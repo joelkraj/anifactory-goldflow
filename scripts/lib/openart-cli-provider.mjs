@@ -17,6 +17,7 @@ export const OPENART_CLI_ORIGIN = 'https://openart.ai';
 // The release CLI's production API base is https://openart.ai/suite. This is
 // distinct from the OAuth origin persisted in cli-credentials.json.
 export const OPENART_CLI_GENERATE_PATH = '/suite/api/cli/v1/generate';
+export const OPENART_CLI_COST_PATH = '/suite/api/cli/v1/model-cost';
 export const OPENART_MAX_PARALLEL_GENERATIONS = 32;
 const OPENART_ERROR_BODY_LIMIT = 1024;
 
@@ -138,6 +139,56 @@ async function readOpenArtCliCredential({ credentialPath = OPENART_CLI_CREDENTIA
   const credential = JSON.parse(await fs.readFile(credentialPath, 'utf8'));
   if (credential.origin !== OPENART_CLI_ORIGIN || credential.type !== 'oauth' || !credential.accessToken || !credential.refreshToken) fail('openart_credential_invalid', 'OpenArt CLI OAuth credential is incomplete or has an unexpected origin.');
   return credential;
+}
+
+function exactCostItem(response, request) {
+  const item = response?.items?.find((row) => row.model === request.model && row.mode === request.mode);
+  if (!item || !Number.isFinite(item.totalCredits) || item.totalCredits < 0) fail('openart_exact_quote_invalid', 'OpenArt returned no finite configured-price quote.', { response });
+  const expected = {
+    imageCount: request.params.imageCount,
+    resolutionTier: request.params.resolutionTier,
+    aspectRatio: request.params.aspectRatio,
+    quality: request.params.quality,
+  };
+  for (const [key, value] of Object.entries(expected)) if (item.config?.[key] !== value) fail('openart_exact_quote_mismatch', `OpenArt quote did not bind exact ${key}.`, { item });
+  return item;
+}
+
+/** Read-only current configured pricing for exact requests. */
+export async function quoteExactOpenArtImageBatch({
+  jobs, credentialPath = OPENART_CLI_CREDENTIAL_PATH, runCli = runOpenArtCli, fetchImpl = fetch,
+} = {}) {
+  if (!Array.isArray(jobs) || !jobs.length) fail('openart_exact_jobs_required', 'At least one exact OpenArt image job is required.');
+  const requests = jobs.map((job) => buildExactOpenArtImageRequest(job));
+  const account = await runCli(['account']);
+  const credential = await readOpenArtCliCredential({ credentialPath });
+  const quoted = await boundedMap(requests, Math.min(OPENART_MAX_PARALLEL_GENERATIONS, requests.length), async (request) => {
+    const result = await fetchImpl(new URL(OPENART_CLI_COST_PATH, credential.origin), {
+      method: 'POST', redirect: 'error', signal: AbortSignal.timeout(45000),
+      headers: {
+        authorization: `Bearer ${credential.accessToken}`,
+        'content-type': 'application/json', accept: 'application/json',
+        'user-agent': 'openart-cli/0.1.1 goldflow-exact-compat/1',
+      },
+      body: JSON.stringify({ model: request.model, mode: request.mode, params: request.params }),
+    });
+    const body = await result.text();
+    if (!result.ok) fail('openart_exact_quote_failed', `OpenArt exact quote failed with HTTP ${result.status}.`, { body: boundedProviderBody(body) });
+    let response;
+    try { response = JSON.parse(body); } catch { fail('openart_exact_quote_invalid', 'OpenArt exact quote returned non-JSON data.'); }
+    const item = exactCostItem(response, request);
+    return {
+      model: item.model, mode: item.mode, credits: item.totalCredits,
+      config: item.config, reference_count: request.params.visualReferences?.length ?? 0,
+      request_sha256: hash(JSON.stringify(request)),
+    };
+  });
+  const failed = quoted.find((row) => row.status === 'rejected');
+  if (failed) throw failed.reason;
+  return {
+    observed_at: now(), plan: account.plan, account_credits_available: account.credits,
+    quotes: quoted.map((row) => row.value),
+  };
 }
 
 async function boundedMap(rows, concurrency, worker) {

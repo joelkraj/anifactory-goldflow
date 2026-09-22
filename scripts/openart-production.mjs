@@ -11,6 +11,10 @@ import {
 } from './lib/openart-asset-bank.mjs';
 import { bindOpenArtShots, hardenOpenArtShots } from './lib/openart-shot-binding.mjs';
 import { openartContext, bankPhase, listAssignments, refsApprovalCurrent, referenceWorkerPool } from './lib/openart-production-state.mjs';
+import {
+  buildExactOpenArtImageRequest, downloadOpenArtCreation, quoteExactOpenArtImageBatch,
+  runOpenArtCli, submitExactOpenArtImageBatch,
+} from './lib/openart-cli-provider.mjs';
 
 function requireValue(value, message) { if (!value) throw new Error(message); return value; }
 function exact(actual, expected, message) { if (JSON.stringify(actual) !== JSON.stringify(expected)) throw new Error(message); }
@@ -33,6 +37,18 @@ async function withEpisodeLock(context, fn) {
 function pinnedRefs(refs) {
   return refs.map((ref) => ({ asset_id: ref.asset_id, version: ref.version, sha256: ref.sha256, openart_asset_id: ref.openart_asset_id, openart_library_asset_id: ref.openart_library_asset_id }));
 }
+async function boundedMap(rows, concurrency, worker) {
+  const results = new Array(rows.length); let next = 0;
+  async function run() {
+    while (true) {
+      const index = next++;
+      if (index >= rows.length) return;
+      results[index] = await worker(rows[index], index);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, rows.length) }, run));
+  return results;
+}
 async function validateDispatch(context, assignment) {
   await requirePlanApproval(context);
   if (assignment.scope === 'scene') await requireRefsApproval(context);
@@ -42,7 +58,7 @@ async function validateDispatch(context, assignment) {
     if (phase.phase !== expected) throw new Error('Assignment is outside the current approved production phase.');
   }
   const attempts = (await listAssignments(context.root)).filter((row) => row.scope === assignment.scope && row.asset_id === assignment.asset_id);
-  if (attempts.at(-1)?.assignment_id !== assignment.assignment_id || attempts.at(-1)?.failure || attempts.at(-1)?.receipt) throw new Error('Assignment has been superseded, failed or already completed.');
+  if (attempts.at(-1)?.assignment_id !== assignment.assignment_id || attempts.at(-1)?.failure || attempts.at(-1)?.receipt || attempts.at(-1)?.submitted) throw new Error('Assignment has been superseded, failed, submitted or already completed.');
   const fresh = await resolveReferences(context.bankRoot, assignment.reference_bindings.map((row) => row.asset_id), { maxReferences: context.contract.max_reference_count, extraReferenceReason: assignment.extra_reference_reason });
   exact(pinnedRefs(fresh), pinnedRefs(assignment.reference_bindings), 'Assigned reference approval/version/native library identity has changed.');
 }
@@ -260,7 +276,9 @@ async function importResultUnlocked(context, flags) {
   if (!submitted || submitted.assignment_sha256 !== await fileHash(flags.assignment)) throw new Error('No exact one-submission authorization.');
   if (await readJson(path.join(context.root, 'results', `${assignment.assignment_id}.json`))) throw new Error('Result already imported; accepted media is immutable.');
   const result = await readJson(flags.receipt);
-  if (result?.attestation !== 'openart_result_identity_and_download_visibly_verified' || !result.reviewer) throw new Error('Observed generation/library identity and downloaded raster receipt required.');
+  const trustedResult = result?.attestation === 'openart_result_identity_and_download_visibly_verified'
+    || (assignment.transport === 'openart_cli_v1' && result?.attestation === 'openart_cli_result_identity_and_download_verified');
+  if (!trustedResult || !result.reviewer) throw new Error('Observed generation/library identity and downloaded raster receipt required.');
   if (result.assignment_id !== assignment.assignment_id || result.submission_sha256 !== await fileHash(subPath)) throw new Error('Result is not bound to the exact submitted assignment.');
   if (assignment.scope === 'canonical') requireValue(result.project_id, 'Canonical OpenArt project ID missing before import.');
   requireValue(result.creation_id, 'OpenArt creation ID missing.'); requireValue(result.openart_asset_id, 'OpenArt media asset ID missing.');
@@ -301,6 +319,178 @@ async function importResultUnlocked(context, flags) {
   if (assignment.scope === 'scene') await refreshSceneReport(context);
   await event(context.root, { event: 'result_imported', assignment_id: assignment.assignment_id, output_sha256: result.sha256, openart_asset_id: result.openart_asset_id });
   return normalized;
+}
+
+function cliBatchId(value) {
+  if (!/^[a-z0-9][a-z0-9_.-]{2,99}$/.test(value ?? '')) throw new Error('CLI batch needs a stable lowercase --batch-id.');
+  return value;
+}
+function assignmentPaths(flags) {
+  const values = String(flags.assignments ?? flags.assignment ?? '').split(',').map((row) => row.trim()).filter(Boolean);
+  if (!values.length || values.some((row) => !path.isAbsolute(row)) || new Set(values).size !== values.length) throw new Error('CLI batch needs unique absolute --assignments paths.');
+  return values;
+}
+function coreReferenceRows(rows) {
+  return rows.map(({ asset_id, sha256: hash, openart_asset_id }) => ({ asset_id, sha256: hash, openart_asset_id }));
+}
+
+/**
+ * Guarded bridge between immutable Goldflow assignments and the verified exact
+ * OpenArt CLI OAuth surface. URLs remain process-local and are never returned
+ * or persisted. Execution reserves every submission before the first POST.
+ */
+export async function dispatchCliBatch(context, flags, dependencies = {}) {
+  const batchId = cliBatchId(flags['batch-id']);
+  const execute = flags.execute === 'true';
+  if (execute && flags['confirm-spend'] !== 'exact_openart_batch') throw new Error('Paid CLI dispatch requires --confirm-spend exact_openart_batch.');
+  if (context.contract.transport !== 'openart_cli_v1') throw new Error('CLI batch dispatch requires an identity locked to openart_cli_v1.');
+  const paths = assignmentPaths(flags);
+  const concurrency = Number(flags.concurrency ?? context.contract.concurrency);
+  if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 32 || concurrency > context.contract.concurrency || paths.length > concurrency) throw new Error('CLI batch exceeds the identity-locked concurrency or provider limit of 32.');
+  const projectId = requireValue(flags['project-id'] ?? context.contract.project_id, 'Exact OpenArt --project-id required.');
+  const runCli = dependencies.runCli ?? runOpenArtCli;
+  const quoteBatch = dependencies.quoteBatch ?? quoteExactOpenArtImageBatch;
+  const submitBatch = dependencies.submitBatch ?? submitExactOpenArtImageBatch;
+  const downloadCreation = dependencies.downloadCreation ?? downloadOpenArtCreation;
+
+  const assignments = [];
+  await withEpisodeLock(context, async () => {
+    for (const assignmentPath of paths) {
+      const assignment = await loadAssignment(context, assignmentPath);
+      await validateDispatch(context, assignment);
+      if (assignment.transport !== 'openart_cli_v1') throw new Error('Prepared assignment is not locked to CLI dispatch.');
+      assignments.push({ ...assignment, assignment_path: assignmentPath });
+    }
+  });
+
+  const bank = await loadBank(context.bankRoot);
+  const referenceCache = new Map();
+  async function referenceUrl(ref) {
+    if (referenceCache.has(ref.openart_asset_id)) return referenceCache.get(ref.openart_asset_id);
+    const asset = bank.assets.find((row) => row.asset_id === ref.asset_id && row.version === ref.version && row.sha256 === ref.sha256 && row.openart_asset_id === ref.openart_asset_id && row.approval_state === 'approved');
+    if (!asset?.openart_creation_id) throw new Error(`Approved reference has no OpenArt creation identity: ${ref.asset_id}`);
+    const response = await runCli(['creation', 'get', asset.openart_creation_id]);
+    const resource = response.resources?.find((row) => row.id === ref.openart_asset_id && row.resourceType === 'image' && row.status === 'completed' && row.generation?.historyId === asset.openart_creation_id);
+    let url;
+    try { url = new URL(resource?.url); } catch { throw new Error(`OpenArt reference media could not be resolved: ${ref.asset_id}`); }
+    if (url.protocol !== 'https:' || url.hostname !== 'cdn.openart.ai') throw new Error(`OpenArt reference media has an untrusted origin: ${ref.asset_id}`);
+    referenceCache.set(ref.openart_asset_id, resource.url);
+    return resource.url;
+  }
+  const initialJobs = await Promise.all(assignments.map(async (assignment) => ({
+    assignmentId: assignment.assignment_id, prompt: assignment.prompt, projectId,
+    receiptPath: path.join(context.root, execute ? 'cli-submission-receipts' : 'cli-dry-run-receipts', `${assignment.assignment_id}--${batchId}.json`),
+    creditsQuoted: 0,
+    references: await Promise.all(assignment.reference_bindings.map(async (ref) => ({
+      id: ref.openart_asset_id, label: ref.asset_id, sha256: ref.sha256, url: await referenceUrl(ref),
+    }))),
+  })));
+  const quote = await quoteBatch({ jobs: initialJobs, runCli });
+  if (!Number.isFinite(quote.account_credits_available)) throw new Error('Current OpenArt account balance is unavailable.');
+  if (!Array.isArray(quote.quotes) || quote.quotes.length !== assignments.length) throw new Error('Exact configured-price quote coverage is incomplete.');
+  const jobs = initialJobs.map((job, index) => ({ ...job, creditsQuoted: quote.quotes[index].credits }));
+  let totalQuoted = 0;
+  for (const [index, assignment] of assignments.entries()) {
+    const quoted = quote.quotes[index]; const request = buildExactOpenArtImageRequest(jobs[index]);
+    if (quoted.model !== assignment.model_id || quoted.mode !== assignment.mode || quoted.request_sha256 !== sha256(JSON.stringify(request)) || !Number.isFinite(quoted.credits) || quoted.credits < 0 || quoted.credits > assignment.max_credit_cost || quoted.credits > context.contract.max_credit_cost) throw new Error(`Exact configured-price quote is invalid for ${assignment.assignment_id}.`);
+    totalQuoted += quoted.credits;
+  }
+  const all = await listAssignments(context.root);
+  const committed = all.reduce((sum, row) => sum + (row.submitted?.ui?.credits_quoted ?? 0), 0);
+  if (totalQuoted > quote.account_credits_available) throw new Error('Current OpenArt balance cannot cover this exact batch.');
+  if (committed + totalQuoted > context.contract.total_credit_budget) throw new Error('Identity-locked episode credit budget cannot cover this exact batch.');
+  const batchRoot = path.join(context.root, 'cli-batches');
+  const planPath = path.join(batchRoot, `${batchId}-${execute ? 'execution' : 'dry-run'}.json`);
+  const plan = {
+    schema: 'goldflow_openart_cli_batch_plan_v1', batch_id: batchId, execute,
+    identity_sha256: await fileHash(path.join(context.episodeDir, 'run_identity.json')),
+    concurrency, project_id: projectId, observed_at: quote.observed_at,
+    account_credits_available: quote.account_credits_available, committed_credits_before: committed,
+    total_credits_quoted: totalQuoted,
+    assignments: await Promise.all(assignments.map(async (assignment, index) => ({
+      assignment_id: assignment.assignment_id, assignment_sha256: await fileHash(assignment.assignment_path),
+      model_id: assignment.model_id, mode: assignment.mode, prompt_sha256: assignment.prompt_sha256,
+      params: assignment.params, references: coreReferenceRows(assignment.reference_bindings),
+      credits_quoted: quote.quotes[index].credits, exact_request_sha256: quote.quotes[index].request_sha256,
+    }))),
+    reference_urls_persisted: false, automatic_retry: false, automatic_failover: false,
+  };
+  await writeOnce(planPath, plan);
+  if (!execute) {
+    const result = await submitBatch({ jobs, concurrency, maxCreditCost: context.contract.max_credit_cost, totalCreditBudget: totalQuoted, execute: false, runCli });
+    await event(context.root, { event: 'cli_batch_dry_run', batch_id: batchId, plan_sha256: await fileHash(planPath), assignment_ids: assignments.map((row) => row.assignment_id) });
+    return { status: 'dry_run_not_submitted', batch_id: batchId, plan_path: planPath, plan_sha256: await fileHash(planPath), exact: result };
+  }
+
+  const submissionPaths = [];
+  await withEpisodeLock(context, async () => {
+    for (const [index, assignment] of assignments.entries()) await validateDispatch(context, assignment);
+    for (const [index, assignment] of assignments.entries()) {
+      const submissionPath = path.join(context.root, 'submissions', `${assignment.assignment_id}.json`);
+      const submission = {
+        schema: 'goldflow_openart_submission_v1', assignment_id: assignment.assignment_id,
+        assignment_sha256: await fileHash(assignment.assignment_path),
+        ui: {
+          attestation: 'exact_cli_request_quote_and_references_verified', reviewer: 'Goldflow exact OpenArt CLI bridge',
+          params: assignment.params, model_id: assignment.model_id, prompt_sha256: assignment.prompt_sha256,
+          references: coreReferenceRows(assignment.reference_bindings), image_count: 1,
+          credits_quoted: quote.quotes[index].credits, account_credits_available: quote.account_credits_available,
+          observed_at: quote.observed_at, discount_fraction: context.contract.discount_fraction,
+          exact_request_sha256: quote.quotes[index].request_sha256, batch_plan_sha256: await fileHash(planPath),
+        },
+        marked_at: new Date().toISOString(), state: 'reserved_for_one_immediate_cli_submission', batch_id: batchId,
+      };
+      await writeOnce(submissionPath, submission); submissionPaths.push(submissionPath);
+    }
+    await event(context.root, { event: 'cli_batch_submission_authorized_once', batch_id: batchId, credits_quoted: totalQuoted, assignment_ids: assignments.map((row) => row.assignment_id) });
+  });
+  const submitted = await submitBatch({ jobs, concurrency, maxCreditCost: context.contract.max_credit_cost, totalCreditBudget: totalQuoted, execute: true, runCli });
+  const providerResults = new Map(submitted.results.map((row) => [row.assignment_id, row]));
+  const completed = await boundedMap(assignments, concurrency, async (assignment, index) => {
+    const provider = providerResults.get(assignment.assignment_id);
+    if (!provider?.history_id) throw new Error(`OpenArt returned no exact history ID for ${assignment.assignment_id}.`);
+    const observation = await runCli(['creation', 'wait', provider.history_id, '--timeout', '5m']);
+    if (observation.history?.id !== provider.history_id || observation.history?.status !== 'completed') throw new Error(`OpenArt creation did not complete: ${assignment.assignment_id}.`);
+    const resources = observation.resources?.filter((row) => row.resourceType === 'image' && row.status === 'completed' && row.generation?.historyId === provider.history_id) ?? [];
+    if (resources.length !== 1) throw new Error(`OpenArt creation has ambiguous output: ${assignment.assignment_id}.`);
+    const resource = resources[0];
+    const outputPath = path.join(context.root, 'cli-downloads', `${assignment.assignment_id}.png`);
+    const downloadReceiptPath = path.join(context.root, 'cli-download-receipts', `${assignment.assignment_id}.json`);
+    const download = await downloadCreation({ creationId: provider.history_id, openartAssetId: resource.id, outputPath, receiptPath: downloadReceiptPath, runCli });
+    const createdAt = Number.isFinite(resource.createdAt) ? new Date(resource.createdAt).toISOString() : new Date().toISOString();
+    const resultPath = path.join(context.root, 'import-receipts', `${assignment.assignment_id}.json`);
+    const result = {
+      schema: 'goldflow_openart_cli_import_ready_v1', attestation: 'openart_cli_result_identity_and_download_verified',
+      reviewer: 'Goldflow exact OpenArt CLI bridge', assignment_id: assignment.assignment_id,
+      submission_sha256: await fileHash(submissionPaths[index]), creation_id: provider.history_id,
+      openart_asset_id: resource.id, output_path: outputPath, sha256: download.sha256,
+      width: download.width, height: download.height, format: download.format, created_at: createdAt,
+      project_id: projectId, credits_quoted: quote.quotes[index].credits, credits_charged: null,
+      exact_submission_receipt_path: provider.provider_receipt_path,
+      exact_submission_receipt_sha256: provider.provider_receipt_sha256,
+      download_receipt_path: downloadReceiptPath, download_receipt_sha256: await fileHash(downloadReceiptPath),
+      batch_id: batchId,
+    };
+    await writeOnce(resultPath, result);
+    return { assignment_id: assignment.assignment_id, history_id: provider.history_id, openart_asset_id: resource.id, import_receipt_path: resultPath, import_receipt_sha256: await fileHash(resultPath) };
+  });
+  const accountAfter = await runCli(['account']);
+  const batchReceipt = {
+    schema: 'goldflow_openart_cli_batch_completion_v1', batch_id: batchId,
+    plan_path: planPath, plan_sha256: await fileHash(planPath), total_credits_quoted: totalQuoted,
+    account_credits_before: quote.account_credits_available,
+    account_credits_after: accountAfter.credits,
+    total_credits_charged: Number.isFinite(accountAfter.credits) ? quote.account_credits_available - accountAfter.credits : null,
+    results: completed, automatic_retry: false, automatic_failover: false, completed_at: new Date().toISOString(),
+  };
+  const batchReceiptPath = path.join(batchRoot, `${batchId}-completion.json`);
+  await writeOnce(batchReceiptPath, batchReceipt);
+  await event(context.root, { event: 'cli_batch_completed_import_ready', batch_id: batchId, receipt_sha256: await fileHash(batchReceiptPath), assignment_ids: assignments.map((row) => row.assignment_id) });
+  return {
+    status: 'completed_import_ready', batch_id: batchId, batch_receipt_path: batchReceiptPath,
+    batch_receipt_sha256: await fileHash(batchReceiptPath), results: completed,
+    import_commands: completed.map((row, index) => `node bin/goldflow.mjs imagegen openart --action import --assignment ${assignments[index].assignment_path} --receipt ${row.import_receipt_path} --episode-dir ${context.episodeDir}`),
+  };
 }
 async function refreshSceneReport(context) {
   const planPath = path.join(context.episodeDir, 'section_image_prompts_hardened.json');
@@ -365,6 +555,7 @@ export async function runOpenArt(flags) {
   if (action === 'prepare') return prepareAssignments(context, flags);
   if (action === 'prepare-ready') return prepareReadyReferenceAssignments(context, flags);
   if (action === 'worker-status') return referenceWorkerPool(context, { maxWorkers: flags['max-workers'] });
+  if (action === 'dispatch-cli') return dispatchCliBatch(context, flags);
   if (action === 'mark-submitted') return markSubmitted(context, flags);
   if (action === 'import') return importResult(context, flags);
   if (action === 'review') {

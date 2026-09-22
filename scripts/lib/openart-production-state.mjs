@@ -83,7 +83,9 @@ export async function verifyCompletedAssignment(context, attempt, { prompt = nul
   const submitted = await readJson(submissionPath);
   requireState(submitted?.assignment_id === assignment.assignment_id && submitted.assignment_sha256 === await fileHash(assignmentPath), 'OpenArt submission assignment binding is stale.');
   const ui = submitted.ui;
-  requireState(ui?.attestation === 'exact_prompt_settings_and_ordered_references_visibly_verified' && ui.reviewer?.trim() && ui.model_id === assignment.model_id && ui.prompt_sha256 === assignment.prompt_sha256 && same(ui.params, assignment.params) && same(ui.references, coreReferences(assignment.reference_bindings)) && ui.image_count === 1, 'OpenArt visible submission verification is incomplete.');
+  const acceptedAttestation = ui?.attestation === 'exact_prompt_settings_and_ordered_references_visibly_verified'
+    || (assignment.transport === 'openart_cli_v1' && ui?.attestation === 'exact_cli_request_quote_and_references_verified');
+  requireState(acceptedAttestation && ui.reviewer?.trim() && ui.model_id === assignment.model_id && ui.prompt_sha256 === assignment.prompt_sha256 && same(ui.params, assignment.params) && same(ui.references, coreReferences(assignment.reference_bindings)) && ui.image_count === 1, 'OpenArt submission verification is incomplete.');
   requireState(validTimestamp(ui.observed_at) && validTimestamp(submitted.marked_at) && Number.isFinite(ui.credits_quoted) && ui.credits_quoted >= 0 && ui.credits_quoted <= context.contract.max_credit_cost, 'OpenArt quote/time evidence invalid.');
   requireState(assignment.transport !== 'openart_studio_browser' || ui.discount_fraction === 0, 'Browser generation cannot claim CLI credit discount.');
   const receipt = attempt.receipt;
@@ -157,7 +159,7 @@ export async function bankPhase(context) {
   const bank = await loadBank(bankRoot); const assignments = (await listAssignments(root)).filter((row) => !row.catalog_sha256 || row.catalog_sha256 === context.plan.catalog_sha256);
   const canonicalAttempts = latestAssignments(assignments, 'canonical');
   const validationAttempts = latestAssignments(assignments, 'validation');
-  const pending = (phase, id, attempt) => ({ phase, action: attempt?.failure ? 'triage' : attempt ? (attempt.submitted ? 'import' : 'mark-submitted') : 'prepare', ids: [id], assignment: attempt, evidence: attempt?.failure });
+  const pending = (phase, id, attempt) => ({ phase, action: attempt?.failure ? 'triage' : attempt ? (attempt.submitted ? 'import' : (context.contract.transport === 'openart_cli_v1' ? 'dispatch-cli' : 'mark-submitted')) : 'prepare', ids: [id], assignment: attempt, evidence: attempt?.failure });
   for (const phase of ['joey', 'core', 'validation', 'remaining']) {
     if (phase === 'validation') {
       for (const shot of catalog.validation_shots) {
@@ -231,11 +233,13 @@ export async function referenceWorkerPool(context, { maxWorkers } = {}) {
     assignment_id: row.assignment_id,
     assignment_path: row.assignment_path,
     asset_id: row.asset_id,
-    state: row.submitted ? 'submitted_awaiting_import' : 'prepared_awaiting_visible_verification',
-    next_action: row.submitted ? 'import' : 'mark-submitted',
+    state: row.submitted ? 'submitted_awaiting_import' : (context.contract.transport === 'openart_cli_v1' ? 'prepared_awaiting_cli_dispatch' : 'prepared_awaiting_visible_verification'),
+    next_action: row.submitted ? 'import' : (context.contract.transport === 'openart_cli_v1' ? 'dispatch-cli' : 'mark-submitted'),
     next_command_shape: row.submitted
       ? `node bin/goldflow.mjs imagegen openart --references-only true --scope ${scope} --action import --assignment ${row.assignment_path} --receipt <observed-result.json> --episode-dir ${context.episodeDir}`
-      : `node bin/goldflow.mjs imagegen openart --references-only true --scope ${scope} --action mark-submitted --assignment ${row.assignment_path} --ui-receipt <observed-ui.json> --episode-dir ${context.episodeDir}`,
+      : context.contract.transport === 'openart_cli_v1'
+        ? `node bin/goldflow.mjs imagegen openart --references-only true --scope ${scope} --action dispatch-cli --batch-id <stable-batch-id> --assignments ${row.assignment_path} --project-id <openart-project-id> --episode-dir ${context.episodeDir}`
+        : `node bin/goldflow.mjs imagegen openart --references-only true --scope ${scope} --action mark-submitted --assignment ${row.assignment_path} --ui-receipt <observed-ui.json> --episode-dir ${context.episodeDir}`,
   }));
   const slots = Math.max(0, limit - workers.length);
   const ready = []; const waiting = [];
@@ -276,6 +280,7 @@ export async function openartProductionStageStates({ episodeDir, identity }) {
     const pool = planApproved && ['core', 'validation', 'remaining'].includes(phase.phase) ? await referenceWorkerPool(context, { maxWorkers: statusWorkerLimit }) : null;
     let refCommand = `imagegen openart --references-only true --scope ${phase.phase === 'validation' ? 'validation' : 'canonical'} --action ${phase.action} --asset-ids ${(phase.ids ?? []).join(',') || '<exact-ids>'}`;
     if (phase.action === 'mark-submitted') refCommand += ` --assignment ${phase.assignment.assignment_path} --ui-receipt <observed-ui.json>`;
+    if (phase.action === 'dispatch-cli') refCommand += ` --batch-id <stable-batch-id> --assignments ${phase.assignment.assignment_path} --project-id <openart-project-id>`;
     if (phase.action === 'import') refCommand += ` --assignment ${phase.assignment.assignment_path} --receipt <observed-result.json>`;
     if (phase.action === 'review') refCommand += ' --review <hash-bound-visual-review.json>';
     if (phase.action === 'sync-library') refCommand += ' --sync <native-library-receipt.json>';
@@ -326,7 +331,11 @@ export async function openartProductionStageStates({ episodeDir, identity }) {
     const next = pending?.failure
       ? 'imagegen openart --scope scene --action triage --repair <exact-id-repair.json>'
       : pending
-        ? `imagegen openart --action ${pending.submitted ? 'import' : 'mark-submitted'} --assignment ${pending.assignment_path} --${pending.submitted ? 'receipt' : 'ui-receipt'} <exact-receipt.json>`
+        ? pending.submitted
+          ? `imagegen openart --action import --assignment ${pending.assignment_path} --receipt <exact-receipt.json>`
+          : context.contract.transport === 'openart_cli_v1'
+            ? `imagegen openart --action dispatch-cli --batch-id <stable-batch-id> --assignments ${pending.assignment_path} --project-id <openart-project-id>`
+            : `imagegen openart --action mark-submitted --assignment ${pending.assignment_path} --ui-receipt <exact-receipt.json>`
         : `imagegen openart --action prepare --image-ids ${missing.slice(0, 4).join(',') || '<first-frame-ids>'}`;
     stageStates.image_generation = expected.length && !missing.length && !pending ? passed(`All ${expected.length} new OpenArt frames and exact provider receipts verified`) : incomplete(`OpenArt frames ${results.size}/${expected.length || 'unbound'}`, next, pending?.failure ? 'blocked' : 'missing');
     return { applicable: true, stageStates, phase };

@@ -4,9 +4,10 @@ import os from 'node:os';
 import path from 'node:path';
 import sharp from 'sharp';
 import { test } from 'node:test';
-import { prepareAssignments, prepareReadyReferenceAssignments, markSubmitted, importResult, runOpenArt } from '../openart-production.mjs';
+import { dispatchCliBatch, prepareAssignments, prepareReadyReferenceAssignments, markSubmitted, importResult, runOpenArt } from '../openart-production.mjs';
 import { bankPhase, openartProductionStageStates, listAssignments, validationReviewState, refsApprovalCurrent, referenceWorkerPool } from '../lib/openart-production-state.mjs';
 import { addCanonicalResult, fileHash, loadBank, requiredVisualChecks, reviewCanonicalAssets, synchronizeLibraryRecord, sha256 } from '../lib/openart-asset-bank.mjs';
+import { buildExactOpenArtImageRequest, submitExactOpenArtImageBatch } from '../lib/openart-cli-provider.mjs';
 
 const params = { quality: 'low', resolution: '1k', aspect_ratio: '16:9' };
 const write = async (file, value) => { await fs.mkdir(path.dirname(file), { recursive: true }); await fs.writeFile(file, `${JSON.stringify(value)}\n`); return file; };
@@ -150,6 +151,90 @@ test('CLI reference worker pool permits the identity-locked Pro limit of thirty-
   const pool = await referenceWorkerPool(context, { maxWorkers: 32 });
   assert.equal(pool.ready_ids.length, 32);
   await assert.rejects(referenceWorkerPool(context, { maxWorkers: 33 }), /1 through 32/);
+});
+
+test('Guarded CLI bridge dry-runs, reserves once, downloads, and emits an import-ready receipt without exposing URLs', async (t) => {
+  const context = await fixture(t, { budget: 20, concurrency: 2, transport: 'openart_cli_v1' });
+  const assignment = await prepared(context);
+  const quoteBatch = async ({ jobs }) => ({
+    observed_at: new Date().toISOString(), plan: 'Pro', account_credits_available: 100,
+    quotes: jobs.map((job) => {
+      const request = buildExactOpenArtImageRequest(job);
+      return { model: request.model, mode: request.mode, credits: 5, config: {}, reference_count: job.references.length, request_sha256: sha256(JSON.stringify(request)) };
+    }),
+  });
+  const dry = await dispatchCliBatch(context, {
+    'batch-id': 'bridge-dry-001', assignments: assignment.assignment_path,
+    'project-id': 'project1', concurrency: '1', execute: 'false',
+  }, { quoteBatch, submitBatch: submitExactOpenArtImageBatch, runCli: async () => { throw new Error('dry run unexpectedly used provider CLI'); } });
+  assert.equal(dry.status, 'dry_run_not_submitted');
+  assert.equal((await listAssignments(context.root))[0].submitted, null);
+  const dryBytes = await fs.readFile(dry.exact.results[0].provider_receipt_path, 'utf8');
+  assert(!dryBytes.includes('cdn.openart.ai'));
+
+  const submitBatch = async ({ jobs, execute }) => {
+    assert.equal(execute, true);
+    const results = [];
+    for (const job of jobs) {
+      const bytes = `${JSON.stringify({ historyId: `history-${job.assignmentId}` })}\n`;
+      await fs.mkdir(path.dirname(job.receiptPath), { recursive: true }); await fs.writeFile(job.receiptPath, bytes, { flag: 'wx' });
+      results.push({ assignment_id: job.assignmentId, history_id: `history-${job.assignmentId}`, provider_receipt_path: job.receiptPath, provider_receipt_sha256: sha256(bytes) });
+    }
+    return { results };
+  };
+  const runCli = async (args) => {
+    if (args[0] === 'account') return { plan: 'Pro', credits: 95 };
+    if (args[0] === 'creation' && args[1] === 'wait') return {
+      history: { id: args[2], status: 'completed' },
+      resources: [{ id: `media-${assignment.assignment_id}`, resourceType: 'image', status: 'completed', createdAt: Date.now(), generation: { historyId: args[2] } }],
+    };
+    throw new Error(`Unexpected CLI call ${args.join(' ')}`);
+  };
+  const downloadCreation = async ({ outputPath, receiptPath }) => {
+    await fs.mkdir(path.dirname(outputPath), { recursive: true });
+    await sharp({ create: { width: 1792, height: 1008, channels: 3, background: '#456789' } }).png().toFile(outputPath);
+    const hash = await fileHash(outputPath); await write(receiptPath, { sha256: hash, width: 1792, height: 1008, format: 'png' });
+    return { sha256: hash, width: 1792, height: 1008, format: 'png' };
+  };
+  const executed = await dispatchCliBatch(context, {
+    'batch-id': 'bridge-paid-001', assignments: assignment.assignment_path,
+    'project-id': 'project1', concurrency: '1', execute: 'true', 'confirm-spend': 'exact_openart_batch',
+  }, { quoteBatch, submitBatch, runCli, downloadCreation });
+  assert.equal(executed.status, 'completed_import_ready');
+  assert.equal(executed.results.length, 1);
+  const importReceipt = JSON.parse(await fs.readFile(executed.results[0].import_receipt_path, 'utf8'));
+  assert.equal(importReceipt.attestation, 'openart_cli_result_identity_and_download_verified');
+  assert(!JSON.stringify(importReceipt).includes('cdn.openart.ai'));
+  const imported = await importResult(context, { assignment: assignment.assignment_path, receipt: executed.results[0].import_receipt_path });
+  assert.equal(imported.openart_asset_id, `media-${assignment.assignment_id}`);
+});
+
+test('Guarded CLI bridge resolves only the approved OpenArt media identity and persists no CDN URL', async (t) => {
+  const context = await fixture(t, { budget: 20, concurrency: 2, transport: 'openart_cli_v1' });
+  const canonical = await approvedCanonical(context);
+  const assignment = (await prepareAssignments(context, { scope: 'validation', 'image-ids': 'validation.0' })).assignments[0];
+  let resolved = false;
+  const runCli = async (args) => {
+    assert.deepEqual(args, ['creation', 'get', canonical.openart_creation_id]); resolved = true;
+    return { history: { id: canonical.openart_creation_id, status: 'completed' }, resources: [{
+      id: canonical.openart_asset_id, resourceType: 'image', status: 'completed',
+      url: 'https://cdn.openart.ai/reference.png?signature=private', generation: { historyId: canonical.openart_creation_id },
+    }] };
+  };
+  const quoteBatch = async ({ jobs }) => {
+    assert.equal(jobs[0].references[0].id, canonical.openart_asset_id);
+    assert.match(jobs[0].references[0].url, /signature=private/);
+    const request = buildExactOpenArtImageRequest(jobs[0]);
+    return { observed_at: new Date().toISOString(), account_credits_available: 100, quotes: [{ model: request.model, mode: request.mode, credits: 6, request_sha256: sha256(JSON.stringify(request)) }] };
+  };
+  const dry = await dispatchCliBatch(context, {
+    'batch-id': 'reference-dry-001', assignments: assignment.assignment_path,
+    'project-id': 'project1', concurrency: '1', execute: 'false',
+  }, { quoteBatch, submitBatch: submitExactOpenArtImageBatch, runCli });
+  assert.equal(resolved, true);
+  assert(!JSON.stringify(dry).includes('cdn.openart.ai'));
+  assert(!await fs.readFile(dry.plan_path, 'utf8').then((bytes) => bytes.includes('cdn.openart.ai')));
+  assert(!await fs.readFile(dry.exact.results[0].provider_receipt_path, 'utf8').then((bytes) => bytes.includes('cdn.openart.ai')));
 });
 
 test('Concurrent reference workers still serialize credit reservation', async (t) => {

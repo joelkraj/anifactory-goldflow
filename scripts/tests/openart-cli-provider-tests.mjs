@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto';
 import {
   buildExactOpenArtImageRequest, discoverOpenArtContract, generateOpenArtImage,
   sanitizeOpenArtEvidence, uploadOpenArtAsset, createOpenArtProject,
-  downloadOpenArtCreation, submitExactOpenArtImageBatch,
+  downloadOpenArtCreation, quoteExactOpenArtImageBatch, submitExactOpenArtImageBatch,
 } from '../lib/openart-cli-provider.mjs';
 
 const root = await fs.mkdtemp(path.join(os.tmpdir(), 'goldflow-openart-test-'));
@@ -91,6 +91,21 @@ try {
   await fs.writeFile(credentialPath, JSON.stringify({
     accessToken: 'ACCESS-SECRET', refreshToken: 'REFRESH-SECRET', origin: 'https://openart.ai', type: 'oauth',
   }), { mode: 0o600 });
+  let quoteAccountReads = 0;
+  const quote = await quoteExactOpenArtImageBatch({
+    jobs: [exactJob('quote')], credentialPath,
+    runCli: async (args) => { assert.deepEqual(args, ['account']); quoteAccountReads += 1; return { plan: 'Pro', credits: 123 }; },
+    fetchImpl: async (url, options) => {
+      assert.equal(String(url), 'https://openart.ai/suite/api/cli/v1/model-cost');
+      const body = JSON.parse(options.body);
+      assert.equal(body.params.quality, 'low'); assert.equal(body.params.resolutionTier, '1k'); assert.equal(body.params.aspectRatio, '16:9');
+      return { ok: true, status: 200, text: async () => JSON.stringify({ items: [{ model: body.model, mode: body.mode, config: { imageCount: 1, resolutionTier: '1k', aspectRatio: '16:9', quality: 'low' }, totalCredits: 6 }] }) };
+    },
+  });
+  assert.equal(quoteAccountReads, 1);
+  assert.equal(quote.account_credits_available, 123);
+  assert.equal(quote.quotes[0].credits, 6);
+  assert.equal(quote.quotes[0].reference_count, 1);
   let active = 0; let maximumActive = 0; let requests = 0; let accountRefreshes = 0;
   const executeJobs = Array.from({ length: 5 }, (_, index) => exactJob(`execute-${index}`));
   const executed = await submitExactOpenArtImageBatch({

@@ -29,12 +29,14 @@ raises quality automatically. Follow `run status` after each completed stage.
 
 Discover exact model IDs and forms with the installed OpenArt CLI before spend.
 CLI v0.1.1 lists model forms but its generation command does not expose their
-quality, aspect-ratio, or resolution fields. The adapter fails closed when its
-dry-run payload cannot reproduce the requested configuration. Default cost
-quotes are not configured-price proof. A blocked MCP transport is not retried
-through alternate identities or headers. Use an explicitly locked Studio route
-when authorized and retain its actual displayed quote. Do not infer the 10%
-CLI/MCP discount from a Pro subscription.
+quality, aspect-ratio, or resolution fields. The guarded compatibility adapter
+uses the release CLI OAuth credential and production API surface to submit the
+exact live-form body: one Sunburst image, Low, 1K, 16:9, with prompt enhancement
+off. Before spend it sends that same body to the read-only configured-price
+endpoint and reads the current account balance. Default cost quotes are not
+configured-price proof. Request receipts retain hashes and reference identities,
+never credentials or CDN URLs. A blocked transport is not retried through
+alternate identities or headers.
 
 ## Global assets and native Studio library
 
@@ -96,9 +98,10 @@ assignments without spending. Use `--references-only true --scope canonical` or
 Reference preparation may use a bounded browser-worker pool after Joey is
 approved and registered. Run `imagegen openart --references-only true --action
 prepare-ready --max-workers 4` to fill up to four slots with the next independent
-assets in the current phase. The maximum is eight and can never exceed the
-immutable identity's OpenArt concurrency; an identity locked at one must use one,
-and higher concurrency requires a fresh compliant production attempt. Goldflow
+assets in the current phase. The browser maximum is eight; the verified CLI
+transport may use up to 32. A pool can never exceed the immutable identity's
+OpenArt concurrency; an identity locked at one must use one, and higher
+concurrency requires a fresh compliant production attempt. Goldflow
 selects only catalog IDs whose declared references already resolve to approved, hash-valid native
 library records; dependent wardrobe, character, prop, or validation work remains
 queued. `--action worker-status --max-workers 4` is read-only and returns each
@@ -117,6 +120,29 @@ inspect history and recover its existing ID. `--action import` binds the downloa
 raster, OpenArt creation/media IDs, timestamp, cost evidence, and native geometry
 to that submission. `--action review` and `--action sync-library` add visual and
 native-library receipts. Every command retains append-only events.
+
+## Guarded CLI batch dispatch
+
+An identity locked to `openart_cli_v1` uses the formal batch bridge instead of
+browser `mark-submitted`. Dry-run the prepared assignments first:
+
+`node bin/goldflow.mjs imagegen openart --action dispatch-cli --batch-id <stable-id> --assignments <absolute-assignment-paths-comma-separated> --project-id <openart-project-id> --concurrency <identity-bounded-count> --episode-dir <episode-dir>`
+
+This resolves each approved reference from its hash-bound OpenArt creation/media
+identity, verifies its CDN origin in memory, obtains the exact configured price,
+checks current account and episode budgets, and writes exact request hashes plus
+sanitized dry-run receipts. It stores no reference URL, reserves no submission,
+and does not call generation.
+
+After reviewing that evidence, submit the same prepared assignments once with a
+new batch ID plus `--execute true --confirm-spend exact_openart_batch`. Goldflow
+writes every guarded submission reservation before the first provider POST,
+dispatches at identity-bounded concurrency, and performs no retry or provider
+fallback. It waits on the returned history IDs, downloads the exact media IDs,
+verifies native raster dimensions, and writes hash-bound import-ready receipts.
+Run each returned `--action import` command through Goldflow; the bridge does not
+make visual approval automatic. An uncertain or partial batch requires history
+inspection and exact-ID triage rather than another submission.
 
 If later inspection proves that a native-library receipt captured an account or
 URL path identifier instead of the asset's native record ID, correct the same

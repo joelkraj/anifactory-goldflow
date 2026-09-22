@@ -38,7 +38,14 @@ export async function falProductionStageStates({ episodeDir } = {}) {
         ? { state: "blocked", evidence: `${failures.filter(Boolean).length} exact Fal repair is pending`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action observe-repairs` }
         : { state: "blocked", evidence: `${failures.filter(Boolean).length} exact Fal IDs need scoped repair`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action repair-failures --directives <absolute_repair_directives.json> --confirm-spend exact_fal_repair_batch` };
     }
-    else if (submitted.some((value,index) => value && !results[index] && !failures[index])) bulkState = { state: "missing", evidence: `${results.filter(Boolean).length}/${bulk.assignments.length} Fal frames complete`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action observe-bulk --limit 100` };
+    else if (submitted.some((value,index) => value && !results[index] && !failures[index])) {
+      const outstanding = submitted.filter((value,index) => value && !results[index] && !failures[index]).length;
+      const unsubmitted = submitted.filter(value => !value).length;
+      const concurrency = Number(bulk.concurrency ?? 1);
+      bulkState = unsubmitted > 0 && outstanding < concurrency
+        ? { state: "missing", evidence: `${results.filter(Boolean).length}/${bulk.assignments.length} Fal frames complete; filling ${concurrency-outstanding} idle provider slots`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action dispatch-bulk --limit ${concurrency-outstanding} --confirm-spend exact_fal_bulk_batch` }
+        : { state: "missing", evidence: `${results.filter(Boolean).length}/${bulk.assignments.length} Fal frames complete`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action observe-bulk --limit 100` };
+    }
     else bulkState = { state: "missing", evidence: `${submitted.filter(Boolean).length}/${bulk.assignments.length} Fal requests submitted`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action dispatch-bulk --limit 100 --confirm-spend exact_fal_bulk_batch` };
   }
   return { stageStates: {

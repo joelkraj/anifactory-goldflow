@@ -3,7 +3,11 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { discoverOpenArtContract, generateOpenArtImage, sanitizeOpenArtEvidence, uploadOpenArtAsset, createOpenArtProject, downloadOpenArtCreation } from '../lib/openart-cli-provider.mjs';
+import {
+  buildExactOpenArtImageRequest, discoverOpenArtContract, generateOpenArtImage,
+  sanitizeOpenArtEvidence, uploadOpenArtAsset, createOpenArtProject,
+  downloadOpenArtCreation, submitExactOpenArtImageBatch,
+} from '../lib/openart-cli-provider.mjs';
 
 const root = await fs.mkdtemp(path.join(os.tmpdir(), 'goldflow-openart-test-'));
 const sha = (bytes) => createHash('sha256').update(bytes).digest('hex');
@@ -53,6 +57,84 @@ try {
   let downloadCalled = false;
   await assert.rejects(downloadOpenArtCreation({ creationId: 'history1', outputPath: path.join(root, 'download.png'), receiptPath: path.join(root, 'download.json'), runCli: async () => ({ history: { id: 'history1', status: 'processing' }, resources: [] }), fetchImpl: async () => { downloadCalled = true; } }), { code: 'openart_creation_not_complete' });
   assert.equal(downloadCalled, false);
+
+  const exactJob = (id, receiptPath = path.join(root, `${id}.json`)) => ({
+    assignmentId: id, prompt: `prompt ${id}`, projectId: 'project1', receiptPath,
+    creditsQuoted: 5,
+    references: [{ id: 'upload1', label: 'Joey', sha256: 'a'.repeat(64), url: 'https://cdn.openart.ai/ref.png?signature=private' }],
+  });
+  const exactRequest = buildExactOpenArtImageRequest(exactJob('exact-request'));
+  assert.equal(exactRequest.model, 'gpt-image-2-5-sunburst');
+  assert.equal(exactRequest.mode, 'image2image');
+  assert.deepEqual(exactRequest.params, {
+    prompt: 'prompt exact-request', imageCount: 1, aspectRatio: '16:9', resolutionTier: '1k', quality: 'low',
+    outputFormat: 'png', lockAspectRatio: true, autoEnhancePrompt: false,
+    visualReferences: [{ type: 'image', id: 'upload1', url: 'https://cdn.openart.ai/ref.png?signature=private', label: 'Joey' }],
+    variant: 'sunburst',
+  });
+
+  let dryRunNetwork = false;
+  const dryRun = await submitExactOpenArtImageBatch({
+    jobs: [exactJob('dry-run')], concurrency: 24, maxCreditCost: 20, totalCreditBudget: 5,
+    execute: false,
+    runCli: async () => { dryRunNetwork = true; }, fetchImpl: async () => { dryRunNetwork = true; },
+  });
+  assert.equal(dryRun.dry_run, true);
+  assert.equal(dryRunNetwork, false);
+  const dryReceipt = await fs.readFile(path.join(root, 'dry-run.json'), 'utf8');
+  assert.match(dryReceipt, /"aspectRatio": "16:9"/);
+  assert.match(dryReceipt, /"resolutionTier": "1k"/);
+  assert.match(dryReceipt, /"quality": "low"/);
+  assert(!dryReceipt.includes('signature=private'));
+
+  const credentialPath = path.join(root, 'cli-credentials.json');
+  await fs.writeFile(credentialPath, JSON.stringify({
+    accessToken: 'ACCESS-SECRET', refreshToken: 'REFRESH-SECRET', origin: 'https://openart.ai', type: 'oauth',
+  }), { mode: 0o600 });
+  let active = 0; let maximumActive = 0; let requests = 0; let accountRefreshes = 0;
+  const executeJobs = Array.from({ length: 5 }, (_, index) => exactJob(`execute-${index}`));
+  const executed = await submitExactOpenArtImageBatch({
+    jobs: executeJobs, concurrency: 2, maxCreditCost: 20, totalCreditBudget: 25, execute: true,
+    credentialPath,
+    runCli: async (args) => { assert.deepEqual(args, ['account']); accountRefreshes += 1; return { plan: 'Pro' }; },
+    fetchImpl: async (url, options) => {
+      requests += 1; active += 1; maximumActive = Math.max(maximumActive, active);
+      assert.equal(String(url), 'https://openart.ai/suite/api/cli/v1/generate');
+      assert.equal(options.headers.authorization, 'Bearer ACCESS-SECRET');
+      const body = JSON.parse(options.body);
+      assert.equal(body.params.quality, 'low'); assert.equal(body.params.resolutionTier, '1k'); assert.equal(body.params.aspectRatio, '16:9');
+      await new Promise((resolve) => setTimeout(resolve, 5)); active -= 1;
+      return { ok: true, status: 200, text: async () => JSON.stringify({ historyId: `history-${requests}`, status: 'PENDING' }) };
+    },
+  });
+  assert.equal(executed.results.length, 5);
+  assert.equal(accountRefreshes, 1);
+  assert.equal(requests, 5);
+  assert.equal(maximumActive, 2);
+  const paidReceipt = await fs.readFile(path.join(root, 'execute-0.json'), 'utf8');
+  assert(!/ACCESS-SECRET|REFRESH-SECRET|signature=private/.test(paidReceipt));
+  assert.match(paidReceipt, /openart_cli_oauth_api_compat_v1/);
+
+  const failedReceipt = path.join(root, 'failed-http.json');
+  await assert.rejects(submitExactOpenArtImageBatch({
+    jobs: [exactJob('failed-http', failedReceipt)], concurrency: 1, maxCreditCost: 20,
+    totalCreditBudget: 5, execute: true, credentialPath,
+    runCli: async () => ({ plan: 'Pro' }),
+    fetchImpl: async () => ({ ok: false, status: 500, text: async () => `provider-error-${'x'.repeat(4096)}` }),
+  }), (error) => {
+    const serialized = JSON.stringify(error.results);
+    assert(serialized.length < 2000);
+    assert(serialized.includes('truncated'));
+    return true;
+  });
+  await assert.rejects(fs.access(failedReceipt));
+
+  let budgetNetwork = false;
+  await assert.rejects(submitExactOpenArtImageBatch({
+    jobs: [exactJob('budget')], concurrency: 1, maxCreditCost: 4, totalCreditBudget: 5, execute: true,
+    runCli: async () => { budgetNetwork = true; }, fetchImpl: async () => { budgetNetwork = true; },
+  }), { code: 'openart_exact_job_budget_exceeded' });
+  assert.equal(budgetNetwork, false);
   console.log('OpenArt CLI provider guard tests passed.');
 } finally {
   await fs.rm(root, { recursive: true, force: true });

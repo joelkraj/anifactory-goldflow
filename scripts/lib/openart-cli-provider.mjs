@@ -12,6 +12,13 @@ export const OPENART_LOW_PARAMS = Object.freeze({
   imageCount: 1, aspectRatio: '16:9', resolutionTier: '1k', quality: 'low',
   outputFormat: 'png', lockAspectRatio: true, autoEnhancePrompt: false,
 });
+export const OPENART_CLI_CREDENTIAL_PATH = '/Users/joel/.openart/cli-credentials.json';
+export const OPENART_CLI_ORIGIN = 'https://openart.ai';
+// The release CLI's production API base is https://openart.ai/suite. This is
+// distinct from the OAuth origin persisted in cli-credentials.json.
+export const OPENART_CLI_GENERATE_PATH = '/suite/api/cli/v1/generate';
+export const OPENART_MAX_PARALLEL_GENERATIONS = 32;
+const OPENART_ERROR_BODY_LIMIT = 1024;
 
 const hash = (value) => createHash('sha256').update(value).digest('hex');
 const now = () => new Date().toISOString();
@@ -35,6 +42,13 @@ function fail(code, message, details = {}) {
   error.code = code;
   error.details = sanitizeOpenArtEvidence(details);
   throw error;
+}
+
+function boundedProviderBody(body) {
+  if (typeof body !== 'string') return body;
+  return body.length <= OPENART_ERROR_BODY_LIMIT
+    ? body
+    : `${body.slice(0, OPENART_ERROR_BODY_LIMIT)}...[truncated ${body.length - OPENART_ERROR_BODY_LIMIT} bytes]`;
 }
 
 export async function runOpenArtCli(args, { cliPath = OPENART_CLI_PATH, timeoutMs = 45000 } = {}) {
@@ -76,6 +90,153 @@ function validateFormValue(value, schema, name) {
   if (schema.type === 'string' && typeof value !== 'string') return `${name} must be a string`;
   if (schema.type === 'integer' && (!Number.isInteger(value) || value < (schema.minimum ?? -Infinity) || value > (schema.maximum ?? Infinity))) return `${name} is outside the live integer range`;
   return null;
+}
+
+function validateExactImageJob(job) {
+  if (!job || typeof job !== 'object') fail('openart_exact_job_required', 'An exact OpenArt image job is required.');
+  if (!/^[A-Za-z0-9._-]+$/.test(job.assignmentId || '')) fail('openart_exact_assignment_required', 'Each exact OpenArt job needs a safe assignment ID.');
+  if (!job.prompt?.trim()) fail('openart_exact_prompt_required', 'Each exact OpenArt job needs a non-empty prompt.');
+  if (!job.projectId?.trim()) fail('openart_project_required', 'Each exact OpenArt job needs an explicit project ID.');
+  if (!path.isAbsolute(job.receiptPath || '')) fail('openart_receipt_path_required', 'Each exact OpenArt job needs an absolute immutable receipt path.');
+  const references = job.references ?? [];
+  if (!Array.isArray(references) || references.length > 16) fail('openart_exact_references_invalid', 'Exact OpenArt jobs accept at most sixteen ordered image references.');
+  for (const [index, reference] of references.entries()) {
+    let url;
+    try { url = new URL(reference.url); } catch { fail('openart_exact_reference_url_invalid', `Reference ${index + 1} needs an OpenArt CDN URL.`); }
+    if (url.protocol !== 'https:' || url.hostname !== 'cdn.openart.ai') fail('openart_exact_reference_url_invalid', `Reference ${index + 1} is not on the OpenArt CDN.`);
+    if (!reference.id?.trim() || !reference.label?.trim() || !/^[a-f0-9]{64}$/.test(reference.sha256 || '')) fail('openart_exact_reference_identity_invalid', `Reference ${index + 1} needs its stable ID, label, and approved SHA-256.`);
+  }
+  if (!Number.isFinite(job.creditsQuoted) || job.creditsQuoted < 0) fail('openart_exact_quote_required', 'Each exact OpenArt job needs its current configured credit quote.');
+  return { ...job, references };
+}
+
+export function buildExactOpenArtImageRequest(job) {
+  const checked = validateExactImageJob(job);
+  const mode = checked.references.length ? 'image2image' : 'text2image';
+  return {
+    model: OPENART_PRIMARY_MODEL,
+    media: 'image',
+    mode,
+    params: {
+      prompt: checked.prompt,
+      ...OPENART_LOW_PARAMS,
+      ...(checked.references.length ? {
+        visualReferences: checked.references.map((reference) => ({
+          type: 'image', id: reference.id, url: reference.url, label: reference.label,
+        })),
+      } : {}),
+      variant: 'sunburst',
+    },
+    projectId: checked.projectId,
+  };
+}
+
+async function readOpenArtCliCredential({ credentialPath = OPENART_CLI_CREDENTIAL_PATH } = {}) {
+  if (!path.isAbsolute(credentialPath)) fail('openart_credential_path_invalid', 'OpenArt CLI credential path must be absolute.');
+  const stat = await fs.stat(credentialPath);
+  if ((stat.mode & 0o077) !== 0) fail('openart_credential_permissions_invalid', 'OpenArt CLI credential file must not be accessible to group or other users.');
+  const credential = JSON.parse(await fs.readFile(credentialPath, 'utf8'));
+  if (credential.origin !== OPENART_CLI_ORIGIN || credential.type !== 'oauth' || !credential.accessToken || !credential.refreshToken) fail('openart_credential_invalid', 'OpenArt CLI OAuth credential is incomplete or has an unexpected origin.');
+  return credential;
+}
+
+async function boundedMap(rows, concurrency, worker) {
+  const results = new Array(rows.length);
+  let next = 0;
+  async function run() {
+    while (true) {
+      const index = next++;
+      if (index >= rows.length) return;
+      try { results[index] = { status: 'fulfilled', value: await worker(rows[index], index) }; }
+      catch (reason) { results[index] = { status: 'rejected', reason }; }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, rows.length) }, run));
+  return results;
+}
+
+function exactReceiptRecord(job, request, response, { dryRun, idempotencyKey }) {
+  const referenceEvidence = job.references.map((reference) => ({
+    id: reference.id, label: reference.label, sha256: reference.sha256,
+    url_sha256: hash(reference.url),
+  }));
+  return {
+    schema: 'goldflow_openart_exact_cli_submission_v1',
+    created_at: now(), assignment_id: job.assignmentId,
+    transport: 'openart_cli_oauth_api_compat_v1', endpoint: `POST ${OPENART_CLI_GENERATE_PATH}`,
+    model: request.model, media: request.media, mode: request.mode,
+    params: { ...request.params, prompt: undefined, visualReferences: undefined },
+    prompt_sha256: hash(job.prompt), references: referenceEvidence,
+    project_id: job.projectId, credits_quoted: job.creditsQuoted,
+    request_sha256: hash(JSON.stringify(request)), idempotency_key_sha256: hash(idempotencyKey),
+    dry_run: dryRun, submitted: !dryRun,
+    history_id: response?.historyId ?? response?.history?.id ?? null,
+    provider_status: response?.status ?? response?.history?.status ?? (dryRun ? 'dry_run' : null),
+    raw_credentials_read: !dryRun,
+    credential_origin: dryRun ? null : OPENART_CLI_ORIGIN,
+    response: dryRun ? null : sanitizeOpenArtEvidence(response),
+  };
+}
+
+/**
+ * Submit exact GPT Image 2.5 requests through the official CLI OAuth/API
+ * surface. The released CLI cannot serialize its own non-default image form,
+ * so this compatibility path refreshes its documented private OAuth file and
+ * posts the exact form body directly. Tokens remain process-local and are
+ * never returned, logged, or written to receipts. There is no retry/failover.
+ */
+export async function submitExactOpenArtImageBatch({
+  jobs, concurrency = 24, maxCreditCost = 20, totalCreditBudget,
+  execute = false, credentialPath = OPENART_CLI_CREDENTIAL_PATH,
+  runCli = runOpenArtCli, fetchImpl = fetch,
+} = {}) {
+  if (!Array.isArray(jobs) || !jobs.length) fail('openart_exact_jobs_required', 'At least one exact OpenArt image job is required.');
+  if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > OPENART_MAX_PARALLEL_GENERATIONS) fail('openart_exact_concurrency_invalid', 'OpenArt concurrency must be from one through thirty-two.');
+  const checked = jobs.map(validateExactImageJob);
+  if (new Set(checked.map((job) => job.assignmentId)).size !== checked.length || new Set(checked.map((job) => job.receiptPath)).size !== checked.length) fail('openart_exact_jobs_duplicate', 'Assignment IDs and receipt paths must be unique.');
+  const quoted = checked.reduce((sum, job) => sum + job.creditsQuoted, 0);
+  if (checked.some((job) => job.creditsQuoted > maxCreditCost)) fail('openart_exact_job_budget_exceeded', 'An exact OpenArt job exceeds the per-request credit ceiling.');
+  if (!Number.isFinite(totalCreditBudget) || totalCreditBudget < quoted) fail('openart_exact_batch_budget_exceeded', 'The exact OpenArt batch is not covered by its explicit credit budget.');
+  await Promise.all(checked.map((job) => assertAbsent(job.receiptPath)));
+
+  let credential = null;
+  if (execute) {
+    // Refresh through the official binary before reading its private file.
+    await runCli(['account']);
+    credential = await readOpenArtCliCredential({ credentialPath });
+  }
+  const results = await boundedMap(checked, concurrency, async (job) => {
+    const request = buildExactOpenArtImageRequest(job);
+    const idempotencyKey = `goldflow-${hash(`${job.assignmentId}:${JSON.stringify(request)}`).slice(0, 32)}`;
+    let response = null;
+    if (execute) {
+      const result = await fetchImpl(new URL(OPENART_CLI_GENERATE_PATH, credential.origin), {
+        method: 'POST', redirect: 'error', signal: AbortSignal.timeout(45000),
+        headers: {
+          authorization: `Bearer ${credential.accessToken}`,
+          'content-type': 'application/json', accept: 'application/json',
+          'user-agent': 'openart-cli/0.1.1 goldflow-exact-compat/1',
+          'x-idempotency-key': idempotencyKey,
+        },
+        body: JSON.stringify(request),
+      });
+      const body = await result.text();
+      if (!result.ok) fail('openart_exact_submission_failed', `OpenArt exact submission failed with HTTP ${result.status}.`, { body: boundedProviderBody(body) });
+      try { response = JSON.parse(body); } catch { fail('openart_exact_submission_invalid', 'OpenArt exact submission returned non-JSON data.'); }
+      if (!(response.historyId || response.history?.id)) fail('openart_exact_history_id_missing', 'OpenArt exact submission returned no history ID.', { response });
+    }
+    const record = exactReceiptRecord(job, request, response, { dryRun: !execute, idempotencyKey });
+    const receipt = await writeReceipt(job.receiptPath, record);
+    return { assignment_id: job.assignmentId, history_id: record.history_id, request_sha256: record.request_sha256, ...receipt };
+  });
+  const failures = results.filter((result) => result.status === 'rejected');
+  if (failures.length) {
+    const error = new Error(`Exact OpenArt batch completed with ${failures.length} failed assignment(s); inspect successful immutable receipts and triage only failed IDs.`);
+    error.code = 'openart_exact_batch_partial_failure';
+    error.results = results.map((result) => result.status === 'fulfilled' ? result : { status: 'rejected', error: sanitizeOpenArtEvidence({ code: result.reason?.code, message: result.reason?.message, details: result.reason?.details }) });
+    throw error;
+  }
+  return { schema: 'goldflow_openart_exact_cli_batch_v1', dry_run: !execute, concurrency, quoted_credits: quoted, results: results.map((result) => result.value) };
 }
 
 export async function discoverOpenArtContract({

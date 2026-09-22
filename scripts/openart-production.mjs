@@ -387,6 +387,13 @@ async function recoverPartialCliBatch(context, flags, dependencies = {}) {
     const exact = await readJson(exactPath);
     if (!exact) { failed.push(planned.assignment_id); continue; }
     if (exact.schema !== 'goldflow_openart_exact_cli_submission_v1' || exact.assignment_id !== planned.assignment_id || exact.request_sha256 !== planned.exact_request_sha256 || !exact.history_id) throw new Error(`Partial CLI submission evidence is invalid for ${planned.assignment_id}.`);
+    const resultPath = path.join(context.root, 'import-receipts', `${planned.assignment_id}.json`);
+    const retained = await readJson(resultPath);
+    if (retained) {
+      if (retained.assignment_id !== planned.assignment_id || retained.creation_id !== exact.history_id || retained.exact_submission_receipt_sha256 !== await fileHash(exactPath) || retained.sha256 !== await fileHash(retained.output_path)) throw new Error(`Retained partial recovery receipt is invalid for ${planned.assignment_id}.`);
+      successes.push({ assignment_id: planned.assignment_id, history_id: exact.history_id, openart_asset_id: retained.openart_asset_id, import_receipt_path: resultPath, import_receipt_sha256: await fileHash(resultPath) });
+      continue;
+    }
     const observation = await runCli(['creation', 'wait', exact.history_id, '--timeout', '5m']);
     if (observation.history?.id !== exact.history_id || observation.history?.status !== 'completed') throw new Error(`OpenArt partial creation did not complete: ${planned.assignment_id}.`);
     const resources = observation.resources?.filter((row) => row.resourceType === 'image' && row.status === 'completed' && row.generation?.historyId === exact.history_id) ?? [];
@@ -397,7 +404,6 @@ async function recoverPartialCliBatch(context, flags, dependencies = {}) {
     const download = await downloadCreation({ creationId: exact.history_id, openartAssetId: resource.id, outputPath, receiptPath: downloadReceiptPath, runCli });
     const assignmentPath = path.join(context.root, 'assignments', `${planned.assignment_id}.json`);
     const submissionPath = path.join(context.root, 'submissions', `${planned.assignment_id}.json`);
-    const resultPath = path.join(context.root, 'import-receipts', `${planned.assignment_id}.json`);
     const result = {
       schema: 'goldflow_openart_cli_import_ready_v1', attestation: 'openart_cli_result_identity_and_download_verified',
       reviewer: 'Goldflow exact OpenArt CLI partial-batch recovery', assignment_id: planned.assignment_id,

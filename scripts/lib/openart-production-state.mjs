@@ -71,6 +71,16 @@ export function latestAssignments(assignments, scope) {
   }
   return latest;
 }
+async function completedBatchForPending(root, assignmentId) {
+  const dir = path.join(root, 'cli-batches');
+  const names = await fs.readdir(dir).catch((error) => { if (error.code === 'ENOENT') return []; throw error; });
+  const candidates = [];
+  for (const name of names.filter((value) => value.endsWith('-completion.json'))) {
+    const file = path.join(dir, name); const receipt = await readJson(file);
+    if (receipt?.schema === 'goldflow_openart_cli_batch_completion_v1' && receipt.results?.some((row) => row.assignment_id === assignmentId)) candidates.push({ file, completed_at: receipt.completed_at });
+  }
+  return candidates.sort((a, b) => Date.parse(b.completed_at) - Date.parse(a.completed_at))[0]?.file ?? null;
+}
 const coreReferences = (rows) => (rows ?? []).map(({ asset_id, sha256: hash, openart_asset_id }) => ({ asset_id, sha256: hash, openart_asset_id }));
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const validTimestamp = (value) => typeof value === 'string' && Number.isFinite(Date.parse(value));
@@ -348,10 +358,13 @@ export async function openartProductionStageStates({ episodeDir, identity }) {
     const boardResultCount = [...sceneAttempts.values()].filter((row) => row?.receipt && !row.failure && row.reference_board).length;
     const prepareBatchSize = boardResultCount < 12 ? 8 : boardResultCount < 28 ? 16 : Math.min(32, context.contract.concurrency);
     const pending = expected.map((row) => sceneAttempts.get(row.image_id)).find((row) => row && (!row.receipt || row.failure));
+    const pendingBatch = pending?.submitted && !pending.receipt ? await completedBatchForPending(root, pending.assignment_id) : null;
     const next = pending?.failure
       ? 'imagegen openart --scope scene --action triage --repair <exact-id-repair.json>'
       : pending
-        ? pending.submitted
+        ? pendingBatch
+          ? `imagegen openart --action import-batch --batch-receipt ${pendingBatch}`
+          : pending.submitted
           ? `imagegen openart --action import --assignment ${pending.assignment_path} --receipt <exact-receipt.json>`
           : context.contract.transport === 'openart_cli_v1'
             ? `imagegen openart --action dispatch-cli --batch-id <stable-batch-id> --assignments ${pending.assignment_path} --project-id <openart-project-id>`

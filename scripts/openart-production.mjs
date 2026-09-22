@@ -294,7 +294,7 @@ async function markSubmittedUnlocked(context, flags) {
   return { status: 'ready_for_one_browser_click', assignment_id: assignment.assignment_id, prompt_sha256: assignment.prompt_sha256, credits_quoted: quote };
 }
 export async function importResult(context, flags) { return withEpisodeLock(context, () => importResultUnlocked(context, flags)); }
-async function importResultUnlocked(context, flags) {
+async function importResultUnlocked(context, flags, { refreshScene = true } = {}) {
   const assignment = await loadAssignment(context, flags.assignment);
   const subPath = path.join(context.root, 'submissions', `${assignment.assignment_id}.json`);
   const submitted = await readJson(subPath);
@@ -341,9 +341,37 @@ async function importResultUnlocked(context, flags) {
     normalized.bank_record = await addCanonicalResult(context.bankRoot, { item, catalog: context.catalog, result: normalized, references: assignment.reference_bindings, prompt: assignment.prompt, params: assignment.params, projectId: result.project_id ?? null });
   }
   await writeOnce(path.join(context.root, 'results', `${assignment.assignment_id}.json`), normalized);
-  if (assignment.scope === 'scene') await refreshSceneReport(context);
+  if (assignment.scope === 'scene' && refreshScene) await refreshSceneReport(context);
   await event(context.root, { event: 'result_imported', assignment_id: assignment.assignment_id, output_sha256: result.sha256, openart_asset_id: result.openart_asset_id });
   return normalized;
+}
+
+async function importCliBatch(context, flags) {
+  const receiptPath = path.resolve(requireValue(flags['batch-receipt'], '--batch-receipt required'));
+  if (path.dirname(receiptPath) !== path.join(context.root, 'cli-batches')) throw new Error('CLI batch receipt must belong to this episode.');
+  const batch = await readJson(receiptPath);
+  if (batch?.schema !== 'goldflow_openart_cli_batch_completion_v1' || !Array.isArray(batch.results) || !batch.results.length || batch.results.length > 32) throw new Error('Exact completed OpenArt CLI batch receipt required.');
+  if (path.dirname(batch.plan_path ?? '') !== path.join(context.root, 'cli-batches') || batch.plan_sha256 !== await fileHash(batch.plan_path)) throw new Error('CLI batch completion plan binding is invalid.');
+  return withEpisodeLock(context, async () => {
+    const imported = []; let sceneChanged = false;
+    for (const row of batch.results) {
+      safeId(row.assignment_id);
+      if (path.dirname(row.import_receipt_path ?? '') !== path.join(context.root, 'import-receipts') || row.import_receipt_sha256 !== await fileHash(row.import_receipt_path)) throw new Error(`Batch import receipt is invalid for ${row.assignment_id}.`);
+      const assignmentPath = path.join(context.root, 'assignments', `${row.assignment_id}.json`);
+      const existing = await readJson(path.join(context.root, 'results', `${row.assignment_id}.json`));
+      if (existing) {
+        if (existing.sha256 !== (await readJson(row.import_receipt_path))?.sha256) throw new Error(`Existing batch import differs for ${row.assignment_id}.`);
+        imported.push({ assignment_id: row.assignment_id, status: 'already_imported', sha256: existing.sha256 });
+        continue;
+      }
+      const assignment = await loadAssignment(context, assignmentPath);
+      const result = await importResultUnlocked(context, { assignment: assignmentPath, receipt: row.import_receipt_path }, { refreshScene: false });
+      sceneChanged ||= assignment.scope === 'scene';
+      imported.push({ assignment_id: row.assignment_id, status: 'imported', sha256: result.sha256 });
+    }
+    if (sceneChanged) await refreshSceneReport(context);
+    return { status: 'batch_imported', batch_id: batch.batch_id, batch_receipt_path: receiptPath, imported };
+  });
 }
 
 function cliBatchId(value) {
@@ -639,6 +667,7 @@ export async function runOpenArt(flags) {
   if (action === 'dispatch-cli') return dispatchCliBatch(context, flags);
   if (action === 'mark-submitted') return markSubmitted(context, flags);
   if (action === 'import') return importResult(context, flags);
+  if (action === 'import-batch') return importCliBatch(context, flags);
   if (action === 'review') {
     const review = await readJson(requireValue(flags.review, '--review required'));
     return flags.scope === 'validation' ? reviewValidation(context, review) : reviewCanonicalAssets(context.bankRoot, review);

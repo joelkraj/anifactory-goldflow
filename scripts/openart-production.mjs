@@ -388,9 +388,20 @@ export async function dispatchCliBatch(context, flags, dependencies = {}) {
     }
   });
 
+  const boardReferenceCache = new Map();
   async function boardReference(assignment) {
+    const key = assignment.reference_board?.cache_key;
+    if (!key) return null;
+    if (boardReferenceCache.has(key)) return boardReferenceCache.get(key);
+    const pending = resolveBoardReference(assignment).catch((error) => {
+      boardReferenceCache.delete(key);
+      throw error;
+    });
+    boardReferenceCache.set(key, pending);
+    return pending;
+  }
+  async function resolveBoardReference(assignment) {
     const board = assignment.reference_board;
-    if (!board) return null;
     if (await fileHash(board.output_path) !== board.output_sha256 || await fileHash(board.manifest_path).catch(() => null) == null) throw new Error(`Reference board bytes or manifest are missing: ${assignment.asset_id}`);
     if (!execute) return {
       id: board.board_id, label: board.board_id, sha256: board.output_sha256,

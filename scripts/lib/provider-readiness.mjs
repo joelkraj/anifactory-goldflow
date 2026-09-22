@@ -188,10 +188,16 @@ export async function inspectProviderLane(spec, {
     if (!surface) return false;
     try {
       const url = new URL(surface);
+      // A completed image leaves the persistent Gemini tab on its conversation.
+      // The next image job resets that same tab to /images and verifies its UI.
+      const geminiConversationId = /^\/app\/([a-z0-9_-]+)\/?$/i.exec(url.pathname)?.[1];
+      const geminiResultConversation = Boolean(geminiConversationId)
+        && !/^(?:auth|login|signin|signout)$/i.test(geminiConversationId);
       return spec.provider === "google-flow"
         ? (url.origin === "https://labs.google" && /^\/fx\/tools\/flow\/project\/[^/]+(?:\/|$)/.test(url.pathname))
           || (url.origin === "https://flow.google.com" && /^\/project\/[^/]+(?:\/|$)/.test(url.pathname))
-        : url.origin === "https://gemini.google.com" && /^\/images(?:[/?#]|$)/.test(url.pathname);
+        : url.origin === "https://gemini.google.com"
+          && (/^\/images(?:[/?#]|$)/.test(url.pathname) || geminiResultConversation);
     } catch {
       return false;
     }

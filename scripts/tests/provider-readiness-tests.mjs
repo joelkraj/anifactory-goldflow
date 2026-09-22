@@ -111,6 +111,45 @@ for (const [projectUrl, expectedReady] of [
   assert.deepEqual(lane.findings.map((row) => row.code), expectedReady ? [] : ["worker_slot_surface_not_ready"], projectUrl);
 }
 
+// A successful image result stays in its persistent conversation until the
+// next job resets it. Readiness must not reject this ordinary idle state.
+for (const [surfaceUrl, expectedReady] of [
+  ["https://gemini.google.com/images", true],
+  ["https://gemini.google.com/images?hl=en#home", true],
+  ["https://gemini.google.com/app/92bd90b80ff7335c", true],
+  ["https://gemini.google.com/app/abc123/?hl=en#result", true],
+  ["https://gemini.google.com/app", false],
+  ["https://gemini.google.com/app/", false],
+  ["https://gemini.google.com/auth", false],
+  ["https://gemini.google.com/app/auth", false],
+  ["https://gemini.google.com/app/signin", false],
+  ["https://accounts.google.com/signin", false],
+  ["https://gemini.google.com/app/abc123/settings", false],
+  ["https://gemini.google.com.evil.example/app/abc123", false],
+  ["https://gemini.google.com@evil.example/app/abc123", false],
+  ["http://gemini.google.com/app/abc123", false],
+  ["not a URL", false],
+]) {
+  const spec = specs[1];
+  const lane = await inspectProviderLane(spec, {
+    readJsonImpl: async (filePath) => {
+      const value = passedRuntime(spec, filePath);
+      if (filePath === spec.worker_runtime_path) {
+        value.worker_pool.ready_slots = value.worker_pool.ready_slots.map(row => ({ ...row, surface_url: surfaceUrl }));
+      }
+      return value;
+    },
+    processLiveImpl: () => true,
+    fetchHealthImpl: async () => ({
+      status: "ok", service: "goldflow-studio", browser_provider: spec.provider,
+      ui_contract: { account_plan: spec.plan_label, model_label: spec.model_label },
+    }),
+    nowMs,
+  });
+  assert.equal(lane.status, expectedReady ? "passed" : "blocked", surfaceUrl);
+  assert.deepEqual(lane.findings.map(row => row.code), expectedReady ? [] : ["worker_slot_surface_not_ready"], surfaceUrl);
+}
+
 const blockedGemini = await inspectProviderLane(specs[1], {
   readJsonImpl: async (filePath) => passedRuntime(specs[1], filePath),
   processLiveImpl: () => true,

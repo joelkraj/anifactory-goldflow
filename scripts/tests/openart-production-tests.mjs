@@ -4,22 +4,22 @@ import os from 'node:os';
 import path from 'node:path';
 import sharp from 'sharp';
 import { test } from 'node:test';
-import { prepareAssignments, markSubmitted, importResult, runOpenArt } from '../openart-production.mjs';
-import { bankPhase, openartProductionStageStates, listAssignments, validationReviewState, refsApprovalCurrent } from '../lib/openart-production-state.mjs';
+import { prepareAssignments, prepareReadyReferenceAssignments, markSubmitted, importResult, runOpenArt } from '../openart-production.mjs';
+import { bankPhase, openartProductionStageStates, listAssignments, validationReviewState, refsApprovalCurrent, referenceWorkerPool } from '../lib/openart-production-state.mjs';
 import { addCanonicalResult, fileHash, loadBank, requiredVisualChecks, reviewCanonicalAssets, synchronizeLibraryRecord, sha256 } from '../lib/openart-asset-bank.mjs';
 
 const params = { quality: 'low', resolution: '1k', aspect_ratio: '16:9' };
 const write = async (file, value) => { await fs.mkdir(path.dirname(file), { recursive: true }); await fs.writeFile(file, `${JSON.stringify(value)}\n`); return file; };
-async function fixture(t, { budget = 10 } = {}) {
+async function fixture(t, { budget = 10, concurrency = 8, coreAssets = [] } = {}) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'goldflow-openart-prod-test-'));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   const episodeDir = path.join(dir, 'episode'); const root = path.join(episodeDir, 'openart'); const bankRoot = path.join(dir, 'bank');
-  const contract = { primary: { model_id: 'gpt-image-2-5-sunburst', ...params }, transport: 'openart_studio_browser', max_reference_count: 8, max_credit_cost: 10, total_credit_budget: budget, repair_models: [], reference_bank_path: bankRoot };
+  const contract = { primary: { model_id: 'gpt-image-2-5-sunburst', ...params }, transport: 'openart_studio_browser', concurrency, max_reference_count: 8, max_credit_cost: 10, total_credit_budget: budget, repair_models: [], reference_bank_path: bankRoot };
   const identity = { episode: 'ep01', image_provider: 'openart_cli', image_provider_options: { openart: contract } };
   await write(path.join(episodeDir, 'run_identity.json'), identity);
   const catalog = {
     schema: 'goldflow_openart_bank_catalog_v1', story_universe: 'fixture', series_scope: 'fixture', style_prompt: 'test style', source_script_sha256: '1'.repeat(64),
-    assets: [{ asset_id: 'test.joey', asset_class: 'character', canonical_name: 'Joey', prompt: 'Canonical Joey.', phase: 'joey', reference_asset_ids: [] }],
+    assets: [{ asset_id: 'test.joey', asset_class: 'character', canonical_name: 'Joey', prompt: 'Canonical Joey.', phase: 'joey', reference_asset_ids: [] }, ...coreAssets],
     validation_shots: Array.from({ length: 8 }, (_, i) => ({ image_id: `validation.${i}`, prompt: `Validation ${i}.`, reference_asset_ids: ['test.joey'] })),
   };
   const catalogPath = await write(path.join(root, 'catalog.json'), catalog);
@@ -99,6 +99,55 @@ test('Budget reservation is serialized across concurrent submissions', async (t)
   const assignments = (await prepareAssignments(context, { scope: 'validation', 'image-ids': 'validation.0,validation.1' })).assignments;
   const outcomes = await Promise.allSettled(assignments.map((assignment) => submit(context, assignment)));
   assert.equal(outcomes.filter((row) => row.status === 'fulfilled').length, 1, 'Two competing 5-credit submissions must not both reserve a 5-credit budget.');
+});
+
+test('Reference worker pool prepares only bounded independent next-ready assets', async (t) => {
+  const coreAssets = [
+    { asset_id: 'test.brother', asset_class: 'character', canonical_name: 'Brother', prompt: 'Canonical brother.', phase: 'core', reference_asset_ids: [] },
+    { asset_id: 'test.dad', asset_class: 'character', canonical_name: 'Dad', prompt: 'Canonical dad.', phase: 'core', reference_asset_ids: [] },
+    { asset_id: 'test.casino', asset_class: 'location', canonical_name: 'Casino', prompt: 'Canonical casino.', phase: 'core', reference_asset_ids: [] },
+    { asset_id: 'test.brother.suit', asset_class: 'wardrobe', canonical_name: 'Brother suit', prompt: 'Brother in suit.', phase: 'core', reference_asset_ids: ['test.brother'] },
+  ];
+  const context = await fixture(t, { budget: 20, coreAssets });
+  await approvedCanonical(context);
+  const before = await referenceWorkerPool(context, { maxWorkers: 2 });
+  assert.deepEqual(before.ready_ids, ['test.brother', 'test.dad']);
+  assert.deepEqual(before.queued_ready_ids, ['test.casino']);
+  assert.deepEqual(before.waiting_on_dependencies.map((row) => row.asset_id), ['test.brother.suit']);
+
+  const preparedPool = await prepareReadyReferenceAssignments(context, { 'max-workers': '2' });
+  assert.equal(preparedPool.assignments.length, 2);
+  assert.deepEqual(preparedPool.assignments.map((row) => row.asset_id), ['test.brother', 'test.dad']);
+  assert.ok(preparedPool.assignments.every((row) => row.params.quality === 'low' && row.prompt_sha256 === sha256(row.prompt)));
+  assert.equal(preparedPool.worker_pool.active_count, 2);
+  assert.ok(preparedPool.worker_pool.workers.every((row) => row.next_command_shape.includes('--action mark-submitted')));
+
+  const noOverfill = await prepareReadyReferenceAssignments(context, { 'max-workers': '2' });
+  assert.equal(noOverfill.assignments.length, 0);
+  assert.equal((await listAssignments(context.root)).filter((row) => row.scope === 'canonical' && row.catalog_sha256 === context.plan.catalog_sha256).length, 2);
+  await assert.rejects(referenceWorkerPool(context, { maxWorkers: 9 }), /1 through 8/);
+});
+
+test('Reference worker pool cannot exceed immutable identity concurrency', async (t) => {
+  const context = await fixture(t, { concurrency: 1, coreAssets: [
+    { asset_id: 'test.brother', asset_class: 'character', canonical_name: 'Brother', prompt: 'Canonical brother.', phase: 'core', reference_asset_ids: [] },
+    { asset_id: 'test.dad', asset_class: 'character', canonical_name: 'Dad', prompt: 'Canonical dad.', phase: 'core', reference_asset_ids: [] },
+  ] });
+  await approvedCanonical(context);
+  await assert.rejects(referenceWorkerPool(context, { maxWorkers: 2 }), /identity-locked concurrency 1/);
+  await assert.rejects(prepareReadyReferenceAssignments(context, { 'max-workers': '2' }), /identity-locked concurrency 1/);
+  const allowed = await prepareReadyReferenceAssignments(context, {});
+  assert.equal(allowed.assignments.length, 1);
+});
+
+test('Concurrent reference workers still serialize credit reservation', async (t) => {
+  const coreAssets = ['brother', 'dad', 'casino'].map((name) => ({ asset_id: `test.${name}`, asset_class: name === 'casino' ? 'location' : 'character', canonical_name: name, prompt: `Canonical ${name}.`, phase: 'core', reference_asset_ids: [] }));
+  const context = await fixture(t, { budget: 10, coreAssets });
+  await approvedCanonical(context);
+  const assignments = (await prepareReadyReferenceAssignments(context, { 'max-workers': '3' })).assignments;
+  const outcomes = await Promise.allSettled(assignments.map((assignment) => submit(context, assignment)));
+  assert.equal(outcomes.filter((row) => row.status === 'fulfilled').length, 2);
+  assert.equal(outcomes.filter((row) => row.status === 'rejected').length, 1);
 });
 
 test('Reference review revoked after preparation prevents unspent dispatch', async (t) => {

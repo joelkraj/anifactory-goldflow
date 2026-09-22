@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
-import { readJson, fileHash, sha256, loadBank, currentAsset, verifyAsset, validateCatalog } from './openart-asset-bank.mjs';
+import { readJson, fileHash, sha256, loadBank, currentAsset, verifyAsset, validateCatalog, resolveReferences } from './openart-asset-bank.mjs';
 
 export const openartRoot = (episodeDir) => path.join(episodeDir, 'openart');
 export async function openartContext(episodeDir, suppliedIdentity = null) {
@@ -193,6 +193,67 @@ export async function bankPhase(context) {
   }
   return { phase: 'complete', action: 'approve-refs' };
 }
+
+function boundedWorkerCount(context, value) {
+  const locked = Number(context.contract.concurrency);
+  if (!Number.isInteger(locked) || locked < 1) throw new Error('OpenArt identity has no valid locked concurrency.');
+  const count = Number(value ?? Math.min(4, locked));
+  if (!Number.isInteger(count) || count < 1 || count > 8) throw new Error('OpenArt reference workers must be an integer from 1 through 8.');
+  if (count > locked) throw new Error(`Requested ${count} OpenArt reference workers exceeds the identity-locked concurrency ${locked}.`);
+  return count;
+}
+
+/**
+ * Describe a bounded pool of independent reference assignments without
+ * advancing any creative request.  Dependencies are resolved from approved,
+ * hash-valid native-library records, so a pool can never race ahead of the
+ * canonical bank graph.
+ */
+export async function referenceWorkerPool(context, { maxWorkers } = {}) {
+  const limit = boundedWorkerCount(context, maxWorkers);
+  const phaseState = await bankPhase(context);
+  if (!['core', 'validation', 'remaining'].includes(phaseState.phase)) {
+    return { schema: 'goldflow_openart_reference_worker_pool_v1', phase: phaseState.phase, max_workers: limit, active_count: 0, available_slots: 0, ready_ids: [], waiting_on_dependencies: [], workers: [], blocked_by: phaseState.action ?? null };
+  }
+  const scope = phaseState.phase === 'validation' ? 'validation' : 'canonical';
+  const all = (await listAssignments(context.root)).filter((row) => row.catalog_sha256 === context.plan.catalog_sha256);
+  const latest = latestAssignments(all, scope);
+  const items = phaseState.phase === 'validation'
+    ? context.catalog.validation_shots.map((row) => ({ id: row.image_id, item: row }))
+    : context.catalog.assets.filter((row) => row.phase === phaseState.phase).map((row) => ({ id: row.asset_id, item: row }));
+  const failed = items.map(({ id }) => latest.get(id)).find((row) => row?.failure);
+  if (failed) {
+    return { schema: 'goldflow_openart_reference_worker_pool_v1', phase: phaseState.phase, scope, max_workers: limit, active_count: 0, available_slots: 0, ready_ids: [], waiting_on_dependencies: [], workers: [], blocked_by: 'triage', failed_assignment: failed };
+  }
+  const bank = await loadBank(context.bankRoot);
+  const workers = items.map(({ id }) => latest.get(id)).filter((row) => row && !row.receipt).map((row) => ({
+    assignment_id: row.assignment_id,
+    assignment_path: row.assignment_path,
+    asset_id: row.asset_id,
+    state: row.submitted ? 'submitted_awaiting_import' : 'prepared_awaiting_visible_verification',
+    next_action: row.submitted ? 'import' : 'mark-submitted',
+    next_command_shape: row.submitted
+      ? `node bin/goldflow.mjs imagegen openart --references-only true --scope ${scope} --action import --assignment ${row.assignment_path} --receipt <observed-result.json> --episode-dir ${context.episodeDir}`
+      : `node bin/goldflow.mjs imagegen openart --references-only true --scope ${scope} --action mark-submitted --assignment ${row.assignment_path} --ui-receipt <observed-ui.json> --episode-dir ${context.episodeDir}`,
+  }));
+  const slots = Math.max(0, limit - workers.length);
+  const ready = []; const waiting = [];
+  for (const { id, item } of items) {
+    if (latest.has(id) || currentAsset(bank, id, { approved: false })) continue;
+    try {
+      await resolveReferences(context.bankRoot, item.reference_asset_ids ?? [], { maxReferences: context.contract.max_reference_count, extraReferenceReason: item.extra_reference_reason });
+      ready.push(id);
+    } catch (error) {
+      waiting.push({ asset_id: id, reference_asset_ids: item.reference_asset_ids ?? [], reason: error.message });
+    }
+  }
+  return {
+    schema: 'goldflow_openart_reference_worker_pool_v1', phase: phaseState.phase, scope, max_workers: limit,
+    active_count: workers.length, available_slots: slots, ready_ids: ready.slice(0, slots),
+    queued_ready_ids: ready.slice(slots), waiting_on_dependencies: waiting, workers,
+    blocked_by: null,
+  };
+}
 export async function openartProductionStageStates({ episodeDir, identity }) {
   if (identity?.image_provider !== 'openart_cli') return { applicable: false, stageStates: {} };
   const command = (tail) => `node bin/goldflow.mjs ${tail} --episode-dir ${episodeDir}`;
@@ -210,14 +271,19 @@ export async function openartProductionStageStates({ episodeDir, identity }) {
     };
     failureStage = 'reference_generation';
     const phase = planApproved ? await bankPhase(context) : { phase: 'awaiting_plan', action: 'prepare', ids: [] };
+    const statusWorkerLimit = Math.min(4, context.contract.concurrency);
+    const pool = planApproved && ['core', 'validation', 'remaining'].includes(phase.phase) ? await referenceWorkerPool(context, { maxWorkers: statusWorkerLimit }) : null;
     let refCommand = `imagegen openart --references-only true --scope ${phase.phase === 'validation' ? 'validation' : 'canonical'} --action ${phase.action} --asset-ids ${(phase.ids ?? []).join(',') || '<exact-ids>'}`;
     if (phase.action === 'mark-submitted') refCommand += ` --assignment ${phase.assignment.assignment_path} --ui-receipt <observed-ui.json>`;
     if (phase.action === 'import') refCommand += ` --assignment ${phase.assignment.assignment_path} --receipt <observed-result.json>`;
     if (phase.action === 'review') refCommand += ' --review <hash-bound-visual-review.json>';
     if (phase.action === 'sync-library') refCommand += ' --sync <native-library-receipt.json>';
     if (phase.action === 'triage') refCommand = `imagegen openart --references-only true --scope ${phase.phase === 'validation' ? 'validation' : 'canonical'} --action triage --repair <exact-id-repair.json>`;
+    if (pool?.ready_ids.length) refCommand = `imagegen openart --references-only true --action prepare-ready --max-workers ${pool.max_workers}`;
+    else if (pool?.workers.length) refCommand = `imagegen openart --references-only true --action worker-status --max-workers ${pool.max_workers}`;
     const refsDone = phase.phase === 'complete';
-    stageStates.reference_generation = refsDone ? passed('Canonical bank, eight-shot validation, and native Studio mirroring complete') : incomplete(`OpenArt phase ${phase.phase}: ${phase.action}`, refCommand, phase.action === 'triage' ? 'blocked' : 'missing');
+    const poolEvidence = pool ? `; ${pool.active_count}/${pool.max_workers} workers active, ${pool.ready_ids.length} independently ready` : '';
+    stageStates.reference_generation = refsDone ? passed('Canonical bank, eight-shot validation, and native Studio mirroring complete') : incomplete(`OpenArt phase ${phase.phase}: ${phase.action}${poolEvidence}`, refCommand, phase.action === 'triage' ? 'blocked' : 'missing');
     failureStage = 'reference_image_approval';
     const refsApproved = refsDone && await refsApprovalCurrent(context);
     const shotPlan = await readJson(path.join(root, 'shot-binding.json'));
@@ -228,7 +294,7 @@ export async function openartProductionStageStates({ episodeDir, identity }) {
     stageStates = {
       visual_reference_plan: planned ? passed(`Authored global bank catalog; ${catalog.assets.length} canonical assets`) : incomplete('OpenArt global bank plan missing', 'visual openart-bank --action plan --catalog <authored-catalog.json>'),
       reference_plan_approval: planApproved ? passed('Hash-bound authored bank plan approved') : incomplete('Canonical creative plan needs review', 'visual openart-bank --action approve-plan --reviewer Codex --note <review-evidence>'),
-      reference_generation: refsDone ? passed('Canonical bank, eight-shot validation, and native Studio mirroring complete') : incomplete(`OpenArt phase ${phase.phase}: ${phase.action}`, refCommand, phase.action === 'triage' ? 'blocked' : 'missing'),
+      reference_generation: refsDone ? passed('Canonical bank, eight-shot validation, and native Studio mirroring complete') : incomplete(`OpenArt phase ${phase.phase}: ${phase.action}${poolEvidence}`, refCommand, phase.action === 'triage' ? 'blocked' : 'missing'),
       reference_image_approval: refsApproved ? passed('Every canonical raster visually reviewed and library IDs verified') : incomplete('Final bank approval missing', 'visual openart-bank --action approve-refs'),
       visual_prompt_plan: planCurrent ? passed('New shot plan bound exclusively to approved OpenArt canonical assets') : incomplete('Authored shot migration and canonical binding required', 'visual openart-bank --action bind-shots --shot-plan <authored-shot-plan.json>'),
       visual_prompt_harden: hardCurrent ? passed('OpenArt prompt/reference hashes and complete beat coverage validated') : incomplete('New OpenArt prompt hardening required', 'visual openart-bank --action harden'),

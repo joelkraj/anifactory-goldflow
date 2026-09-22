@@ -10,7 +10,7 @@ import {
   openartTriageAdmission,
 } from "../lib/openart-visual-restart.mjs";
 import { normalizeImageProvider, providerSlug, routedProviderForPrompt } from "../lib/image-provider-routing.mjs";
-import { commandStageFor } from "../lib/pipeline-stage-registry.mjs";
+import { buildStageCommand, commandStageFor } from "../lib/pipeline-stage-registry.mjs";
 import { mediaWorkflowForPreflight } from "../lib/media-workflows.mjs";
 import { assertCommandWorkflowRoute } from "../lib/episode-workflow-routing.mjs";
 
@@ -89,6 +89,7 @@ try {
   await write(path.join(newDir, "visual_restart_receipt.json"), receipt);
   const identity = createOpenArtRestartIdentity({ baseline, targetDir: newDir, week: "new", contract, git: { dirty: false, commit: "fixture" }, receiptSha256: await fileSha256(path.join(newDir, "visual_restart_receipt.json")), baselineIdentitySha256: oldIdentityHash, createdAt: "fixture" });
   await write(path.join(newDir, "run_identity.json"), identity);
+  assert.match(buildStageCommand("reference_generation", identity), /--action prepare-ready --max-workers 1$/);
   assert.throws(() => assertCommandWorkflowRoute({ command: "imagegen", subcommand: "start", script: "imagegen.mjs", episodeDir: newDir, flags: { channel: "fixture", week: "new", episode: "ep_01", "workflow-bypass": "true" } }), /guarded OpenArt/);
   assert.throws(() => assertCommandWorkflowRoute({ command: "visual", subcommand: "plan", script: "visual-plan.mjs", episodeDir: newDir, flags: { channel: "fixture", week: "new", episode: "ep_01" } }), /guarded OpenArt/);
   assertCommandWorkflowRoute({ command: "imagegen", subcommand: "openart", script: "openart-production.mjs", episodeDir: newDir, flags: { "episode-dir": newDir, action: "prepare", "references-only": "true" } });

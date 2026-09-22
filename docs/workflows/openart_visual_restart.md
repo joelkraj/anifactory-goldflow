@@ -88,6 +88,22 @@ assignments without spending. Use `--references-only true --scope canonical` or
 `--scope validation` during bank production. Native scene generation uses
 `--image-ids <ids>`. No unscoped whole-stage retry is permitted.
 
+Reference preparation may use a bounded browser-worker pool after Joey is
+approved and registered. Run `imagegen openart --references-only true --action
+prepare-ready --max-workers 4` to fill up to four slots with the next independent
+assets in the current phase. The maximum is eight and can never exceed the
+immutable identity's OpenArt concurrency; an identity locked at one must use one,
+and higher concurrency requires a fresh compliant production attempt. Goldflow
+selects only catalog IDs whose declared references already resolve to approved, hash-valid native
+library records; dependent wardrobe, character, prop, or validation work remains
+queued. `--action worker-status --max-workers 4` is read-only and returns each
+active assignment plus its exact next `mark-submitted` or `import` command.
+Multiple browser workers may operate those distinct assignments concurrently.
+Each worker still performs exactly one visible verification and one Generate
+click for its assignment. `mark-submitted` retains the episode lock, so competing
+workers reserve credits serially against the one episode budget. A failed exact
+ID blocks new pool admission for triage; it does not trigger a retry or fallback.
+
 Before one Generate click, `--action mark-submitted --assignment <file>
 --ui-receipt <file>` verifies actual prompt hash, model, Low/1K/16:9, ordered
 reference IDs/hashes, one output, current displayed cost and balance, and budget.

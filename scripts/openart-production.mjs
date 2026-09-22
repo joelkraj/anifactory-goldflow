@@ -10,7 +10,7 @@ import {
   synchronizeLibraryRecord, PRIMARY_MODEL, safeId,
 } from './lib/openart-asset-bank.mjs';
 import { bindOpenArtShots, hardenOpenArtShots } from './lib/openart-shot-binding.mjs';
-import { openartContext, bankPhase, listAssignments, refsApprovalCurrent } from './lib/openart-production-state.mjs';
+import { openartContext, bankPhase, listAssignments, refsApprovalCurrent, referenceWorkerPool } from './lib/openart-production-state.mjs';
 
 function requireValue(value, message) { if (!value) throw new Error(message); return value; }
 function exact(actual, expected, message) { if (JSON.stringify(actual) !== JSON.stringify(expected)) throw new Error(message); }
@@ -18,9 +18,15 @@ function refsCore(refs) { return refs.map(({ asset_id, sha256: hash, openart_ass
 async function withEpisodeLock(context, fn) {
   await fs.mkdir(context.root, { recursive: true });
   const lock = path.join(context.root, '.dispatch-lock');
-  let handle;
-  try { handle = await fs.open(lock, 'wx'); }
-  catch (error) { if (error.code === 'EEXIST') throw new Error('Another OpenArt mutation is active; inspect its result before retrying.'); throw error; }
+  let handle; const deadline = Date.now() + 10_000;
+  while (!handle) {
+    try { handle = await fs.open(lock, 'wx'); }
+    catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+      if (Date.now() >= deadline) throw new Error('Another OpenArt mutation remained active; inspect its result before retrying.');
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
   try { await handle.writeFile(JSON.stringify({ pid: process.pid, at: new Date().toISOString() })); return await fn(); }
   finally { await handle.close(); await fs.unlink(lock); }
 }
@@ -200,6 +206,22 @@ async function prepareAssignmentsUnlocked(context, flags) {
   }
   return { status: 'prepared_not_submitted', assignments: prepared };
 }
+export async function prepareReadyReferenceAssignments(context, flags) {
+  return withEpisodeLock(context, async () => {
+    await requirePlanApproval(context);
+    const pool = await referenceWorkerPool(context, { maxWorkers: flags['max-workers'] });
+    if (pool.blocked_by) throw new Error(`Reference worker pool is blocked by ${pool.blocked_by}.`);
+    if (!pool.ready_ids.length) return { status: pool.workers.length ? 'workers_already_active' : 'no_independent_references_ready', worker_pool: pool, assignments: [] };
+    const result = await prepareAssignmentsUnlocked(context, {
+      ...flags,
+      scope: pool.scope,
+      'asset-ids': pool.ready_ids.join(','),
+      'image-ids': pool.ready_ids.join(','),
+    });
+    await event(context.root, { event: 'reference_worker_pool_prepared', phase: pool.phase, max_workers: pool.max_workers, assignment_ids: result.assignments.map((row) => row.assignment_id) });
+    return { ...result, status: 'reference_workers_prepared_not_submitted', worker_pool: await referenceWorkerPool(context, { maxWorkers: pool.max_workers }) };
+  });
+}
 export async function markSubmitted(context, flags) { return withEpisodeLock(context, () => markSubmittedUnlocked(context, flags)); }
 async function markSubmittedUnlocked(context, flags) {
   const assignment = await loadAssignment(context, flags.assignment);
@@ -339,6 +361,8 @@ export async function runOpenArt(flags) {
   if (action === 'revise-plan') return revisePlan(context, flags);
   if (action === 'approve-plan') return approvePlan(context, flags);
   if (action === 'prepare') return prepareAssignments(context, flags);
+  if (action === 'prepare-ready') return prepareReadyReferenceAssignments(context, flags);
+  if (action === 'worker-status') return referenceWorkerPool(context, { maxWorkers: flags['max-workers'] });
   if (action === 'mark-submitted') return markSubmitted(context, flags);
   if (action === 'import') return importResult(context, flags);
   if (action === 'review') {

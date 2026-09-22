@@ -743,10 +743,12 @@ export function buildStageCommand(stageId, identity = {}, options = {}) {
     youtube_pinned_comment: `After explicit comment approval, use the youtube-studio-publish browser skill, pin the exact manifest comment, then run node bin/goldflow.mjs youtube record-comment ${base} --comment-id <id> --text-verified true --post-approved true --post-approved-by <name> --pinned-verified true --recorded-by <name>`,
   };
   if (identity.image_provider === "openart_cli") {
+    const lockedOpenArtConcurrency = Number(identity.image_provider_options?.openart?.concurrency ?? identity.openart_contract?.concurrency ?? 1);
+    const referenceWorkers = Number.isInteger(lockedOpenArtConcurrency) && lockedOpenArtConcurrency > 0 ? Math.min(4, lockedOpenArtConcurrency) : 1;
     Object.assign(commands, {
       visual_reference_plan: `node bin/goldflow.mjs visual openart-bank ${base} --action plan --catalog <canonical-catalog.json>`,
       reference_plan_approval: `node bin/goldflow.mjs visual openart-bank ${base} --action approve-plan --reviewer <name> --note "<reference plan review>"`,
-      reference_generation: `node bin/goldflow.mjs imagegen openart ${base} --references-only true --action prepare --scope canonical --asset-ids <next_exact_asset_ids>`,
+      reference_generation: `node bin/goldflow.mjs imagegen openart ${base} --references-only true --action prepare-ready --max-workers ${referenceWorkers}`,
       reference_image_approval: `node bin/goldflow.mjs visual openart-bank ${base} --action approve-refs --reviewer <name> --note "<completed visual review>"`,
       visual_prompt_plan: `node bin/goldflow.mjs visual openart-bank ${base} --action bind-shots --shot-plan <shot-plan.json>`,
       visual_prompt_harden: `node bin/goldflow.mjs visual openart-bank ${base} --action harden`,

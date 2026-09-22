@@ -7,5 +7,6 @@ import "./source-name-familiarity-tests.mjs";
 import "./youtube-analytics-winner-lineage-tests.mjs";
 import "./source-opening-audio-audition-tests.mjs";
 import "./editorial-source-scene-location-tests.mjs";
+import "./visual-reference-chunk-packet-tests.mjs";
 
 await runFixtureSuite("planner");

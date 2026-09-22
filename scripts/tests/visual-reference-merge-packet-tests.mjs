@@ -7,6 +7,7 @@ import {
   compactReferenceDirectorMergePayloadsForTests,
   compactOversizedReferenceDirectorPromptForTests,
   compactReferenceDirectorCardDefaultsForTests,
+  compactReferenceDirectorCardTemplatesForTests,
   expandReferenceDirectorCardDefaultsForTests,
   assertVisualReferencePromptBytesForTests,
   VISUAL_REFERENCE_DIRECTOR_SAFE_MAX_BYTES,
@@ -192,5 +193,67 @@ assert(dependencyPacked.character_state_candidate_line_format.field_aliases.stat
 assert.deepEqual(expandReferenceDirectorCardDefaultsForTests(dependencyPacked), dependencyInput, "Alias lookup must use overridden source_targets, while explicit state_ref overrides retain priority");
 const emptyCards = { ...mixed, cards: { ...mixed.cards, rows: [] }, unlinked_character_state_candidates: [] };
 assert.deepEqual(compactReferenceDirectorCardDefaultsForTests(emptyCards), emptyCards);
+
+// Literal string templates keep every character, including Unicode, delimiters,
+// leading zeroes, null/false exceptions and values unlike the common prefix.
+const templateInput = structuredClone(mixed);
+const templateTargetColumn = templateInput.cards.fields.indexOf("target_candidate_lines");
+const templateFormat = templateInput.target_candidate_line_format;
+if (!templateFormat.fields.includes("construction")) {
+  const prior = templateFormat.constants.construction;
+  delete templateFormat.constants.construction;
+  templateFormat.fields.push("construction");
+  for (const card of templateInput.cards.rows) for (const row of card[templateTargetColumn]) row.push(prior);
+}
+const constructionColumn = templateFormat.fields.indexOf("construction");
+const beatColumn = templateFormat.fields.indexOf("beats");
+const unionColumn = templateInput.cards.fields.indexOf("union_beat_scope");
+for (const [index, card] of templateInput.cards.rows.entries()) {
+  card[unionColumn] = `0002:beat_w${String(index).padStart(6, "0")}_w000099->beat_w000100_w000120`;
+  for (const row of card[templateTargetColumn]) {
+    row[constructionColumn] = `共同の参考画像：landscape production reference with literal text | café 🜁 $& ${index} ->beat_w007_w008 : end`;
+    row[beatColumn] = card[unionColumn];
+  }
+}
+for (const [index, value] of [null, false, "An unrelated construction: | ->beat_w café 🜁"].entries()) {
+  templateInput.cards.rows[index][templateTargetColumn][0][constructionColumn] = value;
+  templateInput.cards.rows[index][templateTargetColumn][0][beatColumn] = value;
+  templateInput.cards.rows[index][unionColumn] = value;
+}
+const beforeTemplates = compactReferenceDirectorCardDefaultsForTests(templateInput);
+const templates = compactReferenceDirectorCardTemplatesForTests(beforeTemplates);
+assert(templates.target_candidate_line_format.literal_templates.construction);
+assert(templates.target_candidate_line_format.literal_templates.beats);
+assert(templates.cards.literal_templates.union_beat_scope);
+assert.deepEqual(expandReferenceDirectorCardDefaultsForTests(templates), templateInput, "Literal templates preserve the exact entire card payload");
+assert.deepEqual(compactReferenceDirectorCardTemplatesForTests(templates), templates, "Already templated cells are not encoded twice");
+assert.deepEqual(expandReferenceDirectorCardDefaultsForTests(beforeTemplates), templateInput, "Input default cards remain unchanged");
+const malformedTemplate = structuredClone(templates);
+const encodedBeatColumn = malformedTemplate.target_candidate_line_format.fields.indexOf("beats");
+malformedTemplate.cards.rows[5][templateTargetColumn][0][encodedBeatColumn].push("extra part");
+assert.throws(() => expandReferenceDirectorCardDefaultsForTests(malformedTemplate), /template parts/, "Malformed part counts fail closed");
+const literalArrayInput = structuredClone(beforeTemplates);
+literalArrayInput.cards.rows[5][templateTargetColumn][0][encodedBeatColumn] = ["authored", "literal", "array"];
+const literalArrayPacked = compactReferenceDirectorCardTemplatesForTests(literalArrayInput);
+assert(!literalArrayPacked.target_candidate_line_format.literal_templates?.beats, "Fields containing literal arrays are not ambiguously templated");
+assert.deepEqual(expandReferenceDirectorCardDefaultsForTests(literalArrayPacked), expandReferenceDirectorCardDefaultsForTests(literalArrayInput));
+
+// Exercise the actual last-resort prompt branch, including literal replacement
+// metacharacters; JSON replacement must not interpret authored "$&" strings.
+const makeTemplatePrompt = (padding) => large.prompt
+  .replace(JSON.stringify(payload(large.prompt, 0)), () => JSON.stringify({ ...payload(large.prompt, 0), exact_operator_text: "z".repeat(padding) }))
+  .replace(JSON.stringify(payload(large.prompt, 4)), () => JSON.stringify(templateInput));
+const probePadding = VISUAL_REFERENCE_DIRECTOR_SAFE_MAX_BYTES;
+const templateProbe = compactOversizedReferenceDirectorPromptForTests(makeTemplatePrompt(probePadding));
+const fittingPadding = probePadding - (Buffer.byteLength(templateProbe) - VISUAL_REFERENCE_DIRECTOR_SAFE_MAX_BYTES) - 512;
+assert(fittingPadding > 0);
+const templateOriginalPrompt = makeTemplatePrompt(fittingPadding);
+const templateFinalPrompt = compactOversizedReferenceDirectorPromptForTests(templateOriginalPrompt);
+assert(templateFinalPrompt.includes("literal_templates"), "Integrated fixture must reach the final template fallback");
+assertVisualReferencePromptBytesForTests(templateFinalPrompt, { label: "visual-reference global director merge", maxBytes: VISUAL_REFERENCE_DIRECTOR_SAFE_MAX_BYTES });
+for (let index = 0; index < headings.length; index += 1) {
+  assert.deepEqual(expandedPayload(templateFinalPrompt, index), expandedPayload(templateOriginalPrompt, index), `Integrated templates preserve all values in ${headings[index]}`);
+}
+assert.equal(compactOversizedReferenceDirectorPromptForTests(templateFinalPrompt), templateFinalPrompt, "Fitting templated packets stay byte-identical");
 
 console.log("PASS visual-reference merge packet lossless compaction");

@@ -1856,16 +1856,80 @@ export function compactReferenceDirectorCardDefaultsForTests(candidateCards) {
   return packed;
 }
 
+// Named fragments retain literal IDs and text. Only array-valued cells under
+// an explicitly declared field template are expanded; other cells are exact.
+function expandReferenceLiteralTemplateRows(rows, format) {
+  for (const [field, fragments] of Object.entries(format.literal_templates ?? {})) {
+    const column = format.fields.indexOf(field);
+    if (column < 0 || !Array.isArray(fragments) || fragments.length < 2 || fragments.some((part) => typeof part !== "string")) throw new Error("Invalid reference director literal template");
+    for (const row of rows) {
+      const parts = row[column];
+      if (!Array.isArray(parts)) continue;
+      if (parts.length !== fragments.length - 1 || parts.some((part) => typeof part !== "string")) throw new Error("Invalid reference director literal template parts");
+      row[column] = fragments.map((fragment, index) => fragment + (parts[index] ?? "")).join("");
+    }
+  }
+}
+
+export function compactReferenceDirectorCardTemplatesForTests(candidateCards) {
+  if (candidateCards?.schema !== "goldflow_reference_director_candidate_card_defaults_v3") return candidateCards;
+  if (candidateCards.cards.literal_templates || candidateCards.target_candidate_line_format.literal_templates) return candidateCards;
+  const packed = structuredClone(candidateCards);
+  const size = (value) => Buffer.byteLength(JSON.stringify(value), "utf8");
+  const targetColumn = packed.cards.fields.indexOf("target_candidate_lines");
+  const targetRows = targetColumn >= 0
+    ? packed.cards.rows.flatMap((row) => row[targetColumn])
+    : packed.cards.constants.target_candidate_lines ?? [];
+  const tryTemplate = (rows, format, field, fragments, split) => {
+    const column = format.fields.indexOf(field);
+    if (column < 0 || rows.some((row) => Array.isArray(row[column]))) return;
+    const original = rows.map((row) => row[column]);
+    const replacement = original.map((value) => typeof value === "string" ? split(value) ?? value : value);
+    const declaration = { ...(format.literal_templates ?? {}), [field]: fragments };
+    const overhead = size(declaration) - (format.literal_templates ? size(format.literal_templates) : 0) + (format.literal_templates ? 0 : 21);
+    if (size(original) - size(replacement) <= overhead) return;
+    rows.forEach((row, index) => { row[column] = replacement[index]; });
+    format.literal_templates = declaration;
+  };
+  const targetFormat = packed.target_candidate_line_format;
+  const constructionColumn = targetFormat.fields.indexOf("construction");
+  if (constructionColumn >= 0) {
+    const values = targetRows.map((row) => row[constructionColumn]);
+    // Derive a literal prefix from the actual authored text, not a content-
+    // family default. Keep the best exact byte-saving prefix ending in space.
+    const prefixes = new Set(values.filter((value) => typeof value === "string").flatMap((value) => (
+      [...value.matchAll(/\s+/g)].map((match) => value.slice(0, match.index + match[0].length)).filter((prefix) => prefix.length >= 8)
+    )));
+    let best = null;
+    for (const prefix of prefixes) {
+      const replacement = values.map((value) => typeof value === "string" && value.startsWith(prefix) ? [value.slice(prefix.length)] : value);
+      const saving = size(values) - size(replacement) - size([prefix, ""]);
+      if (!best || saving > best.saving) best = { prefix, saving };
+    }
+    if (best?.saving > 0) tryTemplate(targetRows, targetFormat, "construction", [best.prefix, ""], (value) => value.startsWith(best.prefix) ? [value.slice(best.prefix.length)] : null);
+  }
+  const beatFragments = ["", ":beat_w", "->beat_w", ""];
+  const splitBeatScope = (value) => value.match(/^(\d+):beat_w(\d+_w\d+)->beat_w(\d+_w\d+)$/)?.slice(1) ?? null;
+  tryTemplate(targetRows, targetFormat, "beats", beatFragments, splitBeatScope);
+  tryTemplate(packed.cards.rows, packed.cards, "union_beat_scope", beatFragments, splitBeatScope);
+  return size(packed) < size(candidateCards) ? packed : candidateCards;
+}
+
 export function expandReferenceDirectorCardDefaultsForTests(candidateCards) {
   if (candidateCards?.schema !== "goldflow_reference_director_candidate_card_defaults_v3") return candidateCards;
   if (candidateCards.card_table_source_schema !== "goldflow_reference_director_candidate_card_tables_v2") throw new Error("Unknown source card-table schema");
   const result = structuredClone(candidateCards);
+  expandReferenceLiteralTemplateRows(result.cards.rows, result.cards);
+  delete result.cards.literal_templates;
   const targetRefByCandidateId = new Map();
   for (const kind of ["target", "character_state"]) {
     const key = `${kind}_candidate_line_format`;
     const format = result[key];
     const lineKey = `${kind}_candidate_lines`;
     const column = result.cards.fields.indexOf(lineKey);
+    const rows = column >= 0 ? result.cards.rows.flatMap((row) => row[column]) : result.cards.constants[lineKey] ?? [];
+    expandReferenceLiteralTemplateRows([...rows, ...(kind === "character_state" ? result.unlinked_character_state_candidates : [])], format);
+    delete format.literal_templates;
     const decodeRow = (row) => {
       if (!format.override_field) return row;
       if (row.length !== format.fields.length) throw new Error("Reference director literal-default row width changed");
@@ -1944,10 +2008,17 @@ export function compactOversizedReferenceDirectorPromptForTests(prompt) {
   // Preserve already-fitting output bytes from the earlier literal-table
   // fallback before considering the additional card representation.
   if (Buffer.byteLength(packed, "utf8") > VISUAL_REFERENCE_DIRECTOR_SAFE_MAX_BYTES) {
-    const compactedCards = compactReferenceDirectorCardDefaultsForTests(candidateCards);
+    let compactedCards = compactReferenceDirectorCardDefaultsForTests(candidateCards);
     if (compactedCards !== candidateCards) {
-      packed = packed.replace(`CANDIDATE CARDS:\n${JSON.stringify(compactReferencePromptValue(candidateCards))}`, `CANDIDATE CARDS:\n${JSON.stringify(compactReferencePromptValue(compactedCards))}`);
+      packed = packed.replace(`CANDIDATE CARDS:\n${JSON.stringify(compactReferencePromptValue(candidateCards))}`, () => `CANDIDATE CARDS:\n${JSON.stringify(compactReferencePromptValue(compactedCards))}`);
       packed = packed.replace(REFERENCE_PROMPT_TABLE_INSTRUCTION, `${REFERENCE_PROMPT_TABLE_INSTRUCTION}\nCandidate-card line formats use named literal defaults: apply constants/defaults and row fields, then the override_field cell (null for none, otherwise exact named replacements including explicit null), then field_aliases only for fields without overrides. A target_candidate alias copies ref from the target row containing the first literal candidate ID in the resolved source_targets; absent/unlinked targets require an explicit override. source_fields preserves original columns; all_fields preserves labeled-line order. card_table_source_schema records the original card schema. These aliases never merge or select candidates.`);
+      if (Buffer.byteLength(packed, "utf8") > VISUAL_REFERENCE_DIRECTOR_SAFE_MAX_BYTES) {
+        const templatedCards = compactReferenceDirectorCardTemplatesForTests(compactedCards);
+        if (templatedCards !== compactedCards) {
+          packed = packed.replace(`CANDIDATE CARDS:\n${JSON.stringify(compactReferencePromptValue(compactedCards))}`, () => `CANDIDATE CARDS:\n${JSON.stringify(compactReferencePromptValue(templatedCards))}`);
+          packed = packed.replace(REFERENCE_PROMPT_TABLE_INSTRUCTION, `${REFERENCE_PROMPT_TABLE_INSTRUCTION}\nFor a field named in literal_templates, an array cell contains exact string parts: interleave the declared literal fragments with those parts to recover the original string before defaults or aliases. Non-array cells remain exact, including null and exceptions. No numeric conversion or delimiter splitting is allowed.`);
+        }
+      }
     }
   }
   // Some valid packets are irreducible. Keep the original rather than enlarge

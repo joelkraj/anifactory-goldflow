@@ -32,7 +32,9 @@ export async function falProductionStageStates({ episodeDir } = {}) {
     const effectiveResults = results.map((value,index) => value || repairResults[index]);
     const failures = await Promise.all(bulk.assignments.map(row => exists(path.join(root,"bulk","failure-receipts",`${row.image_id}.json`))));
     const holds = await Promise.all(bulk.assignments.map(row => exists(path.join(root,"bulk","transport-holds",`${row.image_id}.json`))));
+    const unsubmittedCount = submitted.filter(value => !value).length;
     if (effectiveResults.every(Boolean)) bulkState = { done: true, evidence: `All ${bulk.assignments.length} Fal frames have exact request/result receipts, including scoped repair lineage` };
+    else if (unsubmittedCount > 0) bulkState = { state: "missing", evidence: `${submitted.filter(Boolean).length}/${bulk.assignments.length} Fal requests queued; provider enforces ${bulk.concurrency} active requests`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action dispatch-bulk --limit ${Math.min(100,unsubmittedCount)} --confirm-spend exact_fal_bulk_batch` };
     else if (holds.some((value,index)=>value&&!results[index]) && submitted.every(Boolean) && submitted.every((value,index) => !value || results[index] || failures[index] || holds[index])) bulkState = { state: "blocked", evidence: `${holds.filter((value,index)=>value&&!results[index]).length} completed Fal requests await exact result transport`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action observe-holds` };
     else if (failures.some(Boolean) && submitted.every(Boolean) && submitted.every((value,index) => !value || results[index] || failures[index] || holds[index])) {
       const repairSubmitted = await Promise.all(bulk.assignments.map(row => exists(path.join(root,"bulk","repair-submission-receipts",`${row.image_id}.json`))));

@@ -5,11 +5,20 @@ import path from 'node:path';
 import sharp from 'sharp';
 import { test } from 'node:test';
 import { dispatchCliBatch, prepareAssignments, prepareReadyReferenceAssignments, markSubmitted, importResult, runOpenArt } from '../openart-production.mjs';
-import { bankPhase, openartProductionStageStates, listAssignments, validationReviewState, refsApprovalCurrent, referenceWorkerPool } from '../lib/openart-production-state.mjs';
+import { bankPhase, openartProductionStageStates, listAssignments, latestAssignments, validationReviewState, refsApprovalCurrent, referenceWorkerPool } from '../lib/openart-production-state.mjs';
 import { addCanonicalResult, fileHash, loadBank, requiredVisualChecks, reviewCanonicalAssets, synchronizeLibraryRecord, sha256 } from '../lib/openart-asset-bank.mjs';
 import { buildExactOpenArtImageRequest, submitExactOpenArtImageBatch } from '../lib/openart-cli-provider.mjs';
 
 const params = { quality: 'low', resolution: '1k', aspect_ratio: '16:9' };
+
+test('A reviewed acceptance override selects the retained failed raster without deleting repair history', () => {
+  const failed = { assignment_id: 'frame--original', asset_id: 'frame', scope: 'scene', created_at: '2026-01-01T00:00:00Z', receipt: { sha256: 'a'.repeat(64) }, failure: { reason: 'strict review' }, acceptance: { reviewer: 'operator' } };
+  const abandonedRepair = { assignment_id: 'frame--repair', previous_assignment_id: 'frame--original', asset_id: 'frame', scope: 'scene', created_at: '2026-01-02T00:00:00Z', failure: { reason: 'superseded before dispatch' } };
+  const selected = latestAssignments([failed, abandonedRepair], 'scene').get('frame');
+  assert.equal(selected.assignment_id, failed.assignment_id);
+  assert.equal(selected.failure, null);
+  assert.deepEqual(selected.failure_history, failed.failure);
+});
 const write = async (file, value) => { await fs.mkdir(path.dirname(file), { recursive: true }); await fs.writeFile(file, `${JSON.stringify(value)}\n`); return file; };
 async function fixture(t, { budget = 10, concurrency = 8, coreAssets = [], transport = 'openart_studio_browser' } = {}) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'goldflow-openart-prod-test-'));

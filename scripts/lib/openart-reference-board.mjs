@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import sharp from 'sharp';
 
 export const REFERENCE_BOARD_SCHEMA = 'goldflow_reference_board_v1';
-export const REFERENCE_BOARD_COMPOSITOR_VERSION = '1.0.0';
+export const REFERENCE_BOARD_COMPOSITOR_VERSION = '1.1.0';
 export const REFERENCE_BOARD_WIDTH = 1920;
 export const REFERENCE_BOARD_HEIGHT = 1080;
 export const REFERENCE_BOARD_GUTTER = 12;
@@ -54,7 +54,7 @@ export function referenceBoardLayout(references) {
   if (references.length === 2) {
     const left = take(primary); const right = take(secondary ?? environment ?? prop);
     const lw = Math.floor((w - g) / 2);
-    return { layout_id: 'primary_left_support_right', panels: [box(0, 0, lw, h, 'primary_character_or_subject', left), box(lw + g, 0, w - lw - g, h, classify(right), right)] };
+    return { layout_id: 'primary_left_support_right', panels: [box(0, 0, lw, h, classify(left), left), box(lw + g, 0, w - lw - g, h, classify(right), right)] };
   }
   if (references.length === 3 && characters.length >= 2) {
     const left = take(primary); const center = take(secondary); const right = take(environment ?? prop);
@@ -64,12 +64,12 @@ export function referenceBoardLayout(references) {
   if (references.length === 3 && prop && environment) {
     const left = take(primary); const upper = take(prop); const lower = take(environment);
     const lw = Math.floor((w - g) * 0.45); const rh = Math.floor((h - g) * 0.55);
-    return { layout_id: 'prop_critical_primary_left_prop_upper_right_environment_lower_right', panels: [box(0, 0, lw, h, 'primary_character_or_subject', left), box(lw + g, 0, w - lw - g, rh, 'crucial_prop', upper), box(lw + g, rh + g, w - lw - g, h - rh - g, 'environment', lower)] };
+    return { layout_id: 'prop_critical_primary_left_prop_upper_right_environment_lower_right', panels: [box(0, 0, lw, h, classify(left), left), box(lw + g, 0, w - lw - g, rh, 'crucial_prop', upper), box(lw + g, rh + g, w - lw - g, h - rh - g, 'environment', lower)] };
   }
   if (references.length === 3) {
     const left = take(primary); const upper = take(environment); const lower = take();
     const lw = Math.floor((w - g) * 0.5); const rh = Math.floor((h - g) * 0.6);
-    return { layout_id: 'primary_left_environment_upper_right_support_lower_right', panels: [box(0, 0, lw, h, 'primary_character_or_subject', left), box(lw + g, 0, w - lw - g, rh, 'environment', upper), box(lw + g, rh + g, w - lw - g, h - rh - g, classify(lower), lower)] };
+    return { layout_id: 'primary_left_environment_upper_right_support_lower_right', panels: [box(0, 0, lw, h, classify(left), left), box(lw + g, 0, w - lw - g, rh, classify(upper), upper), box(lw + g, rh + g, w - lw - g, h - rh - g, classify(lower), lower)] };
   }
 
   const left = take(primary); const center = take(secondary); const upper = take(environment); const lower = take(prop);

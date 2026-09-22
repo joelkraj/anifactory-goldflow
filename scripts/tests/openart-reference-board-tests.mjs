@@ -33,6 +33,12 @@ try {
   const guidance = referenceBoardPromptGuidance(first);
   assert.match(guidance, /left panel/); assert.match(guidance, /upper-right panel/); assert.match(guidance, /lower-right panel/);
   assert(!guidance.includes('Joey'));
+  const style = await make('probability-style', '#20152e', 'style');
+  const locationStyle = await buildReferenceBoard({ root, imageId: 'frame.location-style', references: [refs[1], style] });
+  const locationStyleGuidance = referenceBoardPromptGuidance(locationStyle);
+  assert.match(locationStyleGuidance, /left panel only for the environment's architecture/);
+  assert.match(locationStyleGuidance, /right panel only for the supernatural interface treatment/);
+  assert(!locationStyleGuidance.includes("primary character's identity"));
   console.log('OpenArt deterministic reference board tests passed.');
 } finally {
   await fs.rm(root, { recursive: true, force: true });

@@ -33,7 +33,12 @@ export async function listAssignments(root) {
     const receipt = await readJson(path.join(root, 'results', `${assignment.assignment_id}.json`));
     const submitted = await readJson(path.join(root, 'submissions', `${assignment.assignment_id}.json`));
     const failure = await readJson(path.join(root, 'failures', `${assignment.assignment_id}.json`));
-    assignments.push({ ...assignment, assignment_path: file, receipt, submitted, failure });
+    const acceptance = await readJson(path.join(root, 'acceptance-overrides', `${assignment.assignment_id}.json`));
+    if (acceptance) {
+      requireState(failure && receipt, 'An OpenArt acceptance override requires a retained failed generated result.');
+      requireState(acceptance.schema === 'goldflow_openart_visual_acceptance_override_v1' && acceptance.assignment_id === assignment.assignment_id && acceptance.output_sha256 === receipt.sha256 && acceptance.failure_sha256 === await fileHash(path.join(root, 'failures', `${assignment.assignment_id}.json`)) && acceptance.reviewer?.trim() && acceptance.note?.trim() && validTimestamp(acceptance.accepted_at), 'OpenArt acceptance override is invalid or stale.');
+    }
+    assignments.push({ ...assignment, assignment_path: file, receipt, submitted, failure, acceptance });
   }
   const byId = new Map(assignments.map((row) => [row.assignment_id, row]));
   const depth = (row, seen = new Set()) => {
@@ -52,6 +57,13 @@ export function latestAssignments(assignments, scope) {
   }
   const latest = new Map();
   for (const [id, rows] of groups) {
+    const accepted = rows.filter((row) => row.acceptance);
+    if (accepted.length > 1) throw new Error(`Multiple visual acceptance overrides exist for ${id}.`);
+    if (accepted.length === 1) {
+      const row = accepted[0];
+      latest.set(id, { ...row, failure_history: row.failure, failure: null });
+      continue;
+    }
     const replaced = new Set(rows.map((row) => row.previous_assignment_id).filter(Boolean));
     const leaves = rows.filter((row) => !replaced.has(row.assignment_id));
     if (leaves.length !== 1) throw new Error(`Ambiguous parallel or cyclic OpenArt attempts: ${id}`);

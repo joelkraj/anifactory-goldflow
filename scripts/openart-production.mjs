@@ -641,6 +641,22 @@ export async function runOpenArt(flags) {
     requireValue(flags.note, 'Exact failure evidence required.');
     return writeOnce(path.join(context.root, 'failures', `${assignment.assignment_id}.json`), { assignment_id: assignment.assignment_id, reason: flags.note, at: new Date().toISOString(), automatic_retry: false });
   }
+  if (action === 'accept-failed-output') {
+    const assignment = await loadAssignment(context, flags.assignment);
+    const attempts = await listAssignments(context.root);
+    const attempt = attempts.find((row) => row.assignment_id === assignment.assignment_id);
+    if (!attempt?.failure || !attempt?.receipt) throw new Error('Visual acceptance override requires an exact failed generated output.');
+    const outputSha256 = requireValue(flags['output-sha256'], '--output-sha256 required');
+    if (outputSha256 !== attempt.receipt.sha256) throw new Error('Visual acceptance output hash mismatch.');
+    const reviewer = requireValue(flags.reviewer, '--reviewer required');
+    const note = requireValue(flags.note, '--note required');
+    const failurePath = path.join(context.root, 'failures', `${assignment.assignment_id}.json`);
+    return writeOnce(path.join(context.root, 'acceptance-overrides', `${assignment.assignment_id}.json`), {
+      schema: 'goldflow_openart_visual_acceptance_override_v1', assignment_id: assignment.assignment_id,
+      output_sha256: outputSha256, failure_sha256: await fileHash(failurePath), reviewer, note,
+      accepted_at: new Date().toISOString(), preserves_failure_history: true,
+    });
+  }
   if (action === 'triage') {
     const repair = await readJson(requireValue(flags.repair, '--repair required'));
     if (!repair?.asset_id || !repair.prior_assignment_id || !repair.reviewer || !repair.reason) throw new Error('Exact reviewed repair required.');

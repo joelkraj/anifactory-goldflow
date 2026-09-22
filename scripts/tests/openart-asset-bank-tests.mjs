@@ -51,6 +51,15 @@ function sync(record, id = `library-${record.asset_id}-${record.version}`) {
     openart_media_asset_id: record.openart_asset_id, openart_library_asset_id: id, openart_library_kind: record.openart_library_kind,
   };
 }
+function mediaSync(record) {
+  return {
+    attestation: 'openart_media_asset_identity_verified', reviewer: 'fixture-reviewer',
+    evidence: 'Exact provider media ID and hash-bound downloaded raster verified.',
+    registration_surface: 'media', asset_id: record.asset_id, version: record.version, sha256: record.sha256,
+    openart_media_asset_id: record.openart_asset_id, openart_library_asset_id: record.openart_asset_id,
+    openart_library_kind: record.openart_library_kind,
+  };
+}
 async function latest(id = 'test.joey') { return (await loadBank(bankRoot)).assets.filter((row) => row.asset_id === id).at(-1); }
 
 try {
@@ -81,6 +90,12 @@ try {
   assert.equal(references[0].openart_library_asset_id, 'library-test.joey-1');
   assert.equal(references[0].openart_library_kind, 'character');
   assert.equal(await fileHash(references[0].library_sync.path), references[0].library_sync.sha256);
+  const media = await addCanonicalResult(bankRoot, await candidate('test.media'));
+  await reviewCanonicalAssets(bankRoot, review(media));
+  await synchronizeLibraryRecord(bankRoot, mediaSync(media));
+  const mediaReference = (await resolveReferences(bankRoot, ['test.media']))[0];
+  assert.equal(mediaReference.openart_library_asset_id, media.openart_asset_id);
+  assert.equal(mediaReference.openart_registration_surface, 'media');
   await assert.rejects(resolveReferences(bankRoot, ['test.joey', 'test.joey']), /Duplicate/);
   await assert.rejects(resolveReferences(bankRoot, ['a', 'b', 'c', 'd']), /composition reason/);
   await assert.rejects(synchronizeLibraryRecord(bankRoot, sync(first, 'different-native-id')), /new canonical version/);

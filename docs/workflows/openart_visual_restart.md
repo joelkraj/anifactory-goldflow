@@ -51,9 +51,14 @@ landscape three-quarter/full body. Environments are empty location plates;
 props are isolated. Canonical rasters must originate from GPT Image 2.5 Sunburst,
 not historical provider images or repair models.
 
-Each record maps both its generated OpenArt media ID and its native Studio
-library ID. Register characters/wardrobes under Characters, location plates
-under Backgrounds, props under Objects, and actual styles under Styles. Native
+Each record maps its generated OpenArt media ID and its reusable OpenArt
+registration. A reusable registration may be either the exact persistent Media
+asset created by generation or a separate native Studio library record. Prefer
+Media registration for wardrobe states, location plates, and props when it
+avoids a serial Studio form without reducing reference fidelity; bind the exact
+media ID to the local hash and never describe it as a separate native ID.
+Register durable identity characters under Characters when useful, location
+plates under Backgrounds, props under Objects, and actual styles under Styles. Native
 Worlds are separate derived 3D assets: record their source plate IDs, separate
 cost/model/operation, local export if available, and the parent location. Do not
 confuse a 3D World ID with a generated canonical background ID or budget every

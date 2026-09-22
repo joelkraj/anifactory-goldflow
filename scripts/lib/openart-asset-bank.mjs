@@ -163,7 +163,7 @@ export async function verifyAsset(record, { requireLibrary = false } = {}) {
   if (record.record_path) {
     if (!record.record_sha256 || await fileHash(record.record_path) !== record.record_sha256) throw new Error('Immutable canonical record changed.');
     const original = await readJson(record.record_path);
-    const mutable = new Set(['approval_state', 'review', 'library_sync', 'openart_library_asset_id', 'record_sha256']);
+    const mutable = new Set(['approval_state', 'review', 'library_sync', 'openart_library_asset_id', 'openart_registration_surface', 'record_sha256']);
     for (const key of Object.keys(original).filter((key) => !mutable.has(key))) {
       if (JSON.stringify(record[key]) !== JSON.stringify(original[key])) throw new Error(`Immutable canonical metadata changed: ${key}`);
     }
@@ -178,7 +178,12 @@ export async function verifyAsset(record, { requireLibrary = false } = {}) {
   if (requireLibrary || record.openart_library_asset_id) {
     if (!record.openart_library_asset_id || !record.library_sync?.path || await fileHash(record.library_sync.path) !== record.library_sync.sha256) throw new Error('Canonical reference lacks verified native OpenArt library mirroring.');
     const sync = await readJson(record.library_sync.path);
-    if (sync.attestation !== 'native_openart_library_asset_visibly_verified' || !sync.reviewer || !sync.evidence || sync.asset_id !== record.asset_id || sync.version !== record.version || sync.sha256 !== record.sha256 || sync.openart_media_asset_id !== record.openart_asset_id || sync.openart_library_asset_id !== record.openart_library_asset_id || sync.openart_library_kind !== record.openart_library_kind) throw new Error('Native OpenArt library receipt does not match the canonical version.');
+    const mediaRegistration = sync.registration_surface === 'media'
+      && sync.attestation === 'openart_media_asset_identity_verified'
+      && sync.openart_library_asset_id === sync.openart_media_asset_id;
+    const nativeRegistration = (sync.registration_surface == null || sync.registration_surface === 'native_library')
+      && sync.attestation === 'native_openart_library_asset_visibly_verified';
+    if ((!mediaRegistration && !nativeRegistration) || !sync.reviewer || !sync.evidence || sync.asset_id !== record.asset_id || sync.version !== record.version || sync.sha256 !== record.sha256 || sync.openart_media_asset_id !== record.openart_asset_id || sync.openart_library_asset_id !== record.openart_library_asset_id || sync.openart_library_kind !== record.openart_library_kind || (record.openart_registration_surface ?? (nativeRegistration ? 'native_library' : null)) !== (sync.registration_surface ?? 'native_library')) throw new Error('OpenArt library/media receipt does not match the canonical version.');
   }
   return record;
 }
@@ -192,7 +197,8 @@ export async function resolveReferences(root, ids, { maxReferences = 8, extraRef
     if (!asset) throw new Error(`Approved canonical reference unavailable: ${id}`);
     await verifyAsset(asset, { requireLibrary });
     return { asset_id: id, version: asset.version, path: asset.local_absolute_path, sha256: asset.sha256, openart_asset_id: asset.openart_asset_id, asset_class: asset.asset_class, canonical_name: asset.canonical_name,
-      openart_library_asset_id: asset.openart_library_asset_id, openart_library_kind: asset.openart_library_kind, library_sync: asset.library_sync ?? null,
+      openart_library_asset_id: asset.openart_library_asset_id, openart_library_kind: asset.openart_library_kind,
+      openart_registration_surface: asset.openart_registration_surface ?? 'native_library', library_sync: asset.library_sync ?? null,
       parent_asset_id: asset.parent_asset_id, state_id: asset.state_id };
   }));
 }
@@ -248,7 +254,12 @@ export async function addCanonicalResult(root, { item, catalog, result, referenc
 }
 
 export async function synchronizeLibraryRecord(root, sync) {
-  if (sync?.attestation !== 'native_openart_library_asset_visibly_verified' || !sync.openart_library_asset_id || !sync.evidence || !sync.reviewer) throw new Error('Native Studio library registration must be visibly verified.');
+  const mediaRegistration = sync?.registration_surface === 'media'
+    && sync.attestation === 'openart_media_asset_identity_verified'
+    && sync.openart_library_asset_id === sync.openart_media_asset_id;
+  const nativeRegistration = (sync?.registration_surface == null || sync.registration_surface === 'native_library')
+    && sync?.attestation === 'native_openart_library_asset_visibly_verified';
+  if ((!mediaRegistration && !nativeRegistration) || !sync.openart_library_asset_id || !sync.evidence || !sync.reviewer) throw new Error('OpenArt native-library or persistent-media registration must be exactly verified.');
   return withBankLock(root, async () => {
     const bank = await loadBank(root);
     const asset = bank.assets.find((row) => row.asset_id === sync.asset_id && row.version === sync.version);
@@ -271,6 +282,7 @@ export async function synchronizeLibraryRecord(root, sync) {
       }];
     }
     asset.openart_library_asset_id = sync.openart_library_asset_id;
+    asset.openart_registration_surface = sync.registration_surface ?? 'native_library';
     asset.library_sync = receipt;
     await commitBank(root, bank, { event: correctingLibraryId ? 'native_library_id_corrected' : 'native_library_synced', asset_id: sync.asset_id, version: sync.version, prior_openart_library_asset_id: priorLibraryId ?? null, ...receipt });
     return receipt;

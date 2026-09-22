@@ -22,7 +22,13 @@ async function main(){
  const targetDir=path.join(baselineDir.slice(0,-suffix.length),"weekly_runs",f.week,"episodes",baseline.episode); const targetRun=path.dirname(path.dirname(targetDir)); await absent(targetRun);
  const statusRun=spawnSync(process.execPath,[path.join(repoRoot,"bin/goldflow.mjs"),"run","status","--episode-dir",baselineDir,"--format","json"],{cwd:repoRoot,encoding:"utf8",maxBuffer:64*1024*1024});
  if(statusRun.status) throw new Error(statusRun.stderr||statusRun.stdout); const status=JSON.parse(statusRun.stdout); validateBaselineStages(status);
- const files=await collectBaselineFiles(baselineDir,baseline);
+ // A Fal attempt may branch from the approved OpenArt visual restart. Its
+ // narration reports still bind the original episode-local audio, so mirror
+ // nonvisual files from that immutable source while taking visual plans only
+ // from the current OpenArt attempt.
+ const nonvisualBaselineDir=baseline.visual_restart?.baseline_episode_dir
+   ? await fs.realpath(baseline.visual_restart.baseline_episode_dir) : baselineDir;
+ const files=await collectBaselineFiles(nonvisualBaselineDir,baseline);
  for(const name of FAL_VISUAL_FILES){const source=path.join(baselineDir,name);files.push({relative_path:name,source_path:source,sha256:await fileSha256(source),kind:"approved_visual_plan_artifact"});}
  const catalogSource=path.join(baselineDir,"openart","catalog.json"); files.push({relative_path:"fal/catalog.json",source_path:catalogSource,sha256:await fileSha256(catalogSource),kind:"provider_neutral_canonical_catalog"});
  const baselineIdentitySha256=await fileSha256(path.join(baselineDir,"run_identity.json")); const snapshot=jsonBytes(status); const history=jsonBytes(await collectHistoricalVisualInventory(baselineDir,baseline.episode)); const createdAt=new Date().toISOString();

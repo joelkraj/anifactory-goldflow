@@ -758,6 +758,18 @@ export async function runOpenArt(flags) {
   }
   if (action === 'triage') {
     const repair = await readJson(requireValue(flags.repair, '--repair required'));
+    if (repair?.schema === 'goldflow_openart_exact_id_repair_batch_v1') {
+      if (!Array.isArray(repair.repair_paths) || !repair.repair_paths.length || repair.repair_paths.length > 32 || new Set(repair.repair_paths).size !== repair.repair_paths.length) throw new Error('Exact-ID repair batch requires one through thirty-two unique repair paths.');
+      const prepared = [];
+      for (const repairPath of repair.repair_paths) {
+        if (!path.isAbsolute(repairPath) || path.dirname(repairPath) !== path.join(context.root, 'repair-requests')) throw new Error('Repair batch paths must belong to this episode.');
+        const item = await readJson(repairPath);
+        if (!item?.asset_id || !item.prior_assignment_id || !item.reviewer || !item.reason) throw new Error('Exact reviewed repair required.');
+        const result = await prepareAssignments(context, { ...flags, repair: repairPath, 'asset-ids': item.asset_id, action: 'prepare' });
+        prepared.push(...result.assignments);
+      }
+      return { status: 'prepared_exact_repair_batch_not_submitted', assignments: prepared };
+    }
     if (!repair?.asset_id || !repair.prior_assignment_id || !repair.reviewer || !repair.reason) throw new Error('Exact reviewed repair required.');
     return prepareAssignments(context, { ...flags, 'asset-ids': repair.asset_id, action: 'prepare' });
   }

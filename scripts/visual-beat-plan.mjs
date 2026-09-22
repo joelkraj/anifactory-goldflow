@@ -14,6 +14,7 @@ import {
   editorialBeatCoverageFindings,
   editorialRetentionRailFindings,
   groupingLockHash,
+  isSourceSceneLocationBeat,
   normalizeEditorialGrouping,
   projectActiveStateConstraints,
   retimeLockedEditorialBeats,
@@ -859,7 +860,7 @@ function localBeatReferenceNeeds(scene, beat, {
   ));
   const locationSubject = beat.location ?? scene.location ?? null;
   if (locationSubject) {
-    const requirement = locationRequirements[0] ?? null;
+    const requirement = isSourceSceneLocationBeat(beat) ? null : locationRequirements[0] ?? null;
     const mode = generationModeForBeatRef({ kind: "location", beat, subject: locationSubject, visibleCharacters });
     needs.push(beatRefNeed({
       refId: requirement?.ref_id ?? refIdForSubject(locationSubject, "location"),

@@ -6,5 +6,6 @@ import "./first-class-story-contract-tests.mjs";
 import "./source-name-familiarity-tests.mjs";
 import "./youtube-analytics-winner-lineage-tests.mjs";
 import "./source-opening-audio-audition-tests.mjs";
+import "./editorial-source-scene-location-tests.mjs";
 
 await runFixtureSuite("planner");

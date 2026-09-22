@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { getLLMModel, isLocalLLMRoute, localLLMAuthHeaders, localLLMChatCompletionURL } from "./lib/llm-router.mjs";
 import { configuredCodexModel, isCodexCacheCompatible, readCodexCallMetadata, runCodexCli } from "./lib/codex-cli-runner.mjs";
 import { recordPlannerChunkCheckpoint } from "./lib/planner-chunk-ledger.mjs";
+import { isSourceSceneLocationBeat } from "./lib/editorial-beat-director.mjs";
 import {
   buildReferenceDirectorSelectionReceipt,
   referenceDirectorSelectionFidelityFindings,
@@ -513,8 +514,9 @@ function buildReferenceEvidenceLedger(scopedSemantic, visualBeatPlan, {
       : rawSubject;
     if (!cleanSubject) return;
     const assetKind = normalizedKind;
+    const sourceSceneLocation = assetKind === "location" && isSourceSceneLocationBeat(beat);
     const canonicalIndex = canonicalAliases.get(assetKind) ?? { exact: new Map(), evidence_phrases: [] };
-    const canonical = [canonicalId, refId, cleanSubject]
+    const canonical = sourceSceneLocation ? null : [canonicalId, refId, cleanSubject]
       .map((value) => slug(value, ""))
       .filter(Boolean)
       .map((key) => canonicalIndex.exact.get(key))
@@ -536,7 +538,7 @@ function buildReferenceEvidenceLedger(scopedSemantic, visualBeatPlan, {
         ? `char_${canonical.canonical_id.replace(/^char_/, "")}_identity`
         : inventoryRefIdFor(assetKind, canonical.canonical_id, canonical.canonical_id);
     }
-    if (!refId && assetKind === "location" && sceneId) {
+    if (!sourceSceneLocation && !refId && assetKind === "location" && sceneId) {
       let bestLocation = null;
       for (const existing of assets.values()) {
         if (existing.kind !== "location" || !existing.scene_ids.has(sceneId)) continue;
@@ -783,7 +785,7 @@ function buildLocationContractLedger(scopedSemantic, { outputPath: ledgerPath = 
       const description = String(req.subject ?? req.description ?? scene.location ?? req.ref_id ?? contractId).trim();
       const matchingBeats = beats.filter((beat) => (beat.ref_needs ?? beat.beat_ref_requirements ?? [])
         .some((need) => normalizeKind(need?.kind) === "location" && slug(need?.ref_id ?? "") === contractId));
-      const scopedBeats = matchingBeats.length ? matchingBeats : beats;
+      const scopedBeats = matchingBeats.length ? matchingBeats : beats.filter((beat) => !isSourceSceneLocationBeat(beat));
       const localLocationLabels = [...new Set(scopedBeats
         .map((beat) => String(beat.local_location ?? beat.location ?? "").trim())
         .filter(Boolean))];
@@ -828,6 +830,23 @@ function buildLocationContractLedger(scopedSemantic, { outputPath: ledgerPath = 
           .map((need) => slug(need?.ref_id ?? "")),
       ].filter(Boolean));
       for (const contractId of contractIds) {
+        if (isSourceSceneLocationBeat(beat) && !contracts.has(contractId)
+          && (beat.ref_needs ?? beat.beat_ref_requirements ?? []).some((need) => (
+            normalizeKind(need?.kind) === "location" && slug(need?.ref_id ?? "") === contractId
+            && need.subject === beat.local_location
+          ))) {
+          contracts.set(contractId, {
+            location_contract_id: contractId,
+            semantic_ref_id: null,
+            description: beat.local_location,
+            prompt_anchor: beat.local_location,
+            scene_ids: [],
+            beat_ids: [],
+            local_location_labels: [],
+            reasons: ["Exact source scene location; no canonical location ID or inherited venue reference."],
+            location_provenance: beat.location_provenance,
+          });
+        }
         const contract = contracts.get(contractId);
         if (!contract) continue;
         const locationLabel = String(beat.local_location ?? beat.location ?? "").trim();

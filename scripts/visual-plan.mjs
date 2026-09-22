@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { getLLMModel, isLocalLLMRoute, localLLMAuthHeaders, localLLMChatCompletionURL } from "./lib/llm-router.mjs";
 import { configuredCodexModel, isCodexCacheCompatible, readCodexCallMetadata, runCodexCli } from "./lib/codex-cli-runner.mjs";
 import { plannerChunkIdentityFindings, recordPlannerChunkCheckpoint } from "./lib/planner-chunk-ledger.mjs";
+import { isSourceSceneLocationBeat } from "./lib/editorial-beat-director.mjs";
 import {
   appendPlannerChunkTelemetry,
   derivePlannerChunkTuning,
@@ -2498,6 +2499,15 @@ function locationTargetsForSourceRow(row, visualReferencePlan) {
 function locationTargetMatchesSourceRow(target, row) {
   if (String(target?.kind ?? "").toLowerCase() !== "location") return true;
   const contractIds = (target.location_contract_ids ?? []).map((id) => String(id ?? "").trim()).filter(Boolean);
+  if (isSourceSceneLocationBeat(row)) {
+    const localRefIds = new Set((row.ref_needs ?? row.beat_ref_requirements ?? [])
+      .filter((need) => String(need?.kind ?? "").toLowerCase() === "location"
+        && need.subject === row.local_location)
+      .map((need) => String(need.ref_id ?? "").trim()).filter(Boolean));
+    return contractIds.length
+      ? contractIds.some((id) => localRefIds.has(id))
+      : localRefIds.has(String(target.ref_id ?? "").trim());
+  }
   const rowLocationId = String(row?.location_id ?? row?.location_contract_id ?? "").trim();
   if (!contractIds.length || !rowLocationId) return true;
   return contractIds.includes(rowLocationId);

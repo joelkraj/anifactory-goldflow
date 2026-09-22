@@ -25,6 +25,7 @@ import {
   creditExhaustedIdsFromRows,
 } from "./lib/image-fallback-policy.mjs";
 import { normalizeImageProvider } from "./lib/image-provider-routing.mjs";
+import { openartRestartBaselineState } from "./lib/openart-visual-restart.mjs";
 import {
   federatedWebImageIdentityStatus,
   googleFlowPrimaryIdentityStatus,
@@ -4633,7 +4634,11 @@ async function main() {
   const runIdentityTts = runIdentityTtsComplete(runIdentity);
   const runIdentityWhisper = runIdentityWhisperComplete(runIdentity);
   const runIdentityPlanning = runIdentityPlanningComplete(runIdentity);
-  const runIdentityImage = isFederatedWebImageProvider(identity.image_provider)
+  const openartBaseline = runIdentity.image_provider === "openart_cli"
+    ? await openartRestartBaselineState({ episodeDir, identity: runIdentity }) : null;
+  const runIdentityImage = openartBaseline
+    ? openartBaseline
+    : isFederatedWebImageProvider(identity.image_provider)
     ? await federatedWebImageIdentityStatus(identity)
     : isGoogleFlowPrimaryProvider(identity.image_provider)
       ? await googleFlowPrimaryIdentityStatus(identity)
@@ -4725,6 +4730,21 @@ async function main() {
       ? youtubePinnedCommentReceipt
       : { state: "skipped_with_waiver", evidence: "run predates pinned-comment receipt contract" },
   };
+
+  if (openartBaseline) {
+    if (!openartBaseline.done) {
+      validationByStage.run_identity = { done: false, state: "blocked", evidence: openartBaseline.evidence };
+    } else {
+      Object.assign(validationByStage, openartBaseline.stageStates);
+      const { openartProductionStageStates } = await import("./lib/openart-production-state.mjs");
+      const openart = await openartProductionStageStates({ episodeDir, identity: runIdentity });
+      const ownedStages = new Set(["visual_reference_plan", "reference_plan_approval", "reference_generation", "reference_image_approval", "visual_prompt_plan", "visual_prompt_harden", "visual_prompt_blocker_repair", "image_generation"]);
+      for (const [stageId, state] of Object.entries(openart.stageStates ?? {})) {
+        if (!ownedStages.has(stageId)) throw new Error(`OpenArt adapter cannot replace native ${stageId} gate.`);
+        validationByStage[stageId] = state;
+      }
+    }
+  }
 
   const rows = stageRegistry.map((definition) => {
     const validation = validationByStage[definition.id] ?? { state: "missing", evidence: "validator not materialized" };

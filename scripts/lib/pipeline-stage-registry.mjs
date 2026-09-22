@@ -462,6 +462,13 @@ export function stageIsSatisfied(state) {
 export function commandStageFor(commandName, subcommandName, flags = {}, identity = {}) {
   const registry = stageRegistryFor(identity);
   const key = `${commandName} ${subcommandName}`.trim();
+  if (registry === PIPELINE_STAGE_REGISTRY && key === "visual openart-bank") {
+    return ({ plan: "visual_reference_plan", "approve-plan": "reference_plan_approval", "approve-refs": "reference_image_approval", "bind-shots": "visual_prompt_plan", harden: "visual_prompt_harden" })[String(flags.action ?? "")] ?? null;
+  }
+  if (registry === PIPELINE_STAGE_REGISTRY && key === "imagegen openart") {
+    if (!["generate", "review", "prepare", "mark-submitted", "import", "sync-library", "triage", "fail"].includes(String(flags.action ?? ""))) return null;
+    return /^(true|1|yes)$/i.test(String(flags["references-only"] ?? "")) ? "reference_generation" : "image_generation";
+  }
   if (registry === PIPELINE_STAGE_REGISTRY && (key === "imagegen start" || key === "imagegen codex-work" || key === "imagegen browser-pool" || key === "imagegen import-codex" || key === "imagegen import-staged-codex")) {
     if (/^(true|1|yes)$/i.test(String(flags["references-only"] ?? ""))) return "reference_generation";
     if (/^(true|1|yes)$/i.test(String(flags["qa-recovery"] ?? ""))) return "image_output_qa";
@@ -735,5 +742,16 @@ export function buildStageCommand(stageId, identity = {}, options = {}) {
     youtube_studio_upload: `Use the youtube-studio-publish browser skill, upload privately first, verify every field, then run node bin/goldflow.mjs youtube record-upload ${base} --video-id <id> --watch-url <url> --visibility <private|unlisted|public|scheduled> --channel-verified true --initial-private-verified true --title-verified true --description-verified true --thumbnail-verified true --audience-verified true --monetization-verified true --mid-rolls-verified true --comments-verified true --checks-complete true --recorded-by <name>`,
     youtube_pinned_comment: `After explicit comment approval, use the youtube-studio-publish browser skill, pin the exact manifest comment, then run node bin/goldflow.mjs youtube record-comment ${base} --comment-id <id> --text-verified true --post-approved true --post-approved-by <name> --pinned-verified true --recorded-by <name>`,
   };
+  if (identity.image_provider === "openart_cli") {
+    Object.assign(commands, {
+      visual_reference_plan: `node bin/goldflow.mjs visual openart-bank ${base} --action plan --catalog <canonical-catalog.json>`,
+      reference_plan_approval: `node bin/goldflow.mjs visual openart-bank ${base} --action approve-plan --reviewer <name> --note "<reference plan review>"`,
+      reference_generation: `node bin/goldflow.mjs imagegen openart ${base} --references-only true --action prepare --scope canonical --asset-ids <next_exact_asset_ids>`,
+      reference_image_approval: `node bin/goldflow.mjs visual openart-bank ${base} --action approve-refs --reviewer <name> --note "<completed visual review>"`,
+      visual_prompt_plan: `node bin/goldflow.mjs visual openart-bank ${base} --action bind-shots --shot-plan <shot-plan.json>`,
+      visual_prompt_harden: `node bin/goldflow.mjs visual openart-bank ${base} --action harden`,
+      image_generation: `node bin/goldflow.mjs imagegen openart ${base} --action prepare --image-ids <next_exact_image_ids>`,
+    });
+  }
   return options.override ?? commands[stageId] ?? null;
 }

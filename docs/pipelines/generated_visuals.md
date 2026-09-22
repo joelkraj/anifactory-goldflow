@@ -10,6 +10,8 @@ New preflight requires both `--content-profile <explicit-profile>` and `--media-
 
 This is not the source-footage pipeline. `source_footage_v1` is reserved and blocked for episode production; [movie/TV guidance](movie_tv.md) and the standalone footage library do not satisfy generated-image stages.
 
+An explicitly authorized OpenArt visual restart uses the [OpenArt restart and global asset-bank workflow](../workflows/openart_visual_restart.md). It creates a new identity, preserves the approved nonvisual spine and historical attempt, requires newly generated canonical assets plus native Studio library IDs, and locks Low/1K/16:9 with per-request credit verification. It never silently changes a historical provider or makes schema validation stand in for visual review.
+
 Packaging capability is narrower than the shared render chain: new workflow-locked non-manhwa runs stop at `upload_packaging` until a profile-appropriate adapter exists. Do not satisfy the current manhwa validator with invented betrayal/revenge metadata. Historical identities retain their existing packaging validation and approvals. The stage table below records the chain, not a promise that every content profile has a publishing adapter.
 
 ## Non-Negotiable Flow

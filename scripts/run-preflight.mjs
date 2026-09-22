@@ -194,6 +194,9 @@ const imageProvider = normalizeImageProvider(
 const imageFallbackProvider = flags["image-fallback-provider"]
   ? normalizeImageProvider(flags["image-fallback-provider"])
   : null;
+if (imageProvider === "openart_cli" || imageFallbackProvider === "openart_cli") {
+  throw new Error("OpenArt requires the explicit hash-bound model, form, cost and reference-bank contract in run restart-visuals; generic preflight cannot infer it.");
+}
 const imageFallbackCondition = normalizeImageFallbackCondition(
   flags["image-fallback-condition"] ?? (imageFallbackProvider ? MODELSLAB_CREDIT_EXHAUSTED : null),
 );

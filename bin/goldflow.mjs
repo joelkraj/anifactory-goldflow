@@ -26,6 +26,7 @@ import { visualReferenceRecoveryAdmission } from "../scripts/lib/visual-referenc
 import { referenceImageQaRecoveryAdmission } from "../scripts/lib/reference-image-recovery.mjs";
 import { partialSceneImageQaRecoveryAdmission } from "../scripts/lib/partial-scene-image-recovery.mjs";
 import { orphanedImageStreamSealAdmission } from "../scripts/lib/orphaned-image-stream-seal.mjs";
+import { openartTriageAdmission } from "../scripts/lib/openart-visual-restart.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
@@ -102,6 +103,14 @@ function enforceWorkflowGuard(commandName, subcommandName, scriptArgs) {
   const allowedStages = Array.isArray(result.allowed_command_stages)
     ? result.allowed_command_stages
     : [currentStage];
+  if (commandName === "imagegen" && subcommandName === "openart" && parsedFlags.action === "triage") {
+    const recovery = openartTriageAdmission(result, parsedFlags);
+    if (!recovery.allowed) {
+      console.error(`Workflow guard blocked OpenArt triage: ${recovery.reason}`);
+      process.exit(1);
+    }
+    return;
+  }
   if (commandName === "imagegen" && subcommandName === "codex-work") {
     const recovery = orphanedImageStreamSealAdmission(result, parsedFlags);
     if (recovery.applicable && !recovery.allowed) {
@@ -478,6 +487,8 @@ if (command === "pilot" && !helpRequested) {
   help();
 } else if (command === "run" && subcommand === "preflight") {
   run("run-preflight.mjs", flags);
+} else if (command === "run" && subcommand === "restart-visuals") {
+  run("run-restart-visuals.mjs", flags);
 } else if (command === "run" && subcommand === "relock-tts") {
   run("run-relock-tts.mjs", flags);
 } else if (command === "run" && subcommand === "codex-doctor") {
@@ -621,6 +632,10 @@ if (command === "pilot" && !helpRequested) {
   run("narration-tempo-normalize.mjs", flags);
 } else if (command === "timing" && subcommand === "bind") {
   run("timing-bind.mjs", flags);
+} else if (command === "visual" && subcommand === "openart-bank") {
+  run("openart-production.mjs", flags);
+} else if (command === "imagegen" && subcommand === "openart") {
+  run("openart-production.mjs", flags);
 } else if (command === "visual" && subcommand === "beats") {
   run("visual-beat-plan.mjs", flags);
 } else if (command === "visual" && subcommand === "planner-ab") {

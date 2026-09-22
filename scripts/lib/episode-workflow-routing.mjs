@@ -110,6 +110,12 @@ export function assertCommandWorkflowRoute({ command, subcommand, script, flags 
   let workflow = null;
   if (identity) {
     workflow = assertEpisodeWorkflowFlags(identity, flags);
+    if (identity.image_provider === "openart_cli") {
+      const imageMutation = command === "imagegen" && !["openart", "analyze", "qa"].includes(subcommand);
+      const visualMutation = command === "visual" && ["refs", "approve-ref-plan", "approve-refs", "plan", "harden", "review"].includes(subcommand);
+      if (imageMutation || visualMutation) throw new Error("OpenArt identities require the guarded OpenArt bank/generation adapter; other provider or reference dispatch paths cannot satisfy this identity.");
+      if ((flags["image-provider"] ?? flags.provider) && !["openart", "openart_cli"].includes(flags["image-provider"] ?? flags.provider)) throw new Error("The OpenArt image provider is identity-locked.");
+    }
     if (workflow.id === "avatar_footage_pilot_v1" && command !== "pilot" && !(command === "run" && subcommand === "status")) {
       throw new Error("Avatar pilot permits only pilot commands and run status. Generated production, source manufacture, auto-advance and publishing are unavailable, including with workflow bypass.");
     }

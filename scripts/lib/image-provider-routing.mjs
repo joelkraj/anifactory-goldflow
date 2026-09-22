@@ -10,6 +10,7 @@ import {
 
 export function normalizeImageProvider(value) {
   const normalized = String(value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  if (["openart", "openart_cli"].includes(normalized)) return "openart_cli";
   if (["codex", "codex_imagen", "codex_imagegen", "openai", "openai_imagegen", "gpt_image"].includes(normalized)) return "codex_imagegen";
   if (["chatgpt_web", "chatgpt_web_image", "chatgpt_web_gpt_image", "web_gpt_image"].includes(normalized)) return "chatgpt_web_gpt_image";
   if (["google_flow", "flow", "nano_banana", "nano_banana_pro", "google_flow_nano_banana_pro"].includes(normalized)) return GOOGLE_FLOW_IMAGE_PROVIDER;
@@ -62,6 +63,7 @@ export function normalizeImageProvider(value) {
 
 export function providerSlug(provider) {
   const normalized = normalizeImageProvider(provider);
+  if (normalized === "openart_cli") return "openart-cli";
   if (normalized === "codex_imagegen") return "codex-imagegen";
   if (normalized === "chatgpt_web_gpt_image") return "chatgpt-web-gpt-image";
   if (normalized === GOOGLE_FLOW_IMAGE_PROVIDER) return "google-flow-imagen";

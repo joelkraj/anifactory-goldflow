@@ -45,6 +45,48 @@ function hasValue(value) {
   return value !== undefined && value !== null && String(value).trim() !== "";
 }
 
+function transitionRevalidationDecision(flags, episodeDir) {
+  const refuse = (reason) => ({ allowed: false, reason,
+    required_recovery: "Revalidate the canonical passed transition plan with --revalidate-existing true, the canonical hardened prompts, and its unchanged transition-SFX mode. Do not combine revalidation with authoring or alternate-input/output flags." });
+  // The transition script takes its non-authoring early return only for this
+  // literal value; accepting yes/1 here could admit a fresh creative pass.
+  if (flags["revalidate-existing"] !== "true") return refuse("transition_revalidation_requires_literal_true");
+  const allowedFlags = new Set([
+    "channel", "series", "seriesSlug", "week", "episode", "prompts",
+    "transition-sfx", "revalidate-existing",
+  ]);
+  if (Object.keys(flags).some((key) => !allowedFlags.has(key))) {
+    return refuse("transition_revalidation_override_forbidden");
+  }
+  if (!episodeDir) return refuse("transition_revalidation_episode_required");
+  const episode = path.basename(episodeDir);
+  if (flags.episode && flags.episode !== episode) return refuse("transition_revalidation_episode_mismatch");
+  const promptPath = path.join(episodeDir, "section_image_prompts_hardened.json");
+  if (Object.hasOwn(flags, "prompts") && path.resolve(String(flags.prompts)) !== path.resolve(promptPath)) {
+    return refuse("transition_revalidation_prompt_override_forbidden");
+  }
+  if (Object.hasOwn(flags, "transition-sfx") && !["true", "false"].includes(flags["transition-sfx"])) {
+    return refuse("transition_revalidation_invalid_sfx_mode");
+  }
+  let existing;
+  try {
+    existing = JSON.parse(readFileSync(path.join(episodeDir, `transition_edit_plan_${episode}.json`), "utf8"));
+  } catch {
+    return refuse("transition_revalidation_passed_plan_required");
+  }
+  if (existing?.schema !== "goldflow_transition_edit_plan_v1"
+    || existing.status !== "passed" || !Array.isArray(existing.transition_events)) {
+    return refuse("transition_revalidation_passed_plan_required");
+  }
+  if (existing.prompt_plan_path && path.resolve(existing.prompt_plan_path) !== path.resolve(promptPath)) {
+    return refuse("transition_revalidation_existing_prompt_override_forbidden");
+  }
+  if (existing.transition_sfx_enabled !== (flags["transition-sfx"] !== "false")) {
+    return refuse("transition_revalidation_sfx_mode_change_forbidden");
+  }
+  return { allowed: true, reason: "deterministic_non_authoring_revalidation" };
+}
+
 function explicitFullPlannerRerunOverride(flags = {}) {
   const requested = isTrue(flags["allow-full-stage-rerun"]) || hasValue(flags["rerun-reason"]);
   const reason = String(flags["rerun-reason"] ?? "").trim();
@@ -76,8 +118,12 @@ export function plannerRerunDecision({
   flags = {},
   priorEvents = [],
   unresolvedExpectedIds = [],
+  episodeDir = null,
 } = {}) {
   if (!PLANNER_STAGE_IDS.has(stage)) return { allowed: true, reason: "not_a_planner_stage" };
+  if (stage === "transition_edit_plan" && isTrue(flags["revalidate-existing"])) {
+    return transitionRevalidationDecision(flags, episodeDir);
+  }
   const deterministicNonAuthoringRerun = (
     stage === "visual_beat_plan"
     && (isTrue(flags["retime-locked-grouping"]) || isTrue(flags["reproject-active-state-only"]))
@@ -240,6 +286,7 @@ export function plannerRerunDecisionForEpisode({ stage, flags = {}, episodeDir }
     flags,
     priorEvents,
     unresolvedExpectedIds,
+    episodeDir,
   });
   return {
     ...decision,

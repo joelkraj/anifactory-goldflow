@@ -144,9 +144,18 @@ export async function observeFalImage({ endpoint, requestId, outputPath, receipt
   const response = await fetchImpl(mediaUrl, { redirect: "error", signal: AbortSignal.timeout(60_000) });
   need(response.ok, `Fal output download failed with HTTP ${response.status}.`);
   const bytes = Buffer.from(await response.arrayBuffer()); const metadata = await sharp(bytes).metadata();
-  need(metadata.width === 1920 && metadata.height === 1080 && metadata.format === "png", "Fal output is not the locked 1920x1080 PNG.");
-  await absent(outputPath); await fs.mkdir(path.dirname(outputPath), { recursive: true }); await fs.writeFile(outputPath, bytes, { flag: "wx" });
-  const record = { schema: "goldflow_fal_result_receipt_v1", completed_at: timestamp(), endpoint, request_id: requestId, output_path: outputPath, output_sha256: hash(bytes), width: metadata.width, height: metadata.height, format: metadata.format, source_url_sha256: hash(images[0].url), source_url_persisted: false, provider_metadata: sanitized(result) };
+  need(metadata.width === 1920 && [1072, 1080].includes(metadata.height) && metadata.format === "png", `Fal output has unexpected raster ${metadata.width}x${metadata.height} ${metadata.format}.`);
+  const rawPath = outputPath.replace(/\.png$/i, ".provider.png");
+  await absent(rawPath); await absent(outputPath); await fs.mkdir(path.dirname(outputPath), { recursive: true }); await fs.writeFile(rawPath, bytes, { flag: "wx" });
+  const normalized = metadata.height === 1080 ? bytes : await sharp(bytes).resize(1920, 1080, { fit: "fill" }).png().toBuffer();
+  const normalizedMetadata = await sharp(normalized).metadata();
+  need(normalizedMetadata.width === 1920 && normalizedMetadata.height === 1080 && normalizedMetadata.format === "png", "Fal normalization failed to produce the locked raster.");
+  await fs.writeFile(outputPath, normalized, { flag: "wx" });
+  const record = { schema: "goldflow_fal_result_receipt_v1", completed_at: timestamp(), endpoint, request_id: requestId,
+    provider_output_path: rawPath, provider_output_sha256: hash(bytes), provider_width: metadata.width, provider_height: metadata.height, provider_format: metadata.format,
+    normalization: metadata.height === 1080 ? "none" : "resize_1920x1072_to_1920x1080_png",
+    output_path: outputPath, output_sha256: hash(normalized), width: normalizedMetadata.width, height: normalizedMetadata.height, format: normalizedMetadata.format,
+    source_url_sha256: hash(images[0].url), source_url_persisted: false, provider_metadata: sanitized(result) };
   return { complete: true, record, receipt: await atomicJson(receiptPath, record) };
 }
 

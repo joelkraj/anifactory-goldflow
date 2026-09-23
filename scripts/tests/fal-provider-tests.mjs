@@ -32,5 +32,7 @@ test("Fal blocked-stage recovery admits only the exact status action", () => {
   };
   assert.equal(falBlockedStageRecoveryAdmission(status, { action: "observe-holds" }).allowed, true);
   assert.equal(falBlockedStageRecoveryAdmission(status, { action: "repair-failures" }).allowed, false);
+  const transportStatus = { ...status, next_command_shape: "node bin/goldflow.mjs imagegen fal --episode-dir /tmp/ep --action recover-holds --directives <file> --confirm-spend exact_fal_transport_recovery" };
+  assert.equal(falBlockedStageRecoveryAdmission(transportStatus, { action: "recover-holds" }).allowed, true);
   assert.equal(falBlockedStageRecoveryAdmission({ ...status, current_stage_state: "missing" }, { action: "observe-holds" }).applicable, false);
 });

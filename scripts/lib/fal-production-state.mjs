@@ -7,7 +7,7 @@ async function read(file) { return JSON.parse(await fs.readFile(file, "utf8")); 
 export function falBlockedStageRecoveryAdmission(status, flags = {}) {
   const action = String(flags.action ?? "");
   const next = String(status?.next_command_shape ?? "");
-  const recoveryActions = new Set(["observe-holds", "repair-failures", "observe-repairs"]);
+  const recoveryActions = new Set(["observe-holds", "recover-holds", "observe-transport-recovery", "repair-failures", "observe-repairs"]);
   if (status?.current_stage !== "image_generation" || status?.current_stage_state !== "blocked") {
     return { applicable: false, allowed: false, reason: "Fal blocked-stage recovery is not current." };
   }
@@ -45,13 +45,19 @@ export async function falProductionStageStates({ episodeDir } = {}) {
     const submitted = await Promise.all(bulk.assignments.map(row => exists(row.submission_receipt_path)));
     const results = await Promise.all(bulk.assignments.map(row => exists(row.result_receipt_path)));
     const repairResults = await Promise.all(bulk.assignments.map(row => exists(path.join(root,"bulk","repair-result-receipts",`${row.image_id}.json`))));
-    const effectiveResults = results.map((value,index) => value || repairResults[index]);
+    const transportRecoveryResults = await Promise.all(bulk.assignments.map(row => exists(path.join(root,"bulk","transport-recovery-result-receipts",`${row.image_id}.json`))));
+    const effectiveResults = results.map((value,index) => value || repairResults[index] || transportRecoveryResults[index]);
     const failures = await Promise.all(bulk.assignments.map(row => exists(path.join(root,"bulk","failure-receipts",`${row.image_id}.json`))));
     const holds = await Promise.all(bulk.assignments.map(row => exists(path.join(root,"bulk","transport-holds",`${row.image_id}.json`))));
     const unsubmittedCount = submitted.filter(value => !value).length;
     if (effectiveResults.every(Boolean)) bulkState = { done: true, evidence: `All ${bulk.assignments.length} Fal frames have exact request/result receipts, including scoped repair lineage` };
     else if (unsubmittedCount > 0) bulkState = { state: "missing", evidence: `${submitted.filter(Boolean).length}/${bulk.assignments.length} Fal requests queued; provider enforces ${bulk.concurrency} active requests`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action dispatch-bulk --limit ${Math.min(100,unsubmittedCount)} --confirm-spend exact_fal_bulk_batch` };
-    else if (holds.some((value,index)=>value&&!results[index]) && submitted.every(Boolean) && submitted.every((value,index) => !value || results[index] || failures[index] || holds[index])) bulkState = { state: "blocked", evidence: `${holds.filter((value,index)=>value&&!results[index]).length} completed Fal requests await exact result transport`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action observe-holds` };
+    else if (holds.some((value,index)=>value&&!effectiveResults[index]) && submitted.every(Boolean) && submitted.every((value,index) => !value || results[index] || failures[index] || holds[index])) {
+      const recoverySubmitted = await Promise.all(bulk.assignments.map(row => exists(path.join(root,"bulk","transport-recovery-submission-receipts",`${row.image_id}.json`))));
+      bulkState = recoverySubmitted.some((value,index)=>value&&!transportRecoveryResults[index])
+        ? { state: "blocked", evidence: `${holds.filter((value,index)=>value&&!effectiveResults[index]).length} exact Fal transport recoveries are pending`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action observe-transport-recovery` }
+        : { state: "blocked", evidence: `${holds.filter((value,index)=>value&&!effectiveResults[index]).length} completed Fal requests have persistently unavailable result transport`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action recover-holds --directives <absolute_transport_recovery_directives.json> --confirm-spend exact_fal_transport_recovery` };
+    }
     else if (failures.some(Boolean) && submitted.every(Boolean) && submitted.every((value,index) => !value || results[index] || failures[index] || holds[index])) {
       const repairSubmitted = await Promise.all(bulk.assignments.map(row => exists(path.join(root,"bulk","repair-submission-receipts",`${row.image_id}.json`))));
       bulkState = repairSubmitted.some((value,index)=>value&&!repairResults[index])

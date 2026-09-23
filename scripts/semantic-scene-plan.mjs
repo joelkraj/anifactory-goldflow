@@ -437,6 +437,19 @@ export function applyManualReconciliationRepairForTests(parsed, artifact, script
     }
     parent[op.field] = op.replacement_excerpt;
   }
+  const entityAppends = artifact.canonical_entity_appends ?? [];
+  if (!Array.isArray(entityAppends)) throw new Error("Semantic reconciliation entity appends must be an array");
+  const knownEntityIds = new Set((patched.canonical_entities ?? []).map(row => row.entity_id));
+  for (const row of entityAppends) {
+    if (!/^[a-z][a-z0-9_]+$/.test(row?.entity_id ?? "") || knownEntityIds.has(row.entity_id)
+      || row.kind !== "group" || !row.display_name?.trim() || !Array.isArray(row.aliases) || !row.aliases.length
+      || !Array.isArray(row.evidence) || !row.evidence.length
+      || row.evidence.some(item => !item?.exact_excerpt?.trim() || !script.includes(item.exact_excerpt) || !(Number(item.confidence) >= 0 && Number(item.confidence) <= 1))) {
+      throw new Error(`Invalid evidence-backed canonical group append: ${row?.entity_id ?? "unknown"}`);
+    }
+    knownEntityIds.add(row.entity_id);
+    patched.canonical_entities.push(structuredClone(row));
+  }
   // A transition's effective excerpt must also appear among its cited evidence.
   for (const transition of patched.state_transitions ?? []) {
     const excerpt = transition.transition_evidence_excerpt;

@@ -4506,7 +4506,10 @@ async function main() {
   const semanticPlanPath = path.join(episodeDir, "semantic_scene_plan.json");
   const semanticPlan = await jsonStatusWithSourceHashesComplete(semanticPlanPath, "semantic_scene_plan.json");
   const semanticPlanArtifact = await readJson(semanticPlanPath, null);
-  const semanticManualRepairPath = path.join(episodeDir, "semantic_reconciliation_evidence_repair.json");
+  const semanticManualRepairV2Path = path.join(episodeDir, "semantic_reconciliation_evidence_repair_v2.json");
+  const semanticManualRepairPath = await exists(semanticManualRepairV2Path)
+    ? semanticManualRepairV2Path
+    : path.join(episodeDir, "semantic_reconciliation_evidence_repair.json");
   const semanticManualRepair = await readJson(semanticManualRepairPath, null);
   const semanticRecoveryBase = semanticRecoveryCommandForTests(semanticPlanArtifact, identity, scriptHash);
   const semanticRecoveryCommand = semanticRecoveryBase

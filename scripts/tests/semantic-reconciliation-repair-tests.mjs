@@ -16,6 +16,7 @@ test("exact-scope semantic reconciliation repair accepts only bound script excer
       { collection: "canonical_entities", row_index: 0, row_id: "man", field: "exact_excerpt", evidence_index: 0, expected_excerpt: "The man entered the door.", replacement_excerpt: "The man opened the door." },
       { collection: "scenes", row_index: 0, row_id: "scene_001", field: "script_excerpt_end", expected_excerpt: "He left the room.", replacement_excerpt: "The next visitor arrived." },
     ],
+    canonical_entity_appends: [{ entity_id: "visitors", display_name: "Visitors", kind: "group", aliases: ["visitors"], evidence: [{ exact_excerpt: "The next visitor arrived.", confidence: 1 }] }],
   };
   const result = applyManualReconciliationRepairForTests(parsed, artifact, script, {
     sourceScriptHash: "script", failedCheckpointSha256: "checkpoint", inputSha256: "prompt",
@@ -23,6 +24,7 @@ test("exact-scope semantic reconciliation repair accepts only bound script excer
   assert.equal(result.canonical_entities[0].evidence[0].exact_excerpt, "The man opened the door.");
   assert.equal(result.scenes[0].script_excerpt_end, "The next visitor arrived.");
   assert.equal(result.state_transitions[0].evidence[0].exact_excerpt, "He left the room.");
+  assert.equal(result.canonical_entities[1].entity_id, "visitors");
   assert.equal(parsed.canonical_entities[0].evidence[0].exact_excerpt, "The man entered the door.");
   assert.throws(() => applyManualReconciliationRepairForTests(parsed, { ...artifact, failed_checkpoint_sha256: "wrong" }, script, {
     sourceScriptHash: "script", failedCheckpointSha256: "checkpoint", inputSha256: "prompt",

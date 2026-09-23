@@ -426,6 +426,7 @@ function testAuthoritativeStageRegistry() {
   assert.equal(commandStageFor("youtube", "approve-packaging"), "upload_packaging");
   assert.equal(commandStageFor("youtube", "prepare"), "youtube_publish_readiness");
   assert.equal(commandStageFor("youtube", "record-upload"), "youtube_studio_upload");
+  assert.equal(commandStageFor("youtube", "record-schedule"), "youtube_pinned_comment");
   assert.equal(commandStageFor("youtube", "record-comment"), "youtube_pinned_comment");
   assert.equal(narratorOnly.every((row) => row.validator), true);
 }

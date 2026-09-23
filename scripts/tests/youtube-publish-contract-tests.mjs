@@ -17,11 +17,13 @@ import {
   YOUTUBE_PACKAGING_SPEC_SCHEMA,
   YOUTUBE_PINNED_COMMENT_RECEIPT_SCHEMA,
   YOUTUBE_PUBLISH_MANIFEST_SCHEMA,
+  YOUTUBE_SCHEDULE_RECEIPT_SCHEMA,
   YOUTUBE_THUMBNAIL_UPDATE_RECEIPT_SCHEMA,
   YOUTUBE_UPLOAD_RECEIPT_SCHEMA,
   extractMarkdownSection,
   validateYoutubePackagingSpec,
   validateYoutubePinnedCommentReceipt,
+  validateYoutubeScheduleReceipt,
   validateYoutubeThumbnailUpdateReceipt,
   validateYoutubeUploadReceipt,
   youtubeEffectiveThumbnailState,
@@ -37,6 +39,31 @@ import {
 
 const execFileAsync = promisify(execFile);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+
+{
+  const uploadReceipt = { video_id: "abc123xyz89", visibility: "private", manifest_sha256: "manifest-hash" };
+  const scheduleReceipt = {
+    schema: YOUTUBE_SCHEDULE_RECEIPT_SCHEMA,
+    status: "passed",
+    upload_receipt_sha256: "upload-hash",
+    manifest_sha256: "manifest-hash",
+    video_id: "abc123xyz89",
+    visibility: "scheduled",
+    schedule_at: "2026-09-26T12:00:00.000Z",
+    time_zone: "America/New_York",
+    publish_approval: { approved: true, approved_by: "operator" },
+    field_verification: { active_channel: true, schedule: true, existing_fields: true, checks_complete: true },
+    recorded_by: "codex",
+    recorded_at: "2026-09-23T04:00:00.000Z",
+  };
+  const options = { manifest: {}, uploadReceipt, uploadReceiptSha256: "upload-hash" };
+  assert.equal(validateYoutubeScheduleReceipt(scheduleReceipt, options).status, "passed");
+  assert.equal(validateYoutubeScheduleReceipt({ ...scheduleReceipt, upload_receipt_sha256: "wrong" }, options).status, "blocked");
+  assert.equal(validateYoutubeScheduleReceipt({ ...scheduleReceipt, publish_approval: { approved: false } }, options).status, "blocked");
+  const revision = { ...scheduleReceipt, sequence: 2, supersedes_receipt_sha256: "first-schedule-hash", schedule_at: "2026-09-23T12:00:00.000Z" };
+  assert.equal(validateYoutubeScheduleReceipt(revision, { ...options, previousScheduleReceiptSha256: "first-schedule-hash", expectedSequence: 2 }).status, "passed");
+  assert.equal(validateYoutubeScheduleReceipt(revision, { ...options, previousScheduleReceiptSha256: "wrong", expectedSequence: 2 }).status, "blocked");
+}
 
 assert.equal(youtubeFinalQaDurationSeconds({ media_probe: { format: { duration: "4168.41" } } }), 4168.41);
 assert.equal(youtubeFinalQaDurationSeconds({ media_probe: { duration_sec: 4500 } }), 4500);

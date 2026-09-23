@@ -725,6 +725,8 @@ if (command === "pilot" && !helpRequested) {
   run("youtube-publish.mjs", ["prepare", ...flags]);
 } else if (command === "youtube" && subcommand === "record-upload") {
   run("youtube-publish.mjs", ["record-upload", ...flags]);
+} else if (command === "youtube" && subcommand === "record-schedule") {
+  run("youtube-publish.mjs", ["record-schedule", ...flags]);
 } else if (command === "youtube" && subcommand === "record-ab-test") {
   run("youtube-publish.mjs", ["record-ab-test", ...flags]);
 } else if (command === "youtube" && subcommand === "record-thumbnail-update") {

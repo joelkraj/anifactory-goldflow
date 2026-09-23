@@ -7,9 +7,11 @@ import sharp from "sharp";
 import { sha256File } from "./lib/file-hash.mjs";
 import {
   LEGACY_YOUTUBE_PACKAGING_SPEC_SCHEMA,
+  listYoutubeScheduleReceipts,
   YOUTUBE_PACKAGING_SPEC_SCHEMA,
   YOUTUBE_PINNED_COMMENT_RECEIPT_SCHEMA,
   YOUTUBE_PUBLISH_MANIFEST_SCHEMA,
+  YOUTUBE_SCHEDULE_RECEIPT_SCHEMA,
   YOUTUBE_THUMBNAIL_UPDATE_RECEIPT_SCHEMA,
   YOUTUBE_THUMBNAIL_GENERATION_CONTRACT,
   YOUTUBE_UPLOAD_RECEIPT_SCHEMA,
@@ -18,6 +20,7 @@ import {
   validateYoutubeThumbnailUpdateReceipt,
   validateYoutubePackagingSpec,
   validateYoutubePinnedCommentReceipt,
+  validateYoutubeScheduleReceipt,
   validateYoutubeUploadReceipt,
   youtubeEffectiveThumbnailState,
   youtubeFinalQaDurationSeconds,
@@ -619,6 +622,73 @@ async function recordUpload() {
   }, null, 2));
 }
 
+async function recordSchedule() {
+  const { episodeDir, episode } = await episodeContext();
+  const manifestPath = path.join(episodeDir, `youtube_publish_manifest_${episode}.json`);
+  const uploadReceiptPath = path.join(episodeDir, `youtube_upload_receipt_${episode}.json`);
+  const [manifest, uploadReceipt, uploadReceiptSha256] = await Promise.all([
+    readJson(manifestPath),
+    readJson(uploadReceiptPath),
+    sha256File(uploadReceiptPath).catch(() => null),
+  ]);
+  if (!manifest || manifest.schema !== YOUTUBE_PUBLISH_MANIFEST_SCHEMA || manifest.status !== "passed") {
+    throw new Error(`Passed YouTube publish manifest required: ${manifestPath}`);
+  }
+  if (!uploadReceipt || validateYoutubeUploadReceipt(uploadReceipt, {
+    manifest,
+    manifestHash: await sha256File(manifestPath),
+  }).status !== "passed") {
+    throw new Error(`Passed current YouTube upload receipt required: ${uploadReceiptPath}`);
+  }
+  for (const name of ["video-id", "schedule-at", "time-zone", "publish-approved-by", "recorded-by"]) requiredFlag(name, flags[name]);
+  const existingSchedules = await listYoutubeScheduleReceipts(episodeDir, episode);
+  const sequence = existingSchedules.length + 1;
+  if (existingSchedules.some((row, index) => row.sequence !== index + 1)) {
+    throw new Error("Existing schedule receipt sequence has a gap; inspect before recording another revision.");
+  }
+  const previousScheduleReceiptSha256 = existingSchedules.length
+    ? await sha256File(existingSchedules.at(-1).path) : null;
+  const receiptPath = path.join(episodeDir, `youtube_scheduled_release_receipt_${episode}${sequence === 1 ? "" : `_${sequence}`}.json`);
+  const receipt = {
+    schema: YOUTUBE_SCHEDULE_RECEIPT_SCHEMA,
+    status: "passed",
+    episode,
+    manifest_path: manifestPath,
+    manifest_sha256: await sha256File(manifestPath),
+    upload_receipt_path: uploadReceiptPath,
+    upload_receipt_sha256: uploadReceiptSha256,
+    sequence,
+    supersedes_receipt_sha256: previousScheduleReceiptSha256,
+    video_id: clean(flags["video-id"]),
+    visibility: "scheduled",
+    schedule_at: clean(flags["schedule-at"]),
+    time_zone: clean(flags["time-zone"]),
+    publish_approval: {
+      approved: isTrue(flags["publish-approved"]),
+      approved_by: clean(flags["publish-approved-by"]),
+    },
+    field_verification: {
+      active_channel: isTrue(flags["channel-verified"]),
+      schedule: isTrue(flags["schedule-verified"]),
+      existing_fields: isTrue(flags["existing-fields-verified"]),
+      checks_complete: isTrue(flags["checks-complete"]),
+    },
+    recorded_by: clean(flags["recorded-by"]),
+    recorded_at: new Date().toISOString(),
+    note: clean(flags.note) || null,
+  };
+  const validation = validateYoutubeScheduleReceipt(receipt, {
+    manifest, uploadReceipt, uploadReceiptSha256, previousScheduleReceiptSha256, expectedSequence: sequence,
+  });
+  if (validation.status !== "passed") {
+    console.log(JSON.stringify({ status: "blocked", blockers: validation.blockers }, null, 2));
+    process.exitCode = 2;
+    return;
+  }
+  await writeJsonExclusive(receiptPath, receipt);
+  console.log(JSON.stringify({ status: "passed", receipt_path: receiptPath, video_id: receipt.video_id, schedule_at: receipt.schedule_at }, null, 2));
+}
+
 async function recordComment() {
   const { episodeDir, episode } = await episodeContext();
   const manifestPath = path.join(episodeDir, `youtube_publish_manifest_${episode}.json`);
@@ -817,6 +887,7 @@ async function main() {
   if (action === "approve-ab-test") return approveNativeAbTest();
   if (action === "prepare") return prepareManifest();
   if (action === "record-upload") return recordUpload();
+  if (action === "record-schedule") return recordSchedule();
   if (action === "record-ab-test") return recordNativeAbTest();
   if (action === "record-thumbnail-update") return recordThumbnailUpdate();
   if (action === "record-comment") return recordComment();

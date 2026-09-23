@@ -420,7 +420,7 @@ const stages = [
     output_artifact: "youtube_pinned_comment_receipt_<episode>.json",
     approval: "operator",
     validator: "youtube_pinned_comment_receipt_hash",
-    commands: ["youtube record-comment"],
+    commands: ["youtube record-schedule", "youtube record-comment"],
   },
 ];
 
@@ -744,7 +744,7 @@ export function buildStageCommand(stageId, identity = {}, options = {}) {
     upload_packaging: `node bin/goldflow.mjs youtube approve-packaging ${base} --approve true --approved-by <name> --note "<packaging review notes>"`,
     youtube_publish_readiness: `node bin/goldflow.mjs youtube prepare ${base}`,
     youtube_studio_upload: `Use the youtube-studio-publish browser skill, upload privately first, verify every field, then run node bin/goldflow.mjs youtube record-upload ${base} --video-id <id> --watch-url <url> --visibility <private|unlisted|public|scheduled> --channel-verified true --initial-private-verified true --title-verified true --description-verified true --thumbnail-verified true --audience-verified true --monetization-verified true --mid-rolls-verified true --comments-verified true --checks-complete true --recorded-by <name>`,
-    youtube_pinned_comment: `After explicit comment approval, use the youtube-studio-publish browser skill, pin the exact manifest comment, then run node bin/goldflow.mjs youtube record-comment ${base} --comment-id <id> --text-verified true --post-approved true --post-approved-by <name> --pinned-verified true --recorded-by <name>`,
+    youtube_pinned_comment: `For an explicitly approved scheduled release, verify Studio and run node bin/goldflow.mjs youtube record-schedule ${base} --video-id <id> --schedule-at <ISO-timestamp> --time-zone <zone> --publish-approved true --publish-approved-by <name> --channel-verified true --schedule-verified true --existing-fields-verified true --checks-complete true --recorded-by <name>; after explicit comment approval, pin the exact manifest comment and run node bin/goldflow.mjs youtube record-comment ${base} --comment-id <id> --text-verified true --post-approved true --post-approved-by <name> --pinned-verified true --recorded-by <name>`,
   };
   if (identity.image_provider === "openart_cli") {
     const lockedOpenArtConcurrency = Number(identity.image_provider_options?.openart?.concurrency ?? identity.openart_contract?.concurrency ?? 1);

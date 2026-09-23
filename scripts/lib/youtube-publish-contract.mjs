@@ -14,6 +14,7 @@ export const YOUTUBE_PACKAGING_SPEC_SCHEMA = "goldflow_youtube_packaging_spec_v2
 export const LEGACY_YOUTUBE_PACKAGING_SPEC_SCHEMA = "goldflow_youtube_packaging_spec_v1";
 export const YOUTUBE_PUBLISH_MANIFEST_SCHEMA = "goldflow_youtube_publish_manifest_v1";
 export const YOUTUBE_UPLOAD_RECEIPT_SCHEMA = "goldflow_youtube_upload_receipt_v1";
+export const YOUTUBE_SCHEDULE_RECEIPT_SCHEMA = "goldflow_youtube_scheduled_release_receipt_v1";
 export const YOUTUBE_PINNED_COMMENT_RECEIPT_SCHEMA = "goldflow_youtube_pinned_comment_receipt_v1";
 
 export const YOUTUBE_THUMBNAIL_GENERATION_CONTRACT = Object.freeze({
@@ -615,6 +616,38 @@ export function validateYoutubeUploadReceipt(receipt, options = {}) {
   return { status: blockers.length ? "blocked" : "passed", blockers: uniqueStrings(blockers) };
 }
 
+export function validateYoutubeScheduleReceipt(receipt, { manifest, uploadReceipt, uploadReceiptSha256, previousScheduleReceiptSha256 = null, expectedSequence = 1 } = {}) {
+  const blockers = [];
+  push(blockers, receipt?.schema !== YOUTUBE_SCHEDULE_RECEIPT_SCHEMA, "youtube_schedule_receipt_schema_invalid");
+  push(blockers, receipt?.status !== "passed", "youtube_schedule_receipt_not_passed");
+  push(blockers, !uploadReceipt || receipt?.upload_receipt_sha256 !== uploadReceiptSha256, "youtube_schedule_upload_receipt_hash_stale");
+  push(blockers, !manifest || receipt?.manifest_sha256 !== uploadReceipt?.manifest_sha256, "youtube_schedule_manifest_hash_stale");
+  push(blockers, clean(uploadReceipt?.visibility) !== "private", "youtube_schedule_requires_private_upload_receipt");
+  push(blockers, clean(receipt?.video_id) !== clean(uploadReceipt?.video_id), "youtube_schedule_video_id_mismatch");
+  push(blockers, receipt?.visibility !== "scheduled", "youtube_schedule_visibility_invalid");
+  push(blockers, Number(receipt?.sequence ?? 1) !== expectedSequence, "youtube_schedule_sequence_invalid");
+  push(blockers, (receipt?.supersedes_receipt_sha256 ?? null) !== previousScheduleReceiptSha256, "youtube_schedule_supersession_hash_mismatch");
+  const scheduledAt = Date.parse(clean(receipt?.schedule_at));
+  push(blockers, !Number.isFinite(scheduledAt) || new Date(scheduledAt).toISOString() !== clean(receipt?.schedule_at), "youtube_schedule_time_invalid");
+  push(blockers, !clean(receipt?.time_zone), "youtube_schedule_timezone_missing");
+  push(blockers, receipt?.publish_approval?.approved !== true || !clean(receipt?.publish_approval?.approved_by), "youtube_schedule_approval_missing");
+  push(blockers, receipt?.field_verification?.active_channel !== true || receipt?.field_verification?.schedule !== true
+    || receipt?.field_verification?.existing_fields !== true || receipt?.field_verification?.checks_complete !== true,
+  "youtube_schedule_fields_not_verified");
+  push(blockers, !clean(receipt?.recorded_by) || !clean(receipt?.recorded_at), "youtube_schedule_recorder_missing");
+  return { status: blockers.length ? "blocked" : "passed", blockers: uniqueStrings(blockers) };
+}
+
+export async function listYoutubeScheduleReceipts(episodeDir, episode) {
+  const escapedEpisode = String(episode).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const pattern = new RegExp(`^youtube_scheduled_release_receipt_${escapedEpisode}(?:_(\\d+))?\\.json$`);
+  const names = await fs.readdir(episodeDir).catch(() => []);
+  return names.map((name) => {
+    const match = name.match(pattern);
+    return match ? { path: path.join(episodeDir, name), sequence: match[1] ? Number(match[1]) : 1 } : null;
+  }).filter(Boolean).sort((a, b) => a.sequence - b.sequence);
+}
+
 export async function youtubeUploadReceiptComplete(episodeDir, episode) {
   const manifestPath = path.join(episodeDir, `youtube_publish_manifest_${episode}.json`);
   const receiptPath = path.join(episodeDir, `youtube_upload_receipt_${episode}.json`);
@@ -627,6 +660,24 @@ export async function youtubeUploadReceiptComplete(episodeDir, episode) {
   const validation = validateYoutubeUploadReceipt(receipt, { manifest, manifestHash });
   if (validation.status !== "passed") {
     return { done: false, state: "blocked", evidence: validation.blockers.join(", ") };
+  }
+  const scheduleReceipts = await listYoutubeScheduleReceipts(episodeDir, episode);
+  let scheduleReceipt = null;
+  let previousScheduleReceiptSha256 = null;
+  for (let index = 0; index < scheduleReceipts.length; index += 1) {
+    const { path: scheduleReceiptPath, sequence } = scheduleReceipts[index];
+    scheduleReceipt = await readJson(scheduleReceiptPath);
+    const scheduleValidation = validateYoutubeScheduleReceipt(scheduleReceipt, {
+      manifest,
+      uploadReceipt: receipt,
+      uploadReceiptSha256: await sha256File(receiptPath).catch(() => null),
+      previousScheduleReceiptSha256,
+      expectedSequence: sequence,
+    });
+    if (sequence !== index + 1 || scheduleValidation.status !== "passed") {
+      return { done: false, state: "blocked", evidence: scheduleValidation.blockers.join(", ") || "youtube_schedule_sequence_gap" };
+    }
+    previousScheduleReceiptSha256 = await sha256File(scheduleReceiptPath).catch(() => null);
   }
   let nativeAbEvidence = "";
   if (manifest?.native_ab_test?.required === true) {
@@ -681,7 +732,7 @@ export async function youtubeUploadReceiptComplete(episodeDir, episode) {
     : "";
   return {
     done: true,
-    evidence: `YouTube video ${receipt.video_id} recorded as ${receipt.visibility}${nativeAbEvidence}${thumbnailEvidence}${warning}`,
+    evidence: `YouTube video ${receipt.video_id} recorded as ${scheduleReceipt ? `scheduled for ${scheduleReceipt.schedule_at} (${scheduleReceipt.time_zone})` : receipt.visibility}${nativeAbEvidence}${thumbnailEvidence}${warning}`,
   };
 }
 

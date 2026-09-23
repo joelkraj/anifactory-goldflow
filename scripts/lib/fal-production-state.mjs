@@ -57,9 +57,10 @@ export async function falProductionStageStates({ episodeDir, identity } = {}) {
       const pendingProbe = probes.find(index => !completed[index] && !failures[index] && !holds[index]);
       const visualPlan = completed.every(Boolean) ? await read(path.join(episodeDir, "visual_reference_plan.json")) : null;
       const materialized = visualPlan?.reference_targets?.length === referencePlan.assignments.length
-        && referencePlan.assignments.every(row => visualPlan.reference_targets.some(target =>
-          target.ref_id === row.ref_id && target.reference_image_path === effectivePath[referencePlan.assignments.indexOf(row)]
-          && target.conditioning_image_path === effectivePath[referencePlan.assignments.indexOf(row)]));
+        && referencePlan.assignments.every((row, index) => visualPlan.reference_targets.some(target =>
+          target.ref_id === row.ref_id
+          && [row.output_path, effectivePath[index]].includes(target.reference_image_path)
+          && target.conditioning_image_path === target.reference_image_path));
       referenceState = completed.every(Boolean)
         ? materialized
           ? { done: true, evidence: `Fal canonical references=${completed.length}/${completed.length}, all hash-bound result receipts and local plan paths present` }

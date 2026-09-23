@@ -7,7 +7,8 @@ const EFFORT_LABELS = Object.freeze({
 });
 
 const MODEL_LABELS = Object.freeze({
-  "gpt-6-sol": "GPT-5.6 Sol",
+  "gpt-6-sol": "GPT-6 Sol",
+  "gpt-5.6-sol": "GPT-5.6 Sol",
   "gpt-5.5": "GPT-5.5",
 });
 

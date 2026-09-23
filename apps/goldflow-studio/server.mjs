@@ -198,7 +198,7 @@ export async function createStudioServer(options = {}) {
       : {
         provider: "chatgpt",
         account_plan: String(process.env.GOLDFLOW_STUDIO_CHATGPT_PLAN ?? "Pro"),
-        model_label: String(process.env.GOLDFLOW_STUDIO_CHATGPT_MODEL_LABEL ?? "GPT-5.6 Sol"),
+        model_label: String(process.env.GOLDFLOW_STUDIO_CHATGPT_MODEL_LABEL ?? "GPT-6 Sol"),
         effort_label: String(process.env.GOLDFLOW_STUDIO_CHATGPT_EFFORT ?? "Medium"),
       };
   const llmJobs = await new LlmJobStore({ stateDir }).init();

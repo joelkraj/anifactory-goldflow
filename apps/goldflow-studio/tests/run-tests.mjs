@@ -1059,7 +1059,8 @@ async function testDesktopHostContract() {
   assert.equal(chatGptEffortLabel("max"), "Pro");
   assert.equal(chatGptEffortSliderIndex("Pro"), 4);
   assert.equal(chatGptModelLabel("gpt-5.5"), "GPT-5.5");
-  assert.equal(chatGptModelLabel("gpt-6-sol"), "GPT-5.6 Sol");
+  assert.equal(chatGptModelLabel("gpt-6-sol"), "GPT-6 Sol");
+  assert.equal(chatGptModelLabel("gpt-5.6-sol"), "GPT-5.6 Sol");
   assert.equal(chatGptModelControlMatches("Model 5.5", "GPT-5.5"), true);
   assert.equal(chatGptModelControlMatches("Model GPT-5.6 Sol", "GPT-5.5"), false);
   assert.equal(chatGptUiContractForLlmJob({ account_plan: "Pro", model_label: "GPT-5.6 Sol", effort_label: "Medium" }, {

@@ -37,7 +37,13 @@ export async function promoteApprovedFalReferences({ episodeDir, identity, contr
   for (const target of plan.reference_targets ?? []) {
     const assignment = referencePlan.assignments.find(row => row.ref_id === target.ref_id);
     if (!assignment) continue;
-    const receipt = await read(assignment.result_receipt_path);
+    const reviewedAssignmentPath = path.join(episodeDir, "fal", "reference", "review-repair-assignments", `${assignment.image_id}.json`);
+    const reviewedReceiptPath = path.join(episodeDir, "fal", "reference", "review-repair-result-receipts", `${assignment.image_id}.json`);
+    const repairedAssignmentPath = path.join(episodeDir, "fal", "reference", "repair-assignments", `${assignment.image_id}.json`);
+    const repairedReceiptPath = path.join(episodeDir, "fal", "reference", "repair-result-receipts", `${assignment.image_id}.json`);
+    const activeAssignment = await exists(reviewedReceiptPath) ? await read(reviewedAssignmentPath)
+      : await exists(repairedReceiptPath) ? await read(repairedAssignmentPath) : assignment;
+    const receipt = await read(activeAssignment.result_receipt_path);
     const approvedHash = approval.reference_hash_by_ref_id[target.ref_id];
     requireValue(approvedHash === receipt.output_sha256 && await falFileSha256(receipt.output_path) === approvedHash,
       `Approved Fal reference changed before global promotion: ${target.ref_id}`);
@@ -47,7 +53,7 @@ export async function promoteApprovedFalReferences({ episodeDir, identity, contr
     const version = Number(existing?.version ?? 0) + 1;
     const dest = path.join(bankRoot, "assets", assetId, `v${String(version).padStart(4, "0")}.png`);
     await fs.mkdir(path.dirname(dest), { recursive: true });
-    await fs.copyFile(receipt.output_path, dest, constants.COPYFILE_EXCL);
+    if (!await exists(dest)) await fs.copyFile(receipt.output_path, dest, constants.COPYFILE_EXCL);
     requireValue(await falFileSha256(dest) === approvedHash, `Portable Fal copy changed: ${assetId}`);
     const metadata = await sharp(dest).metadata();
     const parent = target.canonical_subject_id === "joey_manhwa" ? "gf.global.character.joey_manhwa"
@@ -64,17 +70,19 @@ export async function promoteApprovedFalReferences({ episodeDir, identity, contr
       portable_file: { path: dest, sha256: approvedHash, mime_type: "image/png" },
       width: metadata.width, height: metadata.height, aspect_ratio: `${metadata.width}:${metadata.height}`, color_mode: metadata.channels === 4 ? "rgba" : "rgb",
       canonical_prompt: prompt, negative_constraints: target.negative_constraints ?? [],
-      model: assignment.endpoint, provider: "fal_ai", mode: assignment.board_path ? "image_edit" : "text2image",
+      model: activeAssignment.endpoint, provider: "fal_ai", mode: activeAssignment.board_path ? "image_edit" : "text2image",
       quality: "low", resolution: "1920x1080", seed: null, creation_timestamp: receipt.completed_at,
       cost_usd: receipt.provider_metadata?.usage?.cost ?? null,
       cost_status: receipt.provider_metadata?.usage?.cost == null ? "awaiting_provider_billing" : "reported_by_provider",
       tags: [...new Set(["manhwa", "canonical", identity.series_slug, target.kind, role, ...aliases])],
       parent_asset_id: parent, state_id: target.state_delta ?? target.ref_id,
       relationships: { parent_asset_id: parent, canonical_subject_id: target.canonical_subject_id ?? null, state_delta: target.state_delta ?? null,
-        ordered_reference_assets: assignment.reference_asset_ids },
-      reference_ids: assignment.reference_asset_ids, reference_hashes: assignment.reference_hashes,
-      providers: { fal: { request_id: receipt.request_id, endpoint: receipt.endpoint, result_receipt_path: assignment.result_receipt_path,
-        result_receipt_sha256: await falFileSha256(assignment.result_receipt_path) } },
+        ordered_reference_assets: activeAssignment.reference_asset_ids },
+      reference_ids: activeAssignment.reference_asset_ids, reference_hashes: activeAssignment.reference_hashes,
+      providers: { fal: { request_id: receipt.request_id, endpoint: receipt.endpoint, result_receipt_path: activeAssignment.result_receipt_path,
+        result_receipt_sha256: await falFileSha256(activeAssignment.result_receipt_path),
+        original_assignment_sha256: assignment.assignment_sha256,
+        active_assignment_sha256: activeAssignment.assignment_sha256 } },
       replacement_history: existing ? [...(existing.replacement_history ?? []), { supersedes_version: existing.version, supersedes_sha256: existing.sha256 }] : [],
       supersedes_version: existing?.version ?? null, supersedes_sha256: existing?.sha256 ?? null,
       searchable_role_tags: [...new Set([role, ...aliases])],

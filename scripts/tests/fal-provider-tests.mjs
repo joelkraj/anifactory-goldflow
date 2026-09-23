@@ -80,17 +80,17 @@ test("early Fal visual fork begins with reference preparation before validation"
   } finally { await rm(episodeDir, { recursive: true, force: true }); }
 });
 
-test("Fal bulk status observes queued work before filling more provider slots", async () => {
+test("Fal bulk status observes work when bounded queue is full", async () => {
   const episodeDir = await mkdtemp(path.join(os.tmpdir(), "goldflow-fal-queue-"));
   try {
     const root = path.join(episodeDir, "fal");
     await mkdir(root, { recursive: true });
-    const assignments = ["one", "two"].map(id => ({ image_id: id,
+    const assignments = Array.from({ length: 11 }, (_, index) => String(index)).map(id => ({ image_id: id,
       submission_receipt_path: path.join(root, `${id}-submission.json`),
       result_receipt_path: path.join(root, `${id}-result.json`) }));
     await writeFile(path.join(root, "bulk-plan.json"), JSON.stringify({ assignments, concurrency: 1 }));
     await writeFile(path.join(root, "validation-review.json"), JSON.stringify({ status: "passed", approved_ids: [] }));
-    await writeFile(assignments[0].submission_receipt_path, "{}");
+    for (const assignment of assignments.slice(0, 10)) await writeFile(assignment.submission_receipt_path, "{}");
     const state = await falProductionStageStates({ episodeDir, identity: {} });
     assert.match(state.stageStates.image_generation.next_command_shape, /--action observe-bulk --limit 100/);
   } finally { await rm(episodeDir, { recursive: true, force: true }); }

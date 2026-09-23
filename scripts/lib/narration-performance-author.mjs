@@ -594,7 +594,7 @@ export async function authorNarrationPerformanceDirection({
     Math.max(1, Math.min(8, Number(concurrency) || 8)),
     async (packet, index) => {
       const prior = !repairSet.has(packet.packet_id) ? previouslyPassed.get(packet.packet_id) : null;
-      if (prior) {
+      if (prior?.output_path && prior?.prompt_sha256) {
         if (prior.packet_index !== index
           || JSON.stringify(prior.source_ref_keys) !== JSON.stringify(packet.source_ref_keys)
           || path.dirname(prior.output_path) !== callDir) {

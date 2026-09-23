@@ -127,6 +127,7 @@ const stages = [
       "tts narrate",
       "tts import-provider",
       "tts finalize-provider",
+      "tts repair-boundary",
       "tts approve-listen",
       "tts source-structure",
       "tts low-margin-disposition",

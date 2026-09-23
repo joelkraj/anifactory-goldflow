@@ -438,6 +438,7 @@ ${registryCommands}
   goldflow tts throughput-bakeoff  Run an isolated serial/batch-2/batch-4 Qwen/Liam diagnostic
   goldflow tts import-provider     Import hash-bound WAV results from the identity-locked TTS provider
   goldflow tts finalize-provider   Run delivery, continuity, stitch, mastering, and full-stream QA
+  goldflow tts repair-boundary     Repair only reviewed blocked Qwen sentence/word boundaries, then rerun narration QA
   goldflow tts approve-listen      Record hash-bound decisions for exact narration listen items
   goldflow tts approve-subjective  Approve the mandatory hash-bound whole-episode narration sample manifest
   goldflow tts source-structure    Record reviewed narrative chapters separately from technical voice segments
@@ -629,6 +630,8 @@ if (command === "pilot" && !helpRequested) {
   run("narration-provider-output-import.mjs", flags);
 } else if (command === "tts" && subcommand === "finalize-provider") {
   run("narration-provider-output-finalize.mjs", flags);
+} else if (command === "tts" && subcommand === "repair-boundary") {
+  run("tts-exact-boundary-repair.mjs", flags);
 } else if (command === "tts" && subcommand === "approve-listen") {
   run("narration-exact-listen-review.mjs", flags);
 } else if (command === "tts" && subcommand === "approve-subjective") {

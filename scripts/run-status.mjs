@@ -3090,15 +3090,24 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
     return { done: false, evidence: `narration_tts_report_${episode}.json missing` };
   }
   if (!statusPassed(ttsReport.status)) {
-    const triage = await readJson(path.join(episodeDir,
-      `manual_blocker_triage_qwen_tts_stitch_${episode}.json`), null);
+    const revisedTriagePath = path.join(episodeDir,
+      `manual_blocker_triage_qwen_tts_stitch_${episode}_v2.json`);
+    const triage = await readJson(await exists(revisedTriagePath)
+      ? revisedTriagePath : path.join(episodeDir,
+        `manual_blocker_triage_qwen_tts_stitch_${episode}.json`), null);
     if (ttsReport.status === "blocked"
       && triage?.status === "operator_hold_pending_exact_boundary_recovery"
       && triage.source_script_sha256 === currentScriptHash
       && triage.blocked_report_sha256 === await fileSha256(ttsReportPath)) {
+      const repairSpecPath = triage.repair_spec_path ?? path.join(episodeDir,
+        `narration_exact_boundary_repair_spec_${episode}.json`);
       return { done: false, state: "blocked",
         evidence: "Reviewed second-take narration blockers remain; two-attempt limit forbids another full-unit submission",
-        next_command_shape: "Operator hold: implement a guarded exact-boundary repair for the material defects; do not rerun all narration units or waive confirmed omissions." };
+        next_command_shape: await exists(repairSpecPath)
+          && (!triage.repair_spec_sha256
+            || triage.repair_spec_sha256 === await fileSha256(repairSpecPath))
+          ? `node bin/goldflow.mjs tts repair-boundary --episode-dir ${episodeDir} --spec ${repairSpecPath}`
+          : "Operator hold: implement a guarded exact-boundary repair for the material defects; do not rerun all narration units or waive confirmed omissions." };
     }
     if (narrationQualityContract && ttsReport.status === "blocked"
       && policy.primary.provider === "qwen_local") {
@@ -4894,7 +4903,7 @@ async function main() {
     ? ["visual_prompt_harden", "visual_prompt_blocker_repair"]
     : next?.stage === "qwen_tts_stitch"
       && next?.state === "blocked"
-      && /tts (?:approve-listen|narrate|finalize-provider)\b/.test(String(next.next_command_shape ?? ""))
+      && /tts (?:approve-listen|narrate|finalize-provider|repair-boundary)\b/.test(String(next.next_command_shape ?? ""))
       ? ["qwen_tts_stitch"]
     : ["reference_generation", "image_generation"].includes(next?.stage)
       && next?.state === "blocked"

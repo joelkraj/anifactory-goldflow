@@ -19,17 +19,29 @@ function sha256(value) {
   return createHash("sha256").update(String(value ?? "")).digest("hex");
 }
 
-function extractJson(content) {
+export function extractNarrationPerformanceJsonForTests(content) {
   const raw = String(content ?? "").trim();
   try {
-    return JSON.parse(raw);
+    return { value: JSON.parse(raw), syntax_repair: null };
   } catch {}
   const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  if (fenced) return JSON.parse(fenced[1]);
+  if (fenced) return { value: JSON.parse(fenced[1]), syntax_repair: null };
   const start = raw.indexOf("{");
   const end = raw.lastIndexOf("}");
-  if (start >= 0 && end > start) return JSON.parse(raw.slice(start, end + 1));
+  if (start >= 0 && end > start) {
+    const candidate = raw.slice(start, end + 1);
+    try { return { value: JSON.parse(candidate), syntax_repair: null }; } catch {}
+    // Preserve the raw provider output and correct only a missing final unit
+    // object brace. All source-word and coverage validators still run below.
+    if (candidate.endsWith("}]}") && (candidate.match(/\{/g)?.length ?? 0) === (candidate.match(/\}/g)?.length ?? 0) + 1) {
+      return { value: JSON.parse(`${candidate.slice(0, -2)}}]}`), syntax_repair: "missing_final_unit_object_brace" };
+    }
+  }
   throw new Error("Narration performance author did not return valid JSON.");
+}
+
+export function narrationUnitHasTerminalPunctuationForTests(text) {
+  return /[.!?…][\"'”’)]*$/.test(String(text ?? "").trim());
 }
 
 export const NARRATION_PERFORMANCE_TARGET_ATOMS = 96;
@@ -211,7 +223,7 @@ function validateChunkResult(parsed, atomicUnits, chunkIndex, chunkCount) {
       throw new Error(`Narration performance author changed spoken words for ${keys.join(",")}.`);
     }
     if (actualWords.length > 60) throw new Error(`Narration unit exceeds 60 words: ${keys.join(",")}.`);
-    if (!/[.!?][\"'”’)]*$/.test(String(row.spoken_text ?? "").trim())) {
+    if (!narrationUnitHasTerminalPunctuationForTests(row.spoken_text)) {
       throw new Error(`Narration unit lacks terminal punctuation: ${keys.join(",")}.`);
     }
     if (!NARRATION_BOUNDARY_CLASSES.includes(String(row.boundary_after ?? ""))) {
@@ -327,7 +339,8 @@ async function authoredChunk({
       });
       content = call.content;
     }
-    const result = validateChunkResult(extractJson(content), chunk, index, chunkCount);
+    const parsedContent = extractNarrationPerformanceJsonForTests(content);
+    const result = validateChunkResult(parsedContent.value, chunk, index, chunkCount);
     return {
       packet_id: packetId,
       packet_index: index,
@@ -343,6 +356,7 @@ async function authoredChunk({
       prompt_bytes: promptBytes,
       reused: call === null,
       exact_repair: Boolean(repairReason),
+      json_syntax_repair: parsedContent.syntax_repair,
     };
   } catch (error) {
     return {

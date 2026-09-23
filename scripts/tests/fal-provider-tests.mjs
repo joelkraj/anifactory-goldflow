@@ -56,6 +56,7 @@ test("early Fal visual fork routes reference and scene generations through guard
   assert.match(buildStageCommand("reference_generation", identity), /imagegen fal .*--action prepare-references/);
   assert.match(buildStageCommand("image_generation", identity), /imagegen fal .*--action prepare-validation/);
   assert.equal(commandStageFor("imagegen", "fal", { action: "billing-submit-reference" }, identity), "reference_generation");
+  assert.equal(commandStageFor("imagegen", "fal", { action: "finalize-references" }, identity), "reference_generation");
   assert.equal(commandStageFor("imagegen", "fal", { action: "review-validation" }, identity), "image_generation");
 });
 

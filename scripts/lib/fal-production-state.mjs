@@ -39,8 +39,15 @@ export async function falProductionStageStates({ episodeDir, identity } = {}) {
         referencePlan.assignments.findIndex(row => row.endpoint?.endsWith("/text-to-image")),
       ].filter((index, position, all) => index >= 0 && all.indexOf(index) === position);
       const pendingProbe = probes.find(index => !completed[index]);
+      const visualPlan = completed.every(Boolean) ? await read(path.join(episodeDir, "visual_reference_plan.json")) : null;
+      const materialized = visualPlan?.reference_targets?.length === referencePlan.assignments.length
+        && referencePlan.assignments.every(row => visualPlan.reference_targets.some(target =>
+          target.ref_id === row.ref_id && target.reference_image_path === row.output_path
+          && target.conditioning_image_path === row.output_path));
       referenceState = completed.every(Boolean)
-        ? { done: true, evidence: `Fal canonical references=${completed.length}/${completed.length}, all hash-bound result receipts present` }
+        ? materialized
+          ? { done: true, evidence: `Fal canonical references=${completed.length}/${completed.length}, all hash-bound result receipts and local plan paths present` }
+          : { state: "missing", evidence: `Fal canonical references=${completed.length}/${completed.length}; approved plan paths need materialization`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action finalize-references` }
         : unresolved.some(Boolean)
           ? { state: "blocked", evidence: `Fal exact-reference failures or transport holds=${unresolved.filter(Boolean).length}; inspect exact receipts before scoped repair` }
           : pendingProbe != null

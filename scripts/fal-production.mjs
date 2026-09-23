@@ -32,7 +32,8 @@ async function prepareReferences(ctx){
   const assignments=[];
   for(const target of targets){
     const id=String(target.ref_id??"");need(/^[a-z0-9][a-z0-9_-]{1,100}$/.test(id),`Unsafe reference ID: ${id}`);
-    const output=target.conditioning_image_path??target.reference_image_path;
+    const output=target.conditioning_image_path??target.reference_image_path
+      ??path.join(ctx.episodeDir,"assets","images","references",`${id}.png`);
     need(path.isAbsolute(output??"")&&output.startsWith(`${ctx.episodeDir}${path.sep}assets${path.sep}images${path.sep}references${path.sep}`),`Fal reference output is outside this attempt: ${id}`);
     const prompt=String(target.prompt_anchor??"").trim();need(prompt.length>60,`Fal reference prompt is missing: ${id}`);
     const joeyIdentity=target.kind==="character_state"&&(/(^|[_-])joey([_-]|$)/i.test(id)||/\bJoey Manhwa\b/i.test(target.subject??""));
@@ -44,6 +45,33 @@ async function prepareReferences(ctx){
   const referencePlan={schema:"goldflow_fal_reference_plan_v1",created_at:new Date().toISOString(),run_identity_sha256:ctx.identityHash,visual_reference_plan_sha256:await falFileSha256(path.join(ctx.episodeDir,"visual_reference_plan.json")),model:FAL_ENDPOINTS.primary_text,quality:"low",width:1920,height:1080,format:"png",concurrency:ctx.contract.production_concurrency,assignments};
   await write(path.join(ctx.root,"reference-plan.json"),referencePlan);
   return {status:"prepared",count:assignments.length,reused_canonical_joey:assignments.filter(row=>row.reference_asset_ids.includes(joey.asset_id)).length};
+}
+async function finalizeReferences(ctx){
+  const referencePlan=await read(path.join(ctx.root,"reference-plan.json"));
+  const byId=new Map();
+  for(const row of referencePlan.assignments){
+    const receipt=await read(row.result_receipt_path);
+    need(receipt.output_path===row.output_path&&await falFileSha256(row.output_path)===receipt.output_sha256,
+      `Fal reference result is missing or changed: ${row.ref_id}`);
+    byId.set(row.ref_id,row.output_path);
+  }
+  const planPath=path.join(ctx.episodeDir,"visual_reference_plan.json");
+  const plan=await read(planPath);
+  need(plan.status==="passed"&&plan.reference_targets?.length===referencePlan.assignments.length,
+    "Fal reference materialization no longer matches the approved plan.");
+  const updatedAt=new Date().toISOString();
+  const updatedPlan={...plan,reference_targets:plan.reference_targets.map(target=>({
+    ...target,reference_image_path:byId.get(target.ref_id),conditioning_image_path:byId.get(target.ref_id),
+  })),reference_generation_updated_at:updatedAt};
+  const characterPath=path.join(ctx.episodeDir,"character_state_refs.json");
+  const characterRefs=await read(characterPath);
+  const updatedCharacters={...characterRefs,character_state_refs:characterRefs.character_state_refs.map(ref=>({
+    ...ref,reference_image_path:byId.get(ref.source_ref_id)??ref.reference_image_path??null,
+    conditioning_image_path:byId.get(ref.source_ref_id)??ref.conditioning_image_path??null,
+  })),reference_generation_updated_at:updatedAt};
+  await fs.writeFile(planPath,bytes(updatedPlan));
+  await fs.writeFile(characterPath,bytes(updatedCharacters));
+  return {status:"materialized",count:byId.size,visual_reference_plan:planPath,character_state_refs:characterPath};
 }
 async function nativePromptReferences(ctx,row,approval){
   const requirements=[...(row.reference_requirements??[])].sort((a,b)=>Number(a.slot_order??99)-Number(b.slot_order??99)).slice(0,4);
@@ -154,6 +182,7 @@ async function main(){
  if(action==="observe-references"){
    const plan=await read(path.join(ctx.root,"reference-plan.json"));const rows=[];for(const row of plan.assignments)if(await fs.access(row.submission_receipt_path).then(()=>true,()=>false)&&!await fs.access(row.result_receipt_path).then(()=>true,()=>false))rows.push(row);const result=await observeRows(ctx,rows,ctx.contract.production_concurrency);return console.log(JSON.stringify({status:result.every(r=>r.complete)?"complete":"pending",checked:result.length,complete:result.filter(r=>r.complete).length,pending:result.filter(r=>!r.complete).length},null,2));
  }
+ if(action==="finalize-references") return console.log(JSON.stringify(await finalizeReferences(ctx),null,2));
  if(action==="prepare-validation") return console.log(JSON.stringify(await prepare(ctx),null,2));
  if(action==="prepare-bulk") return console.log(JSON.stringify(await prepareBulk(ctx,f),null,2));
  if(action==="dispatch-bulk"){

@@ -586,10 +586,34 @@ export async function authorNarrationPerformanceDirection({
   }
   await fs.mkdir(callDir, { recursive: true });
   const repairSet = new Set(requestedRepairs);
+  const previouslyPassed = new Map((existing?.authoring?.calls ?? [])
+    .filter((call) => call.status === "passed")
+    .map((call) => [call.packet_id, call]));
   const calls = await runPool(
     packets,
     Math.max(1, Math.min(8, Number(concurrency) || 8)),
-    (packet, index) => authoredChunk({
+    async (packet, index) => {
+      const prior = !repairSet.has(packet.packet_id) ? previouslyPassed.get(packet.packet_id) : null;
+      if (prior) {
+        if (prior.packet_index !== index
+          || JSON.stringify(prior.source_ref_keys) !== JSON.stringify(packet.source_ref_keys)
+          || path.dirname(prior.output_path) !== callDir) {
+          throw new Error(`Previously passed narration packet binding changed: ${packet.packet_id}.`);
+        }
+        const metadata = await readCodexCallMetadata(prior.output_path);
+        if (!isCodexCacheCompatible(metadata, {
+          model, reasoningEffort: "medium", promptHash: prior.prompt_sha256,
+          provider, stageName: "narration_performance", planningOverrideStage: "voice_plan",
+        })) {
+          throw new Error(`Previously passed narration packet cache is incompatible: ${packet.packet_id}.`);
+        }
+        const content = await fs.readFile(prior.output_path, "utf8");
+        const parsed = extractNarrationPerformanceJsonForTests(content);
+        const result = validateChunkResult(parsed.value, packet.chunk, index, packets.length);
+        return { ...prior, chapters: result.chapters, units: result.units, reused: true,
+          json_syntax_repair: parsed.syntax_repair };
+      }
+      return authoredChunk({
       chunk: packet.chunk,
       index,
       chunkCount: packets.length,
@@ -602,7 +626,8 @@ export async function authorNarrationPerformanceDirection({
       repairReason: repairSet.has(packet.packet_id) ? repairReason : null,
       allowCreativeSubmission: existing?.status !== "blocked" || repairSet.has(packet.packet_id),
       plannerExecutor,
-    }),
+      });
+    },
   );
   const failedCalls = calls.filter((call) => call.status !== "passed");
   const passedCalls = calls.filter((call) => call.status === "passed");

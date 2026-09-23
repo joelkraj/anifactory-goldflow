@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { buildFalImageInput, FAL_ENDPOINTS, FAL_PRIMARY_PARAMS } from "../lib/fal-provider.mjs";
 import { falBlockedStageRecoveryAdmission } from "../lib/fal-production-state.mjs";
 import { falProductionStageStates } from "../lib/fal-production-state.mjs";
+import { falPortableAssetId } from "../lib/fal-portable-bank.mjs";
 import { normalizeImageProvider } from "../lib/image-provider-routing.mjs";
 import { buildStageCommand, commandStageFor } from "../lib/pipeline-stage-registry.mjs";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -66,4 +67,10 @@ test("early Fal visual fork begins with reference preparation before validation"
     assert.match(state.stageStates.image_generation.next_command_shape, /--action prepare-validation/);
     assert.equal("reference_image_approval" in state.stageStates, false);
   } finally { await rm(episodeDir, { recursive: true, force: true }); }
+});
+
+test("Fal canonical assets retain stable provider-neutral Goldflow IDs", () => {
+  assert.equal(falPortableAssetId("years-taken", { ref_id: "joey_manhwa_clinic_state", kind: "character_state" }),
+    "gf.years_taken.character_state.joey_manhwa_clinic_state");
+  assert.throws(() => falPortableAssetId("../escape", { ref_id: "x", kind: "location" }), /Unsafe/);
 });

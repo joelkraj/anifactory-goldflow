@@ -4,6 +4,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { buildReferenceBoard, referenceBoardPromptGuidance } from "./lib/openart-reference-board.mjs";
 import { falFileSha256, falObjectSha256, uploadFalReference, submitFalImage, observeFalImage, FAL_ENDPOINTS } from "./lib/fal-provider.mjs";
+import { falPortableAssetId, promoteApprovedFalReferences } from "./lib/fal-portable-bank.mjs";
 
 const digest = value => createHash("sha256").update(value).digest("hex");
 const bytes = value => `${JSON.stringify(value, null, 2)}\n`;
@@ -52,7 +53,7 @@ async function nativePromptReferences(ctx,row,approval){
     need(id&&path.isAbsolute(localPath??""),`Fal prompt reference is missing an exact local path: ${row.image_id}`);
     const sha256=approval.reference_hash_by_ref_id?.[id];
     need(/^[a-f0-9]{64}$/.test(sha256??"")&&await falFileSha256(localPath)===sha256,`Fal prompt reference is not hash-approved: ${row.image_id}/${id}`);
-    refs.push({asset_id:`gf.${ctx.identity.series_slug.replace(/-/g,"_")}.${String(ref.kind??"asset").replace(/[^a-z0-9_]/g,"_")}.${id}`,asset_class:ref.kind??"asset",path:localPath,sha256});
+    refs.push({asset_id:falPortableAssetId(ctx.identity.series_slug,{ref_id:id,kind:ref.kind??"asset"}),asset_class:ref.kind??"asset",path:localPath,sha256});
   }
   return refs;
 }
@@ -76,6 +77,7 @@ async function prepare(ctx){
   if(ctx.identity.visual_restart?.fork_at==="visual_reference_plan"){
     const hardened=await read(path.join(ctx.episodeDir,"section_image_prompts_hardened.json"));const approval=await read(path.join(ctx.episodeDir,`visual_reference_approval_${ctx.identity.episode}.json`));
     need(approval.status==="approved", "Fal validation requires approved canonical references.");
+    const portableBank=await promoteApprovedFalReferences({episodeDir:ctx.episodeDir,identity:ctx.identity,contract:ctx.contract,approval});
     const assignments=[];
     for(const row of chooseNativeValidationRows(hardened.prompts)){
       const refs=await nativePromptReferences(ctx,row,approval);
@@ -87,7 +89,7 @@ async function prepare(ctx){
       const assignmentPath=path.join(ctx.root,"validation-assignments",`${row.image_id}.json`);await write(assignmentPath,assignment);assignments.push({...assignment,assignment_path:assignmentPath});
     }
     const plan={schema:"goldflow_fal_validation_plan_v1",created_at:new Date().toISOString(),run_identity_sha256:ctx.identityHash,source_prompt_plan_sha256:await falFileSha256(path.join(ctx.episodeDir,"section_image_prompts_hardened.json")),model:FAL_ENDPOINTS.primary_edit,quality:"low",width:1920,height:1080,format:"png",normal_reference_mode:"one_positional_collage",concurrency:8,assignments};
-    await write(path.join(ctx.root,"validation-plan.json"),plan);return {status:"prepared",count:assignments.length,image_ids:assignments.map(row=>row.image_id)};
+    await write(path.join(ctx.root,"validation-plan.json"),plan);return {status:"prepared",count:assignments.length,image_ids:assignments.map(row=>row.image_id),portable_bank:portableBank};
   }
   const catalog=await read(path.join(ctx.root,"catalog.json")); const bank=await read(ctx.contract.reference_bank_manifest);
   const approved=new Map(bank.assets.filter(row=>row.approval_state==="approved").map(row=>[row.asset_id,row])); const assignments=[];

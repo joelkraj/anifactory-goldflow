@@ -4632,6 +4632,7 @@ async function main() {
     audio_target: flags["audio-target"] ?? runIdentity.audio_target ?? "narrator_only",
     image_provider: flags["image-provider"] ?? flags.provider ?? runIdentity.image_provider ?? "chatgpt_web_gpt_image",
     image_provider_options: runIdentity.image_provider_options ?? {},
+    visual_restart: runIdentity.visual_restart ?? null,
     ...ttsIdentityFields,
     image_output_qa_required: runIdentity.image_output_qa_required ?? runIdentity.production_gates?.image_output_qa_required_before_render ?? false,
     production_gates: runIdentity.production_gates ?? {},

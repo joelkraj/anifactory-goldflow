@@ -50,11 +50,16 @@ async function finalizeReferences(ctx){
   const referencePlan=await read(path.join(ctx.root,"reference-plan.json"));
   const byId=new Map();
   for(const row of referencePlan.assignments){
+    const reviewedAssignmentPath=path.join(ctx.root,"reference","review-repair-assignments",`${row.image_id}.json`);
+    const reviewedReceiptPath=path.join(ctx.root,"reference","review-repair-result-receipts",`${row.image_id}.json`);
     const repairReceiptPath=path.join(ctx.root,"reference","repair-result-receipts",`${row.image_id}.json`);
-    const receipt=await read(await fs.access(repairReceiptPath).then(()=>repairReceiptPath,()=>row.result_receipt_path));
-    need(receipt.output_path===row.output_path&&await falFileSha256(row.output_path)===receipt.output_sha256,
+    const reviewed=await fs.access(reviewedReceiptPath).then(()=>true,()=>false);
+    const activeAssignment=reviewed?await read(reviewedAssignmentPath):row;
+    const receipt=await read(reviewed?reviewedReceiptPath
+      :await fs.access(repairReceiptPath).then(()=>repairReceiptPath,()=>row.result_receipt_path));
+    need(receipt.output_path===activeAssignment.output_path&&await falFileSha256(activeAssignment.output_path)===receipt.output_sha256,
       `Fal reference result is missing or changed: ${row.ref_id}`);
-    byId.set(row.ref_id,row.output_path);
+    byId.set(row.ref_id,activeAssignment.output_path);
   }
   const planPath=path.join(ctx.episodeDir,"visual_reference_plan.json");
   const plan=await read(planPath);
@@ -227,6 +232,70 @@ async function main(){
    return console.log(JSON.stringify({status:result.every(row=>row.complete)?"complete":"pending",checked:result.length,
      complete:result.filter(row=>row.complete).length,pending:result.filter(row=>!row.complete).length},null,2));
  }
+ if(action==="repair-reviewed-references"){
+   need(f["confirm-spend"]==="exact_fal_reviewed_reference_repair","Paid visual reference repair requires exact confirmation token.");
+   const reviewPath=path.join(ctx.root,"reference","review-rejections.json");
+   const review=await read(reviewPath);need(review?.schema==="goldflow_fal_reference_visual_review_v1"
+     &&Array.isArray(review.rejections)&&review.rejections.length,"Exact visual review rejection receipt is required.");
+   const plan=await read(path.join(ctx.root,"reference-plan.json"));const repairs=[];
+   for(const finding of review.rejections){
+     const original=plan.assignments.find(row=>row.image_id===finding.image_id);
+     need(original&&finding.original_assignment_sha256===original.assignment_sha256,
+       `Visual repair identity changed for ${finding.image_id}`);
+     const originalRepairReceiptPath=path.join(ctx.root,"reference","repair-result-receipts",`${original.image_id}.json`);
+     const originalReceiptPath=await fs.access(originalRepairReceiptPath).then(()=>originalRepairReceiptPath,
+       ()=>original.result_receipt_path);
+     const originalReceipt=await read(originalReceiptPath);
+     need(originalReceipt.output_sha256===finding.rejected_sha256
+       &&await falFileSha256(originalReceipt.output_path)===finding.rejected_sha256,
+       `Visual review source changed for ${finding.image_id}`);
+     need(typeof finding.replacement_prompt==="string"&&finding.replacement_prompt.length>40
+       &&digest(finding.replacement_prompt)!==original.prompt_sha256&&finding.finding,
+       `Visual repair prompt or finding is missing for ${finding.image_id}`);
+     let source=null;
+     if(finding.reference_image_id){
+       const sourceAssignment=plan.assignments.find(row=>row.image_id===finding.reference_image_id);
+       need(sourceAssignment&&sourceAssignment.image_id!==original.image_id,
+         `Invalid visual repair source for ${finding.image_id}`);
+       const sourceRepairReceiptPath=path.join(ctx.root,"reference","repair-result-receipts",`${sourceAssignment.image_id}.json`);
+       const sourceReceiptPath=await fs.access(sourceRepairReceiptPath).then(()=>sourceRepairReceiptPath,
+         ()=>sourceAssignment.result_receipt_path);
+       const sourceReceipt=await read(sourceReceiptPath);
+       need(sourceReceipt.output_sha256===finding.reference_sha256
+         &&await falFileSha256(sourceReceipt.output_path)===finding.reference_sha256,
+         `Visual repair reference changed for ${finding.image_id}`);
+       source={asset_id:falPortableAssetId(ctx.identity.series_slug,{ref_id:sourceAssignment.ref_id,kind:sourceAssignment.asset_class}),
+         path:sourceReceipt.output_path,sha256:sourceReceipt.output_sha256};
+     }
+     const core={...original,endpoint:source?FAL_ENDPOINTS.primary_edit:FAL_ENDPOINTS.primary_text,
+       prompt:finding.replacement_prompt,prompt_sha256:digest(finding.replacement_prompt),
+       reference_mode:source?"separate_ordered_references":"text_only",
+       reference_asset_ids:source?[source.asset_id]:[],reference_hashes:source?[source.sha256]:[],
+       board_path:source?.path??null,board_sha256:source?.sha256??null,
+       previous_assignment_sha256:original.assignment_sha256,rejected_image_sha256:finding.rejected_sha256,
+       repair_reason:finding.finding,visual_review_path:reviewPath,
+       output_path:path.join(ctx.episodeDir,"assets","images","reference-repairs",`${finding.image_id}-v2.png`)};
+     for(const key of ["assignment_sha256","assignment_path","submission_receipt_path","result_receipt_path","upload_receipt_path"])delete core[key];
+     const repair={...core,assignment_sha256:falObjectSha256(JSON.stringify(core)),
+       submission_receipt_path:path.join(ctx.root,"reference","review-repair-submission-receipts",`${finding.image_id}.json`),
+       result_receipt_path:path.join(ctx.root,"reference","review-repair-result-receipts",`${finding.image_id}.json`),
+       upload_receipt_path:path.join(ctx.root,"reference","review-repair-upload-receipts",`${finding.image_id}.json`)};
+     await write(path.join(ctx.root,"reference","review-repair-assignments",`${finding.image_id}.json`),repair);
+     repairs.push(repair);
+   }
+   const result=await submitRows(ctx,repairs,Math.min(ctx.contract.production_concurrency,repairs.length));
+   return console.log(JSON.stringify({status:"reviewed_reference_repairs_submitted",count:result.length,
+     image_ids:repairs.map(row=>row.image_id)},null,2));
+ }
+ if(action==="observe-reviewed-references"){
+   const dir=path.join(ctx.root,"reference","review-repair-assignments");const names=await fs.readdir(dir);const rows=[];
+   for(const name of names.filter(value=>value.endsWith(".json"))){const row=await read(path.join(dir,name));
+     if(!await fs.access(row.result_receipt_path).then(()=>true,()=>false))rows.push(row);}
+   const result=await observeRows(ctx,rows,ctx.contract.production_concurrency);
+   return console.log(JSON.stringify({status:result.every(row=>row.complete)?"complete":"pending",checked:result.length,
+     complete:result.filter(row=>row.complete).length,pending:result.filter(row=>!row.complete).length},null,2));
+ }
+ if(action==="finalize-reviewed-references") return console.log(JSON.stringify(await finalizeReferences(ctx),null,2));
  if(action==="finalize-references") return console.log(JSON.stringify(await finalizeReferences(ctx),null,2));
  if(action==="prepare-validation") return console.log(JSON.stringify(await prepare(ctx),null,2));
  if(action==="prepare-bulk") return console.log(JSON.stringify(await prepareBulk(ctx,f),null,2));

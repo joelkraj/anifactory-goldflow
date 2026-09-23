@@ -8,10 +8,12 @@ export function falBlockedStageRecoveryAdmission(status, flags = {}) {
   const action = String(flags.action ?? "");
   const next = String(status?.next_command_shape ?? "");
   const referenceRecovery = status?.current_stage === "reference_generation";
+  const reviewRecovery = status?.current_stage === "reference_image_approval";
   const recoveryActions = new Set(referenceRecovery
     ? ["repair-reference-failures", "observe-reference-repairs"]
+    : reviewRecovery ? ["repair-reviewed-references", "observe-reviewed-references", "finalize-reviewed-references"]
     : ["observe-holds", "recover-holds", "observe-transport-recovery", "repair-failures", "observe-repairs"]);
-  if ((!referenceRecovery && status?.current_stage !== "image_generation") || status?.current_stage_state !== "blocked") {
+  if ((!referenceRecovery && !reviewRecovery && status?.current_stage !== "image_generation") || status?.current_stage_state !== "blocked") {
     return { applicable: false, allowed: false, reason: "Fal blocked-stage recovery is not current." };
   }
   if (!recoveryActions.has(action)) {
@@ -36,6 +38,11 @@ export async function falProductionStageStates({ episodeDir, identity } = {}) {
       const originalResults = await Promise.all(referencePlan.assignments.map(row => exists(row.result_receipt_path)));
       const repairResults = await Promise.all(referencePlan.assignments.map(row => exists(path.join(root, "reference", "repair-result-receipts", `${row.image_id}.json`))));
       const repairSubmitted = await Promise.all(referencePlan.assignments.map(row => exists(path.join(root, "reference", "repair-submission-receipts", `${row.image_id}.json`))));
+      const effectivePath = await Promise.all(referencePlan.assignments.map(async row => {
+        const reviewed = path.join(root, "reference", "review-repair-result-receipts", `${row.image_id}.json`);
+        if (await exists(reviewed)) return (await read(reviewed)).output_path;
+        return row.output_path;
+      }));
       const completed = await Promise.all(referencePlan.assignments.map((row, index) =>
         (originalResults[index] || repairResults[index]) && exists(row.output_path)));
       const failures = await Promise.all(referencePlan.assignments.map(row => exists(path.join(root, "reference", "failure-receipts", `${row.image_id}.json`))));
@@ -51,8 +58,8 @@ export async function falProductionStageStates({ episodeDir, identity } = {}) {
       const visualPlan = completed.every(Boolean) ? await read(path.join(episodeDir, "visual_reference_plan.json")) : null;
       const materialized = visualPlan?.reference_targets?.length === referencePlan.assignments.length
         && referencePlan.assignments.every(row => visualPlan.reference_targets.some(target =>
-          target.ref_id === row.ref_id && target.reference_image_path === row.output_path
-          && target.conditioning_image_path === row.output_path));
+          target.ref_id === row.ref_id && target.reference_image_path === effectivePath[referencePlan.assignments.indexOf(row)]
+          && target.conditioning_image_path === effectivePath[referencePlan.assignments.indexOf(row)]));
       referenceState = completed.every(Boolean)
         ? materialized
           ? { done: true, evidence: `Fal canonical references=${completed.length}/${completed.length}, all hash-bound result receipts and local plan paths present` }
@@ -68,6 +75,27 @@ export async function falProductionStageStates({ episodeDir, identity } = {}) {
           : unresolved.some(Boolean)
             ? { state: "blocked", evidence: `Fal exact-reference failures or transport holds=${unresolved.filter(Boolean).length}; inspect exact receipts before scoped repair`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action repair-reference-failures --directives <absolute_reference_repair_directives.json> --confirm-spend exact_fal_reference_repair` }
             : { state: "missing", evidence: `Fal canonical references submitted=${submitted.filter(Boolean).length}/${submitted.length}`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action dispatch-references --confirm-spend exact_fal_reference_batch` };
+    }
+  }
+  let reviewRepairState = null;
+  if (earlyReferenceFork) {
+    const reviewPath = path.join(root, "reference", "review-rejections.json");
+    if (await exists(reviewPath)) {
+      const review = await read(reviewPath);
+      if (review?.schema !== "goldflow_fal_reference_visual_review_v1" || !Array.isArray(review.rejections) || !review.rejections.length) throw new Error("Invalid Fal reference visual review receipt.");
+      const ids = review.rejections.map(row => row.image_id);
+      const assignments = await Promise.all(ids.map(id => exists(path.join(root, "reference", "review-repair-assignments", `${id}.json`))));
+      const results = await Promise.all(ids.map(id => exists(path.join(root, "reference", "review-repair-result-receipts", `${id}.json`))));
+      const nativePlan = await read(path.join(episodeDir, "visual_reference_plan.json"));
+      const materialized = results.every(Boolean) && review.rejections.every(row => {
+        const expected = path.join(episodeDir, "assets", "images", "reference-repairs", `${row.image_id}-v2.png`);
+        return nativePlan.reference_targets?.some(target => target.ref_id === row.image_id && target.reference_image_path === expected && target.conditioning_image_path === expected);
+      });
+      if (!materialized) reviewRepairState = !assignments.every(Boolean)
+        ? { state: "blocked", evidence: `Exact visual reference repairs required=${ids.length}`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action repair-reviewed-references --confirm-spend exact_fal_reviewed_reference_repair` }
+        : !results.every(Boolean)
+          ? { state: "blocked", evidence: `Exact visual reference repairs complete=${results.filter(Boolean).length}/${ids.length}`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action observe-reviewed-references` }
+          : { state: "blocked", evidence: `Exact visual reference repairs complete=${ids.length}/${ids.length}; materialization pending`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action finalize-reviewed-references` };
     }
   }
   const planPath = path.join(root, "validation-plan.json");
@@ -130,6 +158,7 @@ export async function falProductionStageStates({ episodeDir, identity } = {}) {
   }
   if (earlyReferenceFork) return { stageStates: {
     reference_generation: referenceState,
+    ...(reviewRepairState ? { reference_image_approval: reviewRepairState } : {}),
     image_generation: validationPassed
       ? bulkState ?? { state: "missing", evidence: "Awaiting Fal bulk preparation" }
       : { state: "missing", evidence: next ? "Fal collage validation is incomplete" : "Fal validation review did not pass", ...(next ? { next_command_shape: next } : {}) },

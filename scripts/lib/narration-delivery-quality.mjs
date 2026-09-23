@@ -286,6 +286,30 @@ export function narrationDeliveryNeedsConfirmation(transcriptQa, decision = null
     || (decision?.blockers?.length ?? 0) > 0;
 }
 
+export function blockAutomatedNarrationEdgeRisks(decision, acousticFindings = [], contract = null) {
+  if (contract?.delivery_qa?.acceptance_mode !== "automated_asr_v1") return decision;
+  const edgeCodes = new Set([
+    "tts_audio_tail_not_settled",
+    "tts_audio_endpoint_discontinuity",
+  ]);
+  const edgeFindings = acousticFindings.filter((finding) => edgeCodes.has(finding?.code));
+  if (!edgeFindings.length) return decision;
+  const blockers = uniqueFindings([
+    ...(decision?.blockers ?? []),
+    ...edgeFindings.map((finding) => blocker("narration_unsettled_raw_audio_edge", {
+      source_code: finding.code,
+      tail_50ms_rms_dbfs: finding.tail_50ms_rms_dbfs ?? null,
+      trailing_silence_sec: finding.trailing_silence_sec ?? null,
+      last_sample_dbfs: finding.last_sample_dbfs ?? null,
+    })),
+  ]);
+  return {
+    ...decision,
+    status: "blocked",
+    blockers,
+  };
+}
+
 // A second ASR model adjudicates delivery defects; it does not rewrite audio.
 // Only defects independently observed by both models become automatic blockers.
 // Substitution-only disagreement is kept as a precise listen-review item because

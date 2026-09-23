@@ -2226,6 +2226,10 @@ function transcriptQa(intendedText, recognizedText, {
   phoneticSpellingEquivalences.push(...alignTwoRecognitionSpelling(
     operations, intended, recognized, intendedText, recognizedText, equivalentPhrases,
   ));
+  // Preserve edge identity for dual-ASR delivery QA. A clipped syllable can
+  // align as a substitution rather than a missing word.
+  const firstIntendedOperation = operations.find((row) => row.intended != null);
+  const lastIntendedOperation = operations.findLast((row) => row.intended != null);
   const deletions = operations.filter((row) => row.type === "deletion").length;
   const insertions = operations.filter((row) => row.type === "insertion").length;
   const substitutions = operations.filter((row) => row.type === "substitution").length;
@@ -2313,6 +2317,8 @@ function transcriptQa(intendedText, recognizedText, {
     longest_insertion_run: insertionRun,
     leading_deletion_run: leadingDeletionRun,
     trailing_deletion_run: trailingDeletionRun,
+    first_token_ok: firstIntendedOperation?.type === "match",
+    last_token_ok: lastIntendedOperation?.type === "match",
     operations,
     findings,
   };
@@ -3092,6 +3098,7 @@ async function prepareStitchInput(row, index, options = {}) {
       sampleCount: sourceSampleCount,
       sampleRate: stitchSampleRate,
       alignment: row.unit_qa?.edge_alignment ?? null,
+      waveformActivity: metrics,
       contract: qualityContract,
     });
     if (editPlan.status !== "passed" || editPlan.retained_sample_count <= 0) {

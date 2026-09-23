@@ -9,6 +9,7 @@ import { promisify } from "node:util";
 import {
   NARRATION_DELIVERY_CONSENSUS_VERSION,
   adjudicateNarrationDeliveryConsensus,
+  blockAutomatedNarrationEdgeRisks,
   exactNarrationListenReviewPacket,
   exactNarrationRepairPacket,
   narrationDeliveryNeedsConfirmation,
@@ -18,6 +19,7 @@ import {
 import {
   buildNarrationQualityContract,
   narrationQualityContractForIdentity,
+  narrationUsesAutomatedAsrAcceptance,
 } from "./lib/narration-quality-contract.mjs";
 import {
   narrationProviderUnitQaSha256,
@@ -1690,6 +1692,11 @@ export async function finalizeNarrationProviderOutput(
       ...acousticReviewWarnings,
       ...(continuity?.warnings ?? []),
     ]);
+    decision = blockAutomatedNarrationEdgeRisks(
+      decision,
+      row.unit_qa?.findings ?? [],
+      qualityContract,
+    );
     decision = applyLowMarginDisposition(decision, row.unit_id, lowMarginDisposition);
     if (acceptAsrDeliveryBlockers) {
       decision = operatorWaiveAsrDecision(
@@ -2059,7 +2066,9 @@ export async function finalizeNarrationProviderOutput(
       listenDecision,
     );
   }
-  const deliveryAccepted = listenPacket.item_count === 0
+  const automatedAsrAcceptance = narrationUsesAutomatedAsrAcceptance(qualityContract);
+  const deliveryAccepted = automatedAsrAcceptance
+    || listenPacket.item_count === 0
     || listenDecisionValidation?.status === "approved";
 
   const rawWav = reviewContinuation?.rawAudio.path
@@ -2125,7 +2134,7 @@ export async function finalizeNarrationProviderOutput(
       ? "deferred_until_delivery_acceptance"
       : "diagnostic_disabled",
     reason: masteringRequested
-      ? "Exact listen items must be approved before mastering."
+      ? "Narration delivery QA must pass before mastering."
       : "Mastering was explicitly disabled for a diagnostic run.",
   };
   let canonicalWav = rawWav;
@@ -2596,7 +2605,9 @@ export async function finalizeNarrationProviderOutput(
         : null,
     listen_review_packet_path: listenPacketPath,
     listen_review_packet_sha256: listenPacket.packet_sha256,
-    listen_review_status: listenPacket.item_count === 0
+    listen_review_status: automatedAsrAcceptance
+      ? "automated_asr_qa"
+      : listenPacket.item_count === 0
       ? "not_required"
       : listenDecisionValidation?.status ?? "pending",
     ...(reviewContinuation ? {

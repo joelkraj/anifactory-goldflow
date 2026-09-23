@@ -4,6 +4,8 @@ import { PROVIDER_SAFE_SPOKEN_COMPILER_ID } from "./narration-spoken-text.mjs";
 export const NARRATION_QUALITY_CONTRACT_SCHEMA =
   "goldflow_narration_quality_contract_v2";
 export const NARRATION_QUALITY_CONTRACT_VERSION =
+  "narration_quality_v2_extreme_r5";
+const PRIOR_NARRATION_QUALITY_CONTRACT_VERSION_R4 =
   "narration_quality_v2_extreme_r4";
 const LEGACY_NARRATION_QUALITY_CONTRACT_VERSION =
   "narration_quality_v2_extreme";
@@ -35,9 +37,12 @@ export function buildNarrationQualityContract({
   modelRevision = null,
   deliveryQaPolicy = null,
 } = {}) {
+  const automatedAcceptance = deliveryQaPolicy?.acceptance_mode === "automated_asr_v1";
   const contract = {
     schema: NARRATION_QUALITY_CONTRACT_SCHEMA,
-    version: NARRATION_QUALITY_CONTRACT_VERSION,
+    version: automatedAcceptance
+      ? NARRATION_QUALITY_CONTRACT_VERSION
+      : PRIOR_NARRATION_QUALITY_CONTRACT_VERSION_R4,
     provider_binding: {
       provider,
       model_id: modelId,
@@ -113,6 +118,7 @@ export function buildNarrationQualityContract({
       full_stream_screening_model: "small.en",
       full_stream_confirmation_model: "medium",
       confirm_any_unit_transcript_difference: true,
+      ...(automatedAcceptance ? { acceptance_mode: "automated_asr_v1" } : {}),
       confirmed_isolated_deletion_is_blocking: true,
       confirmed_isolated_insertion_is_blocking: true,
       substitution_only_asr_disagreement_requires_exact_listen:
@@ -137,7 +143,7 @@ export function buildNarrationQualityContract({
       exact_spoken_text_preview_required: true,
       categories: ["proper_name", "possessive_name", "rank", "initialism", "currency_or_number", "homograph", "protected_term"],
       contextual_homographs_required: true,
-      subjective_sampling_for_unresolved_risks: true,
+      subjective_sampling_for_unresolved_risks: !automatedAcceptance,
     },
     voice_identity_qa: {
       reference_bank_centroid_required: true,
@@ -160,9 +166,9 @@ export function buildNarrationQualityContract({
       operator_promotion_required: true,
     },
     subjective_review: {
-      hash_bound_sampling_manifest_required: true,
+      hash_bound_sampling_manifest_required: !automatedAcceptance,
       required_coverage: ["complete_opening", "every_chapter_boundary", "system_or_pronunciation_risk", "middle_fatigue", "climax", "final_minute"],
-      exact_audio_attestation_required: true,
+      exact_audio_attestation_required: !automatedAcceptance,
       repair_scope: "exact_unit_only",
     },
     mastering: {
@@ -204,6 +210,11 @@ export function buildNarrationQualityContract({
   };
 }
 
+export function narrationUsesAutomatedAsrAcceptance(contract) {
+  return contract?.version === NARRATION_QUALITY_CONTRACT_VERSION
+    && contract?.delivery_qa?.acceptance_mode === "automated_asr_v1";
+}
+
 export function validateNarrationQualityContract(contract) {
   const findings = [];
   if (!contract || typeof contract !== "object") {
@@ -212,12 +223,16 @@ export function validateNarrationQualityContract(contract) {
   if (contract.schema !== NARRATION_QUALITY_CONTRACT_SCHEMA) {
     findings.push({ code: "narration_quality_contract_schema_invalid" });
   }
-  if (![NARRATION_QUALITY_CONTRACT_VERSION, PRIOR_NARRATION_QUALITY_CONTRACT_VERSION_R3, PRIOR_NARRATION_QUALITY_CONTRACT_VERSION, LEGACY_NARRATION_QUALITY_CONTRACT_VERSION]
+  if (![NARRATION_QUALITY_CONTRACT_VERSION, PRIOR_NARRATION_QUALITY_CONTRACT_VERSION_R4, PRIOR_NARRATION_QUALITY_CONTRACT_VERSION_R3, PRIOR_NARRATION_QUALITY_CONTRACT_VERSION, LEGACY_NARRATION_QUALITY_CONTRACT_VERSION]
     .includes(contract.version)) {
     findings.push({ code: "narration_quality_contract_version_invalid" });
   }
   if (contract.contract_sha256 !== narrationQualityContractSha256(contract)) {
     findings.push({ code: "narration_quality_contract_hash_invalid" });
+  }
+  if (contract.version === NARRATION_QUALITY_CONTRACT_VERSION
+    && !narrationUsesAutomatedAsrAcceptance(contract)) {
+    findings.push({ code: "narration_quality_automated_asr_mode_missing" });
   }
   if (contract.edge_editing?.amplitude_only_trimming_forbidden !== true) {
     findings.push({ code: "narration_quality_amplitude_only_trim_not_forbidden" });
@@ -231,7 +246,8 @@ export function validateNarrationQualityContract(contract) {
   if (contract.text_ir?.exact_transformation_ledger_required !== true) {
     findings.push({ code: "narration_quality_transform_ledger_not_required" });
   }
-  if (contract.version === NARRATION_QUALITY_CONTRACT_VERSION) {
+  if ([NARRATION_QUALITY_CONTRACT_VERSION, PRIOR_NARRATION_QUALITY_CONTRACT_VERSION_R4].includes(contract.version)) {
+    const automatedAcceptance = narrationUsesAutomatedAsrAcceptance(contract);
     if (contract.text_ir?.exact_text_receipt_chain_required !== true
       || contract.text_ir?.spoken_text_lineage_schema !== "goldflow_spoken_text_lineage_v1") {
       findings.push({ code: "narration_quality_exact_text_lineage_not_required" });
@@ -248,7 +264,8 @@ export function validateNarrationQualityContract(contract) {
       findings.push({ code: "narration_quality_chapter_prosody_spine_not_required" });
     }
     if (contract.pronunciation_qa?.exact_spoken_text_preview_required !== true
-      || contract.pronunciation_qa?.subjective_sampling_for_unresolved_risks !== true) {
+      || contract.pronunciation_qa?.subjective_sampling_for_unresolved_risks
+        !== !automatedAcceptance) {
       findings.push({ code: "narration_quality_pronunciation_preview_not_required" });
     }
     if (contract.edge_editing?.spectral_edge_diagnostics_required !== true
@@ -270,7 +287,17 @@ export function validateNarrationQualityContract(contract) {
       "climax",
       "final_minute",
     ];
-    if (contract.subjective_review?.hash_bound_sampling_manifest_required !== true
+    if (automatedAcceptance) {
+      if (contract.subjective_review?.hash_bound_sampling_manifest_required !== false
+        || contract.subjective_review?.exact_audio_attestation_required !== false
+        || contract.delivery_qa?.confirm_any_unit_transcript_difference !== true
+        || contract.delivery_qa?.final_stream_verification_required !== true
+        || contract.delivery_qa?.full_stream_dual_asr_on_any_difference !== true
+        || contract.delivery_qa?.hard_block_trailing_deletion_run !== 1
+        || contract.delivery_qa?.hard_block_opening_deletion_run !== 1) {
+        findings.push({ code: "narration_quality_automated_asr_gate_invalid" });
+      }
+    } else if (contract.subjective_review?.hash_bound_sampling_manifest_required !== true
       || contract.subjective_review?.exact_audio_attestation_required !== true
       || contract.subjective_review?.repair_scope !== "exact_unit_only"
       || requiredSubjectiveCoverage.some((value) => !contract.subjective_review?.required_coverage?.includes(value))) {

@@ -109,6 +109,7 @@ import {
 } from "./lib/planner-provider-registry.mjs";
 import {
   narrationQualityContractForIdentity,
+  narrationUsesAutomatedAsrAcceptance,
 } from "./lib/narration-quality-contract.mjs";
 import {
   validateNarrationTextIr,
@@ -3163,7 +3164,8 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
         }
       }
     }
-    if (listenPacketCurrent && expectedListenCount > 0) {
+    if (!narrationUsesAutomatedAsrAcceptance(narrationQualityContract)
+      && listenPacketCurrent && expectedListenCount > 0) {
       const listenDecisionValidation = validateNarrationExactListenReviewDecision(
         listenPacket,
         listenDecision,
@@ -4435,6 +4437,12 @@ async function main() {
     assertCommandWorkflowRoute({ command: "run", subcommand: "status", script: "run-status.mjs", flags, episodeDir });
   }
   const mediaWorkflow = assertEpisodeWorkflowFlags(runIdentity, persistedRunIdentity ? flags : {});
+  if (mediaWorkflow.id === "true_crime_hybrid_proof_v1") {
+    const { trueCrimeProofStatus, formatTrueCrimeProofStatus } = await import("./lib/true-crime-proof-workflow.mjs");
+    const report = await trueCrimeProofStatus({ proofDir: episodeDir });
+    console.log(flags.format === "markdown" ? formatTrueCrimeProofStatus(report) : JSON.stringify(report, null, 2));
+    return;
+  }
   if (mediaWorkflow.id === "avatar_footage_pilot_v1") {
     const { pilotStatus, formatPilotStatus } = await import("./lib/avatar-pilot-workflow.mjs");
     const report = await pilotStatus(episodeDir);

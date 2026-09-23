@@ -470,6 +470,10 @@ export function commandStageFor(commandName, subcommandName, flags = {}, identit
     return /^(true|1|yes)$/i.test(String(flags["references-only"] ?? "")) ? "reference_generation" : "image_generation";
   }
   if (registry === PIPELINE_STAGE_REGISTRY && key === "imagegen fal") {
+    if (identity.visual_restart?.fork_at === "visual_reference_plan") {
+      return ["prepare-references", "billing-submit-reference", "billing-observe-reference", "dispatch-references", "observe-references"].includes(String(flags.action ?? ""))
+        ? "reference_generation" : "image_generation";
+    }
     return ["prepare-validation", "billing-submit", "billing-observe", "dispatch-validation", "observe-validation", "review-validation"].includes(String(flags.action ?? ""))
       ? "reference_image_approval" : "image_generation";
   }
@@ -761,8 +765,13 @@ export function buildStageCommand(stageId, identity = {}, options = {}) {
   }
   if (identity.image_provider === "fal_ai") {
     Object.assign(commands, {
-      reference_image_approval: `node bin/goldflow.mjs imagegen fal ${base} --action prepare-validation`,
-      image_generation: `node bin/goldflow.mjs imagegen fal ${base} --action prepare-bulk --image-ids all`,
+      ...(identity.visual_restart?.fork_at === "visual_reference_plan" ? {
+        reference_generation: `node bin/goldflow.mjs imagegen fal ${base} --action prepare-references`,
+        image_generation: `node bin/goldflow.mjs imagegen fal ${base} --action prepare-validation`,
+      } : {
+        reference_image_approval: `node bin/goldflow.mjs imagegen fal ${base} --action prepare-validation`,
+        image_generation: `node bin/goldflow.mjs imagegen fal ${base} --action prepare-bulk --image-ids all`,
+      }),
     });
   }
   return options.override ?? commands[stageId] ?? null;

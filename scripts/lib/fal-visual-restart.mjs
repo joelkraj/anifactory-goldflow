@@ -12,8 +12,8 @@ export const FAL_VISUAL_FILES = Object.freeze([
   "transition_edit_plan_ep_01.json",
 ]);
 function need(value, message) { if (!value) throw new Error(message); }
-const providerLock = key => /^(image_|explicit_image_|style_reference_|reference_provider_pool$|scene_provider_pool$|reference_model$|reference_image_provider$|creative_submission_attempts$)/.test(key);
-const mediaVisual = key => /image|reference_concurrency/.test(key);
+const providerLock = key => /^(image_|explicit_image_|style_reference_|reference_provider_pool$|scene_provider_pool$|reference_model$|reference_image_provider$|google_flow_|google_gemini_|chatgpt_web_(image_|fallback_)|federated_|chatgpt_image_|creative_submission_attempts$)/.test(key);
+const mediaVisual = key => /image|reference_concurrency/.test(key) || /^(google_flow_|google_gemini_|federated_google_|hybrid_web_flow_)/.test(key);
 
 export async function validateFalContract(contract) {
   need(contract?.schema === "goldflow_fal_image_contract_v1", "Fal image contract schema is required.");
@@ -29,7 +29,7 @@ export async function validateFalContract(contract) {
   return contract;
 }
 
-export function createFalRestartIdentity({ baseline, targetDir, week, contract, git, receiptSha256, baselineIdentitySha256, createdAt }) {
+export function createFalRestartIdentity({ baseline, targetDir, week, contract, git, receiptSha256, baselineIdentitySha256, createdAt, forkAt = null }) {
   // Fal may use the first OpenArt restart as its approved visual-plan baseline,
   // but it never changes or consumes that run's generated frame receipts.
   need(baseline?.schema === "goldflow_run_identity_v2" && baseline.run_intent === "production", "Fal restart requires a production identity.");
@@ -43,7 +43,7 @@ export function createFalRestartIdentity({ baseline, targetDir, week, contract, 
     for (const key of Object.keys(next.production_profile_config.media)) if (mediaVisual(key)) delete next.production_profile_config.media[key];
     Object.assign(next.production_profile_config.media, { default_image_provider: "fal_ai", image_concurrency: contract.production_concurrency, reference_concurrency: contract.validation_concurrency });
   }
-  next.visual_restart = { schema: RESTART_SCHEMA, provider: "fal_ai", receipt_path: path.join(targetDir, "visual_restart_receipt.json"), receipt_sha256: receiptSha256, baseline_episode_dir: baseline.episode_dir, baseline_identity_sha256: baselineIdentitySha256, historical_visuals_policy: "immutable_excluded_from_fal_production", approved_visual_plan_carryforward: true };
+  next.visual_restart = { schema: RESTART_SCHEMA, provider: "fal_ai", receipt_path: path.join(targetDir, "visual_restart_receipt.json"), receipt_sha256: receiptSha256, baseline_episode_dir: baseline.episode_dir, baseline_identity_sha256: baselineIdentitySha256, historical_visuals_policy: "immutable_excluded_from_fal_production", approved_visual_plan_carryforward: forkAt !== "visual_reference_plan", ...(forkAt ? { fork_at: forkAt } : {}) };
   next.stage_checklist = stageChecklistFor(next);
   need(objectHash(nonvisualIdentityBinding(next)) === objectHash(nonvisualIdentityBinding(baseline)), "Fal restart altered a nonvisual contract.");
   return next;
@@ -62,9 +62,10 @@ export async function falRestartBaselineState({ episodeDir, identity }) {
     for (const row of receipt.files ?? []) {
       need(await fileSha256(row.source_path) === row.sha256 && await fileSha256(path.join(episodeDir, row.relative_path)) === row.sha256, `Fal carryforward changed: ${row.relative_path}`);
     }
-    for (const name of [...requiredBaselineFiles(identity.episode), ...FAL_VISUAL_FILES, "fal/catalog.json"]) need((receipt.files ?? []).some(row => row.relative_path === name), `Fal carryforward missing ${name}.`);
+    const earlyReferenceFork = binding.fork_at === "visual_reference_plan";
+    for (const name of [...requiredBaselineFiles(identity.episode), ...(earlyReferenceFork ? [] : [...FAL_VISUAL_FILES, "fal/catalog.json"])]) need((receipt.files ?? []).some(row => row.relative_path === name), `Fal carryforward missing ${name}.`);
     const stageStates = Object.fromEntries(statuses.filter(row => row.stage !== "run_identity").map(row => [row.stage, { done: true, ...(row.state === "skipped_with_waiver" ? { state: row.state } : {}), evidence: "Exact approved baseline carryforward" }]));
-    Object.assign(stageStates, {
+    if (!earlyReferenceFork) Object.assign(stageStates, {
       visual_reference_plan: { done: true, evidence: "Approved provider-neutral visual reference plan carried by hash" },
       reference_plan_approval: { done: true, evidence: "Operator-authorized Fal reuse of the approved provider-neutral reference plan" },
       reference_generation: { done: true, evidence: `Approved local canonical bank reused (${contract.reference_bank_manifest_sha256.slice(0, 12)})` },

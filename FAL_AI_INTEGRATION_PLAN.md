@@ -4,6 +4,8 @@
 
 Add Fal as a guarded production provider for generated manhwa visuals while preserving the existing global reference bank, OpenArt assets, Gemini history, approved scripts, narration, timing, and Goldflow workflow controls.
 
+For a new episode without approved reference or prompt assets, the early Fal fork begins after the exact script, narration, timing, audio mix, and visual beats pass in a clean planning baseline. The Fal attempt has a separate immutable identity and resumes at `visual_reference_plan`. It generates its own selected canonical references through Fal, reusing the approved universal Joey image only as an identity source where relevant. It then approves those exact references, authors and hardens this episode's prompts, validates eight representative collage shots, and dispatches the remaining frames. The planning baseline never submits images. Do not carry Gambler's Eye locations, props, or supporting-character identities into a different story universe merely because names or semantic roles overlap.
+
 Use direct Fal model endpoints through `genmedia` or `@fal-ai/client`. Do not depend on Fal Agent for production dispatch.
 
 Primary production configuration:

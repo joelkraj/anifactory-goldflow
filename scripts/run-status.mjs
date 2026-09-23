@@ -4765,7 +4765,9 @@ async function main() {
       Object.assign(validationByStage, falBaseline.stageStates);
       const { falProductionStageStates } = await import("./lib/fal-production-state.mjs");
       const fal = await falProductionStageStates({ episodeDir, identity: runIdentity });
-      const ownedStages = new Set(["reference_image_approval", "image_generation"]);
+      const ownedStages = runIdentity.visual_restart?.fork_at === "visual_reference_plan"
+        ? new Set(["reference_generation", "image_generation"])
+        : new Set(["reference_image_approval", "image_generation"]);
       for (const [stageId, state] of Object.entries(fal.stageStates ?? {})) {
         if (!ownedStages.has(stageId)) throw new Error(`Fal adapter cannot replace native ${stageId} gate.`);
         validationByStage[stageId] = state;

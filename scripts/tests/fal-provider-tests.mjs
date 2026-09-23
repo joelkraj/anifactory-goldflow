@@ -2,6 +2,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { buildFalImageInput, FAL_ENDPOINTS, FAL_PRIMARY_PARAMS } from "../lib/fal-provider.mjs";
 import { falBlockedStageRecoveryAdmission } from "../lib/fal-production-state.mjs";
+import { falProductionStageStates } from "../lib/fal-production-state.mjs";
+import { normalizeImageProvider } from "../lib/image-provider-routing.mjs";
+import { buildStageCommand, commandStageFor } from "../lib/pipeline-stage-registry.mjs";
+import { mkdtemp, rm } from "node:fs/promises";
+import path from "node:path";
+import os from "node:os";
 
 test("Fal text request locks low quality 1920x1080 PNG", () => {
   const request = buildFalImageInput({ prompt: "one frame" });
@@ -35,4 +41,29 @@ test("Fal blocked-stage recovery admits only the exact status action", () => {
   const transportStatus = { ...status, next_command_shape: "node bin/goldflow.mjs imagegen fal --episode-dir /tmp/ep --action recover-holds --directives <file> --confirm-spend exact_fal_transport_recovery" };
   assert.equal(falBlockedStageRecoveryAdmission(transportStatus, { action: "recover-holds" }).allowed, true);
   assert.equal(falBlockedStageRecoveryAdmission({ ...status, current_stage_state: "missing" }, { action: "observe-holds" }).applicable, false);
+});
+
+test("early Fal visual fork routes reference and scene generations through guarded Fal actions", () => {
+  const identity = {
+    channel: "53rebirth", series_slug: "years-taken", week: "test-fal", episode: "ep_01",
+    episode_dir: "/tmp/test-fal/episodes/ep_01", image_provider: "fal_ai",
+    visual_restart: { fork_at: "visual_reference_plan" },
+    model_versions: { image_model: FAL_ENDPOINTS.primary_edit, reference_model: FAL_ENDPOINTS.primary_text },
+    production_profile_config: { media: { image_concurrency: 10, reference_concurrency: 8 } },
+  };
+  assert.equal(normalizeImageProvider("fal_ai"), "fal_ai");
+  assert.match(buildStageCommand("reference_generation", identity), /imagegen fal .*--action prepare-references/);
+  assert.match(buildStageCommand("image_generation", identity), /imagegen fal .*--action prepare-validation/);
+  assert.equal(commandStageFor("imagegen", "fal", { action: "billing-submit-reference" }, identity), "reference_generation");
+  assert.equal(commandStageFor("imagegen", "fal", { action: "review-validation" }, identity), "image_generation");
+});
+
+test("early Fal visual fork begins with reference preparation before validation", async () => {
+  const episodeDir = await mkdtemp(path.join(os.tmpdir(), "goldflow-fal-early-"));
+  try {
+    const state = await falProductionStageStates({ episodeDir, identity: { visual_restart: { fork_at: "visual_reference_plan" } } });
+    assert.match(state.stageStates.reference_generation.next_command_shape, /--action prepare-references/);
+    assert.match(state.stageStates.image_generation.next_command_shape, /--action prepare-validation/);
+    assert.equal("reference_image_approval" in state.stageStates, false);
+  } finally { await rm(episodeDir, { recursive: true, force: true }); }
 });

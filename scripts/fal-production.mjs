@@ -19,7 +19,76 @@ async function context(f){
   need(identity.image_provider==="fal_ai","Fal production requires a Fal-locked identity.");
   const root=path.join(episodeDir,"fal"); return {episodeDir,identity,root,identityHash:await falFileSha256(path.join(episodeDir,"run_identity.json")),contract:identity.image_provider_options.fal};
 }
+async function prepareReferences(ctx){
+  need(ctx.identity.visual_restart?.fork_at==="visual_reference_plan","Native Fal reference generation requires the early reference fork.");
+  const plan=await read(path.join(ctx.episodeDir,"visual_reference_plan.json"));
+  need(plan.status==="passed"&&Array.isArray(plan.reference_targets),"Approved visual reference plan is required.");
+  const bank=await read(ctx.contract.reference_bank_manifest);
+  const joey=bank.assets?.find(row=>row.asset_id==="gf.global.character.joey_manhwa"&&row.approval_state==="approved");
+  need(joey?.local_absolute_path&&joey?.sha256&&await falFileSha256(joey.local_absolute_path)===joey.sha256,"Shared canonical Joey identity is unavailable or changed.");
+  const targets=plan.reference_targets.filter(row=>row.required_before_imagegen===true||row.generation_mode==="standalone_ref");
+  need(targets.length>0,"No standalone canonical references were selected.");
+  const assignments=[];
+  for(const target of targets){
+    const id=String(target.ref_id??"");need(/^[a-z0-9][a-z0-9_-]{1,100}$/.test(id),`Unsafe reference ID: ${id}`);
+    const output=target.conditioning_image_path??target.reference_image_path;
+    need(path.isAbsolute(output??"")&&output.startsWith(`${ctx.episodeDir}${path.sep}assets${path.sep}images${path.sep}references${path.sep}`),`Fal reference output is outside this attempt: ${id}`);
+    const prompt=String(target.prompt_anchor??"").trim();need(prompt.length>60,`Fal reference prompt is missing: ${id}`);
+    const joeyIdentity=target.kind==="character_state"&&(/(^|[_-])joey([_-]|$)/i.test(id)||/\bJoey Manhwa\b/i.test(target.subject??""));
+    const source=joeyIdentity?{asset_id:joey.asset_id,asset_class:joey.asset_class,path:joey.local_absolute_path,sha256:joey.sha256}:null;
+    const core={image_id:id,ref_id:id,endpoint:source?FAL_ENDPOINTS.primary_edit:FAL_ENDPOINTS.primary_text,prompt,prompt_sha256:digest(prompt),run_identity_sha256:ctx.identityHash,reference_mode:source?"separate_ordered_references":"text_only",reference_asset_ids:source?[source.asset_id]:[],reference_hashes:source?[source.sha256]:[],board_path:source?.path??null,board_sha256:source?.sha256??null,board_manifest_path:null,max_cost_usd:1.0,asset_class:target.kind,subject:target.subject??null};
+    const assignment={...core,assignment_sha256:falObjectSha256(JSON.stringify(core)),submission_receipt_path:path.join(ctx.root,"reference","submission-receipts",`${id}.json`),result_receipt_path:path.join(ctx.root,"reference","result-receipts",`${id}.json`),output_path:output,upload_receipt_path:path.join(ctx.root,"reference","upload-receipts",`${id}.json`)};
+    const assignmentPath=path.join(ctx.root,"reference","assignments",`${id}.json`);await write(assignmentPath,assignment);assignments.push({...assignment,assignment_path:assignmentPath});
+  }
+  const referencePlan={schema:"goldflow_fal_reference_plan_v1",created_at:new Date().toISOString(),run_identity_sha256:ctx.identityHash,visual_reference_plan_sha256:await falFileSha256(path.join(ctx.episodeDir,"visual_reference_plan.json")),model:FAL_ENDPOINTS.primary_text,quality:"low",width:1920,height:1080,format:"png",concurrency:ctx.contract.production_concurrency,assignments};
+  await write(path.join(ctx.root,"reference-plan.json"),referencePlan);
+  return {status:"prepared",count:assignments.length,reused_canonical_joey:assignments.filter(row=>row.reference_asset_ids.includes(joey.asset_id)).length};
+}
+async function nativePromptReferences(ctx,row,approval){
+  const requirements=[...(row.reference_requirements??[])].sort((a,b)=>Number(a.slot_order??99)-Number(b.slot_order??99)).slice(0,4);
+  const refs=[];
+  for(const ref of requirements){
+    const id=String(ref.ref_id??"");const localPath=ref.reference_image_path??ref.conditioning_image_path;
+    need(id&&path.isAbsolute(localPath??""),`Fal prompt reference is missing an exact local path: ${row.image_id}`);
+    const sha256=approval.reference_hash_by_ref_id?.[id];
+    need(/^[a-f0-9]{64}$/.test(sha256??"")&&await falFileSha256(localPath)===sha256,`Fal prompt reference is not hash-approved: ${row.image_id}/${id}`);
+    refs.push({asset_id:`gf.${ctx.identity.series_slug.replace(/-/g,"_")}.${String(ref.kind??"asset").replace(/[^a-z0-9_]/g,"_")}.${id}`,asset_class:ref.kind??"asset",path:localPath,sha256});
+  }
+  return refs;
+}
+function chooseNativeValidationRows(rows){
+  const eligible=rows.filter(row=>row.image_generation_required!==false);
+  need(eligible.length>=8,"Fal validation needs at least eight distinct production shots.");
+  const chosen=[],used=new Set();
+  const pick=predicate=>{const row=eligible.find(item=>!used.has(item.image_id)&&predicate(item));if(row){used.add(row.image_id);chosen.push(row);}};
+  pick(()=>true);
+  pick(row=>(row.reference_requirements??[]).filter(ref=>ref.kind==="character_state").length>=2);
+  pick(row=>/\b(?:father|dad|Dylan|Nolan)\b/i.test(row.provider_prompt??""));
+  pick(row=>/\bMara\b/i.test(row.provider_prompt??""));
+  pick(row=>/\b(?:Silas|Bell|Rook)\b/i.test(row.provider_prompt??""));
+  pick(row=>/\b(?:wrist|hand|year|blue number)\b/i.test(row.provider_prompt??"")&&/close|detail|insert/i.test(row.sequence_grammar?.shot_size??row.provider_prompt??""));
+  pick(row=>/wide|establish/i.test(row.sequence_grammar?.shot_size??row.suggested_shot_job??""));
+  pick(row=>(row.reference_requirements??[]).length>=4);
+  for(const row of eligible)if(chosen.length<8&&!used.has(row.image_id)){used.add(row.image_id);chosen.push(row);}
+  return chosen;
+}
 async function prepare(ctx){
+  if(ctx.identity.visual_restart?.fork_at==="visual_reference_plan"){
+    const hardened=await read(path.join(ctx.episodeDir,"section_image_prompts_hardened.json"));const approval=await read(path.join(ctx.episodeDir,`visual_reference_approval_${ctx.identity.episode}.json`));
+    need(approval.status==="approved", "Fal validation requires approved canonical references.");
+    const assignments=[];
+    for(const row of chooseNativeValidationRows(hardened.prompts)){
+      const refs=await nativePromptReferences(ctx,row,approval);
+      const board=refs.length?await buildReferenceBoard({root:ctx.root,imageId:row.image_id,references:refs}):null;
+      const basePrompt=row.provider_prompt??row.image_prompt;need(basePrompt,`Fal validation prompt missing: ${row.image_id}`);
+      const prompt=board?`${basePrompt}\n\n${referenceBoardPromptGuidance(board)}`:basePrompt;
+      const core={image_id:row.image_id,endpoint:board?FAL_ENDPOINTS.primary_edit:FAL_ENDPOINTS.primary_text,prompt,prompt_sha256:digest(prompt),run_identity_sha256:ctx.identityHash,reference_mode:board?"one_positional_collage":"text_only",reference_asset_ids:refs.map(r=>r.asset_id),reference_hashes:refs.map(r=>r.sha256),board_path:board?.output_path??null,board_sha256:board?.output_sha256??null,board_manifest_path:board?.manifest_path??null,max_cost_usd:1.0};
+      const assignment={...core,assignment_sha256:falObjectSha256(JSON.stringify(core)),submission_receipt_path:path.join(ctx.root,"submission-receipts",`${row.image_id}.json`),result_receipt_path:path.join(ctx.root,"result-receipts",`${row.image_id}.json`),output_path:path.join(ctx.root,"validation-results",`${row.image_id}.png`),upload_receipt_path:path.join(ctx.root,"upload-receipts",`${row.image_id}.json`),checks:["identity consistency","hands","prop fidelity","composition","unwanted text"]};
+      const assignmentPath=path.join(ctx.root,"validation-assignments",`${row.image_id}.json`);await write(assignmentPath,assignment);assignments.push({...assignment,assignment_path:assignmentPath});
+    }
+    const plan={schema:"goldflow_fal_validation_plan_v1",created_at:new Date().toISOString(),run_identity_sha256:ctx.identityHash,source_prompt_plan_sha256:await falFileSha256(path.join(ctx.episodeDir,"section_image_prompts_hardened.json")),model:FAL_ENDPOINTS.primary_edit,quality:"low",width:1920,height:1080,format:"png",normal_reference_mode:"one_positional_collage",concurrency:8,assignments};
+    await write(path.join(ctx.root,"validation-plan.json"),plan);return {status:"prepared",count:assignments.length,image_ids:assignments.map(row=>row.image_id)};
+  }
   const catalog=await read(path.join(ctx.root,"catalog.json")); const bank=await read(ctx.contract.reference_bank_manifest);
   const approved=new Map(bank.assets.filter(row=>row.approval_state==="approved").map(row=>[row.asset_id,row])); const assignments=[];
   for(const shot of catalog.validation_shots){
@@ -38,17 +107,28 @@ async function prepareBulk(ctx,f){
   const requested=String(f["image-ids"]??"all").split(",").filter(Boolean); const wanted=requested[0]==="all"?null:new Set(requested);
   const rows=prompts.prompts.filter(row=>row.image_generation_required!==false&&(!wanted||wanted.has(row.image_id))); need(rows.length,"No requested Fal bulk images found.");
   const assignments=[];
+  const nativeFal=ctx.identity.visual_restart?.fork_at==="visual_reference_plan";
+  const approval=nativeFal?await read(path.join(ctx.episodeDir,`visual_reference_approval_${ctx.identity.episode}.json`)):null;
+  const validation=nativeFal?await read(path.join(ctx.root,"validation-plan.json")):null;
+  const validationReview=nativeFal?await read(path.join(ctx.root,"validation-review.json")):null;
   for(const row of rows){
-    const refs=(row.reference_bindings??[]).slice(0,4).map(ref=>({asset_id:ref.asset_id,asset_class:ref.asset_class,path:ref.portable_file?.path??ref.path,sha256:ref.portable_file?.sha256??ref.sha256}));
+    const refs=nativeFal?await nativePromptReferences(ctx,row,approval):(row.reference_bindings??[]).slice(0,4).map(ref=>({asset_id:ref.asset_id,asset_class:ref.asset_class,path:ref.portable_file?.path??ref.path,sha256:ref.portable_file?.sha256??ref.sha256}));
     need(refs.every(ref=>ref.path&&ref.sha256),`Portable reference binding missing for ${row.image_id}.`);
     const board=refs.length?await buildReferenceBoard({root:path.join(ctx.root,"bulk"),imageId:row.image_id,references:refs}):null;
     const basePrompt=row.provider_prompt??row.image_prompt??row.canonical_prompt; need(basePrompt,`Prompt missing for ${row.image_id}.`);
     const prompt=board?`${basePrompt}\n\n${referenceBoardPromptGuidance(board)}`:basePrompt;
     const core={image_id:row.image_id,endpoint:board?FAL_ENDPOINTS.primary_edit:FAL_ENDPOINTS.primary_text,prompt,prompt_sha256:digest(prompt),run_identity_sha256:ctx.identityHash,reference_mode:board?"one_positional_collage":"text_only",reference_asset_ids:refs.map(r=>r.asset_id),reference_hashes:refs.map(r=>r.sha256),board_path:board?.output_path??null,board_sha256:board?.output_sha256??null,board_manifest_path:board?.manifest_path??null,max_cost_usd:0.05,start_sec:row.start_sec,duration_sec:row.duration_sec};
+    const acceptedValidation=validation?.assignments?.find(item=>item.image_id===row.image_id&&validationReview?.approved_ids?.includes(item.image_id));
+    if(acceptedValidation){
+      need(acceptedValidation.prompt_sha256===core.prompt_sha256&&acceptedValidation.board_sha256===core.board_sha256&&JSON.stringify(acceptedValidation.reference_hashes)===JSON.stringify(core.reference_hashes),`Accepted Fal validation shot changed before bulk reuse: ${row.image_id}`);
+      need(await fs.access(acceptedValidation.result_receipt_path).then(()=>true,()=>false),`Accepted Fal validation result is missing: ${row.image_id}`);
+      assignments.push({...acceptedValidation,reused_validation_shot:true,start_sec:row.start_sec,duration_sec:row.duration_sec});
+      continue;
+    }
     const assignment={...core,assignment_sha256:falObjectSha256(JSON.stringify(core)),submission_receipt_path:path.join(ctx.root,"bulk","submission-receipts",`${row.image_id}.json`),result_receipt_path:path.join(ctx.root,"bulk","result-receipts",`${row.image_id}.json`),output_path:path.join(ctx.root,"bulk","outputs",`${row.image_id}.png`),upload_receipt_path:path.join(ctx.root,"bulk","upload-receipts",`${row.image_id}.json`)};
     const assignmentPath=path.join(ctx.root,"bulk","assignments",`${row.image_id}.json`);await write(assignmentPath,assignment);assignments.push({...assignment,assignment_path:assignmentPath});
   }
-  const projectedBase=Number((assignments.length*0.00441).toFixed(4)); need(projectedBase<=ctx.contract.hard_budget_usd,"Projected Fal base cost exceeds the locked episode hard budget.");
+  const projectedBase=Number((assignments.filter(row=>!row.reused_validation_shot).length*0.00441).toFixed(4)); need(projectedBase<=ctx.contract.hard_budget_usd,"Projected Fal base cost exceeds the locked episode hard budget.");
   const plan={schema:"goldflow_fal_bulk_plan_v1",created_at:new Date().toISOString(),run_identity_sha256:ctx.identityHash,model:FAL_ENDPOINTS.primary_edit,quality:"low",width:1920,height:1080,format:"png",reference_mode:"one_positional_collage",concurrency:ctx.contract.production_concurrency,assignment_count:assignments.length,projected_base_cost_usd:projectedBase,pricing_note:"Official endpoint base price at preparation; input-image token charges may increase actual cost.",assignments};
   await write(path.join(ctx.root,"bulk-plan.json"),plan);return {status:"prepared",count:assignments.length,projected_base_cost_usd:projectedBase};
 }
@@ -56,6 +136,22 @@ async function submitRows(ctx,rows,limit){return mapLimit(rows,limit,async row=>
 async function observeRows(ctx,rows,limit){return mapLimit(rows,limit,async row=>{const receipt=await read(row.submission_receipt_path);try{return await observeFalImage({endpoint:receipt.endpoint,requestId:receipt.request_id,outputPath:row.output_path,receiptPath:row.result_receipt_path});}catch(error){if(Number(error?.status)>=500||/Gateway Timeout|Internal Server Error/i.test(error?.message??"")){const holdPath=path.join(path.dirname(path.dirname(row.result_receipt_path)),"transport-holds",`${row.image_id}.json`);if(!await fs.access(holdPath).then(()=>true,()=>false))await write(holdPath,{schema:"goldflow_fal_transport_hold_v1",created_at:new Date().toISOString(),image_id:row.image_id,endpoint:receipt.endpoint,request_id:receipt.request_id,assignment_sha256:row.assignment_sha256,provider_queue_status:"unknown_or_completed",reason:"provider_5xx_during_observation",billable_request_resubmitted:false});return {complete:false,transport_pending:true,request_id:receipt.request_id,hold_path:holdPath};}if(error?.status!==422)throw error;const failurePath=path.join(path.dirname(path.dirname(row.result_receipt_path)),"failure-receipts",`${row.image_id}.json`);const failure={schema:"goldflow_fal_exact_failure_v1",created_at:new Date().toISOString(),image_id:row.image_id,endpoint:receipt.endpoint,request_id:receipt.request_id,assignment_sha256:row.assignment_sha256,error_status:error.status,error_type:error.body?.detail?.[0]?.type??"unprocessable_entity",error_message:error.body?.detail?.[0]?.msg??error.message,automatic_retry:false,automatic_failover:false};await write(failurePath,failure);return {complete:false,failed:true,failure_path:failurePath};}});}
 async function main(){
  const f=flags(process.argv.slice(2)); const ctx=await context(f); const action=f.action;
+ if(action==="prepare-references") return console.log(JSON.stringify(await prepareReferences(ctx),null,2));
+ if(action==="billing-submit-reference"||action==="billing-observe-reference"){
+   const plan=await read(path.join(ctx.root,"reference-plan.json"));const row=plan.assignments.find(item=>item.image_id===f["image-id"]);need(row,`Unknown exact Fal reference probe: ${f["image-id"]}`);
+   if(action==="billing-submit-reference"){
+     need(f["confirm-spend"]==="exact_fal_reference_probe","Paid Fal reference probe requires exact confirmation token.");
+     need(!await fs.access(row.submission_receipt_path).then(()=>true,()=>false),"Fal reference probe is already submitted.");
+     const result=await submitRows(ctx,[row],1);return console.log(JSON.stringify({status:"submitted",image_id:row.image_id,request_id:result[0].request_id},null,2));
+   }
+   const result=await observeRows(ctx,[row],1);return console.log(JSON.stringify({status:result[0].complete?"complete":"pending",image_id:row.image_id,result:result[0]},null,2));
+ }
+ if(action==="dispatch-references"){
+   need(f["confirm-spend"]==="exact_fal_reference_batch","Paid reference dispatch requires exact confirmation token.");const plan=await read(path.join(ctx.root,"reference-plan.json"));const limit=Math.min(Number(f.limit??100),100);need(Number.isInteger(limit)&&limit>0,"Reference limit must be 1..100.");const rows=[];for(const row of plan.assignments)if(!await fs.access(row.submission_receipt_path).then(()=>true,()=>false)){rows.push(row);if(rows.length===limit)break;}const result=await submitRows(ctx,rows,ctx.contract.production_concurrency);return console.log(JSON.stringify({status:"submitted",count:result.length},null,2));
+ }
+ if(action==="observe-references"){
+   const plan=await read(path.join(ctx.root,"reference-plan.json"));const rows=[];for(const row of plan.assignments)if(await fs.access(row.submission_receipt_path).then(()=>true,()=>false)&&!await fs.access(row.result_receipt_path).then(()=>true,()=>false))rows.push(row);const result=await observeRows(ctx,rows,ctx.contract.production_concurrency);return console.log(JSON.stringify({status:result.every(r=>r.complete)?"complete":"pending",checked:result.length,complete:result.filter(r=>r.complete).length,pending:result.filter(r=>!r.complete).length},null,2));
+ }
  if(action==="prepare-validation") return console.log(JSON.stringify(await prepare(ctx),null,2));
  if(action==="prepare-bulk") return console.log(JSON.stringify(await prepareBulk(ctx,f),null,2));
  if(action==="dispatch-bulk"){
@@ -95,7 +191,7 @@ async function main(){
  if(action==="billing-observe"){const result=await observeRows(ctx,[plan.assignments[0]],1);return console.log(JSON.stringify({status:result[0].complete?"complete":"pending",result},null,2));}
  if(action==="dispatch-validation"){need(f["confirm-spend"]==="exact_fal_validation_set","Paid validation requires exact confirmation token.");const rows=[];for(const row of plan.assignments.slice(1))if(!await fs.access(row.submission_receipt_path).then(()=>true,()=>false))rows.push(row);return console.log(JSON.stringify({status:"submitted",count:(await submitRows(ctx,rows,8)).length},null,2));}
  if(action==="observe-validation"){const rows=[];for(const row of plan.assignments)if(!await fs.access(row.result_receipt_path).then(()=>true,()=>false))rows.push(row);const result=await observeRows(ctx,rows,8);return console.log(JSON.stringify({status:result.every(r=>r.complete)?"complete":"pending",complete:result.filter(r=>r.complete).length,pending:result.filter(r=>!r.complete).length},null,2));}
- if(action==="review-validation"){const approved=String(f["approve-ids"]??"").split(",").filter(Boolean),rejected=String(f["reject-ids"]??"").split(",").filter(Boolean);need(f.reviewer&&f.note,"Review requires reviewer and note.");need(approved.length+rejected.length===8&&new Set([...approved,...rejected]).size===8,"Review must disposition all eight exact IDs.");const critical=[plan.assignments[0].image_id,"openart-validation-four-person-roulette-v1","openart-validation-wide-grand-salon-v1"];const status=approved.length>=7&&critical.every(id=>approved.includes(id))?"passed":"failed";const review={schema:"goldflow_fal_validation_review_v1",created_at:new Date().toISOString(),reviewer:f.reviewer,note:f.note,status,approved_ids:approved,rejected_ids:rejected,criteria:["identity consistency","hands","prop fidelity","casino detail","composition","unwanted text"],minor_cosmetic_differences_accepted:true};await write(path.join(ctx.root,"validation-review.json"),review);return console.log(JSON.stringify(review,null,2));}
+ if(action==="review-validation"){const approved=String(f["approve-ids"]??"").split(",").filter(Boolean),rejected=String(f["reject-ids"]??"").split(",").filter(Boolean);need(f.reviewer&&f.note,"Review requires reviewer and note.");need(approved.length+rejected.length===8&&new Set([...approved,...rejected]).size===8,"Review must disposition all eight exact IDs.");const nativeFal=ctx.identity.visual_restart?.fork_at==="visual_reference_plan";const critical=nativeFal?[plan.assignments[0].image_id]:[plan.assignments[0].image_id,"openart-validation-four-person-roulette-v1","openart-validation-wide-grand-salon-v1"];const status=approved.length>=7&&critical.every(id=>approved.includes(id))?"passed":"failed";const review={schema:"goldflow_fal_validation_review_v1",created_at:new Date().toISOString(),reviewer:f.reviewer,note:f.note,status,approved_ids:approved,rejected_ids:rejected,criteria:nativeFal?["identity consistency","hands","prop fidelity","environment detail","composition","unwanted text"]:["identity consistency","hands","prop fidelity","casino detail","composition","unwanted text"],minor_cosmetic_differences_accepted:true};await write(path.join(ctx.root,"validation-review.json"),review);return console.log(JSON.stringify(review,null,2));}
  throw new Error(`Unsupported Fal action: ${action}`);
 }
 main().catch(error=>{console.error(error.message);process.exitCode=1;});

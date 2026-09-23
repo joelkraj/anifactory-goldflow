@@ -92,6 +92,31 @@ assert.equal(legacyResult[0].evidence_basis, undefined);
 assert.throws(() => validateConfirmedRetryEvidenceForTests({ ...args,
   evidence: { ...evidence, evidence_basis: undefined } }));
 
+const automated = structuredClone(args);
+automated.requestedUnitIds = ["u51"];
+automated.evidence = {
+  ...evidence,
+  evidence_basis: "reviewed_automated_delivery_qa",
+  authorization_origin: "user_authorized_autonomous_asr_qa",
+  operator_quote: undefined,
+  confirmed_units: [{
+    ...first.evidence, defect_type: "delivery",
+    selected_qa_sha256: canonicalQwenBatchSha256(first.prior.selected_qa),
+  }],
+};
+assert.equal(validateConfirmedRetryEvidenceForTests(automated)[0].evidence_basis,
+  "reviewed_automated_delivery_qa");
+for (const mutate of [
+  (copy) => { copy.evidence.confirmed_units[0].selected_qa_sha256 = hash("0"); },
+  (copy) => { copy.evidence.confirmed_units[0].reviewed_blocker_codes = []; },
+  (copy) => { copy.evidence.authorization_origin = "unknown"; },
+  (copy) => { copy.priorReport.results[0].attempt = 2; },
+]) {
+  const copy = structuredClone(automated);
+  mutate(copy);
+  assert.throws(() => validateConfirmedRetryEvidenceForTests(copy));
+}
+
 const provenance = exactUnitRecoveryProvenanceForTests({
   unit: { unit_id: "u51", spoken_text_sha256: hash("3") },
   candidate: { ...first.prior, qa: first.prior.selected_qa },

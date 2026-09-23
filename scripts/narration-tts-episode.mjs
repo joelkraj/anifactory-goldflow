@@ -469,7 +469,8 @@ export function exactUnitRecoveryProvenanceForTests({
   )].map(String).sort();
   const triggerCodes = confirmedDefect
     ? [`${confirmedEvidenceBasis === "operator_authorized_asr_consensus"
-      ? "operator_authorized_asr_consensus" : "operator_confirmed"}_${String(confirmedDefect).toLowerCase()}`]
+      ? "operator_authorized_asr_consensus" : confirmedEvidenceBasis === "reviewed_automated_delivery_qa"
+        ? "reviewed_automated_delivery_qa" : "operator_confirmed"}_${String(confirmedDefect).toLowerCase()}`]
     : automaticCodes;
   if (!triggerCodes.length) {
     throw new Error(
@@ -486,7 +487,7 @@ export function exactUnitRecoveryProvenanceForTests({
     trigger_codes: triggerCodes,
     candidate_qa: candidate.qa ?? null,
     confirmed_evidence_sha256: confirmedEvidenceSha256,
-    ...(["operator_authorized_asr_consensus", "operator_confirmed_pronunciation"].includes(confirmedEvidenceBasis)
+    ...(["operator_authorized_asr_consensus", "operator_confirmed_pronunciation", "reviewed_automated_delivery_qa"].includes(confirmedEvidenceBasis)
       ? { evidence_basis: confirmedEvidenceBasis,
         human_listening_performed: confirmedEvidenceBasis === "operator_confirmed_pronunciation" } : {}),
   };
@@ -507,7 +508,7 @@ export function exactUnitRecoveryProvenanceForTests({
     trigger_evidence_sha256: canonicalQwenBatchSha256(triggerEvidence),
     confirmed_evidence_path: confirmedEvidencePath,
     confirmed_evidence_sha256: confirmedEvidenceSha256,
-    ...(["operator_authorized_asr_consensus", "operator_confirmed_pronunciation"].includes(confirmedEvidenceBasis)
+    ...(["operator_authorized_asr_consensus", "operator_confirmed_pronunciation", "reviewed_automated_delivery_qa"].includes(confirmedEvidenceBasis)
       ? { evidence_basis: confirmedEvidenceBasis,
         human_listening_performed: confirmedEvidenceBasis === "operator_confirmed_pronunciation" } : {}),
   };
@@ -545,7 +546,8 @@ export function validateConfirmedRetryEvidenceForTests({
   }
   const operatorAsrBasis = evidence.evidence_basis === "operator_authorized_asr_consensus";
   const pronunciationBasis = evidence.evidence_basis === "operator_confirmed_pronunciation";
-  const explicitException = operatorAsrBasis || pronunciationBasis;
+  const automatedBasis = evidence.evidence_basis === "reviewed_automated_delivery_qa";
+  const explicitException = operatorAsrBasis || pronunciationBasis || automatedBasis;
   if (evidence.evidence_basis != null && !explicitException
     && evidence.evidence_basis !== "human_listening") {
     throw new Error("Unsupported confirmed retry evidence basis.");
@@ -555,7 +557,7 @@ export function validateConfirmedRetryEvidenceForTests({
     || (pronunciationBasis
       ? evidence.attestation !== "operator_heard_pronunciation_in_exact_selected_audio"
       : evidence.attestation != null)
-    || !String(evidence.operator_quote ?? "").trim()
+    || (!automatedBasis && !String(evidence.operator_quote ?? "").trim())
     || String(evidence.operator_reason ?? "").trim().length < 40
     || !String(evidence.authorized_by ?? "").trim()
     || !Number.isFinite(Date.parse(evidence.authorized_at))
@@ -571,8 +573,14 @@ export function validateConfirmedRetryEvidenceForTests({
     || priorReport.narration_generation_plan_file_sha256 !== planFileSha256)) {
     throw new Error("Explicit retry exception requires current source/plan/report bindings, authorization and its exact listening evidence basis.");
   }
+  if (automatedBasis && (evidence.attestation != null
+    || evidence.authorization_origin !== "user_authorized_autonomous_asr_qa"
+    || (priorReport.blockers ?? []).length === 0)) {
+    throw new Error("Reviewed automated delivery retry requires user-authorized ASR QA and an exact blocked report.");
+  }
   const allowedDefects = new Set(pronunciationBasis ? ["pronunciation"] : operatorAsrBasis
-    ? ["truncation", "unexpected_words"] : ["skip", "truncation", "stutter"]);
+    ? ["truncation", "unexpected_words"] : automatedBasis
+      ? ["delivery"] : ["skip", "truncation", "stutter"]);
   const evidenceRows = Array.isArray(evidence.confirmed_units)
     ? evidence.confirmed_units
     : [];
@@ -606,7 +614,7 @@ export function validateConfirmedRetryEvidenceForTests({
       throw new Error(`Confirmed retry evidence does not cover requested unit: ${unitId}`);
     }
     if (!allowedDefects.has(String(row.defect_type ?? "").toLowerCase())
-      || !String(operatorAsrBasis ? row.evidence_note ?? "" : row.listen_note ?? "").trim()) {
+      || !String(operatorAsrBasis || automatedBasis ? row.evidence_note ?? "" : row.listen_note ?? "").trim()) {
       throw new Error(
         `Confirmed retry evidence for ${unitId} must record defect_type `
         + (operatorAsrBasis
@@ -664,6 +672,17 @@ export function validateConfirmedRetryEvidenceForTests({
         throw new Error(`Operator-authorized ASR retry lacks exact independently confirmed current blocker evidence for ${unitId}.`);
       }
     }
+    if (automatedBasis) {
+      const reportCodes = (priorReport.blockers ?? [])
+        .filter((finding) => finding.unit_id === unitId)
+        .map((finding) => finding.code).sort();
+      const reviewedCodes = [...(row.reviewed_blocker_codes ?? [])].sort();
+      if (!reportCodes.length || JSON.stringify(reportCodes) !== JSON.stringify(reviewedCodes)
+        || row.selected_qa_sha256 !== canonicalQwenBatchSha256(prior.selected_qa)
+        || (priorReport.results ?? []).some((result) => result.unit_id === unitId && result.qa_status === "passed")) {
+        throw new Error(`Reviewed automated delivery retry lacks exact blocked QA evidence for ${unitId}.`);
+      }
+    }
     const current = (currentCandidates ?? []).find((candidate) => {
       const candidateIdentitySha256 = candidate
         ?.selected_report_synthesis_identity_sha256
@@ -706,6 +725,12 @@ export function validateConfirmedRetryEvidenceForTests({
         human_listening_performed: false,
         reviewed_blocker_codes: row.reviewed_blocker_codes,
         selected_delivery_qa_sha256: row.selected_delivery_qa_sha256,
+      } : {}),
+      ...(automatedBasis ? {
+        evidence_basis: "reviewed_automated_delivery_qa",
+        human_listening_performed: false,
+        reviewed_blocker_codes: row.reviewed_blocker_codes,
+        selected_qa_sha256: row.selected_qa_sha256,
       } : {}),
       ...(pronunciationBasis ? {
         evidence_basis: "operator_confirmed_pronunciation",
@@ -4005,6 +4030,8 @@ async function main() {
       status: validatedConfirmedRetryEvidence.every((row) => (
         row.evidence_basis === "operator_authorized_asr_consensus"
       )) ? "validated_against_operator_authorized_asr_consensus"
+        : validatedConfirmedRetryEvidence.every((row) => row.evidence_basis === "reviewed_automated_delivery_qa")
+          ? "validated_against_reviewed_automated_delivery_qa"
         : validatedConfirmedRetryEvidence.every((row) => row.evidence_basis === "operator_confirmed_pronunciation")
           ? "validated_against_operator_confirmed_pronunciation"
         : "validated_against_confirmed_listen_evidence",

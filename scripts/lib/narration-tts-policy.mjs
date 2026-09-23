@@ -163,19 +163,30 @@ export function narrationTtsRetryReportPolicy({
     evidence_sha256: row.confirmed_evidence_sha256,
     human_listening_performed: true,
   }));
+  const reviewedAutomatedRepairs = recoveryProvenances.filter((row) => (
+    row?.evidence_basis === "reviewed_automated_delivery_qa"
+      && row.human_listening_performed === false
+  )).map((row) => ({
+    unit_id: row.unit_id, trigger_codes: row.trigger_codes,
+    evidence_path: row.confirmed_evidence_path,
+    evidence_sha256: row.confirmed_evidence_sha256,
+    human_listening_performed: false,
+  }));
   return {
     provider,
     same_voice_reference_required: true,
     exact_unit_only: true,
     maximum_creative_submissions_per_invocation: 1,
     maximum_attempts_per_unit_across_explicit_repair_invocations: 2,
-    retry_only_confirmed_skip_truncation_or_stutter: !pronunciationExceptions.length && !operatorAsrExceptions.some((row) => (
+    retry_only_confirmed_skip_truncation_or_stutter: !pronunciationExceptions.length && !reviewedAutomatedRepairs.length && !operatorAsrExceptions.some((row) => (
       row.trigger_codes?.includes("operator_authorized_asr_consensus_unexpected_words")
     )),
     ...(operatorAsrExceptions.length
       ? { operator_authorized_asr_consensus_exceptions: operatorAsrExceptions } : {}),
     ...(pronunciationExceptions.length
       ? { operator_confirmed_pronunciation_exceptions: pronunciationExceptions } : {}),
+    ...(reviewedAutomatedRepairs.length
+      ? { reviewed_automated_delivery_repairs: reviewedAutomatedRepairs } : {}),
     automatic_retry_limited_to_failed_empty_or_objectively_truncated_audio: false,
     other_acoustic_or_voice_identity_blockers_require_review: true,
     uncertain_asr_findings_are_warning_only: true,

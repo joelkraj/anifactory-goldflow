@@ -115,6 +115,7 @@ import {
   validateNarrationTextIr,
 } from "./lib/narration-text-ir.mjs";
 import {
+  narrationSynthesisIdentitySha256,
   validateNarrationProviderOutputManifest,
 } from "./lib/narration-provider-adapter.mjs";
 import {
@@ -2502,6 +2503,85 @@ async function synthesizedNarrationArtifactsComplete({
         if (!matchingRecoveryRunner) {
           add(`unit ${planned.unit_id} exact-unit recovery runner provenance is missing or stale`);
         }
+      } else if (mode === "exact_sentence_boundary_composite_v1") {
+        const provenance = result.recovery_provenance;
+        const request = provenance?.request_path
+          ? await readJson(provenance.request_path, null) : null;
+        const repair = provenance?.result_path
+          ? await readJson(provenance.result_path, null) : null;
+        const priorManifestPath = provenance?.request_path
+          ? path.join(path.dirname(provenance.request_path), "prior_manifest.json") : null;
+        const priorManifest = priorManifestPath
+          ? await readJson(priorManifestPath, null) : null;
+        const priorUnit = (priorManifest?.units ?? []).find(
+          (row) => row.unit_id === planned.unit_id);
+        const requestedUnit = (request?.units ?? []).find(
+          (row) => row.unit_id === planned.unit_id);
+        const repairedUnit = (repair?.units ?? []).find(
+          (row) => row.unit_id === planned.unit_id);
+        let valid = provenance?.schema === "goldflow_tts_exact_boundary_repair_provenance_v1"
+          && synthesisIdentity.schema === "goldflow_tts_exact_boundary_composite_identity_v1"
+          && result.synthesis_identity_sha256
+            === narrationSynthesisIdentitySha256(synthesisIdentity)
+          && request?.schema === "goldflow_tts_exact_boundary_repair_request_v1"
+          && repair?.schema === "goldflow_tts_exact_boundary_repair_result_v1"
+          && request?.request_sha256 === provenance.request_sha256
+          && request?.request_sha256 === canonicalQwenBatchSha256(
+            Object.fromEntries(Object.entries(request).filter(([key]) => key !== "request_sha256")))
+          && request?.request_sha256 === repair?.request_sha256
+          && request?.request_sha256 === synthesisIdentity.request_sha256
+          && provenance?.result_sha256 === await fileSha256(provenance.result_path)
+          && request?.prior_manifest_file_sha256 === await fileSha256(priorManifestPath)
+          && request?.prior_report_file_sha256 === await fileSha256(
+            path.join(path.dirname(provenance.request_path), "prior_report.json"))
+          && request?.prior_delivery_file_sha256 === await fileSha256(
+            path.join(path.dirname(provenance.request_path), "prior_delivery.json"))
+          && request?.prior_manifest_sha256 === priorManifest?.manifest_sha256
+          && request?.plan_sha256 === plan?.plan_sha256
+          && request?.model_id === policy.primary.model_id
+          && request?.model_revision === policy.primary.model_revision
+          && request?.voice_id === policy.primary.voice_id
+          && request?.voice_sha256 === policy.primary.voice_sha256
+          && requestedUnit?.spoken_text === planned.spoken_text
+          && requestedUnit?.spoken_text_sha256 === planned.spoken_text_sha256
+          && requestedUnit?.fragments?.join(" ") === planned.spoken_text
+          && requestedUnit?.fragments?.length >= 2
+          && requestedUnit?.prior_audio_sha256 === priorUnit?.audio_sha256
+          && requestedUnit?.prior_synthesis_identity_sha256
+            === priorUnit?.synthesis_identity_sha256
+          && synthesisIdentity.prior_audio_sha256 === priorUnit?.audio_sha256
+          && synthesisIdentity.prior_synthesis_identity_sha256
+            === priorUnit?.synthesis_identity_sha256
+          && repairedUnit?.audio_sha256 === result.audio_sha256
+          && repairedUnit?.audio_sha256 === synthesisIdentity.composite_audio_sha256
+          && repairedUnit?.audio_path === result.audio_path
+          && repairedUnit?.fragments?.length === requestedUnit?.fragments?.length
+          && await fileSha256(repairedUnit?.audio_path) === repairedUnit.audio_sha256;
+        if (valid) {
+          for (const [partIndex, fragment] of repairedUnit.fragments.entries()) {
+            const expectedText = requestedUnit.fragments[partIndex];
+            const identityPart = synthesisIdentity.fragments?.[partIndex];
+            if (fragment.text !== expectedText
+              || fragment.text_sha256 !== sha256(expectedText)
+              || fragment.audio_sha256 !== identityPart?.audio_sha256
+              || fragment.sidecar_sha256 !== identityPart?.sidecar_sha256
+              || fragment.text_sha256 !== identityPart?.text_sha256
+              || fragment.model_id !== policy.primary.model_id
+              || fragment.model_revision !== policy.primary.model_revision
+              || fragment.voice_id !== policy.primary.voice_id
+              || fragment.voice_sha256 !== policy.primary.voice_sha256
+              || fragment.token_limit_reached === true
+              || !Number.isFinite(Number(fragment.generated_token_count))
+              || Number(fragment.generated_token_count) < 0
+              || Number(fragment.generated_token_count) >= 1200
+              || await fileSha256(fragment.audio_path) !== fragment.audio_sha256
+              || await fileSha256(fragment.sidecar_path) !== fragment.sidecar_sha256) {
+              valid = false;
+              break;
+            }
+          }
+        }
+        if (!valid) add(`unit ${planned.unit_id} exact-boundary composite provenance is missing or stale`);
       } else {
         add(`unit ${planned.unit_id} selected synthesis mode ${mode ?? "missing"} is not allowed by the batch-four contract`);
       }

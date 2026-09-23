@@ -115,6 +115,28 @@ test("Fal bulk status nominates exact failure repair before more dispatch", asyn
   } finally { await rm(episodeDir, { recursive: true, force: true }); }
 });
 
+test("Fal transport hold gets a no-spend original-request recheck first", async () => {
+  const episodeDir = await mkdtemp(path.join(os.tmpdir(), "goldflow-fal-hold-"));
+  try {
+    const root = path.join(episodeDir, "fal");
+    const holdDir = path.join(root, "bulk", "transport-holds");
+    await mkdir(holdDir, { recursive: true });
+    const assignment = { image_id: "one", submission_receipt_path: path.join(root, "one-submission.json"),
+      result_receipt_path: path.join(root, "one-result.json") };
+    await writeFile(path.join(root, "bulk-plan.json"), JSON.stringify({ assignments: [assignment], concurrency: 10 }));
+    await writeFile(path.join(root, "validation-review.json"), JSON.stringify({ status: "passed", approved_ids: [] }));
+    await writeFile(assignment.submission_receipt_path, "{}");
+    await writeFile(path.join(holdDir, "one.json"), "{}");
+    let state = await falProductionStageStates({ episodeDir, identity: {} });
+    assert.match(state.stageStates.image_generation.next_command_shape, /--action observe-holds/);
+    const recheckDir = path.join(root, "bulk", "hold-observation-receipts");
+    await mkdir(recheckDir, { recursive: true });
+    await writeFile(path.join(recheckDir, "one.json"), "{}");
+    state = await falProductionStageStates({ episodeDir, identity: {} });
+    assert.match(state.stageStates.image_generation.next_command_shape, /--action recover-holds/);
+  } finally { await rm(episodeDir, { recursive: true, force: true }); }
+});
+
 test("Fal canonical assets retain stable provider-neutral Goldflow IDs", () => {
   assert.equal(falPortableAssetId("years-taken", { ref_id: "joey_manhwa_clinic_state", kind: "character_state" }),
     "gf.years_taken.character_state.joey_manhwa_clinic_state");

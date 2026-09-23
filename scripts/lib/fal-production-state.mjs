@@ -141,8 +141,11 @@ export async function falProductionStageStates({ episodeDir, identity } = {}) {
     }
     else if (heldUnresolved.some(Boolean)) {
       const recoverySubmitted = await Promise.all(bulk.assignments.map(row => exists(path.join(root,"bulk","transport-recovery-submission-receipts",`${row.image_id}.json`))));
+      const holdRechecked = await Promise.all(bulk.assignments.map(row => exists(path.join(root,"bulk","hold-observation-receipts",`${row.image_id}.json`))));
       bulkState = recoverySubmitted.some((value,index)=>value&&heldUnresolved[index]&&!transportRecoveryResults[index])
         ? { state: "blocked", evidence: `${heldUnresolved.filter(Boolean).length} exact Fal transport recoveries are pending`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action observe-transport-recovery` }
+        : heldUnresolved.some((value,index)=>value&&!holdRechecked[index])
+          ? { state: "blocked", evidence: `${heldUnresolved.filter(Boolean).length} exact Fal transport holds need a no-spend original-request recheck`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action observe-holds` }
         : { state: "blocked", evidence: `${heldUnresolved.filter(Boolean).length} completed Fal requests have persistently unavailable result transport`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action recover-holds --directives <absolute_transport_recovery_directives.json> --confirm-spend exact_fal_transport_recovery` };
     }
     else if (failedUnresolved.some(Boolean)) {

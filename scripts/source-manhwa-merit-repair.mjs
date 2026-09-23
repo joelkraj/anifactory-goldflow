@@ -57,7 +57,7 @@ EXACT SCRIPT:\n${script}`;
 const responsePath = `${outputPath}.merit-patch-response.txt`;
 const existing = await fs.readFile(responsePath, "utf8").catch(() => "");
 const result = existing.trim()
-  ? { provider: "chatgpt_web_reused_response", model: "gpt-5.6-sol", reasoning_effort: "max", bridge_receipt_path: null }
+  ? { provider: "chatgpt_web_reused_response", model: "gpt-6-sol", reasoning_effort: "max", bridge_receipt_path: null }
   : await runChatGptWebPlanner({
       prompt,
       outputPath: responsePath,

@@ -99,7 +99,7 @@ The desktop host pairs itself with the control plane. The dashboard displays the
 export ANIFACTORY_LLM_ROUTE=chatgpt-web
 export ANIFACTORY_CHATGPT_WEB_URL=http://127.0.0.1:4317/v1
 export ANIFACTORY_CHATGPT_WEB_TOKEN='<runtime admin token>'
-export ANIFACTORY_CHATGPT_WEB_MODEL=gpt-5.6-sol
+export ANIFACTORY_CHATGPT_WEB_MODEL=gpt-6-sol
 node bin/goldflow.mjs run advance --episode-dir /absolute/path/to/episode
 ```
 

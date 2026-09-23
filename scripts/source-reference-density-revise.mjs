@@ -264,7 +264,7 @@ if (!suppliedRevisionResponsePath) {
     repoRoot,
     outputPath: revisionResponsePath,
     provider,
-    model: "gpt-5.6-sol",
+    model: "gpt-6-sol",
     reasoningEffort: "max",
     timeoutMs: Number(flags["timeout-ms"] ?? 3_600_000),
   });
@@ -292,7 +292,7 @@ if (words > 10_500 && words <= 11_000) {
       repoRoot,
       outputPath: trimResponsePath,
       provider,
-      model: "gpt-5.6-sol",
+      model: "gpt-6-sol",
       reasoningEffort: "max",
       timeoutMs: Number(flags["timeout-ms"] ?? 3_600_000),
     });

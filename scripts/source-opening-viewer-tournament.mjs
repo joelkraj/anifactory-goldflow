@@ -138,7 +138,7 @@ const tournamentRun = await mapWithConcurrency(personas, concurrency, async (per
       order: persona.order,
       output_path: outputPath,
       provider: "chatgpt_web",
-      model: "gpt-5.6-sol",
+      model: "gpt-6-sol",
       receipt_path: null,
       duration_ms: null,
       reused: true,

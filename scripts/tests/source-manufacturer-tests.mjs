@@ -35,11 +35,11 @@ assert.throws(() => validateDirectorNotes({ incumbent_sha256: "stale", instructi
 assert.throws(() => validateDirectorNotes({ incumbent_sha256: sha, instructions: " " }, sha), /nonempty/);
 assert.throws(() => validateDirectorNotes({ incumbent_sha256: sha, instructions: "x".repeat(6001) }, sha), /compact/);
 const candidateSpecs = [
-  ["draft_56_1", "candidate_a", "gpt-5.6-sol"],
+  ["draft_56_1", "candidate_a", "gpt-6-sol"],
   ["draft_55_1", "candidate_b", "gpt-5.5"],
-  ["draft_56_2", "candidate_c", "gpt-5.6-sol"],
+  ["draft_56_2", "candidate_c", "gpt-6-sol"],
   ["draft_55_2", "candidate_d", "gpt-5.5"],
-  ["draft_56_3", "candidate_e", "gpt-5.6-sol"],
+  ["draft_56_3", "candidate_e", "gpt-6-sol"],
   ["draft_55_3", "candidate_f", "gpt-5.5"],
 ].map(([id, blind_id, model]) => ({ id, blind_id, model, provider: "chatgpt_web" }));
 
@@ -190,20 +190,20 @@ const selection = {
 assert.equal(validateManufacturingSelection(selection, { portfolio }).done, true);
 
 const currentPolicy = sourceWriterPolicy();
-assert.equal(currentPolicy.name, "three_56_pro_v1");
+assert.equal(currentPolicy.name, "three_6_sol_pro_v1");
 assert.deepEqual(currentPolicy.candidates.map((row) => row.id), ["draft_56_1", "draft_56_2", "draft_56_3"]);
-assert.ok(currentPolicy.candidates.every((row) => row.model === "gpt-5.6-sol"));
+assert.ok(currentPolicy.candidates.every((row) => row.model === "gpt-6-sol"));
 const gpt6Policy = sourceWriterPolicy(null, "six_56_6_pro_v1");
 assert.equal(gpt6Policy.candidates.length, 6);
-assert.equal(gpt6Policy.candidates.filter((row) => row.model === "gpt-6-astra").length, 3);
-assert.equal(gpt6Policy.candidates.filter((row) => row.model === "gpt-5.6-sol").length, 3);
+assert.equal(gpt6Policy.candidates.filter((row) => row.model === "gpt-6-astra").length, 0);
+assert.equal(gpt6Policy.candidates.filter((row) => row.model === "gpt-6-sol").length, 6);
 assert.ok(gpt6Policy.candidates.every((row) => row.model !== "gpt-5.5"));
 assert.equal(new Set(gpt6Policy.candidates.map((row) => row.blind_id)).size, 6);
 assert.throws(() => sourceWriterPolicy({ writer_policy: "six_56_6_pro_v1" }, "three_56_pro_v1"), /does not match/);
 assert.throws(() => sourceWriterPolicy(null, "unknown"), /Unknown writer policy/);
 assert.equal(sourceWriterPolicy(portfolio).candidates.length, 6, "historical six-draft portfolios stay readable");
 const currentPortfolio = { ...portfolio, writer_policy: currentPolicy.name,
-  candidates: portfolio.candidates.filter((row) => row.model === "gpt-5.6-sol") };
+  candidates: portfolio.candidates.filter((row) => row.model === "gpt-6-sol") };
 assert.equal(validateManufacturingPortfolio(currentPortfolio, { expectedCandidates: currentPolicy.candidates }).done, true);
 assert.equal(validateManufacturingPortfolio(portfolio, { expectedCandidates: currentPolicy.candidates }).done, false);
 const currentSelection = { ...selection, rankings: selection.rankings
@@ -217,12 +217,12 @@ assert.throws(() => improvementEfforts("pro"), /only medium or high/);
 assert.throws(() => improvementEfforts("medium,max"), /only medium or high/);
 
 const recoveredText = "An intact narration returned by the existing writer.";
-const recoveredManifest = { runId: "fixture", jobs: [{ id: "draft_56_1", kind: "llm", prompt: "Exact prompt", model: "gpt-5.6-sol", effort: "max" }] };
+const recoveredManifest = { runId: "fixture", jobs: [{ id: "draft_56_1", kind: "llm", prompt: "Exact prompt", model: "gpt-6-sol", effort: "max" }] };
 const recoveredReceipt = { schema: "goldflow_chatgpt_job_receipt_v1", runId: "fixture", jobId: "draft_56_1",
-  kind: "llm", status: "completed", promptSha256: sha256Text("Exact prompt"), model: "gpt-5.6-sol", effort: "max",
+  kind: "llm", status: "completed", promptSha256: sha256Text("Exact prompt"), model: "gpt-6-sol", effort: "max",
   artifacts: [{ kind: "text", path: "/tmp/draft.txt", sha256: sha256Text(recoveredText), bytes: Buffer.byteLength(recoveredText) }] };
 const recovery = { manifest: recoveredManifest, receipt: recoveredReceipt, text: recoveredText,
-  prompt: "Exact prompt", model: "gpt-5.6-sol", effort: "max" };
+  prompt: "Exact prompt", model: "gpt-6-sol", effort: "max" };
 assert.equal(validateRecoveredDraft(recovery).sha256, sha256Text(recoveredText));
 assert.throws(() => validateRecoveredDraft({ ...recovery, text: recoveredText + "changed" }), /immutable browser artifact/);
 assert.throws(() => validateRecoveredDraft({ ...recovery, prompt: "Different prompt" }), /manifest/);

@@ -54,7 +54,7 @@ export const PLANNER_PROVIDER_REGISTRY = Object.freeze({
     id: "codex_cli",
     role: "local_execution_and_reconciliation",
     transport: "codex_cli",
-    default_model: "gpt-5.6-sol",
+    default_model: "gpt-6-sol",
     environment: Object.freeze(["ANIFACTORY_CODEX_CLI_PATH", "CODEX_CLI_PATH"]),
   }),
   antigravity_cli: Object.freeze({
@@ -75,7 +75,7 @@ export const PLANNER_PROVIDER_REGISTRY = Object.freeze({
     id: "chatgpt_web",
     role: "premium_creative_planning",
     transport: "goldflow_studio_or_authenticated_browser",
-    default_model: "gpt-5.6-sol",
+    default_model: "gpt-6-sol",
     environment: Object.freeze(["ANIFACTORY_CHATGPT_WEB_URL", "ANIFACTORY_CHATGPT_WEB_TOKEN"]),
   }),
   local_qwen: Object.freeze({

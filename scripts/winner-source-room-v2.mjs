@@ -2710,7 +2710,7 @@ async function scriptFirstClassV4() {
     + `\n\nBINDING WRITER PACKET SHA256: ${room.writerPacket.sha256}. Write 9500-10500 words. Output narration prose only.`;
   const gpt56ResponsePaths = commaSeparatedPaths(flags["gpt56-response-paths"] ?? flags["gpt-response-paths"]);
   const gpt55ResponsePaths = commaSeparatedPaths(flags["gpt55-response-paths"]);
-  const responsePathFor = (spec, indexWithinModel) => spec.model === "gpt-5.6-sol"
+  const responsePathFor = (spec, indexWithinModel) => spec.model === "gpt-6-sol"
     ? gpt56ResponsePaths[indexWithinModel] ?? null
     : gpt55ResponsePaths[indexWithinModel] ?? null;
   const modelIndexes = new Map();

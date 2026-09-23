@@ -236,7 +236,7 @@ export async function createStudioServer(options = {}) {
       ANIFACTORY_LLM_ROUTE: "chatgpt-web",
       ANIFACTORY_CHATGPT_WEB_URL: `http://${host}:${actualPort}/v1`,
       ANIFACTORY_CHATGPT_WEB_TOKEN: adminToken,
-      ANIFACTORY_CHATGPT_WEB_MODEL: "gpt-5.6-sol",
+      ANIFACTORY_CHATGPT_WEB_MODEL: "gpt-6-sol",
       ANIFACTORY_CHATGPT_WEB_REASONING_EFFORT: expectedUiContract.effort_label.toLowerCase(),
     };
   }

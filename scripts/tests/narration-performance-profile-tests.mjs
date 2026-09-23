@@ -214,7 +214,7 @@ try {
     const passedPath = path.join(callDir, `${oldPackets[0].packet_id}.json`);
     const passedBytes = responseFor(oldPackets[0], 0);
     const passedMetadata = JSON.stringify({
-      status: "passed", provider: "codex_cli", model: "gpt-5.6-sol",
+      status: "passed", provider: "codex_cli", model: "gpt-6-sol",
       reasoning_effort: "medium", stage_name: "narration_performance",
       prompt_sha256: oldPackets[0].prompt_sha256,
     });
@@ -235,7 +235,7 @@ try {
     const recovered = await authorNarrationPerformanceDirection({
       atomicUnits: historyUnits, sourceScriptSha256: sourceHash,
       episodeDir: fixtureDir, repoRoot: fixtureDir,
-      contentProfile: documentary, provider: "codex_cli", model: "gpt-5.6-sol",
+      contentProfile: documentary, provider: "codex_cli", model: "gpt-6-sol",
       ...(historyKind === "blocked" ? {
         repairPacketIds: [oldPackets[1].packet_id], repairReason: "Reviewed only the historical failed packet.",
       } : {}),
@@ -245,7 +245,7 @@ try {
         assert.doesNotMatch(prompt, /Locked narration editorial contract/);
         const marker = JSON.parse(await fs.readFile(path.join(fixtureDir, "narration_editorial_contract.json"), "utf8"));
         assert.equal(marker.mode, "legacy_manhwa_prompt_v1");
-        return { content: responseFor(oldPackets[1], 1), provider: "codex_cli", model: "gpt-5.6-sol" };
+        return { content: responseFor(oldPackets[1], 1), provider: "codex_cli", model: "gpt-6-sol" };
       },
     });
     assert.equal(repairCalls, 1, "only the unresolved historical packet reaches the fixture planner");

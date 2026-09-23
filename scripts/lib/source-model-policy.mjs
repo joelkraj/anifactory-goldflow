@@ -11,7 +11,7 @@ import {
 
 export const SOURCE_MODEL_CONTRACT_SCHEMA = "goldflow_source_model_contract_v1";
 export const SOURCE_MODEL_PROVIDER = "chatgpt_web";
-export const SOURCE_MODEL_MODEL = "gpt-5.6-sol";
+export const SOURCE_MODEL_MODEL = "gpt-6-sol";
 export const SOURCE_MODEL_REASONING_EFFORT = "medium";
 export const SOURCE_MODEL_VISIBLE_EFFORT = "Medium";
 
@@ -20,7 +20,7 @@ export const SOURCE_DRAFT_CANDIDATE_SPECS = Object.freeze([
     id: "draft_56_velocity",
     blind_id: "candidate_a",
     provider: "chatgpt_web",
-    model: "gpt-5.6-sol",
+    model: "gpt-6-sol",
     reasoning_effort: "max",
     visible_effort: "Pro",
     transport: "authenticated_chatgpt_web",
@@ -30,7 +30,7 @@ export const SOURCE_DRAFT_CANDIDATE_SPECS = Object.freeze([
     id: "draft_56_relationship",
     blind_id: "candidate_c",
     provider: "chatgpt_web",
-    model: "gpt-5.6-sol",
+    model: "gpt-6-sol",
     reasoning_effort: "max",
     visible_effort: "Pro",
     transport: "authenticated_chatgpt_web",
@@ -40,7 +40,7 @@ export const SOURCE_DRAFT_CANDIDATE_SPECS = Object.freeze([
     id: "draft_56_strategy",
     blind_id: "candidate_e",
     provider: "chatgpt_web",
-    model: "gpt-5.6-sol",
+    model: "gpt-6-sol",
     reasoning_effort: "max",
     visible_effort: "Pro",
     transport: "authenticated_chatgpt_web",
@@ -50,7 +50,7 @@ export const SOURCE_DRAFT_CANDIDATE_SPECS = Object.freeze([
     id: "draft_55_velocity",
     blind_id: "candidate_b",
     provider: "chatgpt_web",
-    model: "gpt-5.5",
+    model: "gpt-6-sol",
     reasoning_effort: "max",
     visible_effort: "Pro",
     transport: "authenticated_chatgpt_web",
@@ -60,7 +60,7 @@ export const SOURCE_DRAFT_CANDIDATE_SPECS = Object.freeze([
     id: "draft_55_relationship",
     blind_id: "candidate_d",
     provider: "chatgpt_web",
-    model: "gpt-5.5",
+    model: "gpt-6-sol",
     reasoning_effort: "max",
     visible_effort: "Pro",
     transport: "authenticated_chatgpt_web",
@@ -70,7 +70,7 @@ export const SOURCE_DRAFT_CANDIDATE_SPECS = Object.freeze([
     id: "draft_55_strategy",
     blind_id: "candidate_f",
     provider: "chatgpt_web",
-    model: "gpt-5.5",
+    model: "gpt-6-sol",
     reasoning_effort: "max",
     visible_effort: "Pro",
     transport: "authenticated_chatgpt_web",

@@ -159,7 +159,7 @@ if (!frontier) {
     repoRoot,
     outputPath: rawPath,
     provider: frontierProvider,
-    model: frontierProvider === "gemini_web" ? "gemini-3.7-flash-web" : "gpt-5.6-sol",
+    model: frontierProvider === "gemini_web" ? "gemini-3.7-flash-web" : "gpt-6-sol",
     reasoningEffort: frontierProvider === "gemini_web" ? "high" : "max",
     timeoutMs: Number(flags["timeout-ms"] ?? 3_600_000),
   });
@@ -206,7 +206,7 @@ if (!diagnostic) {
       repoRoot,
       outputPath: rawPath,
       provider: diagnosticProvider,
-      model: diagnosticProvider === "gemini_web" ? "gemini-3.7-flash-web" : "gpt-5.6-sol",
+      model: diagnosticProvider === "gemini_web" ? "gemini-3.7-flash-web" : "gpt-6-sol",
       reasoningEffort: diagnosticProvider === "gemini_web" ? "high" : "max",
       timeoutMs: Number(flags["timeout-ms"] ?? 3_600_000),
     });

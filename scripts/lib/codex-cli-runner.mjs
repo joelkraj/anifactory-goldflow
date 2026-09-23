@@ -17,7 +17,7 @@ import {
 } from "./planner-provider-registry.mjs";
 import { plannerRouteFromRegistry } from "../../apps/goldflow-studio/lib/planning-route-registry.mjs";
 
-export const DEFAULT_CODEX_MODEL = "gpt-5.6-sol";
+export const DEFAULT_CODEX_MODEL = "gpt-6-sol";
 export const DEFAULT_CODEX_REASONING_EFFORT = "medium";
 export const MINIMUM_GPT56_CODEX_CLI = "0.144.0";
 export const ANTIGRAVITY_CLI_MAX_CONCURRENCY = 3;

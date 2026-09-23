@@ -292,8 +292,8 @@ for (const spec of SOURCE_DRAFT_CANDIDATE_SPECS) {
   assert.equal(validateSourceModelReceipt(receipt, { expectedContract: contract }).done, true);
   assert.equal(validateSourceModelReceipt({ ...receipt, transport: "wrong_transport" }, { expectedContract: contract }).done, false);
 }
-assert.equal(SOURCE_DRAFT_CANDIDATE_SPECS.filter((row) => row.model === "gpt-5.6-sol").length, 3);
-assert.equal(SOURCE_DRAFT_CANDIDATE_SPECS.filter((row) => row.model === "gpt-5.5").length, 3);
+assert.equal(SOURCE_DRAFT_CANDIDATE_SPECS.filter((row) => row.model === "gpt-6-sol").length, 6);
+assert.equal(SOURCE_DRAFT_CANDIDATE_SPECS.filter((row) => row.model === "gpt-5.5").length, 0);
 assert.equal(SOURCE_DRAFT_CANDIDATE_SPECS.filter((row) => row.provider === "chatgpt_web").length, 6);
 assert.equal(SOURCE_DRAFT_CANDIDATE_SPECS.filter((row) => row.reasoning_effort === "max").length, 6);
 assert.equal(SOURCE_DRAFT_CANDIDATE_SPECS.filter((row) => row.visible_effort === "Pro").length, 6);

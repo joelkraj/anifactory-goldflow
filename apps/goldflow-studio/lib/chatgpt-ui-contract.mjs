@@ -7,12 +7,12 @@ const EFFORT_LABELS = Object.freeze({
 });
 
 const MODEL_LABELS = Object.freeze({
-  "gpt-5.6-sol": "GPT-5.6 Sol",
+  "gpt-6-sol": "GPT-5.6 Sol",
   "gpt-5.5": "GPT-5.5",
 });
 
 export function chatGptModelLabel(model) {
-  const normalized = String(model ?? "gpt-5.6-sol").trim().toLowerCase();
+  const normalized = String(model ?? "gpt-6-sol").trim().toLowerCase();
   const label = MODEL_LABELS[normalized];
   if (!label) throw new Error(`Unsupported ChatGPT Web model: ${model}.`);
   return label;

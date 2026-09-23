@@ -74,7 +74,7 @@ export async function runChatGptWebPlanner({
   prompt,
   outputPath,
   workId,
-  model = "gpt-5.6-sol",
+  model = "gpt-6-sol",
   effort,
   projectUrl = null,
   timeoutMs = 1_200_000,

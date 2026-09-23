@@ -185,7 +185,7 @@ ${candidate}`;
   const result = existingResponse.trim()
     ? {
         provider: "chatgpt_web_reused_response",
-        model: "gpt-5.6-sol",
+        model: "gpt-6-sol",
         reasoning_effort: "max",
         bridge_receipt_path: null,
       }

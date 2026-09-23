@@ -869,7 +869,7 @@ async function testServerAndRunner() {
     const completionPromise = jsonRequest(`${studio.url}/v1/chat/completions`, {
       method: "POST",
       token: studio.adminToken,
-      body: { model: "gpt-5.6-sol", messages: [{ role: "user", content: "Return TEST_OK." }], timeout_ms: 5_400_000, metadata: { stage_name: "server-test", reasoning_effort: "max" } },
+      body: { model: "gpt-6-sol", messages: [{ role: "user", content: "Return TEST_OK." }], timeout_ms: 5_400_000, metadata: { stage_name: "server-test", reasoning_effort: "max" } },
     });
     const lease = await waitForLease(studio.url, workerToken);
     assert.match(lease.job.prompt, /Return TEST_OK/);
@@ -891,12 +891,12 @@ async function testServerAndRunner() {
     const concurrentA = jsonRequest(`${studio.url}/v1/chat/completions`, {
       method: "POST",
       token: studio.adminToken,
-      body: { model: "gpt-5.6-sol", messages: [{ role: "user", content: "Return SLOT_A." }], metadata: { stage_name: "slot-a" } },
+      body: { model: "gpt-6-sol", messages: [{ role: "user", content: "Return SLOT_A." }], metadata: { stage_name: "slot-a" } },
     });
     const concurrentB = jsonRequest(`${studio.url}/v1/chat/completions`, {
       method: "POST",
       token: studio.adminToken,
-      body: { model: "gpt-5.6-sol", messages: [{ role: "user", content: "Return SLOT_B." }], metadata: { stage_name: "slot-b" } },
+      body: { model: "gpt-6-sol", messages: [{ role: "user", content: "Return SLOT_B." }], metadata: { stage_name: "slot-b" } },
     });
     const slotZeroLease = await waitForLease(studio.url, workerToken, ["llm"], 0);
     const slotOneLease = await waitForLease(studio.url, workerToken, ["llm"], 1);
@@ -915,7 +915,7 @@ async function testServerAndRunner() {
     process.env.ANIFACTORY_LLM_ROUTE = "chatgpt-web";
     process.env.ANIFACTORY_CHATGPT_WEB_URL = `${studio.url}/v1`;
     process.env.ANIFACTORY_CHATGPT_WEB_TOKEN = studio.adminToken;
-    process.env.ANIFACTORY_CHATGPT_WEB_MODEL = "gpt-5.6-sol";
+    process.env.ANIFACTORY_CHATGPT_WEB_MODEL = "gpt-6-sol";
     assert.equal(chatGptWebRouteEnabled(), true);
     const outputPath = path.join(temporaryRoot, "runner", "answer.txt");
     const runnerPromise = runCodexCli({ prompt: "Return RUNNER_OK.", stageName: "runner-test", repoRoot, outputPath, timeoutMs: 30_000 });
@@ -1059,7 +1059,7 @@ async function testDesktopHostContract() {
   assert.equal(chatGptEffortLabel("max"), "Pro");
   assert.equal(chatGptEffortSliderIndex("Pro"), 4);
   assert.equal(chatGptModelLabel("gpt-5.5"), "GPT-5.5");
-  assert.equal(chatGptModelLabel("gpt-5.6-sol"), "GPT-5.6 Sol");
+  assert.equal(chatGptModelLabel("gpt-6-sol"), "GPT-5.6 Sol");
   assert.equal(chatGptModelControlMatches("Model 5.5", "GPT-5.5"), true);
   assert.equal(chatGptModelControlMatches("Model GPT-5.6 Sol", "GPT-5.5"), false);
   assert.equal(chatGptUiContractForLlmJob({ account_plan: "Pro", model_label: "GPT-5.6 Sol", effort_label: "Medium" }, {

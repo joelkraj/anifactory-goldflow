@@ -1440,6 +1440,9 @@ async function finalQaComplete(episodeDir, episode, identity) {
     }
     return { done: false, state: status === "failed" ? "failed" : "blocked", evidence: `${path.basename(reportPath)} status=${status}` };
   }
+  if (status === "needs_review" && Array.isArray(report.blockers) && report.blockers.length === 0) {
+    return { done: false, state: "needs_review", evidence: `${path.basename(reportPath)} advisory findings require recorded review` };
+  }
   if (status !== "passed") return { done: false, state: status === "failed" ? "failed" : "blocked", evidence: `${path.basename(reportPath)} status=${status || "missing"}` };
   const finalVideoPath = report.final_video_path;
   const finalVideoHash = finalVideoPath ? await fileSha256(finalVideoPath) : null;

@@ -3744,7 +3744,8 @@ function sentenceCompleteUnitBoundaryIntegrity(units, enabled) {
         source_segment_ids: sourceSegmentIds,
       });
     }
-    if (!/^[\p{L}\p{N}"“‘(\[]/u.test(sourceText)) {
+    const startText = sourceText.replace(/^(?:\*\*|__)(?=[\p{L}\p{N}])/u, "");
+    if (!/^[\p{L}\p{N}"“‘(\[]/u.test(startText)) {
       blockers.push({
         code: "tts_unit_possible_mid_sentence_start",
         unit_id: unit?.unit_id ?? null,

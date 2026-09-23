@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn, spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -104,6 +105,17 @@ function enforceWorkflowGuard(commandName, subcommandName, scriptArgs) {
   const allowedStages = Array.isArray(result.allowed_command_stages)
     ? result.allowed_command_stages
     : [currentStage];
+  if (commandName === "voice" && subcommandName === "plan"
+    && currentStage === "voice_plan" && result.current_stage_state === "failed"
+    && !parsedFlags["performance-packet-ids"]
+    && String(result.next_command_shape ?? "").startsWith("node bin/goldflow.mjs voice plan ")) {
+    try {
+      const direction = JSON.parse(readFileSync(path.join(result.episode_dir, "narration_actionable_direction.json"), "utf8"));
+      const plan = JSON.parse(readFileSync(path.join(result.episode_dir, "narration_generation_plan.json"), "utf8"));
+      if (direction.status === "approved" && plan.status === "failed_repairable"
+        && direction.source_script_sha256 === plan.source_script_hash) return;
+    } catch { /* Retain the ordinary workflow guard on missing or malformed evidence. */ }
+  }
   if (commandName === "imagegen" && subcommandName === "openart" && parsedFlags.action === "triage") {
     const recovery = openartTriageAdmission(result, parsedFlags);
     if (!recovery.allowed) {

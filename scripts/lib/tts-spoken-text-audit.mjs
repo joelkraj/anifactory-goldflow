@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { hasTtsTerminalPunctuation } from "./tts-text-boundaries.mjs";
 
 export const TTS_SPOKEN_TEXT_AUDIT_SCHEMA = "goldflow_tts_spoken_text_audit_v1";
 
@@ -63,7 +64,7 @@ function isAtomicUnit(unit = {}) {
 }
 
 function hasTerminalPunctuation(value) {
-  return /[.!?…][\"'”’)}\]]*$/.test(String(value ?? "").trim());
+  return hasTtsTerminalPunctuation(String(value ?? "").trim());
 }
 
 function ordinaryItPronounAppears(sourceText) {

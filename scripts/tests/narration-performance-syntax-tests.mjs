@@ -5,6 +5,7 @@ import { extractNarrationPerformanceJsonForTests, narrationUnitHasTerminalPunctu
 test("scripted Unicode ellipsis ends an authored spoken unit", () => {
   assert.equal(narrationUnitHasTerminalPunctuationForTests("Then I look in there and…"), true);
   assert.equal(narrationUnitHasTerminalPunctuationForTests("“The business was gone. Dylan…”"), true);
+  assert.equal(narrationUnitHasTerminalPunctuationForTests("“What did you—”"), true);
   assert.equal(narrationUnitHasTerminalPunctuationForTests("an unfinished fragment"), false);
 });
 

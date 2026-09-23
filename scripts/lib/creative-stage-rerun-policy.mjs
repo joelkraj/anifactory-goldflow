@@ -281,6 +281,17 @@ export function creativeStageRerunDecisionForEpisode({
   episodeDir,
 } = {}) {
   const commandKey = normalizedCommand(command, subcommand);
+  if (commandKey === "voice plan" && episodeDir
+    && !flags["performance-packet-ids"] && !flags["performance-packet-id"]) {
+    try {
+      const direction = JSON.parse(readFileSync(path.join(episodeDir, "narration_actionable_direction.json"), "utf8"));
+      const plan = JSON.parse(readFileSync(path.join(episodeDir, "narration_generation_plan.json"), "utf8"));
+      if (direction.status === "approved" && plan.status === "failed_repairable"
+        && direction.source_script_sha256 === plan.source_script_hash) {
+        return { allowed: true, reason: "approved_authored_packets_validation_only" };
+      }
+    } catch { /* The ordinary one-shot guard remains in force. */ }
+  }
   const guarded = ONE_SHOT_CREATIVE_COMMANDS.has(commandKey)
     || PASSED_FULL_STAGE_COMMANDS.has(commandKey);
   const nonCreativeCodexControl = commandKey === "imagegen codex-work"

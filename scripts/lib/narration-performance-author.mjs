@@ -41,7 +41,7 @@ export function extractNarrationPerformanceJsonForTests(content) {
 }
 
 export function narrationUnitHasTerminalPunctuationForTests(text) {
-  return /[.!?…][\"'”’)]*$/.test(String(text ?? "").trim());
+  return /[.!?…—][\"'”’)]*$/.test(String(text ?? "").trim());
 }
 
 export const NARRATION_PERFORMANCE_TARGET_ATOMS = 96;
@@ -624,7 +624,7 @@ export async function authorNarrationPerformanceDirection({
       reasoningEffort: "medium",
       contentProfile: effectiveContentProfile,
       repairReason: repairSet.has(packet.packet_id) ? repairReason : null,
-      allowCreativeSubmission: existing?.status !== "blocked" || repairSet.has(packet.packet_id),
+      allowCreativeSubmission: !existing || repairSet.has(packet.packet_id),
       plannerExecutor,
       });
     },

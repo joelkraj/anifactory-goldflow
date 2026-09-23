@@ -96,6 +96,25 @@ test("Fal bulk status observes work when bounded queue is full", async () => {
   } finally { await rm(episodeDir, { recursive: true, force: true }); }
 });
 
+test("Fal bulk status nominates exact failure repair before more dispatch", async () => {
+  const episodeDir = await mkdtemp(path.join(os.tmpdir(), "goldflow-fal-failure-"));
+  try {
+    const root = path.join(episodeDir, "fal");
+    const failureDir = path.join(root, "bulk", "failure-receipts");
+    await mkdir(failureDir, { recursive: true });
+    const assignments = ["one", "two"].map(id => ({ image_id: id,
+      submission_receipt_path: path.join(root, `${id}-submission.json`),
+      result_receipt_path: path.join(root, `${id}-result.json`) }));
+    await writeFile(path.join(root, "bulk-plan.json"), JSON.stringify({ assignments, concurrency: 10 }));
+    await writeFile(path.join(root, "validation-review.json"), JSON.stringify({ status: "passed", approved_ids: [] }));
+    await writeFile(assignments[0].submission_receipt_path, "{}");
+    await writeFile(path.join(failureDir, "one.json"), "{}");
+    const state = await falProductionStageStates({ episodeDir, identity: {} });
+    assert.equal(state.stageStates.image_generation.state, "blocked");
+    assert.match(state.stageStates.image_generation.next_command_shape, /--action repair-failures/);
+  } finally { await rm(episodeDir, { recursive: true, force: true }); }
+});
+
 test("Fal canonical assets retain stable provider-neutral Goldflow IDs", () => {
   assert.equal(falPortableAssetId("years-taken", { ref_id: "joey_manhwa_clinic_state", kind: "character_state" }),
     "gf.years_taken.character_state.joey_manhwa_clinic_state");

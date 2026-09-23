@@ -27,6 +27,7 @@ import { referenceImageQaRecoveryAdmission } from "../scripts/lib/reference-imag
 import { partialSceneImageQaRecoveryAdmission } from "../scripts/lib/partial-scene-image-recovery.mjs";
 import { orphanedImageStreamSealAdmission } from "../scripts/lib/orphaned-image-stream-seal.mjs";
 import { openartTriageAdmission } from "../scripts/lib/openart-visual-restart.mjs";
+import { falBlockedStageRecoveryAdmission } from "../scripts/lib/fal-production-state.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
@@ -110,6 +111,14 @@ function enforceWorkflowGuard(commandName, subcommandName, scriptArgs) {
       process.exit(1);
     }
     return;
+  }
+  if (commandName === "imagegen" && subcommandName === "fal") {
+    const recovery = falBlockedStageRecoveryAdmission(result, parsedFlags);
+    if (recovery.applicable && !recovery.allowed) {
+      console.error(`Workflow guard blocked Fal recovery: ${recovery.reason}`);
+      process.exit(1);
+    }
+    if (recovery.applicable && recovery.allowed) return;
   }
   if (commandName === "imagegen" && subcommandName === "codex-work") {
     const recovery = orphanedImageStreamSealAdmission(result, parsedFlags);

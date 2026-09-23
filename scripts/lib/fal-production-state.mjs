@@ -4,6 +4,22 @@ import path from "node:path";
 async function exists(file) { return fs.access(file).then(() => true, () => false); }
 async function read(file) { return JSON.parse(await fs.readFile(file, "utf8")); }
 
+export function falBlockedStageRecoveryAdmission(status, flags = {}) {
+  const action = String(flags.action ?? "");
+  const next = String(status?.next_command_shape ?? "");
+  const recoveryActions = new Set(["observe-holds", "repair-failures", "observe-repairs"]);
+  if (status?.current_stage !== "image_generation" || status?.current_stage_state !== "blocked") {
+    return { applicable: false, allowed: false, reason: "Fal blocked-stage recovery is not current." };
+  }
+  if (!recoveryActions.has(action)) {
+    return { applicable: false, allowed: false, reason: "This is not a Fal blocked-stage recovery action." };
+  }
+  const expected = new RegExp(`\\bimagegen fal\\b[\\s\\S]*--action ${action}\\b`);
+  return expected.test(next)
+    ? { applicable: true, allowed: true }
+    : { applicable: true, allowed: false, reason: "Run status does not authorize this exact Fal recovery action." };
+}
+
 export async function falProductionStageStates({ episodeDir } = {}) {
   const root = path.join(episodeDir, "fal");
   const planPath = path.join(root, "validation-plan.json");

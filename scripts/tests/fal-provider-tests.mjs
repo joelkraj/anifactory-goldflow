@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { buildFalImageInput, FAL_ENDPOINTS, FAL_PRIMARY_PARAMS } from "../lib/fal-provider.mjs";
+import { falBlockedStageRecoveryAdmission } from "../lib/fal-production-state.mjs";
 
 test("Fal text request locks low quality 1920x1080 PNG", () => {
   const request = buildFalImageInput({ prompt: "one frame" });
@@ -21,4 +22,15 @@ test("Fal edit request uses one positional board without persisting a URL", () =
 
 test("Fal request rejects more than sixteen ordered references", () => {
   assert.throws(() => buildFalImageInput({ prompt: "x", referenceUrls: Array(17).fill("https://v3.fal.media/a.png") }), /sixteen/);
+});
+
+test("Fal blocked-stage recovery admits only the exact status action", () => {
+  const status = {
+    current_stage: "image_generation",
+    current_stage_state: "blocked",
+    next_command_shape: "node bin/goldflow.mjs imagegen fal --episode-dir /tmp/ep --action observe-holds",
+  };
+  assert.equal(falBlockedStageRecoveryAdmission(status, { action: "observe-holds" }).allowed, true);
+  assert.equal(falBlockedStageRecoveryAdmission(status, { action: "repair-failures" }).allowed, false);
+  assert.equal(falBlockedStageRecoveryAdmission({ ...status, current_stage_state: "missing" }, { action: "observe-holds" }).applicable, false);
 });

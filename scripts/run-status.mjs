@@ -4506,7 +4506,16 @@ async function main() {
   const semanticPlanPath = path.join(episodeDir, "semantic_scene_plan.json");
   const semanticPlan = await jsonStatusWithSourceHashesComplete(semanticPlanPath, "semantic_scene_plan.json");
   const semanticPlanArtifact = await readJson(semanticPlanPath, null);
-  const semanticRecoveryCommand = semanticRecoveryCommandForTests(semanticPlanArtifact, identity, scriptHash);
+  const semanticManualRepairPath = path.join(episodeDir, "semantic_reconciliation_evidence_repair.json");
+  const semanticManualRepair = await readJson(semanticManualRepairPath, null);
+  const semanticRecoveryBase = semanticRecoveryCommandForTests(semanticPlanArtifact, identity, scriptHash);
+  const semanticRecoveryCommand = semanticRecoveryBase
+    && semanticManualRepair?.schema === "goldflow_semantic_reconciliation_repair_v1"
+    && semanticManualRepair?.status === "approved"
+    && semanticManualRepair?.source_script_hash === scriptHash
+    && /--semantic-chunk-ids global_reconciliation\b/.test(semanticRecoveryBase)
+    ? `${semanticRecoveryBase} --manual-reconciliation-evidence ${semanticManualRepairPath}`
+    : semanticRecoveryBase;
   const storyFactLedger = await jsonStatusWithSourceHashesComplete(path.join(episodeDir, "story_fact_ledger.json"), "story_fact_ledger.json");
   const timedScenePlan = await jsonStatusWithSourceHashesComplete(path.join(episodeDir, "timed_scene_plan.json"), "timed_scene_plan.json");
   const visualBeatPlanPath = path.join(episodeDir, "visual_beat_plan.json");

@@ -1756,7 +1756,7 @@ function transcriptInputText(value) {
     : String(value ?? "");
 }
 
-export const TRANSCRIPT_QA_COMPARISON_VERSION = "unicode_words_exact_im_numeric_article_contraction_phonetic_v5";
+export const TRANSCRIPT_QA_COMPARISON_VERSION = "unicode_words_exact_im_numeric_article_contraction_phonetic_v6";
 
 const TRANSCRIPT_PUNCTUATION = new Set([".", ",", ";", ":", "!", "?", "…"]);
 
@@ -1922,6 +1922,14 @@ function canonicalTranscriptTokensWithoutAliases(value, preserveBoundaries = fal
       index += 1;
     } else if (base[index] === "after" && base[index + 1] === "life") {
       compounds.push("afterlife");
+      index += 1;
+    } else if (base[index] === "all" && base[index + 1] === "right") {
+      // These spellings are acoustically indistinguishable. Preserve both
+      // source and ASR transcripts while comparing one spoken token.
+      compounds.push("alright");
+      index += 1;
+    } else if (base[index] === "door" && base[index + 1] === "frame") {
+      compounds.push("doorframe");
       index += 1;
     } else {
       compounds.push(base[index]);

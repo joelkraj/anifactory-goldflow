@@ -4803,6 +4803,9 @@ async function main() {
     { "cut-ids": visualPromptRepairScope?.failed_cut_ids?.join(",") ?? "" }).allowed;
   const repairCommandStages = semanticRepairUnitIds.length
     ? ["semantic_scene_plan"]
+    : next?.stage === "voice_plan" && next?.state === "blocked"
+      && /voice plan\b.*--performance-packet-ids\s+\S+/.test(String(next.next_command_shape ?? ""))
+    ? ["voice_plan"]
     : next?.stage === "visual_beat_plan" && next?.state === "blocked" && visualBeatRepairScope
     ? ["visual_beat_plan"]
     : promptRecoveryAllowed

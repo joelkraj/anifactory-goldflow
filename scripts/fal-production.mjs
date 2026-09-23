@@ -50,7 +50,8 @@ async function finalizeReferences(ctx){
   const referencePlan=await read(path.join(ctx.root,"reference-plan.json"));
   const byId=new Map();
   for(const row of referencePlan.assignments){
-    const receipt=await read(row.result_receipt_path);
+    const repairReceiptPath=path.join(ctx.root,"reference","repair-result-receipts",`${row.image_id}.json`);
+    const receipt=await read(await fs.access(repairReceiptPath).then(()=>repairReceiptPath,()=>row.result_receipt_path));
     need(receipt.output_path===row.output_path&&await falFileSha256(row.output_path)===receipt.output_sha256,
       `Fal reference result is missing or changed: ${row.ref_id}`);
     byId.set(row.ref_id,row.output_path);
@@ -180,7 +181,51 @@ async function main(){
    need(f["confirm-spend"]==="exact_fal_reference_batch","Paid reference dispatch requires exact confirmation token.");const plan=await read(path.join(ctx.root,"reference-plan.json"));const limit=Math.min(Number(f.limit??100),100);need(Number.isInteger(limit)&&limit>0,"Reference limit must be 1..100.");const rows=[];for(const row of plan.assignments)if(!await fs.access(row.submission_receipt_path).then(()=>true,()=>false)){rows.push(row);if(rows.length===limit)break;}const result=await submitRows(ctx,rows,ctx.contract.production_concurrency);return console.log(JSON.stringify({status:"submitted",count:result.length},null,2));
  }
  if(action==="observe-references"){
-   const plan=await read(path.join(ctx.root,"reference-plan.json"));const rows=[];for(const row of plan.assignments)if(await fs.access(row.submission_receipt_path).then(()=>true,()=>false)&&!await fs.access(row.result_receipt_path).then(()=>true,()=>false))rows.push(row);const result=await observeRows(ctx,rows,ctx.contract.production_concurrency);return console.log(JSON.stringify({status:result.every(r=>r.complete)?"complete":"pending",checked:result.length,complete:result.filter(r=>r.complete).length,pending:result.filter(r=>!r.complete).length},null,2));
+   const plan=await read(path.join(ctx.root,"reference-plan.json"));const rows=[];for(const row of plan.assignments){
+     const submitted=await fs.access(row.submission_receipt_path).then(()=>true,()=>false);
+     const done=await fs.access(row.result_receipt_path).then(()=>true,()=>false);
+     const failed=await fs.access(path.join(ctx.root,"reference","failure-receipts",`${row.image_id}.json`)).then(()=>true,()=>false);
+     const held=await fs.access(path.join(ctx.root,"reference","transport-holds",`${row.image_id}.json`)).then(()=>true,()=>false);
+     if(submitted&&!done&&!failed&&!held)rows.push(row);
+   }
+   const result=await observeRows(ctx,rows,ctx.contract.production_concurrency);return console.log(JSON.stringify({status:result.every(r=>r.complete)?"complete":"pending",checked:result.length,complete:result.filter(r=>r.complete).length,pending:result.filter(r=>!r.complete).length},null,2));
+ }
+ if(action==="repair-reference-failures"){
+   need(f["confirm-spend"]==="exact_fal_reference_repair","Paid reference repair requires exact confirmation token.");
+   need(path.isAbsolute(f.directives??""),"Reference repair requires an absolute --directives file.");
+   const plan=await read(path.join(ctx.root,"reference-plan.json"));const directives=await read(f.directives);
+   need(directives?.schema==="goldflow_fal_reference_repair_directives_v1"&&Array.isArray(directives.repairs)&&directives.repairs.length,
+     "Exact Fal reference repair directives are required.");
+   const repairs=[];
+   for(const directive of directives.repairs){
+     const original=plan.assignments.find(row=>row.image_id===directive.image_id);
+     need(original&&directive.original_assignment_sha256===original.assignment_sha256,
+       `Reference repair binding changed for ${directive.image_id}`);
+     need(await fs.access(path.join(ctx.root,"reference","failure-receipts",`${directive.image_id}.json`)).then(()=>true,()=>false),
+       `No exact reference failure exists for ${directive.image_id}`);
+     need(typeof directive.replacement_prompt==="string"&&directive.replacement_prompt.length>40
+       &&digest(directive.replacement_prompt)!==original.prompt_sha256&&directive.repair_reason,
+       `Reference repair must have a changed prompt and reason: ${directive.image_id}`);
+     const core={...original,prompt:directive.replacement_prompt,prompt_sha256:digest(directive.replacement_prompt),
+       previous_assignment_sha256:original.assignment_sha256,repair_reason:directive.repair_reason};
+     for(const key of ["assignment_sha256","assignment_path","submission_receipt_path","result_receipt_path","upload_receipt_path"])delete core[key];
+     const repair={...core,assignment_sha256:falObjectSha256(JSON.stringify(core)),
+       submission_receipt_path:path.join(ctx.root,"reference","repair-submission-receipts",`${directive.image_id}.json`),
+       result_receipt_path:path.join(ctx.root,"reference","repair-result-receipts",`${directive.image_id}.json`),
+       upload_receipt_path:path.join(ctx.root,"reference","repair-upload-receipts",`${directive.image_id}.json`)};
+     await write(path.join(ctx.root,"reference","repair-assignments",`${directive.image_id}.json`),repair);
+     repairs.push(repair);
+   }
+   const result=await submitRows(ctx,repairs,Math.min(ctx.contract.production_concurrency,repairs.length));
+   return console.log(JSON.stringify({status:"reference_repair_submitted",count:result.length,image_ids:repairs.map(row=>row.image_id)},null,2));
+ }
+ if(action==="observe-reference-repairs"){
+   const dir=path.join(ctx.root,"reference","repair-assignments");const names=await fs.readdir(dir);const rows=[];
+   for(const name of names.filter(value=>value.endsWith(".json"))){const row=await read(path.join(dir,name));
+     if(!await fs.access(row.result_receipt_path).then(()=>true,()=>false))rows.push(row);}
+   const result=await observeRows(ctx,rows,ctx.contract.production_concurrency);
+   return console.log(JSON.stringify({status:result.every(row=>row.complete)?"complete":"pending",checked:result.length,
+     complete:result.filter(row=>row.complete).length,pending:result.filter(row=>!row.complete).length},null,2));
  }
  if(action==="finalize-references") return console.log(JSON.stringify(await finalizeReferences(ctx),null,2));
  if(action==="prepare-validation") return console.log(JSON.stringify(await prepare(ctx),null,2));

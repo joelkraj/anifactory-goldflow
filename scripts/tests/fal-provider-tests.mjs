@@ -42,6 +42,10 @@ test("Fal blocked-stage recovery admits only the exact status action", () => {
   const transportStatus = { ...status, next_command_shape: "node bin/goldflow.mjs imagegen fal --episode-dir /tmp/ep --action recover-holds --directives <file> --confirm-spend exact_fal_transport_recovery" };
   assert.equal(falBlockedStageRecoveryAdmission(transportStatus, { action: "recover-holds" }).allowed, true);
   assert.equal(falBlockedStageRecoveryAdmission({ ...status, current_stage_state: "missing" }, { action: "observe-holds" }).applicable, false);
+  const referenceStatus = { ...status, current_stage: "reference_generation",
+    next_command_shape: "node bin/goldflow.mjs imagegen fal --episode-dir /tmp/ep --action repair-reference-failures --directives <file> --confirm-spend exact_fal_reference_repair" };
+  assert.equal(falBlockedStageRecoveryAdmission(referenceStatus, { action: "repair-reference-failures" }).allowed, true);
+  assert.equal(falBlockedStageRecoveryAdmission(referenceStatus, { action: "observe-reference-repairs" }).allowed, false);
 });
 
 test("early Fal visual fork routes reference and scene generations through guarded Fal actions", () => {
@@ -57,6 +61,7 @@ test("early Fal visual fork routes reference and scene generations through guard
   assert.match(buildStageCommand("image_generation", identity), /imagegen fal .*--action prepare-validation/);
   assert.equal(commandStageFor("imagegen", "fal", { action: "billing-submit-reference" }, identity), "reference_generation");
   assert.equal(commandStageFor("imagegen", "fal", { action: "finalize-references" }, identity), "reference_generation");
+  assert.equal(commandStageFor("imagegen", "fal", { action: "repair-reference-failures" }, identity), "reference_generation");
   assert.equal(commandStageFor("imagegen", "fal", { action: "review-validation" }, identity), "image_generation");
 });
 

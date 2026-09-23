@@ -18,7 +18,7 @@ import {
 import { creativeStageRerunDecisionForEpisode } from "../scripts/lib/creative-stage-rerun-policy.mjs";
 import { plannerRerunDecisionForEpisode } from "../scripts/lib/planner-rerun-policy.mjs";
 import { failedRenderResumeDecision } from "../scripts/lib/failed-render-resume.mjs";
-import { assertCommandWorkflowRoute } from "../scripts/lib/episode-workflow-routing.mjs";
+import { assertCommandWorkflowRoute, readEpisodeRoutingIdentity } from "../scripts/lib/episode-workflow-routing.mjs";
 import { canonicalContentProfileArgument } from "../scripts/lib/content-profiles.mjs";
 import { semanticRecoveryAdmission } from "../scripts/lib/semantic-planner-recovery.mjs";
 import { visualPromptRecoveryAdmission } from "../scripts/lib/visual-prompt-recovery.mjs";
@@ -59,8 +59,9 @@ function isTrue(value) {
   return /^(true|1|yes)$/i.test(String(value ?? ""));
 }
 
-function commandStage(commandName, subcommandName, parsedFlags) {
-  return commandStageFor(commandName, subcommandName, parsedFlags);
+function commandStage(commandName, subcommandName, parsedFlags, episodeDir) {
+  const identity = episodeDir ? readEpisodeRoutingIdentity(episodeDir) ?? {} : {};
+  return commandStageFor(commandName, subcommandName, parsedFlags, identity);
 }
 
 function statusArgsFor(parsedFlags) {
@@ -74,10 +75,10 @@ function statusArgsFor(parsedFlags) {
   return null;
 }
 
-function enforceWorkflowGuard(commandName, subcommandName, scriptArgs) {
+function enforceWorkflowGuard(commandName, subcommandName, scriptArgs, episodeDir) {
   const parsedFlags = parseFlags(scriptArgs);
   if (isTrue(parsedFlags["workflow-bypass"]) || isTrue(process.env.GOLDFLOW_WORKFLOW_BYPASS)) return;
-  const expectedStage = commandStage(commandName, subcommandName, parsedFlags);
+  const expectedStage = commandStage(commandName, subcommandName, parsedFlags, episodeDir);
   if (!expectedStage) return;
   const statusArgs = statusArgsFor(parsedFlags);
   if (!statusArgs) return;
@@ -235,8 +236,8 @@ function run(script, scriptArgs = []) {
     process.exitCode = 1;
     return;
   }
-  enforceWorkflowGuard(command, subcommand, scriptArgs);
-  const stage = commandStage(command, subcommand, parsedFlags);
+  enforceWorkflowGuard(command, subcommand, scriptArgs, episodeDir);
+  const stage = commandStage(command, subcommand, parsedFlags, episodeDir);
   const plannerRerunDecision = plannerRerunDecisionForEpisode({
     stage,
     flags: parsedFlags,

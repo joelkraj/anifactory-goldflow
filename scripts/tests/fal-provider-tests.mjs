@@ -6,7 +6,7 @@ import { falProductionStageStates } from "../lib/fal-production-state.mjs";
 import { falPortableAssetId } from "../lib/fal-portable-bank.mjs";
 import { normalizeImageProvider } from "../lib/image-provider-routing.mjs";
 import { buildStageCommand, commandStageFor } from "../lib/pipeline-stage-registry.mjs";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 
@@ -77,6 +77,22 @@ test("early Fal visual fork begins with reference preparation before validation"
     assert.match(state.stageStates.reference_generation.next_command_shape, /--action prepare-references/);
     assert.match(state.stageStates.image_generation.next_command_shape, /--action prepare-validation/);
     assert.equal("reference_image_approval" in state.stageStates, false);
+  } finally { await rm(episodeDir, { recursive: true, force: true }); }
+});
+
+test("Fal bulk status observes queued work before filling more provider slots", async () => {
+  const episodeDir = await mkdtemp(path.join(os.tmpdir(), "goldflow-fal-queue-"));
+  try {
+    const root = path.join(episodeDir, "fal");
+    await mkdir(root, { recursive: true });
+    const assignments = ["one", "two"].map(id => ({ image_id: id,
+      submission_receipt_path: path.join(root, `${id}-submission.json`),
+      result_receipt_path: path.join(root, `${id}-result.json`) }));
+    await writeFile(path.join(root, "bulk-plan.json"), JSON.stringify({ assignments, concurrency: 1 }));
+    await writeFile(path.join(root, "validation-review.json"), JSON.stringify({ status: "passed", approved_ids: [] }));
+    await writeFile(assignments[0].submission_receipt_path, "{}");
+    const state = await falProductionStageStates({ episodeDir, identity: {} });
+    assert.match(state.stageStates.image_generation.next_command_shape, /--action observe-bulk --limit 100/);
   } finally { await rm(episodeDir, { recursive: true, force: true }); }
 });
 

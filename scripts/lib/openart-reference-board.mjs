@@ -11,7 +11,7 @@ export const REFERENCE_BOARD_GUTTER = 12;
 export const REFERENCE_BOARD_BACKGROUND = { r: 96, g: 96, b: 96, alpha: 1 };
 
 export const REFERENCE_BOARD_PROMPT_GUIDANCE = `The input is a reference board, not the requested composition.
-Each human panel supplies only its own subject's identity. Do not transfer one person's face, hair, complexion, age, or build to another person. Only story-confirmed twins, clones, or the same person in another state may share a face.
+Each human panel supplies only its own subject's identity and named wardrobe state. Do not transfer one person's face, hair, complexion, age, build, or outfit to another person. Only story-confirmed twins, clones, or the same person in another state may share a face. Follow the current shot's wardrobe state when a base identity panel shows older clothing.
 Create one coherent cinematic manhwa frame. Do not reproduce the board, borders, gutters, reference-sheet layout, or multiple copies of a character. Do not add labels, captions, watermarks, or unintended text.`;
 export const LEGACY_REFERENCE_BOARD_PROMPT_GUIDANCE = `The input is a reference board, not the requested composition.
 Use each panel only for the identity or visual function described by its recorded position. Preserve the primary character's identity, face, hair, age, body type, and wardrobe; preserve secondary-character identities separately; preserve the environment's architecture, materials, lighting vocabulary, and spatial identity; and preserve any crucial prop's defining shape and details.

@@ -34,6 +34,7 @@ try {
   assert.match(guidance, /left panel/); assert.match(guidance, /upper-right panel/); assert.match(guidance, /lower-right panel/);
   assert.match(guidance, /Each human panel supplies only its own subject's identity/);
   assert.match(guidance, /story-confirmed twins, clones/);
+  assert.match(guidance, /current shot's wardrobe state/);
   assert(!guidance.includes('Joey'));
   const style = await make('probability-style', '#20152e', 'style');
   const locationStyle = await buildReferenceBoard({ root, imageId: 'frame.location-style', references: [refs[1], style] });

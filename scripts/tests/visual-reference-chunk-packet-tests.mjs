@@ -47,7 +47,7 @@ assert.throws(() => expandReferencePromptValue({ format: "goldflow_literal_rows_
 const semantic = { source_script_hash: "a".repeat(64), scenes: [{ scene_id: "scene_001", location: "Office", ref_requirements: [] }] };
 const small = buildReferenceChunkPromptForTests(semantic);
 assert.equal(small, buildReferenceChunkPromptForTests(semantic, { compactOversized: false }), "Existing under-ceiling prompts/cache keys remain byte-identical");
-assert.equal(createHash("sha256").update(small).digest("hex"), "e4f3481772f6d53b71df00a427867ddb639b68729b19df560f16eef31dfc736c", "Under-ceiling prompt must retain the reviewed cast-identity policy hash");
+assert.equal(createHash("sha256").update(small).digest("hex"), "a6f7be08407902710d12c9cf3dceaab979edf0a2b458fb1de0b53d6b9bae1763", "Under-ceiling prompt must retain the reviewed cast and wardrobe policy hash");
 
 // Repeated exact evidence with one local beat used to overwhelm even a single
 // scene. Formatting must preserve the payload, not discard refs or widen limits.

@@ -453,6 +453,10 @@ function isCodexRoute(value) {
 
 export function scopedQaRecoveryCommand(imageIds, promptPlan, imagegenReport, runIdentity) {
   const provider = String(runIdentity?.image_provider ?? imagegenReport.image_provider ?? "modelslab");
+  if (provider === "fal_ai") {
+    const target = path.dirname(imagegenReportPath);
+    return `node bin/goldflow.mjs imagegen fal --episode-dir ${target} --action repair-reviewed-bulk --directives <absolute_reviewed_bulk_repair_directives.json> --confirm-spend exact_fal_reviewed_bulk_repair`;
+  }
   const base = `--channel ${runIdentity?.channel ?? channel} --series ${runIdentity?.series_slug ?? series} --week ${runIdentity?.week ?? week} --episode ${runIdentity?.episode ?? episode}`;
   if (isBrowserPoolImageProvider(normalizeImageProvider(provider))) {
     return `node bin/goldflow.mjs imagegen browser-pool ${base} --image-ids ${imageIds.join(",")} --qa-recovery true --repair-reason "<reviewed structural image-QA blocker evidence>"`;

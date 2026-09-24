@@ -1489,6 +1489,17 @@ async function imageOutputQaComplete(episodeDir, episode, identity) {
     }
   }
   if (status === "passed") return { done: true, evidence: `${path.basename(reportPath)} passed; risk_cuts=${report.risk_cut_count ?? "?"}` };
+  if (status === "blocked" && identity.image_provider === "fal_ai" && Array.isArray(report.critical_rejected_image_ids) && report.critical_rejected_image_ids.length) {
+    const ids = report.critical_rejected_image_ids;
+    const repairRoot = path.join(episodeDir, "fal", "bulk");
+    const assigned = await Promise.all(ids.map(id => exists(path.join(repairRoot, "review-repair-assignments", `${id}.json`))));
+    const complete = await Promise.all(ids.map(id => exists(path.join(repairRoot, "review-repair-result-receipts", `${id}.json`))));
+    const next = assigned.every(Boolean)
+      ? complete.every(Boolean) ? "finalize-reviewed-bulk" : "observe-reviewed-bulk"
+      : "repair-reviewed-bulk";
+    return { done: false, state: "blocked", evidence: `Fal exact-ID visual review repairs=${complete.filter(Boolean).length}/${ids.length}`,
+      next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action ${next}${next === "repair-reviewed-bulk" ? " --directives <absolute_reviewed_bulk_repair_directives.json> --confirm-spend exact_fal_reviewed_bulk_repair" : ""}` };
+  }
   return {
     done: false,
     evidence: `${path.basename(reportPath)} status=${status || "missing"}; blockers=${report.unresolved_blocker_count ?? "?"}`,

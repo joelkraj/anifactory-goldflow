@@ -9,11 +9,13 @@ export function falBlockedStageRecoveryAdmission(status, flags = {}) {
   const next = String(status?.next_command_shape ?? "");
   const referenceRecovery = status?.current_stage === "reference_generation";
   const reviewRecovery = status?.current_stage === "reference_image_approval";
+  const bulkReviewRecovery = status?.current_stage === "image_output_qa";
   const recoveryActions = new Set(referenceRecovery
     ? ["repair-reference-failures", "observe-reference-repairs"]
     : reviewRecovery ? ["repair-reviewed-references", "observe-reviewed-references", "finalize-reviewed-references"]
+    : bulkReviewRecovery ? ["repair-reviewed-bulk", "observe-reviewed-bulk", "finalize-reviewed-bulk"]
     : ["observe-holds", "recover-holds", "observe-transport-recovery", "repair-failures", "observe-repairs"]);
-  if ((!referenceRecovery && !reviewRecovery && status?.current_stage !== "image_generation") || status?.current_stage_state !== "blocked") {
+  if ((!referenceRecovery && !reviewRecovery && !bulkReviewRecovery && status?.current_stage !== "image_generation") || status?.current_stage_state !== "blocked") {
     return { applicable: false, allowed: false, reason: "Fal blocked-stage recovery is not current." };
   }
   if (!recoveryActions.has(action)) {

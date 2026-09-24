@@ -60,6 +60,10 @@ test("Fal blocked-stage recovery admits only the exact status action", () => {
     next_command_shape: "node bin/goldflow.mjs imagegen fal --episode-dir /tmp/ep --action repair-reviewed-references --confirm-spend exact_fal_reviewed_reference_repair" };
   assert.equal(falBlockedStageRecoveryAdmission(reviewedStatus, { action: "repair-reviewed-references" }).allowed, true);
   assert.equal(falBlockedStageRecoveryAdmission(reviewedStatus, { action: "finalize-reviewed-references" }).allowed, false);
+  const bulkQaStatus = { ...status, current_stage: "image_output_qa",
+    next_command_shape: "node bin/goldflow.mjs imagegen fal --episode-dir /tmp/ep --action repair-reviewed-bulk --directives <file> --confirm-spend exact_fal_reviewed_bulk_repair" };
+  assert.equal(falBlockedStageRecoveryAdmission(bulkQaStatus, { action: "repair-reviewed-bulk" }).allowed, true);
+  assert.equal(falBlockedStageRecoveryAdmission(bulkQaStatus, { action: "finalize-reviewed-bulk" }).allowed, false);
 });
 
 test("early Fal visual fork routes reference and scene generations through guarded Fal actions", () => {
@@ -77,6 +81,7 @@ test("early Fal visual fork routes reference and scene generations through guard
   assert.equal(commandStageFor("imagegen", "fal", { action: "finalize-references" }, identity), "reference_generation");
   assert.equal(commandStageFor("imagegen", "fal", { action: "repair-reference-failures" }, identity), "reference_generation");
   assert.equal(commandStageFor("imagegen", "fal", { action: "repair-reviewed-references" }, identity), "reference_image_approval");
+  assert.equal(commandStageFor("imagegen", "fal", { action: "repair-reviewed-bulk" }, identity), "image_output_qa");
   assert.equal(commandStageFor("imagegen", "fal", { action: "review-validation" }, identity), "image_generation");
 });
 

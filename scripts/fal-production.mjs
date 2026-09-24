@@ -335,6 +335,71 @@ async function main(){
  if(action==="prepare-validation") return console.log(JSON.stringify(await prepare(ctx),null,2));
  if(action==="prepare-validation-revision") return console.log(JSON.stringify(await prepare(ctx,{revision:2}),null,2));
  if(action==="prepare-bulk") return console.log(JSON.stringify(await prepareBulk(ctx,f),null,2));
+ if(action==="repair-reviewed-bulk"){
+   need(f["confirm-spend"]==="exact_fal_reviewed_bulk_repair","Paid visual repair requires exact confirmation token.");
+   need(path.isAbsolute(f.directives??""),"Visual repair requires absolute directives.");
+   const qaPath=path.join(ctx.episodeDir,`image_output_qa_${ctx.identity.episode}.json`);
+   const qa=await read(qaPath),directives=await read(f.directives),bulk=await read(path.join(ctx.root,"bulk-plan.json"));
+   need(qa.status==="blocked"&&qa.unresolved_blocker_count>0,"Exact image QA blocker is required.");
+   need(directives.schema==="goldflow_fal_reviewed_bulk_repair_directives_v1"&&directives.qa_report_sha256===await falFileSha256(qaPath),"Visual repair directives are not bound to current QA.");
+   const blocked=new Set(qa.critical_rejected_image_ids??[]);
+   need(Array.isArray(directives.repairs)&&directives.repairs.length===blocked.size&&directives.repairs.every(row=>blocked.has(row.image_id)),"Every and only blocked exact image ID must be repaired.");
+   const prompts=await read(path.join(ctx.episodeDir,"section_image_prompts_hardened.json"));
+   const approval=await read(path.join(ctx.episodeDir,`visual_reference_approval_${ctx.identity.episode}.json`));
+   const repairs=[];
+   for(const directive of directives.repairs){
+     const original=bulk.assignments.find(row=>row.image_id===directive.image_id);
+     need(original&&original.assignment_sha256===directive.original_assignment_sha256,`Original assignment changed: ${directive.image_id}`);
+     const originalReceipt=await read(original.result_receipt_path);
+     need(originalReceipt.output_sha256===directive.rejected_image_sha256&&await falFileSha256(originalReceipt.output_path)===directive.rejected_image_sha256,`Rejected raster changed: ${directive.image_id}`);
+     need(typeof directive.finding==="string"&&directive.finding.length>20&&typeof directive.replacement_prompt==="string"&&directive.replacement_prompt.length>100,"Review finding and replacement prompt required.");
+     const promptRow=prompts.prompts.find(row=>row.image_id===directive.image_id);
+     need(promptRow,`Locked prompt row missing: ${directive.image_id}`);
+     let refs=await nativePromptReferences(ctx,promptRow,approval);
+     if(directive.ordered_reference_asset_ids){
+       const order=directive.ordered_reference_asset_ids;
+       need(Array.isArray(order)&&order.length===refs.length&&new Set(order).size===refs.length&&order.every(id=>refs.some(ref=>ref.asset_id===id)),`Reference reorder is not the same approved set: ${directive.image_id}`);
+       refs=order.map(id=>refs.find(ref=>ref.asset_id===id));
+     }
+     const board=refs.length?await buildReferenceBoard({root:path.join(ctx.root,"bulk","review-repair"),imageId:directive.image_id,references:refs}):null;
+     const prompt=board?`${directive.replacement_prompt}\n\n${referenceBoardPromptGuidance(board)}`:directive.replacement_prompt;
+     need(digest(prompt)!==original.prompt_sha256,`Visual repair prompt unchanged: ${directive.image_id}`);
+     const core={image_id:directive.image_id,endpoint:board?FAL_ENDPOINTS.primary_edit:FAL_ENDPOINTS.primary_text,prompt,prompt_sha256:digest(prompt),run_identity_sha256:ctx.identityHash,reference_mode:board?"one_positional_collage":"text_only",reference_asset_ids:refs.map(ref=>ref.asset_id),reference_hashes:refs.map(ref=>ref.sha256),board_path:board?.output_path??null,board_sha256:board?.output_sha256??null,board_manifest_path:board?.manifest_path??null,max_cost_usd:0.05,start_sec:original.start_sec,duration_sec:original.duration_sec,previous_assignment_sha256:original.assignment_sha256,rejected_image_sha256:directive.rejected_image_sha256,repair_reason:directive.finding,qa_report_sha256:directives.qa_report_sha256};
+     const repair={...core,assignment_sha256:falObjectSha256(JSON.stringify(core)),submission_receipt_path:path.join(ctx.root,"bulk","review-repair-submission-receipts",`${directive.image_id}.json`),result_receipt_path:path.join(ctx.root,"bulk","review-repair-result-receipts",`${directive.image_id}.json`),output_path:path.join(ctx.root,"bulk","review-repair-outputs",`${directive.image_id}-v2.png`),upload_receipt_path:path.join(ctx.root,"bulk","review-repair-upload-receipts",`${directive.image_id}.json`)};
+     await write(path.join(ctx.root,"bulk","review-repair-assignments",`${directive.image_id}.json`),repair);
+     repairs.push(repair);
+   }
+   const result=await submitRows(ctx,repairs,Math.min(ctx.contract.production_concurrency,repairs.length));
+   return console.log(JSON.stringify({status:"reviewed_bulk_repair_submitted",count:result.length,image_ids:repairs.map(row=>row.image_id)},null,2));
+ }
+ if(action==="observe-reviewed-bulk"){
+   const dir=path.join(ctx.root,"bulk","review-repair-assignments"),names=await fs.readdir(dir),rows=[];
+   for(const name of names.filter(value=>value.endsWith(".json"))){const row=await read(path.join(dir,name));if(!await fs.access(row.result_receipt_path).then(()=>true,()=>false))rows.push(row);}
+   const result=await observeRows(ctx,rows,Math.min(ctx.contract.production_concurrency,rows.length));
+   return console.log(JSON.stringify({status:result.every(row=>row.complete)?"complete":"pending",checked:result.length,complete:result.filter(row=>row.complete).length},null,2));
+ }
+ if(action==="finalize-reviewed-bulk"){
+   const qa=await read(path.join(ctx.episodeDir,`image_output_qa_${ctx.identity.episode}.json`));
+   need(qa.status==="blocked"&&qa.critical_rejected_image_ids?.length,"Blocked QA required to finalize reviewed repairs.");
+   const reportPath=path.join(ctx.episodeDir,`imagegen_report_${ctx.identity.episode}.json`),ledgerPath=path.join(ctx.episodeDir,"cut_execution_ledger.json");
+   const report=await read(reportPath),ledger=await read(ledgerPath),archive=path.join(ctx.root,"bulk","review-repair-previous");
+   await write(path.join(archive,`imagegen-report-${await falFileSha256(reportPath)}.json`),report);
+   await write(path.join(archive,`cut-ledger-${await falFileSha256(ledgerPath)}.json`),ledger);
+   for(const id of qa.critical_rejected_image_ids){
+     const assignment=await read(path.join(ctx.root,"bulk","review-repair-assignments",`${id}.json`));
+     const receipt=await read(assignment.result_receipt_path);
+     need(receipt.output_sha256===await falFileSha256(receipt.output_path),`Reviewed repair raster changed: ${id}`);
+     const result=report.results.find(row=>row.image_id===id),cut=ledger.cuts.find(row=>row.image_id===id);
+     need(result&&cut&&cut.image_sha256===assignment.rejected_image_sha256,`Prior cut binding changed: ${id}`);
+     result.image_path=receipt.output_path;
+     result.generated={...result.generated,...receipt,output_sha256:receipt.output_sha256,result_receipt_path:assignment.result_receipt_path,result_receipt_sha256:await falFileSha256(assignment.result_receipt_path),recovery_type:"reviewed_visual_repair",previous_image_sha256:assignment.rejected_image_sha256};
+     Object.assign(cut,{image_path:receipt.output_path,image_sha256:receipt.output_sha256,prompt_hash:assignment.prompt_sha256,reference_ids:assignment.reference_asset_ids,provider_request_id:receipt.request_id,provider_receipt_path:assignment.result_receipt_path,provider_receipt_sha256:await falFileSha256(assignment.result_receipt_path),recovery_type:"reviewed_visual_repair",previous_image_sha256:assignment.rejected_image_sha256});
+   }
+   report.updated_at=new Date().toISOString();ledger.updated_at=report.updated_at;
+   await write(path.join(ctx.root,"bulk","image-reports",`reviewed-${digest(JSON.stringify(report)).slice(0,16)}.json`),report);
+   await fs.writeFile(reportPath,bytes(report));await fs.writeFile(ledgerPath,bytes(ledger));
+   return console.log(JSON.stringify({status:"reviewed_bulk_repair_finalized",image_ids:qa.critical_rejected_image_ids,imagegen_report:reportPath,cut_execution_ledger:ledgerPath},null,2));
+ }
  if(action==="dispatch-bulk"){
    need(f["confirm-spend"]==="exact_fal_bulk_batch","Paid bulk dispatch requires exact confirmation token.");const bulk=await read(path.join(ctx.root,"bulk-plan.json"));const limit=Math.min(Number(f.limit??100),100);need(Number.isInteger(limit)&&limit>0,"Bulk limit must be 1..100.");const rows=[];for(const row of bulk.assignments)if(!await fs.access(row.submission_receipt_path).then(()=>true,()=>false)){rows.push(row);if(rows.length===limit)break;}const result=await submitRows(ctx,rows,ctx.contract.production_concurrency);return console.log(JSON.stringify({status:"submitted",count:result.length,remaining:bulk.assignments.length-(await Promise.all(bulk.assignments.map(row=>fs.access(row.submission_receipt_path).then(()=>1,()=>0)))).reduce((a,b)=>a+b,0)},null,2));
  }

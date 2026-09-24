@@ -3173,9 +3173,12 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
     return { done: false, evidence: `narration_tts_report_${episode}.json missing` };
   }
   if (!statusPassed(ttsReport.status)) {
+    const latestTriagePath = path.join(episodeDir,
+      `manual_blocker_triage_qwen_tts_stitch_${episode}_v3.json`);
     const revisedTriagePath = path.join(episodeDir,
       `manual_blocker_triage_qwen_tts_stitch_${episode}_v2.json`);
-    const triage = await readJson(await exists(revisedTriagePath)
+    const triage = await readJson(await exists(latestTriagePath)
+      ? latestTriagePath : await exists(revisedTriagePath)
       ? revisedTriagePath : path.join(episodeDir,
         `manual_blocker_triage_qwen_tts_stitch_${episode}.json`), null);
     if (ttsReport.status === "blocked"
@@ -3185,7 +3188,7 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
       const repairSpecPath = triage.repair_spec_path ?? path.join(episodeDir,
         `narration_exact_boundary_repair_spec_${episode}.json`);
       return { done: false, state: "blocked",
-        evidence: "Reviewed second-take narration blockers remain; two-attempt limit forbids another full-unit submission",
+        evidence: "Reviewed exact narration blockers remain; only the specified units may receive a guarded boundary repair",
         next_command_shape: await exists(repairSpecPath)
           && (!triage.repair_spec_sha256
             || triage.repair_spec_sha256 === await fileSha256(repairSpecPath))

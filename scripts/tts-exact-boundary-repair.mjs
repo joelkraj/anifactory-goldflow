@@ -61,13 +61,17 @@ async function run(command, args, { cwd = DIR } = {}) {
   });
 }
 
-export function validateBoundaryRepairScopeForTests({ plan, manifest, delivery, spec }) {
+export function validateBoundaryRepairScopeForTests({ plan, manifest, delivery, fullStream = null, spec }) {
   const units = plan?.units ?? [];
   const unitById = new Map(units.map((row) => [row.unit_id, row]));
   const manifestById = new Map((manifest?.units ?? []).map((row) => [row.unit_id, row]));
   const deliveryById = new Map((delivery?.units ?? []).map((row) => [row.unit_id, row]));
+  const fullStreamIds = new Set((fullStream?.blockers ?? [])
+    .filter((row) => row.severity === "blocker" && row.unit_id)
+    .map((row) => row.unit_id));
   if (spec?.schema !== "goldflow_tts_exact_boundary_repair_spec_v1"
-    || manifest?.status !== "passed" || delivery?.status !== "blocked"
+    || manifest?.status !== "passed"
+    || (delivery?.status !== "blocked" && (fullStream?.status !== "blocked" || !fullStreamIds.size))
     || !Array.isArray(spec.units) || spec.units.length === 0) {
     throw new Error("Repair requires a blocked unit-delivery report and a valid exact spec.");
   }
@@ -77,18 +81,21 @@ export function validateBoundaryRepairScopeForTests({ plan, manifest, delivery, 
     const output = manifestById.get(entry.unit_id);
     const qa = deliveryById.get(entry.unit_id);
     if (!unit || !output || !qa || selected.has(entry.unit_id)
-      || qa.decision?.status !== "blocked"
+      || (qa.decision?.status !== "blocked" && !fullStreamIds.has(entry.unit_id))
       || !Array.isArray(entry.fragments) || entry.fragments.length < 2
       || entry.fragments.some((part) => typeof part !== "string" || !part.trim())
       || entry.fragments.join(" ") !== unit.spoken_text
       || output.audio_sha256 !== qa.audio_sha256
-      || !qa.decision.blockers?.length) {
+      || (!qa.decision.blockers?.length && !fullStreamIds.has(entry.unit_id))) {
       throw new Error(`Exact-boundary repair scope is not current: ${entry.unit_id}`);
     }
     selected.add(entry.unit_id);
   }
   const otherBlocked = (delivery?.units ?? []).filter((row) =>
     row.decision?.status === "blocked" && !selected.has(row.unit_id));
+  for (const unitId of fullStreamIds) {
+    if (!selected.has(unitId)) throw new Error(`Unrepaired full-stream blocker remains: ${unitId}`);
+  }
   for (const row of otherBlocked) {
     // Re-adjudicate the retained dual-ASR evidence with the corrected
     // orthographic comparator. Advisory interior substitutions remain
@@ -134,8 +141,13 @@ export async function main(parts = process.argv.slice(2)) {
     throw new Error("Prior provider manifest path escaped the episode directory.");
   }
   const deliveryPath = path.join(episodeDir, `narration_unit_delivery_qa_${episode}.json`);
-  const [plan, identity, manifest, delivery, spec] = await Promise.all([
-    json(planPath), json(identityPath), json(manifestPath), json(deliveryPath), json(specPath),
+  const fullStreamPath = path.join(episodeDir, `narration_full_stream_qa_${episode}.json`);
+  const [plan, identity, manifest, delivery, fullStream, spec] = await Promise.all([
+    json(planPath), json(identityPath), json(manifestPath), json(deliveryPath),
+    fs.readFile(fullStreamPath, "utf8").then(JSON.parse).catch((error) => {
+      if (error?.code === "ENOENT") return null;
+      throw error;
+    }), json(specPath),
   ]);
   if (identity.tts_provider !== "qwen_local"
     || manifest.provider !== "qwen_local"
@@ -152,7 +164,12 @@ export async function main(parts = process.argv.slice(2)) {
     voiceSha256: manifest.voice_sha256,
   });
   if (validated.status !== "passed") throw new Error("Prior provider manifest is invalid.");
-  const scope = validateBoundaryRepairScopeForTests({ plan, manifest, delivery, spec });
+  if (fullStream && (fullStream.source_script_hash !== report.source_script_hash
+    || fullStream.provider_output_manifest_file_sha256 !== await fileHash(manifestPath)
+    || report.full_stream_qa_path !== fullStreamPath)) {
+    throw new Error("Full-stream blocker evidence is stale.");
+  }
+  const scope = validateBoundaryRepairScopeForTests({ plan, manifest, delivery, fullStream, spec });
   const unitById = new Map(plan.units.map((row) => [row.unit_id, row]));
   const priorById = new Map(manifest.units.map((row) => [row.unit_id, row]));
   for (const row of manifest.units) {
@@ -169,6 +186,7 @@ export async function main(parts = process.argv.slice(2)) {
     prior_manifest_sha256: manifest.manifest_sha256,
     prior_manifest_file_sha256: await fileHash(manifestPath),
     prior_delivery_file_sha256: await fileHash(deliveryPath),
+    ...(fullStream ? { prior_full_stream_file_sha256: await fileHash(fullStreamPath) } : {}),
     prior_report_file_sha256: await fileHash(reportPath),
     spec_file_sha256: await fileHash(specPath),
     model_id: manifest.model_id, model_revision: manifest.model_revision,
@@ -180,7 +198,10 @@ export async function main(parts = process.argv.slice(2)) {
       spoken_text_sha256: unitById.get(entry.unit_id).spoken_text_sha256,
       prior_audio_sha256: priorById.get(entry.unit_id).audio_sha256,
       prior_synthesis_identity_sha256: priorById.get(entry.unit_id).synthesis_identity_sha256,
-      prior_blocker_codes: delivery.units.find((row) => row.unit_id === entry.unit_id).decision.blockers.map((row) => row.code),
+      prior_blocker_codes: [
+        ...delivery.units.find((row) => row.unit_id === entry.unit_id).decision.blockers.map((row) => row.code),
+        ...(fullStream?.blockers ?? []).filter((row) => row.unit_id === entry.unit_id).map((row) => row.code),
+      ],
       fragments: entry.fragments,
     })),
     orthographic_equivalence_unit_ids: scope.orthographic,
@@ -189,7 +210,7 @@ export async function main(parts = process.argv.slice(2)) {
   const repairDir = path.join(episodeDir, "assets/audio/narration_tts/exact_boundary_repairs", request.request_sha256);
   const requestPath = path.join(repairDir, "request.json");
   await writeNew(requestPath, `${JSON.stringify(request, null, 2)}\n`);
-  for (const [name, original] of [["prior_manifest.json", manifestPath], ["prior_delivery.json", deliveryPath], ["prior_report.json", reportPath]]) {
+  for (const [name, original] of [["prior_manifest.json", manifestPath], ["prior_delivery.json", deliveryPath], ["prior_report.json", reportPath], ...(fullStream ? [["prior_full_stream.json", fullStreamPath]] : [])]) {
     await writeNew(path.join(repairDir, name), await fs.readFile(original));
   }
   if (options["dry-run"] === "true") {

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { createHash } from "node:crypto";
-import { promises as fs } from "node:fs";
+import { promises as fs, constants as fsConstants } from "node:fs";
 import path from "node:path";
 import { buildReferenceBoard, referenceBoardPromptGuidance } from "./lib/openart-reference-board.mjs";
 import { falFileSha256, falObjectSha256, uploadFalReference, submitFalImage, observeFalImage, FAL_ENDPOINTS } from "./lib/fal-provider.mjs";
@@ -36,15 +36,26 @@ async function prepareReferences(ctx){
       ??path.join(ctx.episodeDir,"assets","images","references",`${id}.png`);
     need(path.isAbsolute(output??"")&&output.startsWith(`${ctx.episodeDir}${path.sep}assets${path.sep}images${path.sep}references${path.sep}`),`Fal reference output is outside this attempt: ${id}`);
     const prompt=String(target.prompt_anchor??"").trim();need(prompt.length>60,`Fal reference prompt is missing: ${id}`);
-    const joeyIdentity=target.kind==="character_state"&&(/(^|[_-])joey([_-]|$)/i.test(id)||/\bJoey Manhwa\b/i.test(target.subject??""));
+    const reusableAsset=target.kind==="character_state"&&!target.base_asset_id&&!target.state_delta
+      ?bank.assets.find(row=>row.asset_id===`gf.global.character.${target.canonical_subject_id}`&&row.approval_state==="approved")
+      :null;
+    if(reusableAsset)need(reusableAsset.local_absolute_path&&await falFileSha256(reusableAsset.local_absolute_path)===reusableAsset.sha256,
+      `Approved global identity is unavailable or changed: ${target.canonical_subject_id}`);
+    const joeyIdentity=target.kind==="character_state"&&(/(^|[_-])(joey|evan)([_-]|$)/i.test(id)||/\bJoey Manhwa\b/i.test(target.subject??""));
     const source=joeyIdentity?{asset_id:joey.asset_id,asset_class:joey.asset_class,path:joey.local_absolute_path,sha256:joey.sha256}:null;
-    const core={image_id:id,ref_id:id,endpoint:source?FAL_ENDPOINTS.primary_edit:FAL_ENDPOINTS.primary_text,prompt,prompt_sha256:digest(prompt),run_identity_sha256:ctx.identityHash,reference_mode:source?"separate_ordered_references":"text_only",reference_asset_ids:source?[source.asset_id]:[],reference_hashes:source?[source.sha256]:[],board_path:source?.path??null,board_sha256:source?.sha256??null,board_manifest_path:null,max_cost_usd:1.0,asset_class:target.kind,subject:target.subject??null};
+    const core={image_id:id,ref_id:id,endpoint:reusableAsset?"local-approved-bank-reuse":source?FAL_ENDPOINTS.primary_edit:FAL_ENDPOINTS.primary_text,prompt,prompt_sha256:digest(prompt),run_identity_sha256:ctx.identityHash,reference_mode:reusableAsset?"approved_local_asset":source?"separate_ordered_references":"text_only",reference_asset_ids:reusableAsset?[reusableAsset.asset_id]:source?[source.asset_id]:[],reference_hashes:reusableAsset?[reusableAsset.sha256]:source?[source.sha256]:[],board_path:reusableAsset?.local_absolute_path??source?.path??null,board_sha256:reusableAsset?.sha256??source?.sha256??null,board_manifest_path:null,max_cost_usd:reusableAsset?0:1.0,asset_class:target.kind,subject:target.subject??null};
     const assignment={...core,assignment_sha256:falObjectSha256(JSON.stringify(core)),submission_receipt_path:path.join(ctx.root,"reference","submission-receipts",`${id}.json`),result_receipt_path:path.join(ctx.root,"reference","result-receipts",`${id}.json`),output_path:output,upload_receipt_path:path.join(ctx.root,"reference","upload-receipts",`${id}.json`)};
     const assignmentPath=path.join(ctx.root,"reference","assignments",`${id}.json`);await write(assignmentPath,assignment);assignments.push({...assignment,assignment_path:assignmentPath});
+    if(reusableAsset){
+      await fs.mkdir(path.dirname(output),{recursive:true});
+      if(!await fs.access(output).then(()=>true,()=>false))await fs.copyFile(reusableAsset.local_absolute_path,output,fsConstants.COPYFILE_EXCL);
+      need(await falFileSha256(output)===reusableAsset.sha256,"Imported approved global reference changed.");
+      await write(assignment.result_receipt_path,{schema:"goldflow_fal_approved_bank_reuse_v1",image_id:id,source_asset_id:reusableAsset.asset_id,source_path:reusableAsset.local_absolute_path,source_sha256:reusableAsset.sha256,source_provider:reusableAsset.providers?.openart?"openart":reusableAsset.provider??null,source_provider_receipt_path:reusableAsset.provider_receipt_path??null,source_bank_manifest:ctx.contract.reference_bank_manifest,source_bank_manifest_sha256:ctx.contract.reference_bank_manifest_sha256,output_path:output,output_sha256:reusableAsset.sha256,model:reusableAsset.model,request_id:null,cost_usd:0,assignment_sha256:assignment.assignment_sha256});
+    }
   }
   const referencePlan={schema:"goldflow_fal_reference_plan_v1",created_at:new Date().toISOString(),run_identity_sha256:ctx.identityHash,visual_reference_plan_sha256:await falFileSha256(path.join(ctx.episodeDir,"visual_reference_plan.json")),model:FAL_ENDPOINTS.primary_text,quality:"low",width:1920,height:1080,format:"png",concurrency:ctx.contract.production_concurrency,assignments};
   await write(path.join(ctx.root,"reference-plan.json"),referencePlan);
-  return {status:"prepared",count:assignments.length,reused_canonical_joey:assignments.filter(row=>row.reference_asset_ids.includes(joey.asset_id)).length};
+  return {status:"prepared",count:assignments.length,reused_approved_global_assets:assignments.filter(row=>row.reference_mode==="approved_local_asset").length,joey_conditioned_states:assignments.filter(row=>row.reference_mode==="separate_ordered_references").length};
 }
 async function finalizeReferences(ctx){
   const referencePlan=await read(path.join(ctx.root,"reference-plan.json"));
@@ -81,13 +92,16 @@ async function finalizeReferences(ctx){
 }
 async function nativePromptReferences(ctx,row,approval){
   const requirements=[...(row.reference_requirements??[])].sort((a,b)=>Number(a.slot_order??99)-Number(b.slot_order??99)).slice(0,4);
+  const referencePlan=await read(path.join(ctx.root,"reference-plan.json"));
+  const approvedImports=new Map(referencePlan.assignments.filter(item=>item.reference_mode==="approved_local_asset")
+    .map(item=>[item.ref_id,item.reference_asset_ids[0]]));
   const refs=[];
   for(const ref of requirements){
     const id=String(ref.ref_id??"");const localPath=ref.reference_image_path??ref.conditioning_image_path;
     need(id&&path.isAbsolute(localPath??""),`Fal prompt reference is missing an exact local path: ${row.image_id}`);
     const sha256=approval.reference_hash_by_ref_id?.[id];
     need(/^[a-f0-9]{64}$/.test(sha256??"")&&await falFileSha256(localPath)===sha256,`Fal prompt reference is not hash-approved: ${row.image_id}/${id}`);
-    refs.push({asset_id:falPortableAssetId(ctx.identity.series_slug,{ref_id:id,kind:ref.kind??"asset"}),asset_class:ref.kind??"asset",path:localPath,sha256});
+    refs.push({asset_id:approvedImports.get(id)??falPortableAssetId(ctx.identity.series_slug,{ref_id:id,kind:ref.kind??"asset"}),asset_class:ref.kind??"asset",path:localPath,sha256});
   }
   return refs;
 }

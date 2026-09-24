@@ -47,6 +47,12 @@ export async function promoteApprovedFalReferences({ episodeDir, identity, contr
     const approvedHash = approval.reference_hash_by_ref_id[target.ref_id];
     requireValue(approvedHash === receipt.output_sha256 && await falFileSha256(receipt.output_path) === approvedHash,
       `Approved Fal reference changed before global promotion: ${target.ref_id}`);
+    if (receipt.schema === "goldflow_fal_approved_bank_reuse_v1") {
+      requireValue(sourceBank.assets.some(row => row.asset_id === receipt.source_asset_id
+        && row.approval_state === "approved" && row.sha256 === approvedHash),
+      `Imported global reference is absent from the locked bank: ${target.ref_id}`);
+      continue;
+    }
     const assetId = falPortableAssetId(identity.series_slug, target);
     const existing = prior.assets.filter(row => row.asset_id === assetId).sort((a, b) => Number(b.version) - Number(a.version))[0];
     if (existing?.sha256 === approvedHash) continue;

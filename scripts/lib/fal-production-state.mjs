@@ -99,11 +99,16 @@ export async function falProductionStageStates({ episodeDir, identity } = {}) {
           : { state: "blocked", evidence: `Exact visual reference repairs complete=${ids.length}/${ids.length}; materialization pending`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action finalize-reviewed-references` };
     }
   }
-  const planPath = path.join(root, "validation-plan.json");
-  const reviewPath = path.join(root, "validation-review.json");
+  const revisionRequestPath = path.join(root, "validation-revision-request.json");
+  const revisedPlanPath = path.join(root, "validation-plan-v2.json");
+  const revisionRequested = await exists(revisionRequestPath);
+  const revisionPrepared = await exists(revisedPlanPath);
+  const planPath = revisionPrepared ? revisedPlanPath : path.join(root, "validation-plan.json");
+  const reviewPath = path.join(root, revisionPrepared ? "validation-review-v2.json" : "validation-review.json");
   const plan = await exists(planPath) ? await read(planPath) : null;
   let next;
-  if (!plan) next = `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action prepare-validation`;
+  if (revisionRequested && !revisionPrepared) next = `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action prepare-validation-revision`;
+  else if (!plan) next = `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action prepare-validation`;
   else {
     const submissions = await Promise.all(plan.assignments.map((row) => exists(row.submission_receipt_path)));
     const results = await Promise.all(plan.assignments.map((row) => exists(row.result_receipt_path)));

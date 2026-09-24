@@ -4,6 +4,7 @@ import { buildFalImageInput, FAL_ENDPOINTS, FAL_PRIMARY_PARAMS } from "../lib/fa
 import { falBlockedStageRecoveryAdmission } from "../lib/fal-production-state.mjs";
 import { falProductionStageStates } from "../lib/fal-production-state.mjs";
 import { falPortableAssetId } from "../lib/fal-portable-bank.mjs";
+import { referenceBoardLayout, referenceBoardPromptGuidance } from "../lib/openart-reference-board.mjs";
 import { normalizeImageProvider } from "../lib/image-provider-routing.mjs";
 import { buildStageCommand, commandStageFor } from "../lib/pipeline-stage-registry.mjs";
 import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
@@ -25,6 +26,15 @@ test("Fal edit request uses one positional board without persisting a URL", () =
   assert.equal(request.reference_mode, "one_positional_collage");
   assert.deepEqual(request.input.image_urls, ["https://v3.fal.media/files/board.png"]);
   assert.equal(request.input.partial_images, 0);
+});
+
+test("Fal character-state panels retain human identities in collage guidance", () => {
+  const refs = ["joey", "evan", "claire"].map(asset_id => ({ asset_id, asset_class: "character_state", sha256: "a".repeat(64) }));
+  const layout = referenceBoardLayout(refs);
+  assert.equal(layout.panels.every(panel => panel.role.includes("character")), true);
+  const guidance = referenceBoardPromptGuidance({ panels: layout.panels.map(panel => ({ ...panel, placement: panel })) });
+  assert.match(guidance, /primary character's identity/);
+  assert.doesNotMatch(guidance, /crucial prop/);
 });
 
 test("Fal request rejects more than sixteen ordered references", () => {
@@ -77,6 +87,20 @@ test("early Fal visual fork begins with reference preparation before validation"
     assert.match(state.stageStates.reference_generation.next_command_shape, /--action prepare-references/);
     assert.match(state.stageStates.image_generation.next_command_shape, /--action prepare-validation/);
     assert.equal("reference_image_approval" in state.stageStates, false);
+  } finally { await rm(episodeDir, { recursive: true, force: true }); }
+});
+
+test("reviewed validation correction supersedes the original probe without overwriting it", async () => {
+  const episodeDir = await mkdtemp(path.join(os.tmpdir(), "goldflow-fal-validation-revision-"));
+  try {
+    const root = path.join(episodeDir, "fal"); await mkdir(root, { recursive: true });
+    await writeFile(path.join(root, "validation-plan.json"), JSON.stringify({ assignments: [] }));
+    await writeFile(path.join(root, "validation-revision-request.json"), "{}");
+    let state = await falProductionStageStates({ episodeDir, identity: { visual_restart: { fork_at: "visual_reference_plan" } } });
+    assert.match(state.stageStates.image_generation.next_command_shape, /--action prepare-validation-revision/);
+    await writeFile(path.join(root, "validation-plan-v2.json"), JSON.stringify({ assignments: [{ image_id: "new-probe", submission_receipt_path: path.join(root,"new-submission.json"), result_receipt_path: path.join(root,"new-result.json") }] }));
+    state = await falProductionStageStates({ episodeDir, identity: { visual_restart: { fork_at: "visual_reference_plan" } } });
+    assert.match(state.stageStates.image_generation.next_command_shape, /--action billing-submit/);
   } finally { await rm(episodeDir, { recursive: true, force: true }); }
 });
 

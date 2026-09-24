@@ -21,7 +21,7 @@ const digest = (value) => createHash('sha256').update(value).digest('hex');
 const safe = (value) => String(value).replace(/[^A-Za-z0-9._-]+/g, '_');
 
 function classify(ref) {
-  if (ref.asset_class === 'character' || ref.asset_class === 'wardrobe') return 'character';
+  if (ref.asset_class === 'character' || ref.asset_class === 'character_state' || ref.asset_class === 'wardrobe') return 'character';
   if (ref.asset_class === 'location') return 'environment';
   if (ref.asset_class === 'style') return 'style_reference';
   return 'prop';
@@ -90,6 +90,7 @@ function positionName(panel) {
 function roleInstruction(role) {
   if (role.includes('primary_character')) return "the primary character's identity, facial features, hair, age, body type, and wardrobe";
   if (role.includes('secondary_character')) return "the secondary character's separate identity, facial features, hair, age, body type, and wardrobe";
+  if (role === 'character') return "this character's separate identity, facial features, hair, age, body type, and wardrobe";
   if (role === 'environment') return "the environment's architecture, materials, lighting vocabulary, and spatial identity";
   if (role === 'crucial_prop' || role === 'prop') return "the crucial prop's defining shape, material, scale, and identifying details";
   if (role === 'style_reference') return 'the supernatural interface treatment, color, line vocabulary, and graphic restraint only';

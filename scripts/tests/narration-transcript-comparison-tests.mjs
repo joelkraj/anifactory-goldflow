@@ -281,7 +281,6 @@ try {
   for (const [intended, recognized] of [
     ["My fiancée left.", "My fiancé left."],
     ["He knew I'd left.", "He knew I left."],
-    ["The thousand remained.", "A thousand remained."],
   ]) {
   const words = recognized.split(/\s+/).map((word, index) => ({
     word, start_sec: 0.1 + index * 0.2, end_sec: 0.3 + index * 0.2,

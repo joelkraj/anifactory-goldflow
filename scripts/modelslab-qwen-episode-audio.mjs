@@ -1756,7 +1756,7 @@ function transcriptInputText(value) {
     : String(value ?? "");
 }
 
-export const TRANSCRIPT_QA_COMPARISON_VERSION = "unicode_words_exact_im_numeric_article_contraction_phonetic_v6";
+export const TRANSCRIPT_QA_COMPARISON_VERSION = "unicode_words_exact_im_numeric_article_contraction_phonetic_v7";
 
 const TRANSCRIPT_PUNCTUATION = new Set([".", ",", ";", ":", "!", "?", "…"]);
 
@@ -1930,6 +1930,15 @@ function canonicalTranscriptTokensWithoutAliases(value, preserveBoundaries = fal
       index += 1;
     } else if (base[index] === "door" && base[index + 1] === "frame") {
       compounds.push("doorframe");
+      index += 1;
+    } else if (base[index] === "cold" && base[index + 1] === "water") {
+      compounds.push("coldwater");
+      index += 1;
+    } else if (base[index] === "wi" && base[index + 1] === "fi") {
+      compounds.push("wifi");
+      index += 1;
+    } else if (base[index] === "every" && base[index + 1] === "body") {
+      compounds.push("everybody");
       index += 1;
     } else {
       compounds.push(base[index]);
@@ -2188,7 +2197,9 @@ function alignContractionRecognition(operations, intended, recognized, intendedT
 }
 
 function alignTwoRecognitionSpelling(operations, intended, recognized, intendedText, recognizedText, equivalentPhrases) {
-  if (!operations.some((row) => row.type === "substitution" && row.intended === "num:2" && row.recognized === "too")) return [];
+  if (!operations.some((row) => row.type === "substitution"
+    && ((row.intended === "num:2" && row.recognized === "too")
+      || (row.intended === "too" && row.recognized === "num:2")))) return [];
   const leftBoundaries = transcriptBoundaryPositions(intendedText, intended.length, equivalentPhrases);
   const rightBoundaries = transcriptBoundaryPositions(recognizedText, recognized.length, equivalentPhrases);
   if (!leftBoundaries || !rightBoundaries) return [];
@@ -2199,15 +2210,18 @@ function alignTwoRecognitionSpelling(operations, intended, recognized, intendedT
     const operation = operations[index];
     const previous = operations[index - 1];
     const next = operations[index + 1];
-    if (operation.type === "substitution" && operation.intended === "num:2" && operation.recognized === "too"
+    if (operation.type === "substitution"
+      && ((operation.intended === "num:2" && operation.recognized === "too")
+        || (operation.intended === "too" && operation.recognized === "num:2"))
       && (!previous || previous.type === "match") && (!next || next.type === "match")
       && leftBoundaries.has(left) === rightBoundaries.has(right)
-      && leftBoundaries.has(left + 1) === rightBoundaries.has(right + 1)) {
+      && leftBoundaries.has(left + 1) === rightBoundaries.has(right + 1)
+      && (operation.intended !== "too" || leftBoundaries.has(left + 1))) {
       // The approved value supplies meaning; ASR supplies an explicit homophone
       // at that same position. Never invent a missing token or reinterpret "to".
-      recognized[right] = "num:2";
-      operations[index] = { type: "match", intended: "num:2", recognized: "num:2" };
-      equivalences.push({ intended_index: left, recognized_index: right, intended: "num:2", recognized: "too", rule: "aligned_two_too_spelling" });
+      recognized[right] = operation.intended;
+      operations[index] = { type: "match", intended: operation.intended, recognized: operation.intended };
+      equivalences.push({ intended_index: left, recognized_index: right, intended: operation.intended, recognized: operation.recognized, rule: "aligned_two_too_spelling" });
     }
     if (operation.type !== "insertion") left += 1;
     if (operation.type !== "deletion") right += 1;

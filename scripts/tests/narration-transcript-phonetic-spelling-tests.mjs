@@ -20,6 +20,10 @@ for (const [intended, recognized] of [
   ["He saved two goals and two penalties.", "He saved too goals and too penalties."],
   ["I can see you are all right.", "I can see you are alright."],
   ["He hit the doorframe.", "He hit the door frame."],
+  ["Coldwater opened the door.", "Cold water opened the door."],
+  ["I connected to Wi-Fi and called Claire.", "I connected to wifi and called Claire."],
+  ["Every body had inherited the training.", "Everybody had inherited the training."],
+  ["She had slept too; there was coffee.", "She had slept two; there was coffee."],
 ]) {
   assert.equal(edits(qa(intended, recognized)), 0, `${intended} / ${recognized}`);
   assert.equal(decision(intended, recognized).blockers.length, 0);

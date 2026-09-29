@@ -199,6 +199,20 @@ function timeline(beats) {
     }));
 }
 
+// Replays only the beat portion of an exact pre-spend reference repair. The Fal
+// restart validator uses this to prove a changed carried beat plan came from
+// the guarded repair, without treating arbitrary fork edits as carryforward.
+export function replayBeatLocationRepair(beforePlan, patches, updatedAt) {
+  const plan = structuredClone(beforePlan);
+  const priorGrouping = groupingLockHash(plan.beats);
+  const beatChanges = patchBeatLocations(plan.beats, patches);
+  if (!beatChanges.length) throw new Error("Exact repair has no beat-location changes.");
+  if (groupingLockHash(plan.beats) !== priorGrouping) throw new Error("Exact repair changed locked beat grouping.");
+  plan.location_timeline = timeline(plan.beats);
+  plan.updated_at = updatedAt;
+  return { plan, beatChanges, groupingLockSha256: priorGrouping };
+}
+
 export async function repairReferencePlanExact({ episodeDir, spec, specPath, currentStage, now = new Date() }) {
   episodeDir = path.resolve(episodeDir);
   if (currentStage !== "reference_plan_approval") throw new Error(`Exact repair is allowed only at reference_plan_approval; current stage is ${currentStage}.`);

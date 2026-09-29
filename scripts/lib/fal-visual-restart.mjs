@@ -6,6 +6,7 @@ import {
   nonvisualIdentityBinding, objectHash, readJson, requiredBaselineFiles, validateBaselineStages,
 } from "./openart-visual-restart.mjs";
 import { FAL_ENDPOINTS, FAL_EPISODE_BUDGET, FAL_PRIMARY_PARAMS } from "./fal-provider.mjs";
+import { verifyFalBeatCarryforwardRepair } from "./fal-carryforward-beat-repair.mjs";
 
 export const FAL_VISUAL_FILES = Object.freeze([
   "visual_reference_plan.json", "section_image_prompts.json", "section_image_prompts_hardened.json",
@@ -59,8 +60,22 @@ export async function falRestartBaselineState({ episodeDir, identity }) {
     need(await fileSha256(path.join(binding.baseline_episode_dir, "run_identity.json")) === binding.baseline_identity_sha256, "Fal baseline identity changed.");
     const snapshot = await readJson(path.join(episodeDir, "baseline_status_snapshot.json"));
     const statuses = validateBaselineStages(snapshot);
+    const repairedBeatFiles = new Set(["visual_beat_plan.json", "visual_beat_approval.json"]);
+    const carriedBeatRows = new Map();
     for (const row of receipt.files ?? []) {
-      need(await fileSha256(row.source_path) === row.sha256 && await fileSha256(path.join(episodeDir, row.relative_path)) === row.sha256, `Fal carryforward changed: ${row.relative_path}`);
+      need(await fileSha256(row.source_path) === row.sha256, `Fal carryforward source changed: ${row.relative_path}`);
+      const currentSha256 = await fileSha256(path.join(episodeDir, row.relative_path));
+      if (repairedBeatFiles.has(row.relative_path) && binding.fork_at === "visual_reference_plan") {
+        carriedBeatRows.set(row.relative_path, { originalSha256: row.sha256, currentSha256 });
+      } else {
+        need(currentSha256 === row.sha256, `Fal carryforward changed: ${row.relative_path}`);
+      }
+    }
+    if ([...carriedBeatRows.values()].some(row => row.currentSha256 !== row.originalSha256)) {
+      need(carriedBeatRows.size === 2, "Fal carryforward beat plan/approval pair is incomplete.");
+      await verifyFalBeatCarryforwardRepair({ episodeDir,
+        originalPlanSha256: carriedBeatRows.get("visual_beat_plan.json").originalSha256,
+        originalApprovalSha256: carriedBeatRows.get("visual_beat_approval.json").originalSha256 });
     }
     const earlyReferenceFork = binding.fork_at === "visual_reference_plan";
     for (const name of [...requiredBaselineFiles(identity.episode), ...(earlyReferenceFork ? [] : [...FAL_VISUAL_FILES, "fal/catalog.json"])]) need((receipt.files ?? []).some(row => row.relative_path === name), `Fal carryforward missing ${name}.`);

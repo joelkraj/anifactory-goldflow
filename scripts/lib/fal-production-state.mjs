@@ -1,5 +1,6 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { falRetryBudgetState, falSpendProjectionState } from "./fal-retry-budget.mjs";
 
 async function exists(file) { return fs.access(file).then(() => true, () => false); }
 async function read(file) { return JSON.parse(await fs.readFile(file, "utf8")); }
@@ -29,6 +30,32 @@ export function falBlockedStageRecoveryAdmission(status, flags = {}) {
 
 export async function falProductionStageStates({ episodeDir, identity } = {}) {
   const root = path.join(episodeDir, "fal");
+  const retryBudget = await exists(path.join(episodeDir, "visual_beat_plan.json"))
+    ? await falRetryBudgetState(episodeDir) : null;
+  const retryCapEvidence = retryBudget?.remaining_retries === 0
+    ? `Fal paid retry cap reached (${retryBudget.paid_retry_submissions}/${retryBudget.retry_limit}, 10% of ${retryBudget.planned_frames} planned frames); hold additional paid repairs`
+    : null;
+  const contract = identity?.image_provider_options?.fal;
+  const spend = contract ? await falSpendProjectionState({ episodeDir,
+    warningBudgetUsd: contract.warning_budget_usd, hardBudgetUsd: contract.hard_budget_usd }) : null;
+  const withSpendState = stageStates => {
+    if (!retryBudget && !spend?.warning_reached && !spend?.hard_reached) return { stageStates };
+    const annotated = Object.fromEntries(Object.entries(stageStates).map(([stage, state]) => {
+      if (!state) return [stage, state];
+      const retryNote = retryBudget
+        ? `paid retries ${retryBudget.paid_retry_submissions}/${retryBudget.retry_limit}` : "";
+      const spendNote = spend?.warning_reached
+        ? `projected base spend $${spend.projected_base_spend_usd}/$${spend.hard_budget_usd} (estimate only; actual billing unavailable)` : "";
+      const next = { ...state, evidence: [state.evidence, retryNote, spendNote].filter(Boolean).join("; ") };
+      if (spend?.hard_reached && /\bimagegen fal\b.*--confirm-spend\b/.test(next.next_command_shape ?? "")) {
+        next.state = "blocked";
+        next.evidence += "; locked hard budget reached; hold further paid submission";
+        delete next.next_command_shape;
+      }
+      return [stage, next];
+    }));
+    return { stageStates: annotated };
+  };
   const earlyReferenceFork = identity?.visual_restart?.fork_at === "visual_reference_plan";
   let referenceState = null;
   if (earlyReferenceFork) {
@@ -76,7 +103,9 @@ export async function falProductionStageStates({ episodeDir, identity } = {}) {
           : pendingRepair
             ? { state: "blocked", evidence: "Exact Fal reference repair is pending", next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action observe-reference-repairs` }
           : unresolved.some(Boolean)
-            ? { state: "blocked", evidence: `Fal exact-reference failures or transport holds=${unresolved.filter(Boolean).length}; inspect exact receipts before scoped repair`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action repair-reference-failures --directives <absolute_reference_repair_directives.json> --confirm-spend exact_fal_reference_repair` }
+            ? retryCapEvidence
+              ? { state: "blocked", evidence: retryCapEvidence }
+              : { state: "blocked", evidence: `Fal exact-reference failures or transport holds=${unresolved.filter(Boolean).length}; inspect exact receipts before scoped repair`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action repair-reference-failures --directives <absolute_reference_repair_directives.json> --confirm-spend exact_fal_reference_repair` }
             : { state: "missing", evidence: `Fal canonical references submitted=${submitted.filter(Boolean).length}/${submitted.length}`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action dispatch-references --confirm-spend exact_fal_reference_batch` };
     }
   }
@@ -95,7 +124,9 @@ export async function falProductionStageStates({ episodeDir, identity } = {}) {
         return nativePlan.reference_targets?.some(target => target.ref_id === row.image_id && target.reference_image_path === expected && target.conditioning_image_path === expected);
       });
       if (!materialized) reviewRepairState = !assignments.every(Boolean)
-        ? { state: "blocked", evidence: `Exact visual reference repairs required=${ids.length}`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action repair-reviewed-references --confirm-spend exact_fal_reviewed_reference_repair` }
+        ? retryCapEvidence
+          ? { state: "blocked", evidence: retryCapEvidence }
+          : { state: "blocked", evidence: `Exact visual reference repairs required=${ids.length}`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action repair-reviewed-references --confirm-spend exact_fal_reviewed_reference_repair` }
         : !results.every(Boolean)
           ? { state: "blocked", evidence: `Exact visual reference repairs complete=${results.filter(Boolean).length}/${ids.length}`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action observe-reviewed-references` }
           : { state: "blocked", evidence: `Exact visual reference repairs complete=${ids.length}/${ids.length}; materialization pending`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action finalize-reviewed-references` };
@@ -153,29 +184,33 @@ export async function falProductionStageStates({ episodeDir, identity } = {}) {
         ? { state: "blocked", evidence: `${heldUnresolved.filter(Boolean).length} exact Fal transport recoveries are pending`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action observe-transport-recovery` }
         : heldUnresolved.some((value,index)=>value&&!holdRechecked[index])
           ? { state: "blocked", evidence: `${heldUnresolved.filter(Boolean).length} exact Fal transport holds need a no-spend original-request recheck`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action observe-holds` }
-        : { state: "blocked", evidence: `${heldUnresolved.filter(Boolean).length} completed Fal requests have persistently unavailable result transport`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action recover-holds --directives <absolute_transport_recovery_directives.json> --confirm-spend exact_fal_transport_recovery` };
+        : retryCapEvidence
+          ? { state: "blocked", evidence: retryCapEvidence }
+          : { state: "blocked", evidence: `${heldUnresolved.filter(Boolean).length} completed Fal requests have persistently unavailable result transport`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action recover-holds --directives <absolute_transport_recovery_directives.json> --confirm-spend exact_fal_transport_recovery` };
     }
     else if (failedUnresolved.some(Boolean)) {
       const repairSubmitted = await Promise.all(bulk.assignments.map(row => exists(path.join(root,"bulk","repair-submission-receipts",`${row.image_id}.json`))));
       bulkState = repairSubmitted.some((value,index)=>value&&failedUnresolved[index]&&!repairResults[index])
         ? { state: "blocked", evidence: `${failedUnresolved.filter(Boolean).length} exact Fal repair is pending`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action observe-repairs` }
-        : { state: "blocked", evidence: `${failedUnresolved.filter(Boolean).length} exact Fal IDs need scoped repair`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action repair-failures --directives <absolute_repair_directives.json> --confirm-spend exact_fal_repair_batch` };
+        : retryCapEvidence
+          ? { state: "blocked", evidence: retryCapEvidence }
+          : { state: "blocked", evidence: `${failedUnresolved.filter(Boolean).length} exact Fal IDs need scoped repair`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action repair-failures --directives <absolute_repair_directives.json> --confirm-spend exact_fal_repair_batch` };
     }
     else if (unsubmittedCount > 0 && outstanding < queueTarget) bulkState = { state: "missing", evidence: `${submitted.filter(Boolean).length}/${bulk.assignments.length} Fal requests queued; filling ${queueTarget-outstanding} queue positions while provider enforces ${concurrency} active generations`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action dispatch-bulk --limit ${Math.min(20,unsubmittedCount,queueTarget-outstanding)} --confirm-spend exact_fal_bulk_batch` };
     else if (outstanding > 0) bulkState = { state: "missing", evidence: `${effectiveResults.filter(Boolean).length}/${bulk.assignments.length} Fal frames complete; ${outstanding} submitted requests pending`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action observe-bulk --limit 100` };
     else bulkState = { state: "missing", evidence: `${submitted.filter(Boolean).length}/${bulk.assignments.length} Fal requests submitted`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action dispatch-bulk --limit 100 --confirm-spend exact_fal_bulk_batch` };
   }
-  if (earlyReferenceFork) return { stageStates: {
+  if (earlyReferenceFork) return withSpendState({
     reference_generation: referenceState,
     ...(reviewRepairState ? { reference_image_approval: reviewRepairState } : {}),
     image_generation: validationPassed
       ? bulkState ?? { state: "missing", evidence: "Awaiting Fal bulk preparation" }
       : { state: "missing", evidence: next ? "Fal collage validation is incomplete" : "Fal validation review did not pass", ...(next ? { next_command_shape: next } : {}) },
-  }};
-  return { stageStates: {
+  });
+  return withSpendState({
     reference_image_approval: validationPassed
       ? { done: true, evidence: `Fal eight-shot collage validation passed (${review.approved_ids.length}/8 usable)` }
       : { state: "missing", evidence: next ? "Fal collage validation is incomplete" : "Fal validation review did not pass", ...(next ? { next_command_shape: next } : {}) },
     image_generation: bulkState ?? { state: "missing", evidence: "Awaiting Fal validation approval" },
-  }};
+  });
 }

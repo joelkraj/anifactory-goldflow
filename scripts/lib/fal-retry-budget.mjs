@@ -1,0 +1,117 @@
+import { createHash } from "node:crypto";
+import { promises as fs } from "node:fs";
+import path from "node:path";
+
+const RETRY_FRACTION = 0.10;
+// The existing Fal bulk plan uses this published base-output estimate. It is a
+// lower bound: edit input-image tokens and provider billing are not in receipts.
+const BASE_IMAGE_PRICE_USD = 0.00441;
+const REPAIR_RECEIPT_DIRS = Object.freeze([
+  "reference/repair-submission-receipts",
+  "reference/review-repair-submission-receipts",
+  "bulk/repair-submission-receipts",
+  "bulk/review-repair-submission-receipts",
+  "bulk/transport-recovery-submission-receipts",
+]);
+const INITIAL_RECEIPT_DIRS = Object.freeze([
+  "reference/submission-receipts",
+  "submission-receipts",
+  "validation-v2/submission-receipts",
+  "bulk/submission-receipts",
+]);
+
+async function exists(file) { return fs.access(file).then(() => true, () => false); }
+async function receiptsIn(dir) {
+  const names = await fs.readdir(dir).catch(error => {
+    if (error.code === "ENOENT") return [];
+    throw error;
+  });
+  return names.filter(name => name.endsWith(".json")).map(name => path.join(dir, name));
+}
+async function readReceipt(file) {
+  const receipt = JSON.parse(await fs.readFile(file, "utf8"));
+  if (receipt.schema !== "goldflow_fal_submission_receipt_v1"
+    || typeof receipt.image_id !== "string"
+    || typeof receipt.assignment_sha256 !== "string"
+    || typeof receipt.request_id !== "string") {
+    throw new Error(`Invalid Fal submission receipt in retry accounting: ${file}`);
+  }
+  return receipt;
+}
+
+export async function falRetryBudgetState(episodeDir) {
+  const beatPath = path.join(episodeDir, "visual_beat_plan.json");
+  const beatBytes = await fs.readFile(beatPath);
+  const beatPlan = JSON.parse(beatBytes);
+  const approval = JSON.parse(await fs.readFile(path.join(episodeDir, "visual_beat_approval.json"), "utf8"));
+  const plannedFrames = Number(beatPlan.visual_beat_count);
+  if (beatPlan.status !== "passed" || approval.status !== "approved"
+    || approval.visual_beat_plan_sha256 !== createHash("sha256").update(beatBytes).digest("hex")
+    || !Number.isSafeInteger(plannedFrames)
+    || plannedFrames < 1 || beatPlan.beats?.length !== plannedFrames) {
+    throw new Error("Fal retry cap requires the approved, complete visual beat plan.");
+  }
+  const root = path.join(episodeDir, "fal");
+  const receiptPaths = (await Promise.all(REPAIR_RECEIPT_DIRS.map(dir => receiptsIn(path.join(root, dir))))).flat();
+  const initialValidation = path.join(root, "submission-receipts");
+  for (const file of await receiptsIn(path.join(root, "validation-v2", "submission-receipts"))) {
+    if (await exists(path.join(initialValidation, path.basename(file)))) receiptPaths.push(file);
+  }
+  const receipts = await Promise.all(receiptPaths.map(readReceipt));
+  const limit = Math.floor(plannedFrames * RETRY_FRACTION);
+  return { planned_frames: plannedFrames, retry_limit: limit,
+    paid_retry_submissions: receipts.length, remaining_retries: Math.max(0, limit - receipts.length) };
+}
+
+export async function assertFalRetryBudget({ episodeDir, assignments }) {
+  const state = await falRetryBudgetState(episodeDir);
+  const root = path.join(episodeDir, "fal");
+  const pending = [];
+  for (const row of assignments) {
+    const relative = path.relative(root, row.submission_receipt_path);
+    const isRepair = row.previous_assignment_sha256 || row.previous_request_id
+      || row.rejected_image_sha256;
+    const isRepeatedValidation = relative.startsWith(`validation-v2${path.sep}submission-receipts${path.sep}`)
+      && await exists(path.join(root, "submission-receipts", path.basename(row.submission_receipt_path)));
+    if (isRepair || isRepeatedValidation) pending.push(row);
+  }
+  if (new Set(pending.map(row => row.submission_receipt_path)).size !== pending.length) {
+    throw new Error("Fal retry batch contains duplicate submission receipt paths.");
+  }
+  if (state.paid_retry_submissions + pending.length > state.retry_limit) {
+    throw new Error(`Fal paid retry cap reached: ${state.paid_retry_submissions} used + ${pending.length} requested exceeds ${state.retry_limit} (10% of ${state.planned_frames} planned frames). Review exact IDs and hold additional image spend.`);
+  }
+  return { ...state, requested_paid_retries: pending.length };
+}
+
+export async function falSpendProjectionState({ episodeDir, warningBudgetUsd, hardBudgetUsd }) {
+  if (!Number.isFinite(warningBudgetUsd) || !Number.isFinite(hardBudgetUsd)
+    || warningBudgetUsd <= 0 || hardBudgetUsd <= warningBudgetUsd) {
+    throw new Error("Fal spend projection requires valid locked warning and hard budgets.");
+  }
+  const root = path.join(episodeDir, "fal");
+  const receiptPaths = (await Promise.all([...INITIAL_RECEIPT_DIRS, ...REPAIR_RECEIPT_DIRS]
+    .map(dir => receiptsIn(path.join(root, dir))))).flat();
+  await Promise.all(receiptPaths.map(readReceipt));
+  const paidSubmissions = receiptPaths.length;
+  const projectedBaseSpendUsd = Number((paidSubmissions * BASE_IMAGE_PRICE_USD).toFixed(4));
+  return {
+    paid_submissions: paidSubmissions, projected_base_spend_usd: projectedBaseSpendUsd,
+    warning_budget_usd: warningBudgetUsd, hard_budget_usd: hardBudgetUsd,
+    warning_reached: projectedBaseSpendUsd >= warningBudgetUsd,
+    hard_reached: projectedBaseSpendUsd >= hardBudgetUsd,
+    estimate_only: true, actual_charge_usd: null,
+    pricing_note: "Fal base-output estimate only; input-image tokens and actual provider billing are unavailable in submission/result receipts.",
+  };
+}
+
+export async function assertFalSpendProjectionBudget({ episodeDir, assignments, warningBudgetUsd, hardBudgetUsd }) {
+  const state = await falSpendProjectionState({ episodeDir, warningBudgetUsd, hardBudgetUsd });
+  const projectedAfterBatch = Number(((state.paid_submissions + assignments.length) * BASE_IMAGE_PRICE_USD).toFixed(4));
+  if (state.hard_reached || projectedAfterBatch >= hardBudgetUsd) {
+    throw new Error(`Fal projected base spend reaches the locked $${hardBudgetUsd} hard budget ($${state.projected_base_spend_usd} already projected + ${assignments.length} new requests). This is an estimate only; verify actual Fal balance before further spend.`);
+  }
+  return { ...state, requested_submissions: assignments.length,
+    projected_base_spend_after_batch_usd: projectedAfterBatch,
+    warning_after_batch: projectedAfterBatch >= warningBudgetUsd };
+}

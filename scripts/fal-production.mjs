@@ -5,6 +5,7 @@ import path from "node:path";
 import { buildReferenceBoard, referenceBoardPromptGuidance } from "./lib/openart-reference-board.mjs";
 import { falFileSha256, falObjectSha256, uploadFalReference, submitFalImage, observeFalImage, FAL_ENDPOINTS } from "./lib/fal-provider.mjs";
 import { falPortableAssetId, promoteApprovedFalReferences } from "./lib/fal-portable-bank.mjs";
+import { assertFalRetryBudget, assertFalSpendProjectionBudget, falSpendProjectionState } from "./lib/fal-retry-budget.mjs";
 
 const digest = value => createHash("sha256").update(value).digest("hex");
 const bytes = value => `${JSON.stringify(value, null, 2)}\n`;
@@ -199,11 +200,50 @@ async function prepareBulk(ctx,f){
     const assignment={...core,assignment_sha256:falObjectSha256(JSON.stringify(core)),submission_receipt_path:path.join(ctx.root,"bulk","submission-receipts",`${row.image_id}.json`),result_receipt_path:path.join(ctx.root,"bulk","result-receipts",`${row.image_id}.json`),output_path:path.join(ctx.root,"bulk","outputs",`${row.image_id}.png`),upload_receipt_path:path.join(ctx.root,"bulk","upload-receipts",`${row.image_id}.json`)};
     const assignmentPath=path.join(ctx.root,"bulk","assignments",`${row.image_id}.json`);await write(assignmentPath,assignment);assignments.push({...assignment,assignment_path:assignmentPath});
   }
-  const projectedBase=Number((assignments.filter(row=>!row.reused_validation_shot).length*0.00441).toFixed(4)); need(projectedBase<=ctx.contract.hard_budget_usd,"Projected Fal base cost exceeds the locked episode hard budget.");
+  const projectedBase=Number((assignments.filter(row=>!row.reused_validation_shot).length*0.00441).toFixed(4));
+  const spend=await falSpendProjectionState({episodeDir:ctx.episodeDir,
+    warningBudgetUsd:ctx.contract.warning_budget_usd,hardBudgetUsd:ctx.contract.hard_budget_usd});
+  need(spend.projected_base_spend_usd+projectedBase<ctx.contract.hard_budget_usd,
+    "Projected Fal episode base spend reaches the locked hard budget; estimate only, verify actual account spend.");
+  if(spend.projected_base_spend_usd+projectedBase>=ctx.contract.warning_budget_usd)
+    console.error("Fal projected episode base spend reaches the locked warning threshold; estimate only, verify actual account spend.");
   const plan={schema:"goldflow_fal_bulk_plan_v1",created_at:new Date().toISOString(),run_identity_sha256:ctx.identityHash,model:FAL_ENDPOINTS.primary_edit,quality:"low",width:1920,height:1080,format:"png",reference_mode:"one_positional_collage",concurrency:ctx.contract.production_concurrency,assignment_count:assignments.length,projected_base_cost_usd:projectedBase,pricing_note:"Official endpoint base price at preparation; input-image token charges may increase actual cost.",assignments};
   await write(path.join(ctx.root,"bulk-plan.json"),plan);return {status:"prepared",count:assignments.length,projected_base_cost_usd:projectedBase};
 }
-async function submitRows(ctx,rows,limit){return mapLimit(rows,limit,async row=>{if(!row.board_path)return submitFalImage({assignment:row,referenceUrls:[],receiptPath:row.submission_receipt_path});const upload=await uploadFalReference({localPath:row.board_path,expectedSha256:row.board_sha256,receiptPath:row.upload_receipt_path});try{return await submitFalImage({assignment:row,referenceUrls:[upload.remoteUrl],receiptPath:row.submission_receipt_path});}finally{upload.remoteUrl=null;}});}
+async function submitRows(ctx,rows,limit){
+  const pending=[];
+  for(const row of rows){
+    if(await fs.access(row.submission_receipt_path).then(()=>true,()=>false)){
+      const prior=await read(row.submission_receipt_path);
+      need(prior.schema==="goldflow_fal_submission_receipt_v1"&&prior.image_id===row.image_id
+        &&prior.assignment_sha256===row.assignment_sha256&&prior.run_identity_sha256===ctx.identityHash,
+        `Existing Fal submission receipt differs from exact assignment: ${row.image_id}`);
+    }else pending.push(row);
+  }
+  if(!pending.length)return [];
+  await assertFalRetryBudget({episodeDir:ctx.episodeDir,assignments:pending});
+  const spend=await assertFalSpendProjectionBudget({episodeDir:ctx.episodeDir,assignments:pending,
+    warningBudgetUsd:ctx.contract.warning_budget_usd,hardBudgetUsd:ctx.contract.hard_budget_usd});
+  if(spend.warning_after_batch)console.error(`Fal projected base spend warning: $${spend.projected_base_spend_after_batch_usd} against locked $${spend.warning_budget_usd}; estimate only, verify actual Fal balance.`);
+  return mapLimit(pending,limit,async row=>{
+    if(!row.board_path)return submitFalImage({assignment:row,referenceUrls:[],receiptPath:row.submission_receipt_path});
+    const upload=await uploadFalReference({localPath:row.board_path,expectedSha256:row.board_sha256,receiptPath:row.upload_receipt_path});
+    try{return await submitFalImage({assignment:row,referenceUrls:[upload.remoteUrl],receiptPath:row.submission_receipt_path});}
+    finally{upload.remoteUrl=null;}
+  });
+}
+async function preflightPaidRepair(ctx,receiptDir,imageIds){
+  const pending=[];
+  for(const imageId of imageIds){
+    const submission_receipt_path=path.join(ctx.root,receiptDir,`${imageId}.json`);
+    if(!await fs.access(submission_receipt_path).then(()=>true,()=>false))
+      pending.push({image_id:imageId,previous_assignment_sha256:"preflight",submission_receipt_path});
+  }
+  if(!pending.length)return;
+  await assertFalRetryBudget({episodeDir:ctx.episodeDir,assignments:pending});
+  await assertFalSpendProjectionBudget({episodeDir:ctx.episodeDir,assignments:pending,
+    warningBudgetUsd:ctx.contract.warning_budget_usd,hardBudgetUsd:ctx.contract.hard_budget_usd});
+}
 async function observeRows(ctx,rows,limit){return mapLimit(rows,limit,async row=>{const receipt=await read(row.submission_receipt_path);try{return await observeFalImage({endpoint:receipt.endpoint,requestId:receipt.request_id,outputPath:row.output_path,receiptPath:row.result_receipt_path});}catch(error){const timedOut=error?.name==="TimeoutError"||/aborted due to timeout/i.test(error?.message??"");const stale=Date.now()-Date.parse(receipt.submitted_at)>15*60_000;if(timedOut&&!stale)return {complete:false,transient_observation_timeout:true,request_id:receipt.request_id};if(timedOut||Number(error?.status)>=500||/Gateway Timeout|Internal Server Error/i.test(error?.message??"")){const holdPath=path.join(path.dirname(path.dirname(row.result_receipt_path)),"transport-holds",`${row.image_id}.json`);if(!await fs.access(holdPath).then(()=>true,()=>false))await write(holdPath,{schema:"goldflow_fal_transport_hold_v1",created_at:new Date().toISOString(),image_id:row.image_id,endpoint:receipt.endpoint,request_id:receipt.request_id,assignment_sha256:row.assignment_sha256,provider_queue_status:"unknown_or_completed",reason:timedOut?"stale_observation_timeout":"provider_5xx_during_observation",billable_request_resubmitted:false});return {complete:false,transport_pending:true,request_id:receipt.request_id,hold_path:holdPath};}if(error?.status!==422)throw error;const failurePath=path.join(path.dirname(path.dirname(row.result_receipt_path)),"failure-receipts",`${row.image_id}.json`);const failure={schema:"goldflow_fal_exact_failure_v1",created_at:new Date().toISOString(),image_id:row.image_id,endpoint:receipt.endpoint,request_id:receipt.request_id,assignment_sha256:row.assignment_sha256,error_status:error.status,error_type:error.body?.detail?.[0]?.type??"unprocessable_entity",error_message:error.body?.detail?.[0]?.msg??error.message,automatic_retry:false,automatic_failover:false};await write(failurePath,failure);return {complete:false,failed:true,failure_path:failurePath};}});}
 async function main(){
  const f=flags(process.argv.slice(2)); const ctx=await context(f); const action=f.action;
@@ -236,6 +276,7 @@ async function main(){
    const plan=await read(path.join(ctx.root,"reference-plan.json"));const directives=await read(f.directives);
    need(directives?.schema==="goldflow_fal_reference_repair_directives_v1"&&Array.isArray(directives.repairs)&&directives.repairs.length,
      "Exact Fal reference repair directives are required.");
+   await preflightPaidRepair(ctx,"reference/repair-submission-receipts",directives.repairs.map(row=>row.image_id));
    const repairs=[];
    for(const directive of directives.repairs){
      const original=plan.assignments.find(row=>row.image_id===directive.image_id);
@@ -272,6 +313,7 @@ async function main(){
    const reviewPath=path.join(ctx.root,"reference","review-rejections.json");
    const review=await read(reviewPath);need(review?.schema==="goldflow_fal_reference_visual_review_v1"
      &&Array.isArray(review.rejections)&&review.rejections.length,"Exact visual review rejection receipt is required.");
+   await preflightPaidRepair(ctx,"reference/review-repair-submission-receipts",review.rejections.map(row=>row.image_id));
    const plan=await read(path.join(ctx.root,"reference-plan.json"));const repairs=[];
    for(const finding of review.rejections){
      const original=plan.assignments.find(row=>row.image_id===finding.image_id);
@@ -344,6 +386,7 @@ async function main(){
    need(directives.schema==="goldflow_fal_reviewed_bulk_repair_directives_v1"&&directives.qa_report_sha256===await falFileSha256(qaPath),"Visual repair directives are not bound to current QA.");
    const blocked=new Set(qa.critical_rejected_image_ids??[]);
    need(Array.isArray(directives.repairs)&&directives.repairs.length===blocked.size&&directives.repairs.every(row=>blocked.has(row.image_id)),"Every and only blocked exact image ID must be repaired.");
+   await preflightPaidRepair(ctx,"bulk/review-repair-submission-receipts",directives.repairs.map(row=>row.image_id));
    const prompts=await read(path.join(ctx.episodeDir,"section_image_prompts_hardened.json"));
    const approval=await read(path.join(ctx.episodeDir,`visual_reference_approval_${ctx.identity.episode}.json`));
    const repairs=[];
@@ -405,7 +448,7 @@ async function main(){
  }
  if(action==="repair-failures"){
    need(f["confirm-spend"]==="exact_fal_repair_batch","Paid repair dispatch requires exact confirmation token.");need(path.isAbsolute(f.directives??""),"Repair dispatch requires an absolute --directives file.");
-   const bulk=await read(path.join(ctx.root,"bulk-plan.json"));const directives=await read(f.directives);need(directives?.schema==="goldflow_fal_repair_directives_v1"&&Array.isArray(directives.repairs)&&directives.repairs.length,"Exact repair directives are required.");const repairs=[];
+   const bulk=await read(path.join(ctx.root,"bulk-plan.json"));const directives=await read(f.directives);need(directives?.schema==="goldflow_fal_repair_directives_v1"&&Array.isArray(directives.repairs)&&directives.repairs.length,"Exact repair directives are required.");await preflightPaidRepair(ctx,"bulk/repair-submission-receipts",directives.repairs.map(row=>row.image_id));const repairs=[];
    for(const directive of directives.repairs){const original=bulk.assignments.find(row=>row.image_id===directive.image_id);need(original&&directive.original_assignment_sha256===original.assignment_sha256,`Repair binding changed for ${directive.image_id}.`);const failurePath=path.join(ctx.root,"bulk","failure-receipts",`${directive.image_id}.json`);need(await fs.access(failurePath).then(()=>true,()=>false),`No exact failure exists for ${directive.image_id}.`);need(typeof directive.replacement_prompt==="string"&&directive.replacement_prompt.length>40,"Repair prompt is missing.");const core={...original,prompt:directive.replacement_prompt,prompt_sha256:digest(directive.replacement_prompt),previous_assignment_sha256:original.assignment_sha256,repair_reason:directive.repair_reason};for(const key of ["assignment_sha256","assignment_path","submission_receipt_path","result_receipt_path","output_path","upload_receipt_path"])delete core[key];const repair={...core,assignment_sha256:falObjectSha256(JSON.stringify(core)),submission_receipt_path:path.join(ctx.root,"bulk","repair-submission-receipts",`${directive.image_id}.json`),result_receipt_path:path.join(ctx.root,"bulk","repair-result-receipts",`${directive.image_id}.json`),output_path:original.output_path,upload_receipt_path:path.join(ctx.root,"bulk","repair-upload-receipts",`${directive.image_id}.json`)};const assignmentPath=path.join(ctx.root,"bulk","repair-assignments",`${directive.image_id}.json`);await write(assignmentPath,repair);repairs.push(repair);}
    const result=await submitRows(ctx,repairs,Math.min(ctx.contract.production_concurrency,repairs.length));return console.log(JSON.stringify({status:"repair_submitted",count:result.length,image_ids:repairs.map(r=>r.image_id)},null,2));
  }
@@ -420,7 +463,7 @@ async function main(){
  }
  if(action==="recover-holds"){
    need(f["confirm-spend"]==="exact_fal_transport_recovery","Paid transport recovery requires exact confirmation token.");need(path.isAbsolute(f.directives??""),"Transport recovery requires an absolute --directives file.");
-   const bulk=await read(path.join(ctx.root,"bulk-plan.json"));const directives=await read(f.directives);need(directives?.schema==="goldflow_fal_transport_recovery_directives_v1"&&Array.isArray(directives.recoveries)&&directives.recoveries.length,"Exact transport recovery directives are required.");const recoveries=[];
+   const bulk=await read(path.join(ctx.root,"bulk-plan.json"));const directives=await read(f.directives);need(directives?.schema==="goldflow_fal_transport_recovery_directives_v1"&&Array.isArray(directives.recoveries)&&directives.recoveries.length,"Exact transport recovery directives are required.");await preflightPaidRepair(ctx,"bulk/transport-recovery-submission-receipts",directives.recoveries.map(row=>row.image_id));const recoveries=[];
    for(const directive of directives.recoveries){const original=bulk.assignments.find(row=>row.image_id===directive.image_id);need(original&&directive.original_assignment_sha256===original.assignment_sha256,`Transport recovery binding changed for ${directive.image_id}.`);const hold=await read(path.join(ctx.root,"bulk","transport-holds",`${directive.image_id}.json`));need(hold.request_id===directive.original_request_id,`Transport recovery request ID changed for ${directive.image_id}.`);const core={...original,previous_request_id:hold.request_id,transport_recovery_reason:directive.recovery_reason};for(const key of ["assignment_sha256","assignment_path","submission_receipt_path","result_receipt_path","output_path","upload_receipt_path"])delete core[key];const recovery={...core,assignment_sha256:falObjectSha256(JSON.stringify(core)),submission_receipt_path:path.join(ctx.root,"bulk","transport-recovery-submission-receipts",`${directive.image_id}.json`),result_receipt_path:path.join(ctx.root,"bulk","transport-recovery-result-receipts",`${directive.image_id}.json`),output_path:original.output_path,upload_receipt_path:path.join(ctx.root,"bulk","transport-recovery-upload-receipts",`${directive.image_id}.json`)};const assignmentPath=path.join(ctx.root,"bulk","transport-recovery-assignments",`${directive.image_id}.json`);await write(assignmentPath,recovery);recoveries.push(recovery);}
    const result=await submitRows(ctx,recoveries,Math.min(ctx.contract.production_concurrency,recoveries.length));return console.log(JSON.stringify({status:"transport_recovery_submitted",count:result.length,image_ids:recoveries.map(r=>r.image_id)},null,2));
  }

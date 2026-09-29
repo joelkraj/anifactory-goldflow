@@ -127,3 +127,29 @@ test("an ambiguous adjudicated retry stays held without a second adjudication",a
     assert.equal(state.stageStates.image_generation.next_command_shape,null);
   }finally{await rm(f.dir,{recursive:true,force:true});}
 });
+
+test("queue drain observes receipted work after the adjudicated retry is submitted",async()=>{
+  const f=await fixture();try{
+    const receipt=await validateFalNoJobAdjudication({episodeDir:f.dir,assignment:f.assignment,spec:f.spec});
+    const file=falAdjudicationPath(f.dir,f.assignment.image_id);
+    await mkdir(path.dirname(file),{recursive:true});await writeFile(file,JSON.stringify(receipt));
+    const bulk=path.join(f.dir,"fal","bulk");
+    const retrySubmission=path.join(bulk,"ambiguous-retry-submission-receipts",`${f.assignment.image_id}.json`);
+    const retryResult=path.join(bulk,"ambiguous-retry-result-receipts",`${f.assignment.image_id}.json`);
+    await mkdir(path.dirname(retrySubmission),{recursive:true});
+    await mkdir(path.dirname(retryResult),{recursive:true});
+    await writeFile(retrySubmission,JSON.stringify({schema:"goldflow_fal_submission_receipt_v1",
+      image_id:f.assignment.image_id,assignment_sha256:"e".repeat(64),request_id:"retry-request"}));
+    await writeFile(retryResult,JSON.stringify({schema:"goldflow_fal_result_receipt_v1",request_id:"retry-request"}));
+    const other={image_id:"other",submission_receipt_path:path.join(bulk,"submission-receipts","other.json"),
+      result_receipt_path:path.join(bulk,"result-receipts","other.json")};
+    await writeFile(other.submission_receipt_path,JSON.stringify({schema:"goldflow_fal_submission_receipt_v1",
+      image_id:"other",assignment_sha256:"f".repeat(64),request_id:"other-request"}));
+    await writeFile(path.join(f.dir,"fal","bulk-plan.json"),JSON.stringify({concurrency:1,assignments:[f.assignment,other]}));
+    const state=await falProductionStageStates({episodeDir:f.dir,
+      identity:{image_provider_options:{fal:{warning_budget_usd:30,hard_budget_usd:35}}}});
+    assert.match(state.stageStates.image_generation.next_command_shape,/--action observe-bulk/);
+    assert.match(state.stageStates.image_generation.evidence,/1 submitted requests pending/);
+    assert.doesNotMatch(state.stageStates.image_generation.next_command_shape,/dispatch-bulk/);
+  }finally{await rm(f.dir,{recursive:true,force:true});}
+});

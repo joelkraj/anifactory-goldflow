@@ -179,7 +179,13 @@ export async function falProductionStageStates({ episodeDir, identity } = {}) {
   if (validationPassed && !bulk) bulkState = { state: "missing", evidence: "Fal bulk plan is missing", next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action prepare-bulk --image-ids all` };
   else if (bulk) {
     const submitted = await Promise.all(bulk.assignments.map(row => exists(row.submission_receipt_path)));
-    if (spend) projectedWithPendingBulkUsd = falProjectedSpendUsd(spend.paid_submissions + submitted.filter(value => !value).length);
+    const adjudicated = await Promise.all(bulk.assignments.map(row => exists(falAdjudicationPath(episodeDir,row.image_id))));
+    const retrySubmitted = await Promise.all(bulk.assignments.map(row => exists(path.join(root,"bulk","ambiguous-retry-submission-receipts",`${row.image_id}.json`))));
+    const retryResults = await Promise.all(bulk.assignments.map(row => exists(path.join(root,"bulk","ambiguous-retry-result-receipts",`${row.image_id}.json`))));
+    const queued = submitted.map((value,index) => value || (adjudicated[index] && retrySubmitted[index]));
+    const regularUnsubmittedCount = submitted.filter((value,index) => !value && !adjudicated[index]).length;
+    const adjudicatedRetryPendingCount = adjudicated.filter((value,index) => value && !retrySubmitted[index]).length;
+    if (spend) projectedWithPendingBulkUsd = falProjectedSpendUsd(spend.paid_submissions + regularUnsubmittedCount + adjudicatedRetryPendingCount);
     const results = await Promise.all(bulk.assignments.map(row => exists(row.result_receipt_path)));
     const repairResults = await Promise.all(bulk.assignments.map(row => exists(path.join(root,"bulk","repair-result-receipts",`${row.image_id}.json`))));
     const transportRecoveryResults = await Promise.all(bulk.assignments.map(row => exists(path.join(root,"bulk","transport-recovery-result-receipts",`${row.image_id}.json`))));
@@ -187,8 +193,8 @@ export async function falProductionStageStates({ episodeDir, identity } = {}) {
     const effectiveResults = results.map((value,index) => value || repairResults[index] || transportRecoveryResults[index] || adjudicatedResults[index]);
     const failures = await Promise.all(bulk.assignments.map(row => exists(path.join(root,"bulk","failure-receipts",`${row.image_id}.json`))));
     const holds = await Promise.all(bulk.assignments.map(row => exists(path.join(root,"bulk","transport-holds",`${row.image_id}.json`))));
-    const unsubmittedCount = submitted.filter(value => !value).length;
-    const outstanding = submitted.filter((value,index) => value && !effectiveResults[index] && !failures[index] && !holds[index]).length;
+    const unsubmittedCount = regularUnsubmittedCount;
+    const outstanding = queued.filter((value,index) => value && !effectiveResults[index] && !failures[index] && !holds[index]).length;
     const failedUnresolved = failures.map((value,index) => value && !effectiveResults[index]);
     const heldUnresolved = holds.map((value,index) => value && !effectiveResults[index]);
     const concurrency = Number(bulk.concurrency ?? 1);
@@ -219,12 +225,9 @@ export async function falProductionStageStates({ episodeDir, identity } = {}) {
           ? { state: "blocked", evidence: retryCapEvidence }
           : { state: "blocked", evidence: `${failedUnresolved.filter(Boolean).length} exact Fal IDs need scoped repair`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action repair-failures --directives <absolute_repair_directives.json> --confirm-spend exact_fal_repair_batch` };
     }
-    else if (unsubmittedCount > 0 && outstanding < queueTarget) bulkState = { state: "missing", evidence: `${submitted.filter(Boolean).length}/${bulk.assignments.length} Fal requests queued; filling ${queueTarget-outstanding} queue positions while provider enforces ${concurrency} active generations`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action dispatch-bulk --limit ${Math.min(20,unsubmittedCount,queueTarget-outstanding)} --confirm-spend exact_fal_bulk_batch` };
+    else if (unsubmittedCount > 0 && outstanding < queueTarget) bulkState = { state: "missing", evidence: `${queued.filter(Boolean).length}/${bulk.assignments.length} Fal requests queued; filling ${queueTarget-outstanding} queue positions while provider enforces ${concurrency} active generations`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action dispatch-bulk --limit ${Math.min(20,unsubmittedCount,queueTarget-outstanding)} --confirm-spend exact_fal_bulk_batch` };
     else if (outstanding > 0) bulkState = { state: "missing", evidence: `${effectiveResults.filter(Boolean).length}/${bulk.assignments.length} Fal frames complete; ${outstanding} submitted requests pending`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action observe-bulk --limit 100` };
-    else bulkState = { state: "missing", evidence: `${submitted.filter(Boolean).length}/${bulk.assignments.length} Fal requests submitted`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action dispatch-bulk --limit 100 --confirm-spend exact_fal_bulk_batch` };
-    const adjudicated = await Promise.all(bulk.assignments.map(row => exists(falAdjudicationPath(episodeDir,row.image_id))));
-    const retrySubmitted = await Promise.all(bulk.assignments.map(row => exists(path.join(root,"bulk","ambiguous-retry-submission-receipts",`${row.image_id}.json`))));
-    const retryResults = await Promise.all(bulk.assignments.map(row => exists(path.join(root,"bulk","ambiguous-retry-result-receipts",`${row.image_id}.json`))));
+    else bulkState = { state: "missing", evidence: `${queued.filter(Boolean).length}/${bulk.assignments.length} Fal requests submitted`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action dispatch-bulk --limit 100 --confirm-spend exact_fal_bulk_batch` };
     const retryPending = adjudicated.findIndex((value,index)=>value&&!retrySubmitted[index]);
     if (retryPending >= 0) bulkState = { state: "missing", evidence: `Reviewed no-job adjudication awaits one conservative paid retry: ${bulk.assignments[retryPending].image_id}`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action dispatch-adjudicated --image-id ${bulk.assignments[retryPending].image_id} --confirm-spend exact_fal_ambiguous_retry` };
     else if (retrySubmitted.some((value,index)=>value&&!retryResults[index])) bulkState = { state: "missing", evidence: "Exact adjudicated retry is pending observation", next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action observe-adjudicated` };

@@ -269,7 +269,8 @@ const stages = [
     approval: "automatic",
     validator: "prompt_blocker_resolution",
     skip: "harden_has_no_blockers",
-    commands: ["visual review"],
+    output_patterns: [/^section_image_prompts_reviewed\.json$/],
+    commands: ["visual review", "visual repair-screen-identity"],
   },
   {
     id: "transition_edit_plan",

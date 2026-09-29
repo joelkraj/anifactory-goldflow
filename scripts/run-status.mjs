@@ -852,6 +852,23 @@ async function visualPromptPlanReviewHardenCommand(episodeDir, identity, recover
     return hardenOriginalCommand;
   }
   if (reviewedStatus === "needs_manual_agent_review") {
+    const manualReview = await readJson(manualReviewPath, null);
+    const blockers = manualReview?.unresolved_blockers ?? [];
+    const targetRow = reviewedPlan.prompts?.find((row) => row.image_id === manualReview?.image_ids?.[0]);
+    const beatPlan = await readJson(path.join(episodeDir, "visual_beat_plan.json"), null);
+    const targetBeat = beatPlan?.beats?.find((beat) => beat.visual_beat_id === targetRow?.visual_beat_id);
+    if (manualReview?.status === "needs_manual_agent_review" && manualReview?.image_ids?.length === 1
+      && blockers.length === 1 && blockers[0]?.code === "visible_character_ref_scope_missing"
+      && blockers[0]?.image_id === manualReview.image_ids[0]
+      && targetRow?.narrative_overlays?.length === 1
+      && targetRow.narrative_overlays[0]?.kind === "speech_bubble"
+      && targetRow.narrative_overlays[0]?.speaker === blockers[0]?.character
+      && targetBeat?.screen_visible_entity_ids?.length === 1
+      && /\brobot\b/i.test(targetBeat?.visual_beat_script_excerpt ?? "")
+      && /\b(?:screen|promotional)\b/i.test(targetBeat?.visual_beat_script_excerpt ?? "")
+      && /\b(?:generic|promotional)\b/i.test(targetBeat?.local_continuity_note ?? "")) {
+      return `node bin/goldflow.mjs visual repair-screen-identity --episode-dir ${episodeDir} --repair-spec <reviewed-json>`;
+    }
     return `Manual agent review required: inspect ${manualReviewPath}; then patch detector/review logic or run a scoped visual review/replan for the listed cut ids before rerunning run status.`;
   }
   if (["blocked", "blocked_deadletter"].includes(reviewedStatus)) {

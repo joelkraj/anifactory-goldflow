@@ -9,6 +9,7 @@ import {
   NARRATION_DELIVERY_CONSENSUS_VERSION,
   adjudicateNarrationDeliveryConsensus,
 } from "../lib/narration-delivery-quality.mjs";
+import { NARRATION_CROSS_LEVEL_ASR_POLICY_VERSION } from "../lib/narration-cross-level-asr.mjs";
 import {
   narrationFullStreamDerivedDecisionsCurrent,
   runFullStreamDeliveryQa,
@@ -115,10 +116,16 @@ assert.equal(narrationFullStreamDerivedDecisionsCurrent({
 assert.equal(narrationFullStreamDerivedDecisionsCurrent({
   transcript_comparison_version: helpers.TRANSCRIPT_QA_COMPARISON_VERSION,
   delivery_consensus_version: NARRATION_DELIVERY_CONSENSUS_VERSION,
+}, helpers.TRANSCRIPT_QA_COMPARISON_VERSION), false);
+assert.equal(narrationFullStreamDerivedDecisionsCurrent({
+  transcript_comparison_version: helpers.TRANSCRIPT_QA_COMPARISON_VERSION,
+  delivery_consensus_version: NARRATION_DELIVERY_CONSENSUS_VERSION,
+  cross_level_asr_policy_version: NARRATION_CROSS_LEVEL_ASR_POLICY_VERSION,
 }, helpers.TRANSCRIPT_QA_COMPARISON_VERSION), true);
 assert.equal(narrationFullStreamDerivedDecisionsCurrent({
   transcript_comparison_version: "stale-comparison",
   delivery_consensus_version: NARRATION_DELIVERY_CONSENSUS_VERSION,
+  cross_level_asr_policy_version: NARRATION_CROSS_LEVEL_ASR_POLICY_VERSION,
 }, helpers.TRANSCRIPT_QA_COMPARISON_VERSION), false);
 
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-protected-consensus-"));

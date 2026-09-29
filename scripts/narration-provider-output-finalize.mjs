@@ -51,6 +51,11 @@ import {
   planNarrationConfirmationWindows,
 } from "./lib/narration-confirmation-windows.mjs";
 import {
+  NARRATION_CROSS_LEVEL_ASR_POLICY_VERSION,
+  crossLevelArticleFusionCandidate,
+  corroborateCrossLevelArticleFusion,
+} from "./lib/narration-cross-level-asr.mjs";
+import {
   emptyNarrationFinalizationCheckpoint,
   narrationFinalizationStageKey,
   narrationFinalizationUnitKey,
@@ -815,6 +820,66 @@ async function extractConfirmationWindow({
   };
 }
 
+async function pcm16Mono(audioPath, startSample = null, endSampleExclusive = null) {
+  const args = ["-nostdin", "-v", "error", "-i", audioPath];
+  if (startSample != null && endSampleExclusive != null) {
+    args.push("-af", `atrim=start_sample=${startSample}:end_sample=${endSampleExclusive},asetpts=N/SR/TB`);
+  }
+  args.push("-ac", "1", "-ar", String(CANONICAL_SAMPLE_RATE_HZ),
+    "-f", "s16le", "pipe:1");
+  const { stdout } = await execFile("ffmpeg", args, {
+    encoding: "buffer", maxBuffer: 8 * 1024 * 1024,
+  });
+  return stdout;
+}
+
+function pcmCorrelation(left, right, startSample, endSampleExclusive) {
+  let dot = 0;
+  let leftPower = 0;
+  let rightPower = 0;
+  for (let sample = startSample; sample < endSampleExclusive; sample += 1) {
+    const a = left.readInt16LE(sample * 2);
+    const b = right.readInt16LE(sample * 2);
+    dot += a * b;
+    leftPower += a * a;
+    rightPower += b * b;
+  }
+  return leftPower > 0 && rightPower > 0
+    ? dot / Math.sqrt(leftPower * rightPower) : 0;
+}
+
+async function crossLevelPcmIntegrity({ preparedPath, rawStitchPath,
+  masterPath, startSample, endSampleExclusive, articleStartSec, articleEndSec }) {
+  const [prepared, raw, master] = await Promise.all([
+    pcm16Mono(preparedPath),
+    pcm16Mono(rawStitchPath, startSample, endSampleExclusive),
+    pcm16Mono(masterPath, startSample, endSampleExclusive),
+  ]);
+  const expectedBytes = (endSampleExclusive - startSample) * 2;
+  const articleStart = Math.floor(articleStartSec * CANONICAL_SAMPLE_RATE_HZ);
+  const articleEnd = Math.ceil(articleEndSec * CANONICAL_SAMPLE_RATE_HZ);
+  const articleCorrelation = prepared.length === expectedBytes
+    && raw.length === expectedBytes && master.length === expectedBytes
+    && articleStart >= 0 && articleEnd <= expectedBytes / 2
+    && articleEnd - articleStart >= 1200
+      ? pcmCorrelation(raw, master, articleStart, articleEnd) : 0;
+  return {
+    status: prepared.length === expectedBytes
+      && raw.length === expectedBytes && master.length === expectedBytes
+      && prepared.equals(raw) && articleCorrelation >= 0.99
+      ? "passed" : "blocked",
+    prepared_pcm_sha256: createHash("sha256").update(prepared).digest("hex"),
+    raw_stitch_span_pcm_sha256: createHash("sha256").update(raw).digest("hex"),
+    master_span_pcm_sha256: createHash("sha256").update(master).digest("hex"),
+    article_master_raw_correlation: Number(articleCorrelation.toFixed(6)),
+    article_start_sample: articleStart,
+    article_end_sample_exclusive: articleEnd,
+    span_start_sample: startSample,
+    span_end_sample_exclusive: endSampleExclusive,
+  };
+}
+export const crossLevelPcmIntegrityForTests = crossLevelPcmIntegrity;
+
 function localizedConsensusDecision({
   windowRows,
   orderQa,
@@ -859,7 +924,8 @@ function localizedConsensusDecision({
 
 export function narrationFullStreamDerivedDecisionsCurrent(fullStream, comparisonVersion) {
   return fullStream?.transcript_comparison_version === comparisonVersion
-    && fullStream?.delivery_consensus_version === NARRATION_DELIVERY_CONSENSUS_VERSION;
+    && fullStream?.delivery_consensus_version === NARRATION_DELIVERY_CONSENSUS_VERSION
+    && fullStream?.cross_level_asr_policy_version === NARRATION_CROSS_LEVEL_ASR_POLICY_VERSION;
 }
 
 export async function runFullStreamDeliveryQa({
@@ -871,6 +937,10 @@ export async function runFullStreamDeliveryQa({
   orderQa,
   joinQa,
   stitch,
+  stitchAudioPath,
+  stitchAudioSha256,
+  unitDeliveryRows = [],
+  unitPrimaryRecognitions = new Map(),
   workDir,
   localWhisperContract,
   retainedEvidence = null,
@@ -1070,6 +1140,111 @@ export async function runFullStreamDeliveryQa({
           decision: windowDecision,
         };
       });
+      const deliveryById = new Map(unitDeliveryRows.map((row) => [String(row.unit_id), row]));
+      const unitById = new Map(units.map((row) => [String(row.unit_id), row]));
+      const preparedById = new Map((stitch?.prepared_inputs ?? [])
+        .map((row) => [String(row.unit_id), row]));
+      const candidateIndexes = confirmationWindows.flatMap((window, index) => (
+        crossLevelArticleFusionCandidate(window) ? [index] : []
+      ));
+      for (const index of candidateIndexes) {
+        const window = confirmationWindows[index];
+        const candidate = crossLevelArticleFusionCandidate(window);
+        const unit = unitById.get(candidate.unit_id);
+        const delivery = deliveryById.get(candidate.unit_id);
+        const prepared = preparedById.get(candidate.unit_id);
+        const smallRecognition = unitPrimaryRecognitions.get(candidate.unit_id)?.recognized;
+        if (qualityContract?.delivery_qa?.acceptance_mode !== "automated_asr_v1"
+          || unit?.provider !== "qwen_local"
+          || !unit || !delivery || !prepared || !smallRecognition
+          || delivery.audio_path !== unit.wav
+          || delivery.audio_sha256 !== unit.audio_sha256
+          || prepared.source_wav !== unit.wav
+          || !prepared.prepared_wav || !prepared.prepared_audio_sha256
+          || !(await fileMatchesSha256(unit.wav, unit.audio_sha256))
+          || !(await fileMatchesSha256(prepared.prepared_wav, prepared.prepared_audio_sha256))) continue;
+        const corroborationIds = [
+          `${window.window_id}__unit_raw_medium`,
+          `${window.window_id}__unit_prepared_medium`,
+        ];
+        const localMedium = await helpers.runFasterWhisperUnitBatchForDiagnostics([
+          { unit_id: corroborationIds[0], wav: unit.wav },
+          { unit_id: corroborationIds[1], wav: prepared.prepared_wav },
+        ], { model: confirmationModel, device: "cpu", computeType: "int8_float32" });
+        const rawRecognition = localMedium.get(corroborationIds[0]);
+        const preparedRecognition = localMedium.get(corroborationIds[1]);
+        if (!rawRecognition || !preparedRecognition) continue;
+        const localQa = (text) => helpers.transcriptQaForTests(unit.spoken_text, text, {
+          maxWer: qualityContract.delivery_qa.maximum_word_error_rate,
+          equivalentPhrases: equivalentPhrasesForTests(unit),
+          blockAnySubstitution: false,
+        });
+        const rawQa = localQa(rawRecognition.text);
+        const preparedQa = localQa(preparedRecognition.text);
+        const articleWord = preparedRecognition.words?.[candidate.intended_index];
+        const pcmIntegrity = await crossLevelPcmIntegrity({
+          preparedPath: prepared.prepared_wav,
+          rawStitchPath: stitchAudioPath,
+          masterPath: audioPath,
+          startSample: window.start_sample,
+          endSampleExclusive: window.end_sample_exclusive,
+          articleStartSec: Number(articleWord?.start_sec),
+          articleEndSec: Number(articleWord?.end_sec),
+        });
+        const preparedSpeechPreserved = prepared.edge_edit_plan?.status === "passed"
+          && Number(prepared.edge_edit_plan?.fade_in_samples ?? 0) === 0
+          && Number(prepared.edge_edit_plan?.fade_out_samples ?? 0) === 0
+          && Number(prepared.trim_start_sample) <= Number(delivery.edge_alignment?.first_speech_sample)
+          && Number(prepared.trim_end_sample) >= Number(delivery.edge_alignment?.last_speech_sample_exclusive)
+          && Number(prepared.prepared_sample_count) === Number(window.sample_count);
+        const evidence = {
+          schema: "goldflow_narration_cross_level_article_fusion_v1",
+          policy_version: NARRATION_CROSS_LEVEL_ASR_POLICY_VERSION,
+          window_id: window.window_id,
+          unit_id: candidate.unit_id,
+          source_audio_sha256: unit.audio_sha256,
+          prepared_audio_sha256: prepared.prepared_audio_sha256,
+          stitch_audio_sha256: stitchAudioSha256,
+          master_audio_sha256: audioSha256,
+          window_audio_sha256: window.audio_sha256,
+          quality_contract_sha256: qualityContract.contract_sha256,
+          sample_accounting_exact: stitch?.sample_accounting?.exact_sample_accounting === true
+            && stitch.sample_accounting.status === "passed",
+          join_qa_passed: joinQa?.status === "passed" && !(joinQa.blockers ?? []).length,
+          prepared_speech_preserved: preparedSpeechPreserved,
+          pcm_integrity: pcmIntegrity,
+          prepared_trim_start_sample: prepared.trim_start_sample,
+          prepared_trim_end_sample: prepared.trim_end_sample,
+          unit_small_recognition: smallRecognition,
+          unit_small_qa: delivery.transcript_qa,
+          unit_medium_raw_qa: rawQa,
+          unit_medium_prepared_qa: preparedQa,
+          unit_medium_raw: { ...rawRecognition,
+            canonical_token_count: rawQa.intended_canonical_token_count },
+          unit_medium_prepared: { ...preparedRecognition,
+            canonical_token_count: preparedQa.intended_canonical_token_count },
+        };
+        const resolution = corroborateCrossLevelArticleFusion(window, evidence);
+        if (!resolution.corroborated) continue;
+        const receiptDir = path.join(workDir, "full-stream-cross-level-corroboration");
+        await fs.mkdir(receiptDir, { recursive: true });
+        const receiptPath = path.join(receiptDir,
+          `${window.window_id}-${sha256(JSON.stringify(evidence)).slice(0, 16)}.json`);
+        const receiptText = `${JSON.stringify(evidence, null, 2)}\n`;
+        try {
+          await fs.writeFile(receiptPath, receiptText, { flag: "wx" });
+        } catch (error) {
+          if (error?.code !== "EEXIST" || await fs.readFile(receiptPath, "utf8") !== receiptText) throw error;
+        }
+        confirmationWindows[index] = {
+          ...resolution.window,
+          cross_level_article_fusion: {
+            ...evidence,
+            receipt_path: receiptPath,
+            receipt_file_sha256: await sha256File(receiptPath),
+          },
+        };
+      }
       decision = localizedConsensusDecision({
         windowRows: confirmationWindows,
         orderQa,
@@ -1092,6 +1267,7 @@ export async function runFullStreamDeliveryQa({
   return {
     transcript_comparison_version: helpers.TRANSCRIPT_QA_COMPARISON_VERSION,
     delivery_consensus_version: NARRATION_DELIVERY_CONSENSUS_VERSION,
+    cross_level_asr_policy_version: NARRATION_CROSS_LEVEL_ASR_POLICY_VERSION,
     intended_text: intendedText,
     intended_text_sha256: sha256(intendedText),
     primary_model: primaryModel,
@@ -2299,6 +2475,10 @@ export async function finalizeNarrationProviderOutput(
       orderQa,
       joinQa,
       stitch,
+      stitchAudioPath: rawWav,
+      stitchAudioSha256: rawWavSha256,
+      unitDeliveryRows: deliveryRows,
+      unitPrimaryRecognitions: primaryById,
       workDir,
       localWhisperContract: officialLocalWhisperContract,
       retainedEvidence: cachedFullStream,
@@ -2367,6 +2547,7 @@ export async function finalizeNarrationProviderOutput(
     schema: "goldflow_narration_full_stream_qa_v2",
     transcript_comparison_version: fullStream.transcript_comparison_version,
     delivery_consensus_version: fullStream.delivery_consensus_version,
+    cross_level_asr_policy_version: fullStream.cross_level_asr_policy_version,
     status: fullStream.decision.status,
     source_script_hash: sourceScriptHash(plan),
     narration_generation_plan_path: planPath,

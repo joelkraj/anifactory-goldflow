@@ -39,6 +39,10 @@ import { findSourceCompatibleHybridDeadletters } from "./hybrid-browser-image-po
 import { sha256File as streamSha256File } from "./lib/file-hash.mjs";
 import { loadNarrationSourceStructure } from "./lib/narration-source-structure.mjs";
 import { loadLowMarginDisposition } from "./lib/narration-low-margin-disposition.mjs";
+import {
+  NARRATION_CROSS_LEVEL_ASR_POLICY_VERSION,
+  crossLevelArticleFusionCandidate,
+} from "./lib/narration-cross-level-asr.mjs";
 import { validateAppliedFullStreamManualReview } from "./lib/narration-full-stream-manual-review.mjs";
 import {
   EXTERNAL_NARRATION_TTS_PROVIDERS,
@@ -3171,6 +3175,110 @@ function blockedNarrationComparatorRefreshEligible({
     && providerAudioHashesValid === true;
 }
 
+async function blockedFullStreamPolicyRefreshEligible({
+  episodeDir, ttsReport, stitchReport, fullQa, unitDelivery,
+  providerOutput, providerValidation, plan, planFileSha256,
+  currentScriptHash, qualityContractSha256,
+}) {
+  const manifestPath = ttsReport?.provider_output_manifest_path;
+  if (!manifestPath || !path.isAbsolute(manifestPath)
+    || !path.resolve(manifestPath).startsWith(`${path.resolve(episodeDir)}${path.sep}`)) return false;
+  const manifestHash = await fileSha256(manifestPath);
+  const masterPath = fullQa?.audio_path;
+  if (!masterPath || !path.isAbsolute(masterPath)
+    || !path.resolve(masterPath).startsWith(`${path.resolve(episodeDir)}${path.sep}`)) return false;
+  const masterHash = await fileSha256(masterPath);
+  const rawPath = stitchReport?.raw_output_path;
+  if (!rawPath || !path.isAbsolute(rawPath)
+    || !path.resolve(rawPath).startsWith(`${path.resolve(episodeDir)}${path.sep}`)) return false;
+  const rawHash = await fileSha256(rawPath);
+  const checkpointPath = path.join(path.dirname(rawPath),
+    `narration-finalization-checkpoint-${path.basename(episodeDir)}.json`);
+  const checkpoint = await readJson(checkpointPath, null);
+  const cachedStitch = checkpoint?.stages?.semantic_stitch;
+  const preparedInputs = cachedStitch?.payload?.stitch?.prepared_inputs;
+  const segments = stitchReport?.segments;
+  if (ttsReport?.status !== "blocked"
+    || !statusPassed(ttsReport.unit_qa_status)
+    || ttsReport.full_stream_qa_status !== "blocked"
+    || !statusPassed(unitDelivery?.status)
+    || Number(unitDelivery?.blocked_unit_count ?? -1) !== 0
+    || (unitDelivery.blockers ?? []).length !== 0
+    || stitchReport?.status !== "blocked"
+    || stitchReport?.sample_accounting?.exact_sample_accounting !== true
+    || stitchReport?.join_qa?.status !== "passed"
+    || fullQa?.status !== "blocked"
+    || fullQa.cross_level_asr_policy_version === NARRATION_CROSS_LEVEL_ASR_POLICY_VERSION
+    || fullQa.transcript_comparison_version !== TRANSCRIPT_QA_COMPARISON_VERSION
+    || !fullQa.delivery_consensus_version
+    || (fullQa.blockers ?? []).length !== 1
+    || fullQa.blockers[0]?.code !== "narration_confirmed_word_omission"
+    || (fullQa.confirmation_windows ?? []).filter((window) => (
+      window?.decision?.status === "blocked"
+    )).length !== 1
+    || !(fullQa.confirmation_windows ?? []).some((window) => (
+      crossLevelArticleFusionCandidate(window)
+      && window.window_id === fullQa.blockers[0].confirmation_window_id
+    ))
+    || ttsReport.provider_output_manifest_sha256 !== manifestHash
+    || fullQa.provider_output_manifest_file_sha256 !== manifestHash
+    || providerOutput?.status !== "passed"
+    || providerValidation?.status !== "passed"
+    || ttsReport.source_script_hash !== currentScriptHash
+    || stitchReport.source_script_hash !== currentScriptHash
+    || fullQa.source_script_hash !== currentScriptHash
+    || unitDelivery.source_script_hash !== currentScriptHash
+    || plan?.source_script_hash !== currentScriptHash
+    || ttsReport.narration_generation_plan_sha256 !== plan?.plan_sha256
+    || stitchReport.narration_generation_plan_sha256 !== plan?.plan_sha256
+    || fullQa.narration_generation_plan_sha256 !== plan?.plan_sha256
+    || unitDelivery.narration_generation_plan_sha256 !== plan?.plan_sha256
+    || ttsReport.narration_generation_plan_file_sha256 !== planFileSha256
+    || stitchReport.narration_generation_plan_file_sha256 !== planFileSha256
+    || fullQa.narration_generation_plan_file_sha256 !== planFileSha256
+    || unitDelivery.narration_generation_plan_file_sha256 !== planFileSha256
+    || ttsReport.narration_quality_contract_sha256 !== qualityContractSha256
+    || stitchReport.narration_quality_contract_sha256 !== qualityContractSha256
+    || fullQa.narration_quality_contract_sha256 !== qualityContractSha256
+    || unitDelivery.quality_contract_sha256 !== qualityContractSha256
+    || ttsReport.final_wav !== masterPath
+    || stitchReport.output_path !== masterPath
+    || ttsReport.final_wav_sha256 !== masterHash
+    || stitchReport.output_sha256 !== masterHash
+    || fullQa.audio_sha256 !== masterHash
+    || !rawHash || ttsReport.raw_wav !== rawPath
+    || ttsReport.raw_wav_sha256 !== rawHash
+    || stitchReport.raw_output_sha256 !== rawHash
+    || cachedStitch?.status !== "passed"
+    || cachedStitch.payload?.raw_wav_path !== rawPath
+    || cachedStitch.payload?.raw_wav_sha256 !== rawHash
+    || cachedStitch.payload?.stitch?.status !== "passed"
+    || !Array.isArray(preparedInputs)
+    || !Array.isArray(segments)
+    || preparedInputs.length !== segments.length
+    || preparedInputs.length !== (providerOutput?.units ?? []).length) return false;
+  for (let index = 0; index < preparedInputs.length; index += 1) {
+    const prepared = preparedInputs[index];
+    const segment = segments[index];
+    const providerUnit = providerOutput.units[index];
+    const preparedHash = segment?.prepared_audio_sha256;
+    const preparedPath = segment?.prepared_audio_path;
+    if (!preparedPath || !path.isAbsolute(preparedPath)
+      || !path.resolve(preparedPath).startsWith(`${path.resolve(episodeDir)}${path.sep}`)
+      || !preparedHash || await fileSha256(preparedPath) !== preparedHash
+      || prepared.prepared_wav !== preparedPath
+      || prepared.prepared_audio_sha256 !== preparedHash
+      || prepared.unit_id !== segment.unit_id
+      || providerUnit?.unit_id !== segment.unit_id
+      || prepared.source_wav !== providerUnit.audio_path) return false;
+  }
+  for (const row of providerOutput.units ?? []) {
+    if (!row.audio_path || !row.audio_sha256
+      || await fileSha256(row.audio_path) !== row.audio_sha256) return false;
+  }
+  return true;
+}
+
 async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash, identity) {
   if (!currentScriptHash) return { done: false, evidence: "script_clean.md missing" };
   const narrationQualityContract = narrationQualityContractForIdentity(identity);
@@ -3245,6 +3353,33 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
         return { done: false, state: "blocked",
           evidence: `Completed exact-boundary repair has ${boundaryResume.repairedUnitIds.length} hash-verified composite WAVs in its derived provider manifest; the blocked report selected the prior manifest. Re-adjudicate the derived manifest without synthesis`,
           next_command_shape: `node bin/goldflow.mjs tts finalize-provider --episode-dir ${episodeDir} --manifest ${boundaryResume.manifestPath}` };
+      }
+      const fullQa = await readJson(path.join(episodeDir,
+        `narration_full_stream_qa_${episode}.json`), null);
+      const reportBoundManifestPath = ttsReport.provider_output_manifest_path;
+      const reportBoundManifest = reportBoundManifestPath
+        && path.isAbsolute(reportBoundManifestPath)
+        && path.resolve(reportBoundManifestPath).startsWith(`${path.resolve(episodeDir)}${path.sep}`)
+        ? await readJson(reportBoundManifestPath, null) : null;
+      const reportBoundValidation = validateNarrationProviderOutputManifest(
+        reportBoundManifest, narrationPlanUnitsForStatus(plan), {
+          generationPlanSha256: plan?.plan_sha256 ?? planFileSha256,
+          generationPlanFileSha256: planFileSha256,
+          qualityContractSha256: narrationQualityContract.contract_sha256,
+          provider: policy.primary.provider,
+          voiceId: policy.primary.voice_id,
+          voiceSha256: policy.primary.voice_sha256,
+        },
+      );
+      if (await blockedFullStreamPolicyRefreshEligible({
+        episodeDir, ttsReport, stitchReport, fullQa, unitDelivery,
+        providerOutput: reportBoundManifest, providerValidation: reportBoundValidation,
+        plan, planFileSha256, currentScriptHash,
+        qualityContractSha256: narrationQualityContract.contract_sha256,
+      })) {
+        return { done: false, state: "blocked",
+          evidence: "Full-stream-only ASR blocker uses a stale derived cross-level decision. The exact report-bound manifest, retained WAVs, stitch accounting, and current plan are hash-verified; re-adjudicate without synthesis",
+          next_command_shape: `node bin/goldflow.mjs tts finalize-provider --episode-dir ${episodeDir} --manifest ${reportBoundManifestPath}` };
       }
       if (unitDelivery?.transcript_comparison_version
         && unitDelivery.transcript_comparison_version !== TRANSCRIPT_QA_COMPARISON_VERSION) {
@@ -5177,6 +5312,7 @@ if (path.resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {
 
 export {
   blockedNarrationComparatorRefreshEligible as blockedNarrationComparatorRefreshEligibleForTests,
+  blockedFullStreamPolicyRefreshEligible as blockedFullStreamPolicyRefreshEligibleForTests,
   referenceGenerationComplete as referenceGenerationCompleteForTests,
   inferredState as inferredStateForTests,
   visualReferencePlanComplete as visualReferencePlanCompleteForTests,

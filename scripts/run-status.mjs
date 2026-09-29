@@ -3297,6 +3297,37 @@ async function blockedFullStreamPolicyRefreshEligible({
   return true;
 }
 
+async function qwenExactBoundaryRepairStatus({
+  episodeDir, episode, ttsReportPath, ttsReport, currentScriptHash,
+}) {
+  // New triage receipts supersede earlier ones; a stale latest receipt must
+  // never fall back to an older repair scope.
+  const triageNames = ["_v4", "_v3", "_v2", ""]
+    .map((suffix) => `manual_blocker_triage_qwen_tts_stitch_${episode}${suffix}.json`);
+  let selectedPath = null;
+  for (const name of triageNames) {
+    const candidate = path.join(episodeDir, name);
+    if (await exists(candidate)) {
+      selectedPath = candidate;
+      break;
+    }
+  }
+  const triage = selectedPath ? await readJson(selectedPath, null) : null;
+  if (ttsReport?.status !== "blocked"
+    || triage?.status !== "operator_hold_pending_exact_boundary_recovery"
+    || triage.source_script_sha256 !== currentScriptHash
+    || triage.blocked_report_sha256 !== await fileSha256(ttsReportPath)) return null;
+  const repairSpecPath = triage.repair_spec_path ?? path.join(episodeDir,
+    `narration_exact_boundary_repair_spec_${episode}.json`);
+  return { done: false, state: "blocked",
+    evidence: "Reviewed exact narration blockers remain; only the specified units may receive a guarded boundary repair",
+    next_command_shape: await exists(repairSpecPath)
+      && (!triage.repair_spec_sha256
+        || triage.repair_spec_sha256 === await fileSha256(repairSpecPath))
+      ? `node bin/goldflow.mjs tts repair-boundary --episode-dir ${episodeDir} --spec ${repairSpecPath}`
+      : "Operator hold: implement a guarded exact-boundary repair for the material defects; do not rerun all narration units or waive confirmed omissions." };
+}
+
 async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash, identity) {
   if (!currentScriptHash) return { done: false, evidence: "script_clean.md missing" };
   const narrationQualityContract = narrationQualityContractForIdentity(identity);
@@ -3435,28 +3466,10 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
         }
       }
     }
-    const latestTriagePath = path.join(episodeDir,
-      `manual_blocker_triage_qwen_tts_stitch_${episode}_v3.json`);
-    const revisedTriagePath = path.join(episodeDir,
-      `manual_blocker_triage_qwen_tts_stitch_${episode}_v2.json`);
-    const triage = await readJson(await exists(latestTriagePath)
-      ? latestTriagePath : await exists(revisedTriagePath)
-      ? revisedTriagePath : path.join(episodeDir,
-        `manual_blocker_triage_qwen_tts_stitch_${episode}.json`), null);
-    if (ttsReport.status === "blocked"
-      && triage?.status === "operator_hold_pending_exact_boundary_recovery"
-      && triage.source_script_sha256 === currentScriptHash
-      && triage.blocked_report_sha256 === await fileSha256(ttsReportPath)) {
-      const repairSpecPath = triage.repair_spec_path ?? path.join(episodeDir,
-        `narration_exact_boundary_repair_spec_${episode}.json`);
-      return { done: false, state: "blocked",
-        evidence: "Reviewed exact narration blockers remain; only the specified units may receive a guarded boundary repair",
-        next_command_shape: await exists(repairSpecPath)
-          && (!triage.repair_spec_sha256
-            || triage.repair_spec_sha256 === await fileSha256(repairSpecPath))
-          ? `node bin/goldflow.mjs tts repair-boundary --episode-dir ${episodeDir} --spec ${repairSpecPath}`
-          : "Operator hold: implement a guarded exact-boundary repair for the material defects; do not rerun all narration units or waive confirmed omissions." };
-    }
+    const exactBoundaryRepair = await qwenExactBoundaryRepairStatus({
+      episodeDir, episode, ttsReportPath, ttsReport, currentScriptHash,
+    });
+    if (exactBoundaryRepair) return exactBoundaryRepair;
     if (narrationQualityContract && ttsReport.status === "blocked"
       && policy.primary.provider === "qwen_local") {
       const retryEvidencePath = path.join(episodeDir, `narration_confirmed_retry_evidence_${episode}.json`);
@@ -5329,6 +5342,7 @@ if (path.resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {
 }
 
 export {
+  qwenExactBoundaryRepairStatus as qwenExactBoundaryRepairStatusForTests,
   blockedNarrationComparatorRefreshEligible as blockedNarrationComparatorRefreshEligibleForTests,
   blockedFullStreamPolicyRefreshEligible as blockedFullStreamPolicyRefreshEligibleForTests,
   referenceGenerationComplete as referenceGenerationCompleteForTests,

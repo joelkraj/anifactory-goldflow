@@ -111,16 +111,41 @@ export async function uploadFalReference({ localPath, expectedSha256, receiptPat
   return { remoteUrl, record, receipt: await atomicJson(receiptPath, record) };
 }
 
-export async function submitFalImage({ assignment, referenceUrls = [], receiptPath, client } = {}) {
+export function falSubmissionAttemptPath(receiptPath) {
+  need(path.isAbsolute(receiptPath ?? ""), "Fal submission receipt needs an absolute path.");
+  const dir = path.dirname(receiptPath);
+  return path.join(path.dirname(dir), `${path.basename(dir)}-attempts`, path.basename(receiptPath));
+}
+
+export async function submitFalImage({ assignment, referenceUrls = [], receiptPath, fetchImpl = fetch, credentials } = {}) {
   need(assignment?.image_id && assignment?.assignment_sha256 && assignment?.run_identity_sha256 && assignment?.prompt_sha256 === hash(assignment.prompt ?? ""), "Fal assignment binding is invalid.");
   need(Number.isFinite(assignment.max_cost_usd) && assignment.max_cost_usd > 0, "Fal assignment needs a positive cost ceiling.");
   const request = buildFalImageInput({ prompt: assignment.prompt, referenceUrls, separateReferences: assignment.reference_mode === "separate_ordered_references" });
   need(request.endpoint === assignment.endpoint, "Fal assignment endpoint changed.");
-  const fal = client ?? createFalClient({ credentials: await falCredential() });
+  const key = credentials ?? await falCredential();
+  need(typeof key === "string" && key.length > 0, "Fal submission credential is missing.");
+  await absent(receiptPath);
   const submittedAt = timestamp();
-  const response = await fal.queue.submit(request.endpoint, { input: request.input });
-  const requestId = response?.request_id ?? response?.requestId;
-  need(typeof requestId === "string" && requestId, "Fal returned no request ID.");
+  // The Fal SDK retries queue.submit POSTs on transport/5xx errors. A lost
+  // response can then create multiple billable jobs with only one local receipt.
+  // Reserve the exact attempt before one direct POST; an uncertain outcome must
+  // be reconciled manually, never submitted again by a repeated command.
+  const attemptPath = falSubmissionAttemptPath(receiptPath);
+  await atomicJson(attemptPath, {
+    schema: "goldflow_fal_submission_attempt_v1", created_at: submittedAt,
+    image_id: assignment.image_id, assignment_sha256: assignment.assignment_sha256,
+    run_identity_sha256: assignment.run_identity_sha256, endpoint: request.endpoint,
+    submission_receipt_path: receiptPath, possible_paid_request: true,
+  });
+  const response = await fetchImpl(`https://queue.fal.run/${request.endpoint}`, {
+    method: "POST", headers: { Authorization: `Key ${key}`, Accept: "application/json",
+      "Content-Type": "application/json", "x-fal-queue-priority": "normal" },
+    body: JSON.stringify(request.input),
+  });
+  if (!response.ok) throw new Error(`Fal queue submission returned HTTP ${response.status}; attempt held for manual reconciliation.`);
+  const payload = await response.json();
+  const requestId = payload?.request_id ?? payload?.requestId;
+  need(typeof requestId === "string" && requestId, "Fal returned no request ID; attempt held for manual reconciliation.");
   const record = {
     schema: "goldflow_fal_submission_receipt_v1", submitted_at: submittedAt, image_id: assignment.image_id,
     assignment_sha256: assignment.assignment_sha256, run_identity_sha256: assignment.run_identity_sha256,

@@ -39,6 +39,47 @@ async function readReceipt(file) {
   }
   return receipt;
 }
+async function paidSubmissionsIn(root, relativeDir) {
+  const dir = path.join(root, relativeDir);
+  const attemptDir = path.join(path.dirname(dir), `${path.basename(dir)}-attempts`);
+  const [receiptPaths, attemptPaths] = await Promise.all([receiptsIn(dir), receiptsIn(attemptDir)]);
+  const receipts = new Map(await Promise.all(receiptPaths.map(async file => [path.basename(file), await readReceipt(file)])));
+  const records = [...receipts].map(([name, receipt]) => ({
+    image_id: receipt.image_id, assignment_sha256: receipt.assignment_sha256,
+    submission_receipt_path: path.join(dir, name), ambiguous: false,
+  }));
+  for (const attemptPath of attemptPaths) {
+    const name = path.basename(attemptPath);
+    const attempt = JSON.parse(await fs.readFile(attemptPath, "utf8"));
+    const submissionReceiptPath = path.join(dir, name);
+    if (attempt.schema !== "goldflow_fal_submission_attempt_v1"
+      || typeof attempt.image_id !== "string"
+      || typeof attempt.assignment_sha256 !== "string"
+      || attempt.submission_receipt_path !== submissionReceiptPath) {
+      throw new Error(`Invalid Fal submission attempt in paid accounting: ${attemptPath}`);
+    }
+    const receipt = receipts.get(name);
+    if (receipt) {
+      if (receipt.image_id !== attempt.image_id || receipt.assignment_sha256 !== attempt.assignment_sha256)
+        throw new Error(`Fal submission attempt and receipt differ: ${attemptPath}`);
+    } else records.push({
+      image_id: attempt.image_id, assignment_sha256: attempt.assignment_sha256,
+      submission_receipt_path: submissionReceiptPath, attempt_path: attemptPath, ambiguous: true,
+    });
+  }
+  return records;
+}
+async function possibleSubmissionExists(receiptPath) {
+  const dir = path.dirname(receiptPath);
+  const attemptPath = path.join(path.dirname(dir), `${path.basename(dir)}-attempts`, path.basename(receiptPath));
+  return await exists(receiptPath) || await exists(attemptPath);
+}
+export async function falAmbiguousSubmissionAttempts(episodeDir) {
+  const root = path.join(episodeDir, "fal");
+  const groups = await Promise.all([...INITIAL_RECEIPT_DIRS, ...REPAIR_RECEIPT_DIRS]
+    .map(dir => paidSubmissionsIn(root, dir)));
+  return groups.flat().filter(row => row.ambiguous);
+}
 async function rejectedValidationIds(root) {
   const revised = path.join(root, "validation-review-v2.json");
   const reviewFile = await exists(revised) ? revised : path.join(root, "validation-review.json");
@@ -66,19 +107,20 @@ export async function falRetryBudgetState(episodeDir) {
     throw new Error("Fal retry cap requires the approved, complete visual beat plan.");
   }
   const root = path.join(episodeDir, "fal");
-  const receiptPaths = (await Promise.all(REPAIR_RECEIPT_DIRS.map(dir => receiptsIn(path.join(root, dir))))).flat();
+  const retryGroups = await Promise.all(REPAIR_RECEIPT_DIRS.map(dir => paidSubmissionsIn(root, dir)));
+  const submissions = retryGroups.flat();
   const initialValidation = path.join(root, "submission-receipts");
-  for (const file of await receiptsIn(path.join(root, "validation-v2", "submission-receipts"))) {
-    if (await exists(path.join(initialValidation, path.basename(file)))) receiptPaths.push(file);
+  for (const row of await paidSubmissionsIn(root, "validation-v2/submission-receipts")) {
+    if (await possibleSubmissionExists(path.join(initialValidation, path.basename(row.submission_receipt_path)))) submissions.push(row);
   }
+  const bulkSubmissions = await paidSubmissionsIn(root, "bulk/submission-receipts");
   for (const imageId of await rejectedValidationIds(root)) {
-    const repeatedBulk = path.join(root, "bulk", "submission-receipts", `${imageId}.json`);
-    if (await exists(repeatedBulk)) receiptPaths.push(repeatedBulk);
+    const repeatedBulk = bulkSubmissions.find(row => row.image_id === imageId);
+    if (repeatedBulk) submissions.push(repeatedBulk);
   }
-  const receipts = await Promise.all(receiptPaths.map(readReceipt));
   const limit = Math.floor(plannedFrames * RETRY_FRACTION);
   return { planned_frames: plannedFrames, retry_limit: limit,
-    paid_retry_submissions: receipts.length, remaining_retries: Math.max(0, limit - receipts.length) };
+    paid_retry_submissions: submissions.length, remaining_retries: Math.max(0, limit - submissions.length) };
 }
 
 export async function assertFalRetryBudget({ episodeDir, assignments }) {
@@ -91,7 +133,7 @@ export async function assertFalRetryBudget({ episodeDir, assignments }) {
     const isRepair = row.previous_assignment_sha256 || row.previous_request_id
       || row.rejected_image_sha256;
     const isRepeatedValidation = relative.startsWith(`validation-v2${path.sep}submission-receipts${path.sep}`)
-      && await exists(path.join(root, "submission-receipts", path.basename(row.submission_receipt_path)));
+      && await possibleSubmissionExists(path.join(root, "submission-receipts", path.basename(row.submission_receipt_path)));
     const isRejectedValidationBulk = relative.startsWith(`bulk${path.sep}submission-receipts${path.sep}`)
       && validationRejected.has(row.image_id);
     if (isRepair || isRepeatedValidation || isRejectedValidationBulk) pending.push(row);
@@ -111,10 +153,9 @@ export async function falSpendProjectionState({ episodeDir, warningBudgetUsd, ha
     throw new Error("Fal spend projection requires valid locked warning and hard budgets.");
   }
   const root = path.join(episodeDir, "fal");
-  const receiptPaths = (await Promise.all([...INITIAL_RECEIPT_DIRS, ...REPAIR_RECEIPT_DIRS]
-    .map(dir => receiptsIn(path.join(root, dir))))).flat();
-  await Promise.all(receiptPaths.map(readReceipt));
-  const paidSubmissions = receiptPaths.length;
+  const groups = await Promise.all([...INITIAL_RECEIPT_DIRS, ...REPAIR_RECEIPT_DIRS]
+    .map(dir => paidSubmissionsIn(root, dir)));
+  const paidSubmissions = groups.flat().length;
   const projectedSpendUsd = falProjectedSpendUsd(paidSubmissions);
   return {
     paid_submissions: paidSubmissions, projected_spend_usd: projectedSpendUsd,

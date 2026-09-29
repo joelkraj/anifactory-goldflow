@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildFalImageInput, FAL_ENDPOINTS, FAL_PRIMARY_PARAMS } from "../lib/fal-provider.mjs";
+import { buildFalImageInput, FAL_ENDPOINTS, FAL_PRIMARY_PARAMS, falSubmissionAttemptPath, submitFalImage } from "../lib/fal-provider.mjs";
 import { falBlockedStageRecoveryAdmission } from "../lib/fal-production-state.mjs";
 import { falProductionStageStates } from "../lib/fal-production-state.mjs";
 import { falPortableAssetId } from "../lib/fal-portable-bank.mjs";
@@ -8,7 +8,7 @@ import { validateFalContract } from "../lib/fal-visual-restart.mjs";
 import { referenceBoardLayout, referenceBoardPromptGuidance } from "../lib/openart-reference-board.mjs";
 import { normalizeImageProvider } from "../lib/image-provider-routing.mjs";
 import { buildStageCommand, commandStageFor } from "../lib/pipeline-stage-registry.mjs";
-import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import { createHash } from "node:crypto";
@@ -76,6 +76,67 @@ test("Fal character-state panels retain human identities in collage guidance", (
 
 test("Fal request rejects more than sixteen ordered references", () => {
   assert.throws(() => buildFalImageInput({ prompt: "x", referenceUrls: Array(17).fill("https://v3.fal.media/a.png") }), /sixteen/);
+});
+
+test("Fal paid image submission uses exactly one queue POST and a durable attempt", async () => {
+  const episodeDir = await mkdtemp(path.join(os.tmpdir(), "goldflow-fal-single-post-"));
+  try {
+    const receiptPath = path.join(episodeDir, "fal", "bulk", "submission-receipts", "shot.json");
+    const prompt = "A restrained scene with two visible characters.";
+    const assignment = { image_id: "shot", assignment_sha256: "a".repeat(64),
+      run_identity_sha256: "b".repeat(64), prompt, prompt_sha256: createHash("sha256").update(prompt).digest("hex"),
+      endpoint: FAL_ENDPOINTS.primary_text, reference_mode: "text_only", reference_hashes: [], max_cost_usd: 0.05 };
+    let calls = 0;
+    const fetchImpl = async (url, options) => {
+      calls++;
+      assert.equal(url, `https://queue.fal.run/${FAL_ENDPOINTS.primary_text}`);
+      assert.equal(options.method, "POST");
+      assert.equal(options.headers.Authorization, "Key test:key");
+      assert.deepEqual(JSON.parse(options.body), buildFalImageInput({ prompt }).input);
+      return { ok: true, json: async () => ({ request_id: "request-1" }) };
+    };
+    const result = await submitFalImage({ assignment, receiptPath, fetchImpl, credentials: "test:key" });
+    assert.equal(calls, 1);
+    assert.equal(result.requestId, "request-1");
+    assert.equal(JSON.parse(await readFile(receiptPath, "utf8")).request_id, "request-1");
+    assert.equal(JSON.parse(await readFile(falSubmissionAttemptPath(receiptPath), "utf8")).possible_paid_request, true);
+    await assert.rejects(submitFalImage({ assignment, receiptPath, fetchImpl, credentials: "test:key" }), /Refusing to overwrite/);
+    assert.equal(calls, 1);
+  } finally { await rm(episodeDir, { recursive: true, force: true }); }
+});
+
+test("Fal ambiguous queue outcome stays held and cannot silently resubmit", async () => {
+  const episodeDir = await mkdtemp(path.join(os.tmpdir(), "goldflow-fal-ambiguous-post-"));
+  try {
+    const receiptPath = path.join(episodeDir, "fal", "bulk", "submission-receipts", "shot.json");
+    const prompt = "A solitary industrial mill at dusk.";
+    const assignment = { image_id: "shot", assignment_sha256: "a".repeat(64),
+      run_identity_sha256: "b".repeat(64), prompt, prompt_sha256: createHash("sha256").update(prompt).digest("hex"),
+      endpoint: FAL_ENDPOINTS.primary_text, reference_mode: "text_only", reference_hashes: [], max_cost_usd: 0.05 };
+    let calls = 0;
+    const fetchImpl = async () => { calls++; throw new TypeError("fetch failed"); };
+    await assert.rejects(submitFalImage({ assignment, receiptPath, fetchImpl, credentials: "test:key" }), /fetch failed/);
+    assert.equal(calls, 1);
+    assert.equal(JSON.parse(await readFile(falSubmissionAttemptPath(receiptPath), "utf8")).image_id, "shot");
+    await assert.rejects(submitFalImage({ assignment, receiptPath, fetchImpl, credentials: "test:key" }), /Refusing to overwrite/);
+    assert.equal(calls, 1);
+  } finally { await rm(episodeDir, { recursive: true, force: true }); }
+});
+
+test("Fal queue 503 does not trigger an SDK-style POST retry", async () => {
+  const episodeDir = await mkdtemp(path.join(os.tmpdir(), "goldflow-fal-no-503-retry-"));
+  try {
+    const receiptPath = path.join(episodeDir, "fal", "submission-receipts", "shot.json");
+    const prompt = "A quiet machine room with the power cut.";
+    const assignment = { image_id: "shot", assignment_sha256: "a".repeat(64),
+      run_identity_sha256: "b".repeat(64), prompt, prompt_sha256: createHash("sha256").update(prompt).digest("hex"),
+      endpoint: FAL_ENDPOINTS.primary_text, reference_mode: "text_only", reference_hashes: [], max_cost_usd: 1 };
+    let calls = 0;
+    await assert.rejects(submitFalImage({ assignment, receiptPath, credentials: "test:key",
+      fetchImpl: async () => { calls++; return { ok: false, status: 503 }; } }), /HTTP 503.*held/);
+    assert.equal(calls, 1);
+    assert.equal(JSON.parse(await readFile(falSubmissionAttemptPath(receiptPath), "utf8")).image_id, "shot");
+  } finally { await rm(episodeDir, { recursive: true, force: true }); }
 });
 
 test("Fal blocked-stage recovery admits only the exact status action", () => {

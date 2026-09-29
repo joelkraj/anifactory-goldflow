@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { assertFalRetryBudget, falRetryBudgetState,
-  assertFalSpendProjectionBudget, falSpendProjectionState } from "../lib/fal-retry-budget.mjs";
+  assertFalSpendProjectionBudget, falAmbiguousSubmissionAttempts, falSpendProjectionState } from "../lib/fal-retry-budget.mjs";
 import { falProductionStageStates } from "../lib/fal-production-state.mjs";
 
 async function fixture(frameCount = 20) {
@@ -23,6 +23,14 @@ async function receipt(file, id) {
   await mkdir(path.dirname(file), { recursive: true });
   await writeFile(file, JSON.stringify({ schema: "goldflow_fal_submission_receipt_v1", image_id: id,
     assignment_sha256: "a".repeat(64), request_id: `request-${id}` }));
+}
+async function attempt(receiptPath, id) {
+  const dir = path.dirname(receiptPath);
+  const attemptPath = path.join(path.dirname(dir), `${path.basename(dir)}-attempts`, path.basename(receiptPath));
+  await mkdir(path.dirname(attemptPath), { recursive: true });
+  await writeFile(attemptPath, JSON.stringify({ schema: "goldflow_fal_submission_attempt_v1",
+    image_id: id, assignment_sha256: "a".repeat(64), submission_receipt_path: receiptPath }));
+  return attemptPath;
 }
 
 test("Fal paid repairs are capped at floor(10% of planned scene frames)", async () => {
@@ -84,6 +92,40 @@ test("Fal retry accounting fails closed on a malformed paid submission receipt",
     await mkdir(path.dirname(file), { recursive: true });
     await writeFile(file, "{}");
     await assert.rejects(falRetryBudgetState(episodeDir), /Invalid Fal submission receipt/);
+  } finally { await rm(episodeDir, { recursive: true, force: true }); }
+});
+
+test("unresolved attempts count as possible spend and retries without double-counting completed receipts", async () => {
+  const episodeDir = await fixture();
+  try {
+    const root = path.join(episodeDir, "fal");
+    const repairPath = path.join(root, "bulk", "repair-submission-receipts", "repair.json");
+    await attempt(repairPath, "repair");
+    assert.equal((await falRetryBudgetState(episodeDir)).paid_retry_submissions, 1);
+    assert.equal((await falSpendProjectionState({ episodeDir, warningBudgetUsd: 30, hardBudgetUsd: 35 })).paid_submissions, 1);
+    assert.equal((await falAmbiguousSubmissionAttempts(episodeDir)).length, 1);
+    await receipt(repairPath, "repair");
+    assert.equal((await falRetryBudgetState(episodeDir)).paid_retry_submissions, 1);
+    assert.equal((await falSpendProjectionState({ episodeDir, warningBudgetUsd: 30, hardBudgetUsd: 35 })).paid_submissions, 1);
+    assert.equal((await falAmbiguousSubmissionAttempts(episodeDir)).length, 0);
+  } finally { await rm(episodeDir, { recursive: true, force: true }); }
+});
+
+test("Fal status holds new paid dispatch while a request outcome lacks a receipt", async () => {
+  const episodeDir = await fixture();
+  try {
+    const root = path.join(episodeDir, "fal");
+    const submission = path.join(root, "bulk", "submission-receipts", "shot.json");
+    await attempt(submission, "shot");
+    await writeFile(path.join(root, "bulk-plan.json"), JSON.stringify({ assignments: [{ image_id: "shot",
+      submission_receipt_path: submission,
+      result_receipt_path: path.join(root, "bulk", "result-receipts", "shot.json") }] }));
+    await writeFile(path.join(root, "validation-review.json"), JSON.stringify({ status: "passed", approved_ids: [], rejected_ids: [] }));
+    const state = await falProductionStageStates({ episodeDir,
+      identity: { image_provider_options: { fal: { warning_budget_usd: 30, hard_budget_usd: 35 } } } });
+    assert.equal(state.stageStates.image_generation.state, "blocked");
+    assert.match(state.stageStates.image_generation.evidence, /submission attempt\(s\) lack request receipts/);
+    assert.equal(state.stageStates.image_generation.next_command_shape, undefined);
   } finally { await rm(episodeDir, { recursive: true, force: true }); }
 });
 

@@ -1,6 +1,6 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { falRetryBudgetState, falSpendProjectionState, falProjectedSpendUsd } from "./fal-retry-budget.mjs";
+import { falAmbiguousSubmissionAttempts, falRetryBudgetState, falSpendProjectionState, falProjectedSpendUsd } from "./fal-retry-budget.mjs";
 
 async function exists(file) { return fs.access(file).then(() => true, () => false); }
 async function read(file) { return JSON.parse(await fs.readFile(file, "utf8")); }
@@ -38,9 +38,10 @@ export async function falProductionStageStates({ episodeDir, identity } = {}) {
   const contract = identity?.image_provider_options?.fal;
   const spend = contract ? await falSpendProjectionState({ episodeDir,
     warningBudgetUsd: contract.warning_budget_usd, hardBudgetUsd: contract.hard_budget_usd }) : null;
+  const ambiguousAttempts = await falAmbiguousSubmissionAttempts(episodeDir);
   let projectedWithPendingBulkUsd = null;
   const withSpendState = stageStates => {
-    if (!retryBudget && !spend) return { stageStates };
+    if (!retryBudget && !spend && !ambiguousAttempts.length) return { stageStates };
     const annotated = Object.fromEntries(Object.entries(stageStates).map(([stage, state]) => {
       if (!state) return [stage, state];
       const retryNote = retryBudget
@@ -49,11 +50,13 @@ export async function falProductionStageStates({ episodeDir, identity } = {}) {
         ? `projected submitted spend $${spend.projected_spend_usd}/$${spend.hard_budget_usd} (estimate only; actual billing unavailable)` : "";
       const forecastNote = projectedWithPendingBulkUsd !== null
         ? `projected episode spend including unsubmitted bulk $${projectedWithPendingBulkUsd}/$${contract.hard_budget_usd} (estimate only)` : "";
-      const next = { ...state, evidence: [state.evidence, retryNote, spendNote, forecastNote].filter(Boolean).join("; ") };
-      if ((spend?.hard_reached || projectedWithPendingBulkUsd >= contract?.hard_budget_usd)
+      const ambiguousNote = ambiguousAttempts.length
+        ? `${ambiguousAttempts.length} Fal submission attempt(s) lack request receipts; reconcile before further paid dispatch` : "";
+      const next = { ...state, evidence: [state.evidence, retryNote, spendNote, forecastNote, ambiguousNote].filter(Boolean).join("; ") };
+      if ((spend?.hard_reached || projectedWithPendingBulkUsd >= contract?.hard_budget_usd || ambiguousAttempts.length)
         && /\bimagegen fal\b.*--confirm-spend\b/.test(next.next_command_shape ?? "")) {
         next.state = "blocked";
-        next.evidence += "; locked hard budget reached; hold further paid submission";
+        next.evidence += "; hold further paid submission";
         delete next.next_command_shape;
       }
       return [stage, next];

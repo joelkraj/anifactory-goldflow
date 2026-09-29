@@ -5,7 +5,7 @@ import path from "node:path";
 import { buildReferenceBoard, referenceBoardPromptGuidance } from "./lib/openart-reference-board.mjs";
 import { falFileSha256, falObjectSha256, uploadFalReference, submitFalImage, observeFalImage, FAL_ENDPOINTS } from "./lib/fal-provider.mjs";
 import { falPortableAssetId, promoteApprovedFalReferences } from "./lib/fal-portable-bank.mjs";
-import { assertFalRetryBudget, assertFalSpendProjectionBudget, falSpendProjectionState, falProjectedSpendUsd } from "./lib/fal-retry-budget.mjs";
+import { assertFalRetryBudget, assertFalSpendProjectionBudget, falAmbiguousSubmissionAttempts, falSpendProjectionState, falProjectedSpendUsd } from "./lib/fal-retry-budget.mjs";
 import { chooseNativeValidationRows } from "./lib/fal-validation-selector.mjs";
 
 const digest = value => createHash("sha256").update(value).digest("hex");
@@ -15,7 +15,7 @@ function flags(argv) { const out={}; for(let i=0;i<argv.length;i+=2){need(argv[i
 async function read(file){return JSON.parse(await fs.readFile(file,"utf8"));}
 async function absent(file){try{await fs.lstat(file);throw new Error(`Refusing to overwrite ${file}`);}catch(error){if(error.code!=="ENOENT")throw error;}}
 async function write(file,value){const content=bytes(value);const prior=await fs.readFile(file,"utf8").catch(error=>{if(error.code==="ENOENT")return null;throw error;});if(prior!==null){need(prior===content,`Existing Fal artifact differs: ${file}`);return;}await fs.mkdir(path.dirname(file),{recursive:true});await fs.writeFile(file,content,{flag:"wx"});}
-async function mapLimit(rows, limit, fn){const out=[];let cursor=0;async function worker(){while(cursor<rows.length){const i=cursor++;out[i]=await fn(rows[i],i);}}await Promise.all(Array.from({length:Math.min(limit,rows.length)},worker));return out;}
+async function mapLimit(rows, limit, fn){const out=[];let cursor=0,failure=null;async function worker(){while(!failure&&cursor<rows.length){const i=cursor++;try{out[i]=await fn(rows[i],i);}catch(error){failure??=error;}}}await Promise.all(Array.from({length:Math.min(limit,rows.length)},worker));if(failure)throw failure;return out;}
 
 async function context(f){
   const episodeDir=await fs.realpath(path.resolve(f["episode-dir"])); const identity=await read(path.join(episodeDir,"run_identity.json"));
@@ -204,26 +204,35 @@ async function prepareBulk(ctx,f){
   await write(path.join(ctx.root,"bulk-plan.json"),plan);return {status:"prepared",count:assignments.length,projected_base_cost_usd:projectedBase,projected_observed_rate_episode_cost_usd:projectedEpisode};
 }
 async function submitRows(ctx,rows,limit){
-  const pending=[];
-  for(const row of rows){
-    if(await fs.access(row.submission_receipt_path).then(()=>true,()=>false)){
-      const prior=await read(row.submission_receipt_path);
-      need(prior.schema==="goldflow_fal_submission_receipt_v1"&&prior.image_id===row.image_id
-        &&prior.assignment_sha256===row.assignment_sha256&&prior.run_identity_sha256===ctx.identityHash,
-        `Existing Fal submission receipt differs from exact assignment: ${row.image_id}`);
-    }else pending.push(row);
-  }
-  if(!pending.length)return [];
-  await assertFalRetryBudget({episodeDir:ctx.episodeDir,assignments:pending});
-  const spend=await assertFalSpendProjectionBudget({episodeDir:ctx.episodeDir,assignments:pending,
-    warningBudgetUsd:ctx.contract.warning_budget_usd,hardBudgetUsd:ctx.contract.hard_budget_usd});
-  if(spend.warning_after_batch)console.error(`Fal projected spend warning: $${spend.projected_spend_after_batch_usd} against locked $${spend.warning_budget_usd}; estimate only, verify actual Fal balance.`);
-  return mapLimit(pending,limit,async row=>{
-    if(!row.board_path)return submitFalImage({assignment:row,referenceUrls:[],receiptPath:row.submission_receipt_path});
-    const upload=await uploadFalReference({localPath:row.board_path,expectedSha256:row.board_sha256,receiptPath:row.upload_receipt_path});
-    try{return await submitFalImage({assignment:row,referenceUrls:[upload.remoteUrl],receiptPath:row.submission_receipt_path});}
-    finally{upload.remoteUrl=null;}
-  });
+  const lockPath=path.join(ctx.root,"paid-dispatch.lock");
+  await fs.mkdir(ctx.root,{recursive:true});
+  try{await fs.mkdir(lockPath);}catch(error){if(error.code==="EEXIST")throw new Error("Fal paid dispatch is already active or was interrupted; inspect its attempts before further spend.");throw error;}
+  try{
+    const ambiguous=await falAmbiguousSubmissionAttempts(ctx.episodeDir);
+    need(!ambiguous.length,`Fal has ${ambiguous.length} submission attempt(s) without request receipts; reconcile them before further spend.`);
+    const pending=[];
+    for(const row of rows){
+      if(await fs.access(row.submission_receipt_path).then(()=>true,()=>false)){
+        const prior=await read(row.submission_receipt_path);
+        need(prior.schema==="goldflow_fal_submission_receipt_v1"&&prior.image_id===row.image_id
+          &&prior.assignment_sha256===row.assignment_sha256&&prior.run_identity_sha256===ctx.identityHash,
+          `Existing Fal submission receipt differs from exact assignment: ${row.image_id}`);
+      }else pending.push(row);
+    }
+    if(!pending.length)return [];
+    need(new Set(pending.map(row=>row.submission_receipt_path)).size===pending.length,
+      "Fal paid batch contains duplicate submission receipt paths.");
+    await assertFalRetryBudget({episodeDir:ctx.episodeDir,assignments:pending});
+    const spend=await assertFalSpendProjectionBudget({episodeDir:ctx.episodeDir,assignments:pending,
+      warningBudgetUsd:ctx.contract.warning_budget_usd,hardBudgetUsd:ctx.contract.hard_budget_usd});
+    if(spend.warning_after_batch)console.error(`Fal projected spend warning: $${spend.projected_spend_after_batch_usd} against locked $${spend.warning_budget_usd}; estimate only, verify actual Fal balance.`);
+    return await mapLimit(pending,limit,async row=>{
+      if(!row.board_path)return submitFalImage({assignment:row,referenceUrls:[],receiptPath:row.submission_receipt_path});
+      const upload=await uploadFalReference({localPath:row.board_path,expectedSha256:row.board_sha256,receiptPath:row.upload_receipt_path});
+      try{return await submitFalImage({assignment:row,referenceUrls:[upload.remoteUrl],receiptPath:row.submission_receipt_path});}
+      finally{upload.remoteUrl=null;}
+    });
+  }finally{await fs.rmdir(lockPath);}
 }
 async function preflightPaidRepair(ctx,receiptDir,imageIds){
   const pending=[];

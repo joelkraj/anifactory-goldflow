@@ -23,6 +23,7 @@ import { canonicalContentProfileArgument } from "../scripts/lib/content-profiles
 import { semanticRecoveryAdmission } from "../scripts/lib/semantic-planner-recovery.mjs";
 import { visualPromptRecoveryAdmission } from "../scripts/lib/visual-prompt-recovery.mjs";
 import { visualBeatRecoveryAdmission } from "../scripts/lib/visual-beat-recovery.mjs";
+import { visualBeatExactRepairAdmission } from "../scripts/lib/visual-beat-exact-repair.mjs";
 import { visualReferenceRecoveryAdmission } from "../scripts/lib/visual-reference-recovery.mjs";
 import { referenceImageQaRecoveryAdmission } from "../scripts/lib/reference-image-recovery.mjs";
 import { partialSceneImageQaRecoveryAdmission } from "../scripts/lib/partial-scene-image-recovery.mjs";
@@ -157,6 +158,15 @@ function enforceWorkflowGuard(commandName, subcommandName, scriptArgs, episodeDi
       process.exit(1);
     }
   }
+  if (commandName === "visual" && subcommandName === "repair-beats") {
+    const repair = visualBeatExactRepairAdmission(result, parsedFlags);
+    if (!repair.allowed) {
+      console.error(`Workflow guard blocked exact visual beat repair: ${repair.reason}.`);
+      if (result.next_command_shape) console.error(`Next valid command shape: ${result.next_command_shape}`);
+      process.exit(1);
+    }
+    return;
+  }
   if (commandName === "visual" && subcommandName === "plan") {
     const recovery = visualPromptRecoveryAdmission(result, parsedFlags);
     if (recovery.applicable && !recovery.allowed) {
@@ -238,11 +248,9 @@ function run(script, scriptArgs = []) {
   }
   enforceWorkflowGuard(command, subcommand, scriptArgs, episodeDir);
   const stage = commandStage(command, subcommand, parsedFlags, episodeDir);
-  const plannerRerunDecision = plannerRerunDecisionForEpisode({
-    stage,
-    flags: parsedFlags,
-    episodeDir,
-  });
+  const plannerRerunDecision = command === "visual" && subcommand === "repair-beats"
+    ? { allowed: true }
+    : plannerRerunDecisionForEpisode({ stage, flags: parsedFlags, episodeDir });
   if (!plannerRerunDecision.allowed) {
     console.error(`Planner rerun blocked: ${command} ${subcommand}`);
     console.error(`Reason: ${plannerRerunDecision.reason}. Prior attempts: ${plannerRerunDecision.prior_attempt_count}.`);
@@ -667,6 +675,8 @@ if (command === "pilot" && !helpRequested) {
   run("fal-production.mjs", flags);
 } else if (command === "visual" && subcommand === "beats") {
   run("visual-beat-plan.mjs", flags);
+} else if (command === "visual" && subcommand === "repair-beats") {
+  run("visual-beat-exact-repair.mjs", flags);
 } else if (command === "visual" && subcommand === "planner-ab") {
   run("visual-planner-ab.mjs", flags);
 } else if (command === "visual" && subcommand === "prompt-benchmark") {

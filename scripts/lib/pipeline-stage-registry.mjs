@@ -214,7 +214,7 @@ const stages = [
     output_artifact: "reference_plan_approval.json",
     approval: "operator_or_agent",
     validator: "reference_plan_approval_hash",
-    commands: ["visual approve-ref-plan"],
+    commands: ["visual approve-ref-plan", "visual repair-ref-plan"],
   },
   {
     id: "reference_generation",

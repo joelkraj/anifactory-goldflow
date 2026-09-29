@@ -699,6 +699,8 @@ if (command === "pilot" && !helpRequested) {
   run("visual-reference-plan.mjs", flags);
 } else if (command === "visual" && subcommand === "approve-ref-plan") {
   run("visual-reference-plan-approve.mjs", flags);
+} else if (command === "visual" && subcommand === "repair-ref-plan") {
+  run("visual-reference-plan-exact-repair.mjs", flags);
 } else if (command === "visual" && subcommand === "approve-refs") {
   run("visual-reference-approve.mjs", flags);
 } else if (command === "visual" && subcommand === "review") {

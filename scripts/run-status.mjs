@@ -3137,7 +3137,7 @@ export async function narrationHeardPronunciationRetryReportValidForTests(ttsRep
 function blockedNarrationComparatorRefreshEligible({
   ttsReport, unitDelivery, providerOutput, plan, planFileSha256,
   currentScriptHash, qualityContractSha256, providerValidation,
-  providerAudioHashesValid,
+  providerAudioHashesValid, providerOutputPath, providerOutputFileSha256,
 }) {
   const blockedKeys = (rows) => (rows ?? [])
     .map((row) => `${row?.unit_id ?? ""}|${row?.code ?? ""}`).sort();
@@ -3152,6 +3152,8 @@ function blockedNarrationComparatorRefreshEligible({
     && reportBlockers.length > 0
     && JSON.stringify(reportBlockers) === JSON.stringify(deliveryBlockers)
     && reportBlockers.every((key) => key.includes("|narration_confirmed_"))
+    && ttsReport.provider_output_manifest_path === providerOutputPath
+    && ttsReport.provider_output_manifest_sha256 === providerOutputFileSha256
     && ttsReport.source_script_hash === currentScriptHash
     && unitDelivery.source_script_hash === currentScriptHash
     && plan?.source_script_hash === currentScriptHash
@@ -3271,7 +3273,8 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
         if (blockedNarrationComparatorRefreshEligible({
           ttsReport, unitDelivery, providerOutput, plan, planFileSha256,
           currentScriptHash, qualityContractSha256: narrationQualityContract.contract_sha256,
-          providerValidation, providerAudioHashesValid,
+          providerValidation, providerAudioHashesValid, providerOutputPath,
+          providerOutputFileSha256: await fileSha256(providerOutputPath),
         })) {
           return { done: false, state: "blocked",
             evidence: `Stored blocked narration delivery QA uses transcript comparator ${unitDelivery.transcript_comparison_version}; current comparator ${TRANSCRIPT_QA_COMPARISON_VERSION}. All provider audio hashes and plan bindings remain valid; re-adjudicate without synthesis`,

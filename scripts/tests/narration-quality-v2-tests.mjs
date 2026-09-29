@@ -1690,6 +1690,8 @@ const staleComparisonRefresh = {
     narration_generation_plan_sha256: "plan-hash",
     narration_generation_plan_file_sha256: "plan-file-hash",
     narration_quality_contract_sha256: "quality-hash",
+    provider_output_manifest_path: "/episode/provider-manifest.json",
+    provider_output_manifest_sha256: "provider-file-hash",
     blockers: [{ unit_id: "unit-1", code: "narration_confirmed_final_token_mismatch" }],
   },
   unitDelivery: {
@@ -1709,6 +1711,8 @@ const staleComparisonRefresh = {
   planFileSha256: "plan-file-hash", currentScriptHash: "script-hash",
   qualityContractSha256: "quality-hash",
   providerValidation: { status: "passed" }, providerAudioHashesValid: true,
+  providerOutputPath: "/episode/provider-manifest.json",
+  providerOutputFileSha256: "provider-file-hash",
 };
 const refreshEligible = (change) => blockedNarrationComparatorRefreshEligibleForTests({
   ...staleComparisonRefresh, ...change,
@@ -1718,6 +1722,9 @@ for (const change of [
   { unitDelivery: { ...staleComparisonRefresh.unitDelivery,
     transcript_comparison_version: transcriptQaForTests("same", "same").comparison_version } },
   { ttsReport: { ...staleComparisonRefresh.ttsReport, status: "passed" } },
+  { ttsReport: { ...staleComparisonRefresh.ttsReport,
+    provider_output_manifest_path: "/episode/repaired-manifest.json" } },
+  { providerOutputFileSha256: "changed-file-hash" },
   { ttsReport: { ...staleComparisonRefresh.ttsReport,
     blockers: [{ unit_id: "unit-2", code: "narration_confirmed_final_token_mismatch" }] } },
   { ttsReport: { ...staleComparisonRefresh.ttsReport,

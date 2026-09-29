@@ -125,7 +125,7 @@ test("Fal status holds new paid dispatch while a request outcome lacks a receipt
       identity: { image_provider_options: { fal: { warning_budget_usd: 30, hard_budget_usd: 35 } } } });
     assert.equal(state.stageStates.image_generation.state, "blocked");
     assert.match(state.stageStates.image_generation.evidence, /submission attempt\(s\) lack request receipts/);
-    assert.equal(state.stageStates.image_generation.next_command_shape, undefined);
+    assert.match(state.stageStates.image_generation.next_command_shape, /--action adjudicate-no-job --image-id shot/);
   } finally { await rm(episodeDir, { recursive: true, force: true }); }
 });
 

@@ -1,5 +1,6 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { falAdjudicationPath } from "./fal-ambiguous-adjudication.mjs";
 import { falAmbiguousSubmissionAttempts, falRetryBudgetState, falSpendProjectionState, falProjectedSpendUsd } from "./fal-retry-budget.mjs";
 
 async function exists(file) { return fs.access(file).then(() => true, () => false); }
@@ -7,6 +8,13 @@ async function read(file) { return JSON.parse(await fs.readFile(file, "utf8")); 
 
 export function falBlockedStageRecoveryAdmission(status, flags = {}) {
   const action = String(flags.action ?? "");
+  if (status?.current_stage === "image_generation" && status?.current_stage_state === "blocked"
+    && action === "adjudicate-no-job")
+    return { applicable: true, allowed: /--action adjudicate-no-job\b/.test(status.next_command_shape??""),
+      reason: "No ambiguous Fal submission is current." };
+  if (status?.current_stage === "image_generation" && status?.current_stage_state === "blocked"
+    && action === "observe-bulk" && /submission attempt\(s\) lack request receipts/.test(status.stage_ledger?.find(row=>row.stage==="image_generation")?.evidence??""))
+    return { applicable: true, allowed: true };
   const next = String(status?.next_command_shape ?? "");
   const referenceRecovery = status?.current_stage === "reference_generation";
   const reviewRecovery = status?.current_stage === "reference_image_approval";
@@ -15,7 +23,7 @@ export function falBlockedStageRecoveryAdmission(status, flags = {}) {
     ? ["repair-reference-failures", "observe-reference-repairs"]
     : reviewRecovery ? ["repair-reviewed-references", "observe-reviewed-references", "finalize-reviewed-references"]
     : bulkReviewRecovery ? ["repair-reviewed-bulk", "observe-reviewed-bulk", "finalize-reviewed-bulk"]
-    : ["observe-holds", "recover-holds", "observe-transport-recovery", "repair-failures", "observe-repairs"]);
+    : ["observe-bulk", "observe-holds", "recover-holds", "observe-transport-recovery", "repair-failures", "observe-repairs"]);
   if ((!referenceRecovery && !reviewRecovery && !bulkReviewRecovery && status?.current_stage !== "image_generation") || status?.current_stage_state !== "blocked") {
     return { applicable: false, allowed: false, reason: "Fal blocked-stage recovery is not current." };
   }
@@ -53,7 +61,13 @@ export async function falProductionStageStates({ episodeDir, identity } = {}) {
       const ambiguousNote = ambiguousAttempts.length
         ? `${ambiguousAttempts.length} Fal submission attempt(s) lack request receipts; reconcile before further paid dispatch` : "";
       const next = { ...state, evidence: [state.evidence, retryNote, spendNote, forecastNote, ambiguousNote].filter(Boolean).join("; ") };
-      if ((spend?.hard_reached || projectedWithPendingBulkUsd >= contract?.hard_budget_usd || ambiguousAttempts.length)
+      if (ambiguousAttempts.length && stage === "image_generation" && /--confirm-spend\b/.test(next.next_command_shape ?? "")) {
+        next.state = "blocked";
+        next.evidence += "; hold further paid submission";
+        next.next_command_shape = ambiguousAttempts[0].submission_receipt_path.includes(`${path.sep}bulk${path.sep}submission-receipts${path.sep}`)
+          ? `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action adjudicate-no-job --image-id ${ambiguousAttempts[0].image_id} --review-spec <absolute_reviewed_json>`
+          : null;
+      } else if ((spend?.hard_reached || projectedWithPendingBulkUsd >= contract?.hard_budget_usd || ambiguousAttempts.length)
         && /\bimagegen fal\b.*--confirm-spend\b/.test(next.next_command_shape ?? "")) {
         next.state = "blocked";
         next.evidence += "; hold further paid submission";
@@ -169,7 +183,8 @@ export async function falProductionStageStates({ episodeDir, identity } = {}) {
     const results = await Promise.all(bulk.assignments.map(row => exists(row.result_receipt_path)));
     const repairResults = await Promise.all(bulk.assignments.map(row => exists(path.join(root,"bulk","repair-result-receipts",`${row.image_id}.json`))));
     const transportRecoveryResults = await Promise.all(bulk.assignments.map(row => exists(path.join(root,"bulk","transport-recovery-result-receipts",`${row.image_id}.json`))));
-    const effectiveResults = results.map((value,index) => value || repairResults[index] || transportRecoveryResults[index]);
+    const adjudicatedResults = await Promise.all(bulk.assignments.map(row => exists(path.join(root,"bulk","ambiguous-retry-result-receipts",`${row.image_id}.json`))));
+    const effectiveResults = results.map((value,index) => value || repairResults[index] || transportRecoveryResults[index] || adjudicatedResults[index]);
     const failures = await Promise.all(bulk.assignments.map(row => exists(path.join(root,"bulk","failure-receipts",`${row.image_id}.json`))));
     const holds = await Promise.all(bulk.assignments.map(row => exists(path.join(root,"bulk","transport-holds",`${row.image_id}.json`))));
     const unsubmittedCount = submitted.filter(value => !value).length;
@@ -207,6 +222,12 @@ export async function falProductionStageStates({ episodeDir, identity } = {}) {
     else if (unsubmittedCount > 0 && outstanding < queueTarget) bulkState = { state: "missing", evidence: `${submitted.filter(Boolean).length}/${bulk.assignments.length} Fal requests queued; filling ${queueTarget-outstanding} queue positions while provider enforces ${concurrency} active generations`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action dispatch-bulk --limit ${Math.min(20,unsubmittedCount,queueTarget-outstanding)} --confirm-spend exact_fal_bulk_batch` };
     else if (outstanding > 0) bulkState = { state: "missing", evidence: `${effectiveResults.filter(Boolean).length}/${bulk.assignments.length} Fal frames complete; ${outstanding} submitted requests pending`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action observe-bulk --limit 100` };
     else bulkState = { state: "missing", evidence: `${submitted.filter(Boolean).length}/${bulk.assignments.length} Fal requests submitted`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action dispatch-bulk --limit 100 --confirm-spend exact_fal_bulk_batch` };
+    const adjudicated = await Promise.all(bulk.assignments.map(row => exists(falAdjudicationPath(episodeDir,row.image_id))));
+    const retrySubmitted = await Promise.all(bulk.assignments.map(row => exists(path.join(root,"bulk","ambiguous-retry-submission-receipts",`${row.image_id}.json`))));
+    const retryResults = await Promise.all(bulk.assignments.map(row => exists(path.join(root,"bulk","ambiguous-retry-result-receipts",`${row.image_id}.json`))));
+    const retryPending = adjudicated.findIndex((value,index)=>value&&!retrySubmitted[index]);
+    if (retryPending >= 0) bulkState = { state: "missing", evidence: `Reviewed no-job adjudication awaits one conservative paid retry: ${bulk.assignments[retryPending].image_id}`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action dispatch-adjudicated --image-id ${bulk.assignments[retryPending].image_id} --confirm-spend exact_fal_ambiguous_retry` };
+    else if (retrySubmitted.some((value,index)=>value&&!retryResults[index])) bulkState = { state: "missing", evidence: "Exact adjudicated retry is pending observation", next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action observe-adjudicated` };
   }
   if (earlyReferenceFork) return withSpendState({
     reference_generation: referenceState,

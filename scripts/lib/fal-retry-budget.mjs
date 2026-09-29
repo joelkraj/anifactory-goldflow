@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { falAdjudicationForAttempt } from "./fal-ambiguous-adjudication.mjs";
 
 const RETRY_FRACTION = 0.10;
 // Conservative planning allowance based on the 2026-09-29 Fal dashboard:
@@ -13,6 +14,7 @@ const REPAIR_RECEIPT_DIRS = Object.freeze([
   "bulk/repair-submission-receipts",
   "bulk/review-repair-submission-receipts",
   "bulk/transport-recovery-submission-receipts",
+  "bulk/ambiguous-retry-submission-receipts",
 ]);
 const INITIAL_RECEIPT_DIRS = Object.freeze([
   "reference/submission-receipts",
@@ -78,7 +80,13 @@ export async function falAmbiguousSubmissionAttempts(episodeDir) {
   const root = path.join(episodeDir, "fal");
   const groups = await Promise.all([...INITIAL_RECEIPT_DIRS, ...REPAIR_RECEIPT_DIRS]
     .map(dir => paidSubmissionsIn(root, dir)));
-  return groups.flat().filter(row => row.ambiguous);
+  const unresolved = [];
+  for (const row of groups.flat().filter(row => row.ambiguous)) {
+    const originalBulk = path.relative(root, row.submission_receipt_path)
+      .startsWith(`bulk${path.sep}submission-receipts${path.sep}`);
+    if (!originalBulk || !await falAdjudicationForAttempt(episodeDir, row)) unresolved.push(row);
+  }
+  return unresolved;
 }
 async function rejectedValidationIds(root) {
   const revised = path.join(root, "validation-review-v2.json");

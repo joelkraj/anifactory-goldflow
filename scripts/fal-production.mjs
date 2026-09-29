@@ -7,6 +7,7 @@ import { falFileSha256, falObjectSha256, uploadFalReference, submitFalImage, obs
 import { falPortableAssetId, promoteApprovedFalReferences } from "./lib/fal-portable-bank.mjs";
 import { assertFalRetryBudget, assertFalSpendProjectionBudget, falAmbiguousSubmissionAttempts, falSpendProjectionState, falProjectedSpendUsd } from "./lib/fal-retry-budget.mjs";
 import { chooseNativeValidationRows } from "./lib/fal-validation-selector.mjs";
+import { falAdjudicationPath, validateFalNoJobAdjudication } from "./lib/fal-ambiguous-adjudication.mjs";
 
 const digest = value => createHash("sha256").update(value).digest("hex");
 const bytes = value => `${JSON.stringify(value, null, 2)}\n`;
@@ -249,6 +250,58 @@ async function preflightPaidRepair(ctx,receiptDir,imageIds){
 async function observeRows(ctx,rows,limit){return mapLimit(rows,limit,async row=>{const receipt=await read(row.submission_receipt_path);try{return await observeFalImage({endpoint:receipt.endpoint,requestId:receipt.request_id,outputPath:row.output_path,receiptPath:row.result_receipt_path});}catch(error){const timedOut=error?.name==="TimeoutError"||/aborted due to timeout/i.test(error?.message??"");const stale=Date.now()-Date.parse(receipt.submitted_at)>15*60_000;if(timedOut&&!stale)return {complete:false,transient_observation_timeout:true,request_id:receipt.request_id};if(timedOut||Number(error?.status)>=500||/Gateway Timeout|Internal Server Error/i.test(error?.message??"")){const holdPath=path.join(path.dirname(path.dirname(row.result_receipt_path)),"transport-holds",`${row.image_id}.json`);if(!await fs.access(holdPath).then(()=>true,()=>false))await write(holdPath,{schema:"goldflow_fal_transport_hold_v1",created_at:new Date().toISOString(),image_id:row.image_id,endpoint:receipt.endpoint,request_id:receipt.request_id,assignment_sha256:row.assignment_sha256,provider_queue_status:"unknown_or_completed",reason:timedOut?"stale_observation_timeout":"provider_5xx_during_observation",billable_request_resubmitted:false});return {complete:false,transport_pending:true,request_id:receipt.request_id,hold_path:holdPath};}if(error?.status!==422)throw error;const failurePath=path.join(path.dirname(path.dirname(row.result_receipt_path)),"failure-receipts",`${row.image_id}.json`);const failure={schema:"goldflow_fal_exact_failure_v1",created_at:new Date().toISOString(),image_id:row.image_id,endpoint:receipt.endpoint,request_id:receipt.request_id,assignment_sha256:row.assignment_sha256,error_status:error.status,error_type:error.body?.detail?.[0]?.type??"unprocessable_entity",error_message:error.body?.detail?.[0]?.msg??error.message,automatic_retry:false,automatic_failover:false};await write(failurePath,failure);return {complete:false,failed:true,failure_path:failurePath};}});}
 async function main(){
  const f=flags(process.argv.slice(2)); const ctx=await context(f); const action=f.action;
+ if(action==="adjudicate-no-job"){
+   need(path.isAbsolute(f["review-spec"]??""),"No-job adjudication requires an absolute reviewed spec.");
+   const bulk=await read(path.join(ctx.root,"bulk-plan.json"));
+   const row=bulk.assignments.find(item=>item.image_id===f["image-id"]);
+   need(row,`Unknown exact Fal bulk ID: ${f["image-id"]}`);
+   const receipt=await validateFalNoJobAdjudication({episodeDir:ctx.episodeDir,assignment:row,spec:await read(f["review-spec"])});
+   const receiptPath=falAdjudicationPath(ctx.episodeDir,row.image_id);
+   await absent(receiptPath);await write(receiptPath,receipt);
+   return console.log(JSON.stringify({status:"no_provider_job_adjudicated",image_id:row.image_id,receipt_path:receiptPath},null,2));
+ }
+ if(action==="dispatch-adjudicated"||action==="observe-adjudicated"){
+   const bulk=await read(path.join(ctx.root,"bulk-plan.json"));
+   const originals=action==="dispatch-adjudicated"?bulk.assignments.filter(row=>row.image_id===f["image-id"]):bulk.assignments;
+   need(originals.length,"No exact Fal adjudicated ID found.");const rows=[];
+   for(const original of originals){
+     const adjudicationPath=falAdjudicationPath(ctx.episodeDir,original.image_id);
+     if(!await fs.access(adjudicationPath).then(()=>true,()=>false))continue;
+     const adjudication=await read(adjudicationPath);
+     need(adjudication.schema==="goldflow_fal_no_job_adjudication_receipt_v1"
+       && adjudication.assignment_sha256===original.assignment_sha256
+       && adjudication.prompt_sha256===original.prompt_sha256
+       && adjudication.attempt_sha256===await falFileSha256(adjudication.attempt_path),
+       `Fal no-job adjudication changed: ${original.image_id}`);
+     need(!await fs.access(original.submission_receipt_path).then(()=>true,()=>false)
+       && !await fs.access(original.result_receipt_path).then(()=>true,()=>false),
+       `Original Fal request acquired a receipt: ${original.image_id}`);
+     const core={...original,previous_assignment_sha256:original.assignment_sha256,
+       ambiguous_attempt_sha256:adjudication.attempt_sha256,
+       adjudication_receipt_sha256:await falFileSha256(adjudicationPath),recovery_reason:"reviewed_no_provider_job"};
+     for(const key of ["assignment_sha256","assignment_path","submission_receipt_path","result_receipt_path","output_path","upload_receipt_path"])delete core[key];
+     const root=path.join(ctx.root,"bulk");
+     const row={...core,assignment_sha256:falObjectSha256(JSON.stringify(core)),
+       submission_receipt_path:path.join(root,"ambiguous-retry-submission-receipts",`${original.image_id}.json`),
+       result_receipt_path:path.join(root,"ambiguous-retry-result-receipts",`${original.image_id}.json`),
+       output_path:original.output_path,
+       upload_receipt_path:path.join(root,"ambiguous-retry-upload-receipts",`${original.image_id}.json`)};
+     if(action==="dispatch-adjudicated"){
+       need(f["confirm-spend"]==="exact_fal_ambiguous_retry","Adjudicated retry requires exact spend token.");
+       need(!await fs.access(row.output_path).then(()=>true,()=>false),`Accepted Fal output already exists: ${original.image_id}`);
+       await write(path.join(root,"ambiguous-retry-assignments",`${original.image_id}.json`),row);
+       rows.push(row);
+     }else if(await fs.access(row.submission_receipt_path).then(()=>true,()=>false)
+       && !await fs.access(row.result_receipt_path).then(()=>true,()=>false))rows.push(row);
+   }
+   if(action==="dispatch-adjudicated"){
+     need(rows.length===1,"Exactly one adjudicated retry is required.");
+     const result=await submitRows(ctx,rows,1);
+     return console.log(JSON.stringify({status:"submitted",image_id:f["image-id"],count:result.length},null,2));
+   }
+   const result=await observeRows(ctx,rows,ctx.contract.production_concurrency);
+   return console.log(JSON.stringify({status:"observed",checked:result.length,complete:result.filter(x=>x.complete).length},null,2));
+ }
  if(action==="prepare-references") return console.log(JSON.stringify(await prepareReferences(ctx),null,2));
  if(action==="billing-submit-reference"||action==="billing-observe-reference"){
    const plan=await read(path.join(ctx.root,"reference-plan.json"));const row=plan.assignments.find(item=>item.image_id===f["image-id"]);need(row,`Unknown exact Fal reference probe: ${f["image-id"]}`);
@@ -446,7 +499,7 @@ async function main(){
    return console.log(JSON.stringify({status:"reviewed_bulk_repair_finalized",image_ids:qa.critical_rejected_image_ids,imagegen_report:reportPath,cut_execution_ledger:ledgerPath},null,2));
  }
  if(action==="dispatch-bulk"){
-   need(f["confirm-spend"]==="exact_fal_bulk_batch","Paid bulk dispatch requires exact confirmation token.");const bulk=await read(path.join(ctx.root,"bulk-plan.json"));const limit=Math.min(Number(f.limit??100),100);need(Number.isInteger(limit)&&limit>0,"Bulk limit must be 1..100.");const rows=[];for(const row of bulk.assignments)if(!await fs.access(row.submission_receipt_path).then(()=>true,()=>false)){rows.push(row);if(rows.length===limit)break;}const result=await submitRows(ctx,rows,ctx.contract.production_concurrency);return console.log(JSON.stringify({status:"submitted",count:result.length,remaining:bulk.assignments.length-(await Promise.all(bulk.assignments.map(row=>fs.access(row.submission_receipt_path).then(()=>1,()=>0)))).reduce((a,b)=>a+b,0)},null,2));
+   need(f["confirm-spend"]==="exact_fal_bulk_batch","Paid bulk dispatch requires exact confirmation token.");const bulk=await read(path.join(ctx.root,"bulk-plan.json"));const limit=Math.min(Number(f.limit??100),100);need(Number.isInteger(limit)&&limit>0,"Bulk limit must be 1..100.");const rows=[];for(const row of bulk.assignments)if(!await fs.access(row.submission_receipt_path).then(()=>true,()=>false)&&!await fs.access(falAdjudicationPath(ctx.episodeDir,row.image_id)).then(()=>true,()=>false)){rows.push(row);if(rows.length===limit)break;}const result=await submitRows(ctx,rows,ctx.contract.production_concurrency);return console.log(JSON.stringify({status:"submitted",count:result.length,remaining:bulk.assignments.length-(await Promise.all(bulk.assignments.map(row=>fs.access(row.submission_receipt_path).then(()=>1,()=>0)))).reduce((a,b)=>a+b,0)},null,2));
  }
  if(action==="repair-failures"){
    need(f["confirm-spend"]==="exact_fal_repair_batch","Paid repair dispatch requires exact confirmation token.");need(path.isAbsolute(f.directives??""),"Repair dispatch requires an absolute --directives file.");
@@ -474,7 +527,7 @@ async function main(){
  }
  if(action==="finalize-bulk"){
    const bulk=await read(path.join(ctx.root,"bulk-plan.json"));const planPath=path.join(ctx.episodeDir,"section_image_prompts_hardened.json");const plan=await read(planPath);const promptHash=await falFileSha256(planPath);const promptById=new Map(plan.prompts.map(row=>[row.image_id,row]));const results=[];const cuts=[];
-   for(const row of bulk.assignments){const receiptCandidates=[row.result_receipt_path,path.join(ctx.root,"bulk","transport-recovery-result-receipts",`${row.image_id}.json`),path.join(ctx.root,"bulk","repair-result-receipts",`${row.image_id}.json`)];let receiptPath=null;for(const candidate of receiptCandidates)if(await fs.access(candidate).then(()=>true,()=>false)){receiptPath=candidate;break;}need(receiptPath,`Final Fal result missing for ${row.image_id}.`);const receipt=await read(receiptPath);need(await falFileSha256(receipt.output_path)===receipt.output_sha256,`Final Fal raster hash changed for ${row.image_id}.`);const prompt=promptById.get(row.image_id);need(prompt,`Final Fal prompt row missing for ${row.image_id}.`);const referenceInputs=prompt.reference_bindings??[];const recoveryType=receiptPath.includes("repair-result")?"content_policy_repair":receiptPath.includes("transport-recovery")?"transport_recovery":"original";const generated={output_sha256:receipt.output_sha256,model:row.endpoint,provider:"fal_ai",request_id:receipt.request_id,result_receipt_path:receiptPath,result_receipt_sha256:await falFileSha256(receiptPath),recovery_type:recoveryType,...receipt};results.push({image_id:row.image_id,scene_id:prompt.scene_id,image_path:receipt.output_path,status:"generated",generated,reference_inputs:referenceInputs});cuts.push({image_id:row.image_id,scene_id:prompt.scene_id,visual_beat_id:prompt.visual_beat_id,start_sec:prompt.start_sec,duration_sec:prompt.duration_sec,prompt_hash:row.prompt_sha256,reference_ids:row.reference_asset_ids,reference_inputs:referenceInputs,image_path:receipt.output_path,image_sha256:receipt.output_sha256,provider:"fal_ai",model:row.endpoint,provider_request_id:receipt.request_id,provider_receipt_path:receiptPath,provider_receipt_sha256:await falFileSha256(receiptPath),recovery_type:recoveryType});}
+   for(const row of bulk.assignments){const receiptCandidates=[row.result_receipt_path,path.join(ctx.root,"bulk","ambiguous-retry-result-receipts",`${row.image_id}.json`),path.join(ctx.root,"bulk","transport-recovery-result-receipts",`${row.image_id}.json`),path.join(ctx.root,"bulk","repair-result-receipts",`${row.image_id}.json`)];let receiptPath=null;for(const candidate of receiptCandidates)if(await fs.access(candidate).then(()=>true,()=>false)){receiptPath=candidate;break;}need(receiptPath,`Final Fal result missing for ${row.image_id}.`);const receipt=await read(receiptPath);need(await falFileSha256(receipt.output_path)===receipt.output_sha256,`Final Fal raster hash changed for ${row.image_id}.`);const prompt=promptById.get(row.image_id);need(prompt,`Final Fal prompt row missing for ${row.image_id}.`);const referenceInputs=prompt.reference_bindings??[];const recoveryType=receiptPath.includes("ambiguous-retry")?"adjudicated_no_job_retry":receiptPath.includes("repair-result")?"content_policy_repair":receiptPath.includes("transport-recovery")?"transport_recovery":"original";const generated={output_sha256:receipt.output_sha256,model:row.endpoint,provider:"fal_ai",request_id:receipt.request_id,result_receipt_path:receiptPath,result_receipt_sha256:await falFileSha256(receiptPath),recovery_type:recoveryType,...receipt};results.push({image_id:row.image_id,scene_id:prompt.scene_id,image_path:receipt.output_path,status:"generated",generated,reference_inputs:referenceInputs});cuts.push({image_id:row.image_id,scene_id:prompt.scene_id,visual_beat_id:prompt.visual_beat_id,start_sec:prompt.start_sec,duration_sec:prompt.duration_sec,prompt_hash:row.prompt_sha256,reference_ids:row.reference_asset_ids,reference_inputs:referenceInputs,image_path:receipt.output_path,image_sha256:receipt.output_sha256,provider:"fal_ai",model:row.endpoint,provider_request_id:receipt.request_id,provider_receipt_path:receiptPath,provider_receipt_sha256:await falFileSha256(receiptPath),recovery_type:recoveryType});}
    need(results.length===bulk.assignments.length&&results.length===plan.prompts.filter(row=>row.image_generation_required!==false).length,"Fal final report count does not match the locked prompt plan.");const updatedAt=new Date().toISOString();const report={schema:"goldflow_imagegen_report_v1",status:"passed",image_provider:"fal_ai",prompt_plan_path:planPath,prompt_plan_hash:promptHash,expected_image_count:bulk.assignments.length,image_count:results.length,missing_image_count:0,results,updated_at:updatedAt};const ledger={schema:"goldflow_cut_execution_ledger_v1",prompt_plan_path:planPath,prompt_plan_hash:promptHash,cuts,updated_at:updatedAt};const immutableReportPath=path.join(ctx.root,"bulk","image-reports",`${Date.now()}-${digest(JSON.stringify(report)).slice(0,12)}.json`);await write(immutableReportPath,report);await write(path.join(ctx.episodeDir,`imagegen_report_${ctx.identity.episode}.json`),report);await write(path.join(ctx.episodeDir,"cut_execution_ledger.json"),ledger);return console.log(JSON.stringify({status:"passed",image_count:results.length,imagegen_report:path.join(ctx.episodeDir,`imagegen_report_${ctx.identity.episode}.json`),cut_execution_ledger:path.join(ctx.episodeDir,"cut_execution_ledger.json"),immutable_report:immutableReportPath},null,2));
  }
  const plan=await read(await validationPlanPath(ctx));

@@ -818,7 +818,8 @@ function stage(stageId, validation, identity, nextCommandOverride = null) {
     validator: definition.validator,
     exists: stageIsSatisfied(state),
     evidence: validation.evidence ?? null,
-    next_command_shape: stageIsSatisfied(state) ? null : nextCommandOverride ?? validation.next_command_shape ?? commandFor(stageId, identity),
+    next_command_shape: stageIsSatisfied(state) || (identity.image_provider === "fal_ai" && stageId === "image_generation" && state === "blocked" && !validation.next_command_shape)
+      ? null : nextCommandOverride ?? validation.next_command_shape ?? commandFor(stageId, identity),
   };
 }
 

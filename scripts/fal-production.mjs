@@ -6,6 +6,7 @@ import { buildReferenceBoard, referenceBoardPromptGuidance } from "./lib/openart
 import { falFileSha256, falObjectSha256, uploadFalReference, submitFalImage, observeFalImage, FAL_ENDPOINTS } from "./lib/fal-provider.mjs";
 import { falPortableAssetId, promoteApprovedFalReferences } from "./lib/fal-portable-bank.mjs";
 import { assertFalRetryBudget, assertFalSpendProjectionBudget, falSpendProjectionState, falProjectedSpendUsd } from "./lib/fal-retry-budget.mjs";
+import { chooseNativeValidationRows } from "./lib/fal-validation-selector.mjs";
 
 const digest = value => createHash("sha256").update(value).digest("hex");
 const bytes = value => `${JSON.stringify(value, null, 2)}\n`;
@@ -114,22 +115,6 @@ async function nativePromptReferences(ctx,row,approval){
   }
   return refs;
 }
-function chooseNativeValidationRows(rows){
-  const eligible=rows.filter(row=>row.image_generation_required!==false);
-  need(eligible.length>=8,"Fal validation needs at least eight distinct production shots.");
-  const chosen=[],used=new Set();
-  const pick=predicate=>{const row=eligible.find(item=>!used.has(item.image_id)&&predicate(item));if(row){used.add(row.image_id);chosen.push(row);}};
-  pick(()=>true);
-  pick(row=>(row.reference_requirements??[]).filter(ref=>ref.kind==="character_state").length>=2);
-  pick(row=>/\b(?:father|dad|Dylan|Nolan)\b/i.test(row.provider_prompt??""));
-  pick(row=>/\bMara\b/i.test(row.provider_prompt??""));
-  pick(row=>/\b(?:Silas|Bell|Rook)\b/i.test(row.provider_prompt??""));
-  pick(row=>/\b(?:wrist|hand|year|blue number)\b/i.test(row.provider_prompt??"")&&/close|detail|insert/i.test(row.sequence_grammar?.shot_size??row.provider_prompt??""));
-  pick(row=>/wide|establish/i.test(row.sequence_grammar?.shot_size??row.suggested_shot_job??""));
-  pick(row=>(row.reference_requirements??[]).length>=4);
-  for(const row of eligible)if(chosen.length<8&&!used.has(row.image_id)){used.add(row.image_id);chosen.push(row);}
-  return chosen;
-}
 async function prepare(ctx,{revision=1}={}){
   if(ctx.identity.visual_restart?.fork_at==="visual_reference_plan"){
     let revisionRequest=null;
@@ -149,12 +134,12 @@ async function prepare(ctx,{revision=1}={}){
     need(approval.status==="approved", "Fal validation requires approved canonical references.");
     const portableBank=await promoteApprovedFalReferences({episodeDir:ctx.episodeDir,identity:ctx.identity,contract:ctx.contract,approval});
     const assignments=[];
-    for(const row of chooseNativeValidationRows(hardened.prompts)){
+    for(const {row,category,category_matched} of chooseNativeValidationRows(hardened.prompts)){
       const refs=await nativePromptReferences(ctx,row,approval);
       const board=refs.length?await buildReferenceBoard({root:validationRoot,imageId:row.image_id,references:refs}):null;
       const basePrompt=row.provider_prompt??row.image_prompt;need(basePrompt,`Fal validation prompt missing: ${row.image_id}`);
       const prompt=board?`${basePrompt}\n\n${referenceBoardPromptGuidance(board)}`:basePrompt;
-      const core={image_id:row.image_id,endpoint:board?FAL_ENDPOINTS.primary_edit:FAL_ENDPOINTS.primary_text,prompt,prompt_sha256:digest(prompt),run_identity_sha256:ctx.identityHash,reference_mode:board?"one_positional_collage":"text_only",reference_asset_ids:refs.map(r=>r.asset_id),reference_hashes:refs.map(r=>r.sha256),board_path:board?.output_path??null,board_sha256:board?.output_sha256??null,board_manifest_path:board?.manifest_path??null,max_cost_usd:1.0};
+      const core={image_id:row.image_id,validation_category:category,validation_category_matched:category_matched,endpoint:board?FAL_ENDPOINTS.primary_edit:FAL_ENDPOINTS.primary_text,prompt,prompt_sha256:digest(prompt),run_identity_sha256:ctx.identityHash,reference_mode:board?"one_positional_collage":"text_only",reference_asset_ids:refs.map(r=>r.asset_id),reference_hashes:refs.map(r=>r.sha256),board_path:board?.output_path??null,board_sha256:board?.output_sha256??null,board_manifest_path:board?.manifest_path??null,max_cost_usd:1.0};
       const assignment={...core,assignment_sha256:falObjectSha256(JSON.stringify(core)),submission_receipt_path:path.join(validationRoot,"submission-receipts",`${row.image_id}.json`),result_receipt_path:path.join(validationRoot,"result-receipts",`${row.image_id}.json`),output_path:path.join(validationRoot,"validation-results",`${row.image_id}.png`),upload_receipt_path:path.join(validationRoot,"upload-receipts",`${row.image_id}.json`),checks:["identity consistency","hands","prop fidelity","composition","unwanted text"]};
       const assignmentPath=path.join(validationRoot,"validation-assignments",`${row.image_id}.json`);await write(assignmentPath,assignment);assignments.push({...assignment,assignment_path:assignmentPath});
     }

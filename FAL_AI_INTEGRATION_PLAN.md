@@ -295,16 +295,7 @@ Boards may be cached and reused only when their full constituent hashes, crops, 
 
 Test collage mode before episode-scale dispatch.
 
-Use the existing representative validation set:
-
-1. Joey close-up
-2. Joey with Adrian
-3. Joey with Victor
-4. Joey with Celeste
-5. Four-person roulette-table composition
-6. Torn dollar close-up
-7. Grandpa's watch close-up
-8. Wide Grand salon shot
+For a new story, choose eight distinct reference-backed production shots from its approved prompt plan. Cover the opening identity, two human identities, a dense cast, a close prop or hand, a nonhuman or important device when present, a wide environment, physical contact, and a late character state. Spread the selections across the runtime. If a category is unavailable, record the fallback in the validation assignment rather than introducing an unrelated old-story subject. The Gambler's Eye set (Joey with Adrian, Victor, and Celeste, roulette table, torn dollar, watch, Grand salon) remains historical evidence for that episode only.
 
 Generate each through Fal GPT Image 2.5 Sunburst:
 
@@ -321,9 +312,9 @@ Review:
 - Wardrobe fidelity
 - Age and body proportions
 - Hands
-- Torn-dollar shape and initials
-- Watch shape, clasp, and gold finish
-- Roulette wheel and table details
+- Story-critical prop shape, markings, and hand placement
+- Nonhuman or device-state continuity when present
+- Episode-specific setting and equipment details
 - Character count
 - Location fidelity
 - Absence of collage borders
@@ -337,10 +328,10 @@ Schema success does not count as visual approval.
 
 Approve collage mode when:
 
-- Joey remains recognizable across all relevant shots.
+- The primary character remains recognizable across all relevant shots.
 - At least seven of eight outputs are production-usable or need only a narrow prompt correction.
-- The four-person composition contains the correct number of distinct people.
-- The dollar and watch retain their defining features.
+- Dense compositions contain the correct number of distinct people.
+- Story-critical objects and machines retain their defining features.
 - No repeated board-layout leakage appears.
 - No systematic environment loss appears.
 

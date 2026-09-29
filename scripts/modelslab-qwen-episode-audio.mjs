@@ -1756,7 +1756,7 @@ function transcriptInputText(value) {
     : String(value ?? "");
 }
 
-export const TRANSCRIPT_QA_COMPARISON_VERSION = "unicode_words_exact_im_numeric_article_contraction_phonetic_v7";
+export const TRANSCRIPT_QA_COMPARISON_VERSION = "unicode_words_exact_im_numeric_article_contraction_phonetic_v8";
 
 const TRANSCRIPT_PUNCTUATION = new Set([".", ",", ";", ":", "!", "?", "…"]);
 
@@ -1930,6 +1930,9 @@ function canonicalTranscriptTokensWithoutAliases(value, preserveBoundaries = fal
       index += 1;
     } else if (base[index] === "door" && base[index + 1] === "frame") {
       compounds.push("doorframe");
+      index += 1;
+    } else if (base[index] === "bed" && base[index + 1] === "frame") {
+      compounds.push("bedframe");
       index += 1;
     } else if (base[index] === "cold" && base[index + 1] === "water") {
       compounds.push("coldwater");
@@ -2229,6 +2232,47 @@ function alignTwoRecognitionSpelling(operations, intended, recognized, intendedT
   return equivalences;
 }
 
+const ALIGNED_HOMOPHONE_SPELLINGS = new Map([
+  ["flour", "flower"], ["flower", "flour"],
+  ["queue", "cue"], ["cue", "queue"],
+]);
+
+function alignLiteralHomophoneRecognition(operations, intended, recognized, intendedText, recognizedText, equivalentPhrases) {
+  if (!operations.some((row) => row.type === "substitution"
+    && ALIGNED_HOMOPHONE_SPELLINGS.get(row.intended) === row.recognized)) return [];
+  const leftBoundaries = transcriptBoundaryPositions(intendedText, intended.length, equivalentPhrases);
+  const rightBoundaries = transcriptBoundaryPositions(recognizedText, recognized.length, equivalentPhrases);
+  if (!leftBoundaries || !rightBoundaries) return [];
+  const equivalences = [];
+  let left = 0;
+  let right = 0;
+  for (let index = 0; index < operations.length; index += 1) {
+    const operation = operations[index];
+    const previous = operations[index - 1];
+    const next = operations[index + 1];
+    if (operation.type === "substitution"
+      && ALIGNED_HOMOPHONE_SPELLINGS.get(operation.intended) === operation.recognized
+      && (!previous || previous.type === "match") && (!next || next.type === "match")
+      && (previous?.type === "match" || next?.type === "match")
+      && leftBoundaries.has(left) === rightBoundaries.has(right)
+      && leftBoundaries.has(left + 1) === rightBoundaries.has(right + 1)) {
+      // Only the ASR spelling changes at this already aligned spoken word.
+      // Source tokens, missing words, adjacent edits, and sentence boundaries
+      // remain available to the delivery gate.
+      recognized[right] = operation.intended;
+      operations[index] = { type: "match", intended: operation.intended, recognized: operation.intended };
+      equivalences.push({
+        intended_index: left, recognized_index: right,
+        intended: operation.intended, recognized: operation.recognized,
+        rule: "aligned_literal_homophone_spelling",
+      });
+    }
+    if (operation.type !== "insertion") left += 1;
+    if (operation.type !== "deletion") right += 1;
+  }
+  return equivalences;
+}
+
 function transcriptQa(intendedText, recognizedText, {
   maxWer = unitQaMaxWer,
   equivalentPhrases = [],
@@ -2246,6 +2290,9 @@ function transcriptQa(intendedText, recognizedText, {
     operations, intended, recognized, intendedText, recognizedText, equivalentPhrases,
   );
   phoneticSpellingEquivalences.push(...alignTwoRecognitionSpelling(
+    operations, intended, recognized, intendedText, recognizedText, equivalentPhrases,
+  ));
+  phoneticSpellingEquivalences.push(...alignLiteralHomophoneRecognition(
     operations, intended, recognized, intendedText, recognizedText, equivalentPhrases,
   ));
   // Preserve edge identity for dual-ASR delivery QA. A clipped syllable can

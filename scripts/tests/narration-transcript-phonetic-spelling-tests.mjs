@@ -20,6 +20,7 @@ for (const [intended, recognized] of [
   ["He saved two goals and two penalties.", "He saved too goals and too penalties."],
   ["I can see you are all right.", "I can see you are alright."],
   ["He hit the doorframe.", "He hit the door frame."],
+  ["He finished a bedframe.", "He finished a bed frame."],
   ["Coldwater opened the door.", "Cold water opened the door."],
   ["I connected to Wi-Fi and called Claire.", "I connected to wifi and called Claire."],
   ["Every body had inherited the training.", "Everybody had inherited the training."],
@@ -27,6 +28,22 @@ for (const [intended, recognized] of [
 ]) {
   assert.equal(edits(qa(intended, recognized)), 0, `${intended} / ${recognized}`);
   assert.equal(decision(intended, recognized).blockers.length, 0);
+}
+
+// These exact ASR spellings are acoustically indistinguishable at an aligned
+// word. Keep the script and recognized transcript untouched in the receipt.
+for (const [intended, recognized] of [
+  ["I saved films and music alongside the medical references, and bought two broken arcade cabinets June refused to let near her flour.",
+    "I saved films and music alongside the medical references and bought two broken arcade cabinets. June refused to let near her flower."],
+  ["I leaned beside the door. You can play. There's a queue.",
+    "I leaned beside the door. You can play. There's a cue."],
+  ["The flower was near her queue.", "The flour was near her cue."],
+]) {
+  const compared = qa(intended, recognized);
+  assert.equal(edits(compared), 0, `${intended} / ${recognized}`);
+  assert.equal(decision(intended, recognized).blockers.length, 0);
+  assert.ok(compared.phonetic_spelling_equivalences.every(
+    (row) => row.rule === "aligned_literal_homophone_spelling"));
 }
 
 const source = "The keeper saved two. The captain scored.";
@@ -61,6 +78,17 @@ for (const [intended, recognized] of [
   ["I am not going to leave.", "I am gonna leave."],
   ["I am going not to leave.", "I am gonna leave."],
   ["I am gonna go.", "I am gonna gonna go."],
+  ["June kept her flour.", "June kept her."],
+  ["June kept her flour.", "June kept her flower pot."],
+  ["There is a queue.", "There is a."],
+  ["There is a queue.", "There is a cue outside."],
+  ["He finished a bedframe.", "He finished a bed."],
+  ["He finished a bedframe.", "He finished a frame."],
+  ["He finished a bedframe.", "He finished a bed. Frame."],
+  ["Tessa stepped beside me.", "Test a step beside me."],
+  ["Afterward she came to my table.", "Afterwards she came to my table."],
+  ["He staying? Len asked.", "He's staying? Len asked."],
+  ["Blue returned to work.", "Lou returned to work."],
 ]) {
   assert.ok(edits(qa(intended, recognized)) > 0, `${intended} / ${recognized}`);
   assert.ok(decision(intended, recognized).blockers.length > 0, `${intended} / ${recognized}`);

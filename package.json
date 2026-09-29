@@ -44,7 +44,7 @@
     "docs:workflow": "node scripts/generate-workflow-guidance.mjs",
     "docs:workflow:check": "node scripts/generate-workflow-guidance.mjs --check",
     "test:openart": "node scripts/tests/openart-cli-provider-tests.mjs && node scripts/tests/openart-asset-bank-tests.mjs && node scripts/tests/openart-visual-restart-tests.mjs && node scripts/tests/openart-reference-board-tests.mjs && node --test scripts/tests/openart-production-tests.mjs scripts/tests/openart-shot-binding-tests.mjs",
-    "test:fal": "node --test scripts/tests/fal-provider-tests.mjs scripts/tests/fal-validation-selector-tests.mjs"
+    "test:fal": "node --test scripts/tests/fal-provider-tests.mjs scripts/tests/fal-validation-selector-tests.mjs scripts/tests/fal-reference-bank-reuse-tests.mjs"
   },
   "engines": {
     "node": ">=20"

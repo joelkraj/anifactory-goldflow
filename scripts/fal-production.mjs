@@ -34,6 +34,8 @@ async function prepareReferences(ctx){
   need(ctx.identity.visual_restart?.fork_at==="visual_reference_plan","Native Fal reference generation requires the early reference fork.");
   const plan=await read(path.join(ctx.episodeDir,"visual_reference_plan.json"));
   need(plan.status==="passed"&&Array.isArray(plan.reference_targets),"Approved visual reference plan is required.");
+  need(await falFileSha256(ctx.contract.reference_bank_manifest)===ctx.contract.reference_bank_manifest_sha256,
+    "Locked Fal reference bank manifest changed.");
   const bank=await read(ctx.contract.reference_bank_manifest);
   const joey=bank.assets?.find(row=>row.asset_id==="gf.global.character.joey_manhwa"&&row.approval_state==="approved");
   need(joey?.local_absolute_path&&joey?.sha256&&await falFileSha256(joey.local_absolute_path)===joey.sha256,"Shared canonical Joey identity is unavailable or changed.");
@@ -46,7 +48,11 @@ async function prepareReferences(ctx){
       ??path.join(ctx.episodeDir,"assets","images","references",`${id}.png`);
     need(path.isAbsolute(output??"")&&output.startsWith(`${ctx.episodeDir}${path.sep}assets${path.sep}images${path.sep}references${path.sep}`),`Fal reference output is outside this attempt: ${id}`);
     const prompt=String(target.prompt_anchor??"").trim();need(prompt.length>60,`Fal reference prompt is missing: ${id}`);
-    const reusableAsset=target.kind==="character_state"&&!target.base_asset_id&&!target.state_delta
+    const universalJoeyFace=target.ref_id==="joey_base_identity"
+      &&target.kind==="character_state"&&target.canonical_subject_id==="joey"
+      &&target.generation_mode==="manual_review"&&target.identity_usage==="face_only"
+      &&!target.base_asset_id&&!target.state_delta;
+    const reusableAsset=universalJoeyFace?joey:target.kind==="character_state"&&!target.base_asset_id&&!target.state_delta
       ?bank.assets.find(row=>row.asset_id===`gf.global.character.${target.canonical_subject_id}`&&row.approval_state==="approved")
       :null;
     if(reusableAsset)need(reusableAsset.local_absolute_path&&await falFileSha256(reusableAsset.local_absolute_path)===reusableAsset.sha256,

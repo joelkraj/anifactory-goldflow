@@ -245,7 +245,7 @@ const stages = [
       /^section_image_prompts\.json$/,
       /^planner_chunk_ledger\.json$/,
     ],
-    commands: ["visual plan"],
+    commands: ["visual plan", "visual repair-prompt"],
   },
   {
     id: "visual_prompt_harden",

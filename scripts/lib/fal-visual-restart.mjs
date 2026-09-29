@@ -21,7 +21,7 @@ export async function validateFalContract(contract) {
   need(JSON.stringify(contract.primary_params) === JSON.stringify(FAL_PRIMARY_PARAMS), "Fal primary parameters must be low, 1920x1080 and PNG.");
   need(contract.normal_reference_mode === "one_positional_collage" && contract.maximum_references === 16, "Fal collage/reference limits are not locked.");
   need(contract.automatic_creative_retry === false && contract.automatic_failover === false, "Automatic creative retry/failover is forbidden.");
-  need(contract.validation_concurrency === 8 && Number.isInteger(contract.production_concurrency) && contract.production_concurrency > 0 && contract.production_concurrency <= 10, "Fal concurrency exceeds the current purchase tier.");
+  need(contract.validation_concurrency === 8 && Number.isInteger(contract.production_concurrency) && contract.production_concurrency > 0 && contract.production_concurrency <= 20, "Fal production concurrency must be between 1 and 20; validation concurrency must remain 8.");
   need(contract.warning_budget_usd === FAL_EPISODE_BUDGET.warning_usd && contract.hard_budget_usd === FAL_EPISODE_BUDGET.hard_usd, "Fal budget ceilings differ from policy.");
   need(path.isAbsolute(contract.reference_bank_manifest ?? "") && path.isAbsolute(contract.discovery_receipt ?? ""), "Fal contract needs absolute bank/discovery paths.");
   need(await fileSha256(contract.reference_bank_manifest) === contract.reference_bank_manifest_sha256, "Fal reference-bank binding is stale.");

@@ -4,12 +4,49 @@ import { buildFalImageInput, FAL_ENDPOINTS, FAL_PRIMARY_PARAMS } from "../lib/fa
 import { falBlockedStageRecoveryAdmission } from "../lib/fal-production-state.mjs";
 import { falProductionStageStates } from "../lib/fal-production-state.mjs";
 import { falPortableAssetId } from "../lib/fal-portable-bank.mjs";
+import { validateFalContract } from "../lib/fal-visual-restart.mjs";
 import { referenceBoardLayout, referenceBoardPromptGuidance } from "../lib/openart-reference-board.mjs";
 import { normalizeImageProvider } from "../lib/image-provider-routing.mjs";
 import { buildStageCommand, commandStageFor } from "../lib/pipeline-stage-registry.mjs";
 import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
+import { createHash } from "node:crypto";
+
+test("Fal contract accepts the upgraded 20-request tier while preserving prior 10-request identities", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "goldflow-fal-concurrency-"));
+  try {
+    const bank = path.join(tempDir, "bank.json");
+    const discovery = path.join(tempDir, "discovery.json");
+    const bytes = "{}\n";
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    await writeFile(bank, bytes);
+    await writeFile(discovery, bytes);
+    const contract = {
+      schema: "goldflow_fal_image_contract_v1",
+      endpoints: structuredClone(FAL_ENDPOINTS),
+      primary_params: structuredClone(FAL_PRIMARY_PARAMS),
+      normal_reference_mode: "one_positional_collage",
+      maximum_references: 16,
+      automatic_creative_retry: false,
+      automatic_failover: false,
+      validation_concurrency: 8,
+      production_concurrency: 20,
+      warning_budget_usd: 30,
+      hard_budget_usd: 35,
+      reference_bank_manifest: bank,
+      reference_bank_manifest_sha256: sha256,
+      discovery_receipt: discovery,
+      discovery_receipt_sha256: sha256,
+    };
+    assert.equal(await validateFalContract(contract), contract);
+    const priorTier = await validateFalContract({ ...contract, production_concurrency: 10 });
+    assert.equal(priorTier.production_concurrency, 10);
+    await assert.rejects(validateFalContract({ ...contract, production_concurrency: 21 }), /between 1 and 20/);
+    await assert.rejects(validateFalContract({ ...contract, production_concurrency: 0 }), /between 1 and 20/);
+    await assert.rejects(validateFalContract({ ...contract, validation_concurrency: 9 }), /validation concurrency must remain 8/);
+  } finally { await rm(tempDir, { recursive: true, force: true }); }
+});
 
 test("Fal text request locks low quality 1920x1080 PNG", () => {
   const request = buildFalImageInput({ prompt: "one frame" });

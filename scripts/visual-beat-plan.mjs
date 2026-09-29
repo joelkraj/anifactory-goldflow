@@ -8,6 +8,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { getLLMModel, isLocalLLMRoute, localLLMAuthHeaders, localLLMChatCompletionURL } from "./lib/llm-router.mjs";
 import { isCodexCacheCompatible, readCodexCallMetadata, runCodexCli } from "./lib/codex-cli-runner.mjs";
 import { recordPlannerChunkCheckpoint } from "./lib/planner-chunk-ledger.mjs";
+import { reviewedChunkInputHash, splitReviewedVisualBeat, validateDensityRepairSpec } from "./lib/visual-beat-density-repair.mjs";
 import {
   buildEditorialDirectorPrompt,
   buildTranscriptAtoms,
@@ -1617,6 +1618,105 @@ async function directEditorialBeats(atoms, factLedger, timedScenes, options = {}
   return { beats, planner };
 }
 
+async function assembleReviewedEditorialBeats(atoms, factLedger, timedScenes, options = {}) {
+  const specPath = flags["reviewed-chunk-assembly"];
+  const failedPlanPath = path.join(episodeDir, "visual_beat_plan.json");
+  const activeApprovalPath = path.join(episodeDir, "visual_beat_approval.json");
+  const densityHistoryRoot = path.join(episodeDir, "reports", "stages", "visual_beat_plan", "density_repairs");
+  if (flags["cache-only"] !== "true" || flags["resume-incomplete-chunks"] != null
+    || flags["approve-regrouping"] != null || flags["retime-locked-grouping"] != null
+    || flags["reproject-active-state-only"] != null
+    || outputPath === failedPlanPath || visualBeatApprovalPath === activeApprovalPath
+    || !path.resolve(outputPath).startsWith(`${densityHistoryRoot}${path.sep}`)
+    || path.dirname(outputPath) !== path.dirname(visualBeatApprovalPath)) {
+    throw new Error("Reviewed density assembly requires cache-only true and forbids ordinary rerun/recovery modes.");
+  }
+  const spec = await readJson(specPath, null);
+  validateDensityRepairSpec(spec, flags["density-beat-id"]);
+  const failedPlan = await readJson(failedPlanPath, null);
+  const ledgerPath = path.join(episodeDir, "planner_chunk_ledger.json");
+  const ledger = await readJson(ledgerPath, null);
+  if (spec.episode_dir !== episodeDir
+    || spec.run_identity_sha256 !== await hashFile(runIdentityPath)
+    || spec.source_script_sha256 !== await hashFile(scriptPath)
+    || spec.timed_scene_plan_sha256 !== await hashFile(timedPlanPath)
+    || spec.word_timing_sha256 !== await hashFile(wordTimingPath)
+    || spec.story_fact_ledger_sha256 !== await hashFile(storyFactLedgerPath)
+    || spec.failed_visual_beat_plan_sha256 !== await hashFile(failedPlanPath)
+    || spec.planner_chunk_ledger_sha256 !== await hashFile(ledgerPath)
+    || failedPlan?.schema !== "goldflow_visual_beat_plan_v1" || failedPlan.status !== "failed"
+    || !String(failedPlan.error ?? "").startsWith("Closed visual beat timeline violates the hard density contract:")
+    || !String(failedPlan.error).includes(`${spec.visual_beat_id}:`)
+    || await readJson(activeApprovalPath, null)) {
+    throw new Error("Reviewed density assembly is not bound to the exact current failed plan, inputs, and chunk ledger.");
+  }
+  const descriptors = editorialAtomChunks(atoms, Math.max(8, Number(flags["editorial-chunk-atoms"] ?? 40)))
+    .map((chunk, index) => ({ chunk, chunkId: `editorial_${String(index + 1).padStart(3, "0")}` }));
+  const entries = Object.values(ledger?.entries ?? {}).filter((entry) => entry.planner_stage === "visual_beat_plan");
+  const used = [];
+  const result = [];
+  for (const descriptor of descriptors) {
+    const expectedIds = descriptor.chunk.map((atom) => atom.atom_id);
+    const candidate = entries.filter((entry) => entry.chunk_id === descriptor.chunkId
+      && entry.status === "passed" && JSON.stringify(entry.expected_ids) === JSON.stringify(expectedIds))
+      .sort((left, right) => Number(right.metadata?.recovery_generation ?? 0) - Number(left.metadata?.recovery_generation ?? 0)
+        || String(right.updated_at ?? "").localeCompare(String(left.updated_at ?? "")))[0];
+    if (!candidate || !candidate.output_path || !/^[a-f0-9]{64}$/u.test(String(candidate.output_sha256 ?? ""))) {
+      throw new Error(`Missing current reviewed chunk output: ${descriptor.chunkId}.`);
+    }
+    const generation = Number(candidate.metadata?.recovery_generation ?? 0);
+    const priorError = generation > 0
+      ? entries.find((entry) => entry.chunk_id === descriptor.chunkId && entry.status === "failed"
+        && JSON.stringify(entry.expected_ids) === JSON.stringify(expectedIds)
+        && Number(entry.metadata?.recovery_generation ?? 0) === generation - 1)?.findings?.[0]?.message
+      : null;
+    if (generation > 0 && !priorError) throw new Error(`Reviewed recovery history missing: ${descriptor.chunkId}.`);
+    const promptHash = reviewedChunkInputHash({
+      basePrompt: buildEditorialDirectorPrompt(descriptor.chunk, factLedger, timedScenes, options),
+      recoveryGeneration: generation,
+      priorError,
+    });
+    const expectedOutputPath = path.join(episodeDir, "_codex_calls", "visual-beat-director",
+      `${episode}_editorial_beats_${descriptor.chunkId.slice(-3)}_${generation > 0 ? `recovery_${generation}` : "attempt_1"}-output.txt`);
+    if (candidate.input_sha256 !== promptHash || candidate.output_path !== expectedOutputPath) {
+      throw new Error(`Reviewed chunk prompt or path changed: ${descriptor.chunkId}.`);
+    }
+    const outputBytes = await fs.readFile(expectedOutputPath);
+    const metadata = await readCodexCallMetadata(expectedOutputPath);
+    if (sha256(outputBytes) !== candidate.output_sha256 || metadata?.prompt_sha256 !== promptHash
+      || metadata.output_sha256 !== candidate.output_sha256
+      || metadata.stage_name !== path.basename(expectedOutputPath, "-output.txt")) {
+      throw new Error(`Reviewed chunk output hash or metadata changed: ${descriptor.chunkId}.`);
+    }
+    const normalized = normalizeEditorialGrouping(extractJson(outputBytes.toString("utf8")),
+      descriptor.chunk, factLedger, episode, options);
+    result.push(...normalized.beats);
+    used.push({ chunk_id: descriptor.chunkId, source_atom_ids: expectedIds,
+      output_path: expectedOutputPath, output_sha256: candidate.output_sha256,
+      input_sha256: promptHash, recovery_generation: generation });
+  }
+  const split = splitReviewedVisualBeat(result, atoms, spec, episode, options.timingContract ?? {});
+  return { beats: split.beats, planner: {
+    provider: "reviewed_chunk_cache_only",
+    model: used[0] ? (await readCodexCallMetadata(used[0].output_path))?.model ?? null : null,
+    chunk_count: descriptors.length,
+    concurrency: 0,
+    reused_chunk_count: descriptors.length,
+    reviewed_chunk_assembly: { schema: "goldflow_reviewed_chunk_assembly_v1",
+      repair_spec_path: specPath, repair_spec_sha256: await hashFile(specPath),
+      failed_visual_beat_plan_sha256: spec.failed_visual_beat_plan_sha256,
+      planner_chunk_ledger_sha256: spec.planner_chunk_ledger_sha256,
+      reviewed_outputs: used,
+      split: { prior_visual_beat_id: split.prior_visual_beat_id,
+        new_visual_beat_ids: split.new_visual_beat_ids, hold_seconds: split.hold_seconds,
+        before_grouping_lock_sha256: split.before_grouping_lock_sha256,
+        after_grouping_lock_sha256: split.after_grouping_lock_sha256 },
+      provider_calls: 0 },
+    output_paths: used.map((row) => row.output_path),
+    validation_findings: [],
+  } };
+}
+
 export function mergeEditorialRecoveryBeatsForTests(preservedBeats, recoveredBeats) {
   const combined = [...(preservedBeats ?? []), ...(recoveredBeats ?? [])];
   const byId = new Map();
@@ -1821,7 +1921,9 @@ async function editorialBeatPlan(timedPlan, scriptText, wordTiming, factLedger, 
           prior_visual_beat_plan_sha256: locked.approval.visual_beat_plan_sha256,
         },
         }
-      : await directOrResumeEditorialBeats(atoms, factLedger, timedPlan.scenes, options);
+      : flags["reviewed-chunk-assembly"]
+        ? await assembleReviewedEditorialBeats(atoms, factLedger, timedPlan.scenes, options)
+        : await directOrResumeEditorialBeats(atoms, factLedger, timedPlan.scenes, options);
   } catch (error) {
     if (!locked && error?.partialEditorialResult) {
       const partial = error.partialEditorialResult;
@@ -2196,6 +2298,15 @@ export const visualBeatInternalsForTests = {
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch(async (error) => {
     const failure = { schema: "goldflow_visual_beat_plan_v1", status: "failed", error: error instanceof Error ? error.message : String(error), updated_at: new Date().toISOString() };
+    if (flags["reviewed-chunk-assembly"] && flags["cache-only"] === "true") {
+      // A failed cache-only repair must leave the original failed-plan hash
+      // intact so the same exact reviewed spec can be corrected and retried.
+      const failurePath = flags["density-failure-report"] ?? `${outputPath}.failure.json`;
+      await fs.writeFile(failurePath, `${JSON.stringify(failure, null, 2)}\n`, { flag: "wx" }).catch(() => {});
+      console.error(error instanceof Error ? error.message : String(error));
+      process.exitCode = 1;
+      return;
+    }
     const approval = await readJson(visualBeatApprovalPath, null).catch(() => null);
     const currentHash = await hashFile(outputPath).catch(() => null);
     if (error?.preserveBlockedBeatPlan) {

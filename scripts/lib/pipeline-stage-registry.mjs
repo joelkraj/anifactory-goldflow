@@ -196,7 +196,7 @@ const stages = [
     output_artifact: "visual_beat_plan.json + visual_beat_approval.json",
     approval: "operator_or_agent",
     validator: "beat_coverage_state_and_lock",
-    commands: ["visual beats", "visual repair-beats"],
+    commands: ["visual beats", "visual repair-beats", "visual repair-beat-density"],
   },
   {
     id: "visual_reference_plan",

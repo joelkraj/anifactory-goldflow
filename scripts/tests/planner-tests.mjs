@@ -8,6 +8,7 @@ import "./youtube-analytics-winner-lineage-tests.mjs";
 import "./source-opening-audio-audition-tests.mjs";
 import "./editorial-source-scene-location-tests.mjs";
 import "./visual-beat-exact-repair-tests.mjs";
+import "./visual-beat-density-repair-tests.mjs";
 import "./visual-reference-chunk-packet-tests.mjs";
 import "./transition-revalidation-policy-tests.mjs";
 

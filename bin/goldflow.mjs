@@ -24,6 +24,7 @@ import { semanticRecoveryAdmission } from "../scripts/lib/semantic-planner-recov
 import { visualPromptRecoveryAdmission } from "../scripts/lib/visual-prompt-recovery.mjs";
 import { visualBeatRecoveryAdmission } from "../scripts/lib/visual-beat-recovery.mjs";
 import { visualBeatExactRepairAdmission } from "../scripts/lib/visual-beat-exact-repair.mjs";
+import { visualBeatDensityRepairAdmission } from "../scripts/lib/visual-beat-density-repair.mjs";
 import { visualReferenceRecoveryAdmission } from "../scripts/lib/visual-reference-recovery.mjs";
 import { referenceImageQaRecoveryAdmission } from "../scripts/lib/reference-image-recovery.mjs";
 import { partialSceneImageQaRecoveryAdmission } from "../scripts/lib/partial-scene-image-recovery.mjs";
@@ -167,6 +168,15 @@ function enforceWorkflowGuard(commandName, subcommandName, scriptArgs, episodeDi
     }
     return;
   }
+  if (commandName === "visual" && subcommandName === "repair-beat-density") {
+    const repair = visualBeatDensityRepairAdmission(result, parsedFlags);
+    if (!repair.allowed) {
+      console.error(`Workflow guard blocked visual beat density repair: ${repair.reason}.`);
+      if (result.next_command_shape) console.error(`Next valid command shape: ${result.next_command_shape}`);
+      process.exit(1);
+    }
+    return;
+  }
   if (commandName === "visual" && subcommandName === "plan") {
     const recovery = visualPromptRecoveryAdmission(result, parsedFlags);
     if (recovery.applicable && !recovery.allowed) {
@@ -248,7 +258,7 @@ function run(script, scriptArgs = []) {
   }
   enforceWorkflowGuard(command, subcommand, scriptArgs, episodeDir);
   const stage = commandStage(command, subcommand, parsedFlags, episodeDir);
-  const plannerRerunDecision = command === "visual" && subcommand === "repair-beats"
+  const plannerRerunDecision = command === "visual" && ["repair-beats", "repair-beat-density"].includes(subcommand)
     ? { allowed: true }
     : plannerRerunDecisionForEpisode({ stage, flags: parsedFlags, episodeDir });
   if (!plannerRerunDecision.allowed) {
@@ -677,6 +687,8 @@ if (command === "pilot" && !helpRequested) {
   run("visual-beat-plan.mjs", flags);
 } else if (command === "visual" && subcommand === "repair-beats") {
   run("visual-beat-exact-repair.mjs", flags);
+} else if (command === "visual" && subcommand === "repair-beat-density") {
+  run("visual-beat-density-repair.mjs", flags);
 } else if (command === "visual" && subcommand === "planner-ab") {
   run("visual-planner-ab.mjs", flags);
 } else if (command === "visual" && subcommand === "prompt-benchmark") {

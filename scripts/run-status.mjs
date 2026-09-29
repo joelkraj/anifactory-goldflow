@@ -118,6 +118,7 @@ import {
   narrationSynthesisIdentitySha256,
   validateNarrationProviderOutputManifest,
 } from "./lib/narration-provider-adapter.mjs";
+import { TRANSCRIPT_QA_COMPARISON_VERSION } from "./modelslab-qwen-episode-audio.mjs";
 import {
   NARRATION_EXACT_LISTEN_REVIEW_PACKET_SCHEMA,
   narrationExactListenReviewPacketSha256,
@@ -3132,6 +3133,41 @@ export async function narrationHeardPronunciationRetryReportValidForTests(ttsRep
   return true;
 }
 
+function blockedNarrationComparatorRefreshEligible({
+  ttsReport, unitDelivery, providerOutput, plan, planFileSha256,
+  currentScriptHash, qualityContractSha256, providerValidation,
+  providerAudioHashesValid,
+}) {
+  const blockedKeys = (rows) => (rows ?? [])
+    .map((row) => `${row?.unit_id ?? ""}|${row?.code ?? ""}`).sort();
+  const reportBlockers = blockedKeys(ttsReport?.blockers);
+  const deliveryBlockers = blockedKeys(unitDelivery?.blockers);
+  return ttsReport?.status === "blocked"
+    && ttsReport?.unit_qa_status === "blocked"
+    && ttsReport?.full_stream_qa_status === "not_run_due_to_unit_blockers"
+    && unitDelivery?.status === "blocked"
+    && Boolean(unitDelivery?.transcript_comparison_version)
+    && unitDelivery.transcript_comparison_version !== TRANSCRIPT_QA_COMPARISON_VERSION
+    && reportBlockers.length > 0
+    && JSON.stringify(reportBlockers) === JSON.stringify(deliveryBlockers)
+    && reportBlockers.every((key) => key.includes("|narration_confirmed_"))
+    && ttsReport.source_script_hash === currentScriptHash
+    && unitDelivery.source_script_hash === currentScriptHash
+    && plan?.source_script_hash === currentScriptHash
+    && ttsReport.narration_generation_plan_sha256 === plan?.plan_sha256
+    && unitDelivery.narration_generation_plan_sha256 === plan?.plan_sha256
+    && providerOutput?.narration_generation_plan_sha256 === plan?.plan_sha256
+    && ttsReport.narration_generation_plan_file_sha256 === planFileSha256
+    && unitDelivery.narration_generation_plan_file_sha256 === planFileSha256
+    && providerOutput?.narration_generation_plan_file_sha256 === planFileSha256
+    && ttsReport.narration_quality_contract_sha256 === qualityContractSha256
+    && unitDelivery.quality_contract_sha256 === qualityContractSha256
+    && providerOutput?.narration_quality_contract_sha256 === qualityContractSha256
+    && providerOutput?.status === "passed"
+    && providerValidation?.status === "passed"
+    && providerAudioHashesValid === true;
+}
+
 async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash, identity) {
   if (!currentScriptHash) return { done: false, evidence: "script_clean.md missing" };
   const narrationQualityContract = narrationQualityContractForIdentity(identity);
@@ -3184,6 +3220,52 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
     return { done: false, evidence: `narration_tts_report_${episode}.json missing` };
   }
   if (!statusPassed(ttsReport.status)) {
+    // A changed transcript comparator can clear a blocked ASR spelling while
+    // retaining every immutable provider WAV. Route only a hash-verified,
+    // comparison-sensitive blocked report to the guarded finalizer.
+    if (narrationQualityContract && policy.primary.provider === "qwen_local"
+      && ttsReport.status === "blocked") {
+      const planPath = path.join(episodeDir, "narration_generation_plan.json");
+      const unitDeliveryPath = path.join(episodeDir, `narration_unit_delivery_qa_${episode}.json`);
+      const providerOutputPath = path.join(episodeDir, `narration_provider_output_manifest_${episode}.json`);
+      const unitDelivery = await readJson(unitDeliveryPath, null);
+      if (unitDelivery?.transcript_comparison_version
+        && unitDelivery.transcript_comparison_version !== TRANSCRIPT_QA_COMPARISON_VERSION) {
+        const [plan, providerOutput, planFileSha256] = await Promise.all([
+          readJson(planPath, null), readJson(providerOutputPath, null), fileSha256(planPath),
+        ]);
+        const providerValidation = validateNarrationProviderOutputManifest(
+          providerOutput, narrationPlanUnitsForStatus(plan), {
+            generationPlanSha256: plan?.plan_sha256 ?? planFileSha256,
+            generationPlanFileSha256: planFileSha256,
+            qualityContractSha256: narrationQualityContract.contract_sha256,
+            provider: policy.primary.provider,
+            voiceId: policy.primary.voice_id,
+            voiceSha256: policy.primary.voice_sha256,
+          },
+        );
+        let providerAudioHashesValid = providerValidation.status === "passed";
+        if (providerAudioHashesValid) {
+          for (const row of providerOutput.units) {
+            if (!row.audio_path || !row.audio_sha256
+              || !(await exists(row.audio_path))
+              || await fileSha256(row.audio_path) !== row.audio_sha256) {
+              providerAudioHashesValid = false;
+              break;
+            }
+          }
+        }
+        if (blockedNarrationComparatorRefreshEligible({
+          ttsReport, unitDelivery, providerOutput, plan, planFileSha256,
+          currentScriptHash, qualityContractSha256: narrationQualityContract.contract_sha256,
+          providerValidation, providerAudioHashesValid,
+        })) {
+          return { done: false, state: "blocked",
+            evidence: `Stored blocked narration delivery QA uses transcript comparator ${unitDelivery.transcript_comparison_version}; current comparator ${TRANSCRIPT_QA_COMPARISON_VERSION}. All provider audio hashes and plan bindings remain valid; re-adjudicate without synthesis`,
+            next_command_shape: `node bin/goldflow.mjs tts finalize-provider --episode-dir ${episodeDir}` };
+        }
+      }
+    }
     const latestTriagePath = path.join(episodeDir,
       `manual_blocker_triage_qwen_tts_stitch_${episode}_v3.json`);
     const revisedTriagePath = path.join(episodeDir,
@@ -5074,6 +5156,7 @@ if (path.resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {
 }
 
 export {
+  blockedNarrationComparatorRefreshEligible as blockedNarrationComparatorRefreshEligibleForTests,
   referenceGenerationComplete as referenceGenerationCompleteForTests,
   inferredState as inferredStateForTests,
   visualReferencePlanComplete as visualReferencePlanCompleteForTests,

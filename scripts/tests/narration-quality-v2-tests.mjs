@@ -56,6 +56,7 @@ import {
   validateNarrationTtsPolicyForTests,
 } from "../narration-tts-episode.mjs";
 import {
+  blockedNarrationComparatorRefreshEligibleForTests,
   narrationPlanUnitsForStatusForTests,
   narrationNativeSpeedLockFindingForTests,
 } from "../run-status.mjs";
@@ -1678,5 +1679,60 @@ try {
 } finally {
   await fs.rm(masteringDir, { recursive: true, force: true });
 }
+
+// A comparator update may re-adjudicate retained audio only when the blocked
+// report and every provider WAV still bind to the same approved plan.
+const staleComparisonRefresh = {
+  ttsReport: {
+    status: "blocked", unit_qa_status: "blocked",
+    full_stream_qa_status: "not_run_due_to_unit_blockers",
+    source_script_hash: "script-hash",
+    narration_generation_plan_sha256: "plan-hash",
+    narration_generation_plan_file_sha256: "plan-file-hash",
+    narration_quality_contract_sha256: "quality-hash",
+    blockers: [{ unit_id: "unit-1", code: "narration_confirmed_final_token_mismatch" }],
+  },
+  unitDelivery: {
+    status: "blocked", transcript_comparison_version: "older-comparison",
+    source_script_hash: "script-hash",
+    narration_generation_plan_sha256: "plan-hash",
+    narration_generation_plan_file_sha256: "plan-file-hash",
+    quality_contract_sha256: "quality-hash",
+    blockers: [{ unit_id: "unit-1", code: "narration_confirmed_final_token_mismatch" }],
+  },
+  providerOutput: {
+    status: "passed", narration_generation_plan_sha256: "plan-hash",
+    narration_generation_plan_file_sha256: "plan-file-hash",
+    narration_quality_contract_sha256: "quality-hash",
+  },
+  plan: { source_script_hash: "script-hash", plan_sha256: "plan-hash" },
+  planFileSha256: "plan-file-hash", currentScriptHash: "script-hash",
+  qualityContractSha256: "quality-hash",
+  providerValidation: { status: "passed" }, providerAudioHashesValid: true,
+};
+const refreshEligible = (change) => blockedNarrationComparatorRefreshEligibleForTests({
+  ...staleComparisonRefresh, ...change,
+});
+assert.equal(refreshEligible({}), true);
+for (const change of [
+  { unitDelivery: { ...staleComparisonRefresh.unitDelivery,
+    transcript_comparison_version: transcriptQaForTests("same", "same").comparison_version } },
+  { ttsReport: { ...staleComparisonRefresh.ttsReport, status: "passed" } },
+  { ttsReport: { ...staleComparisonRefresh.ttsReport,
+    blockers: [{ unit_id: "unit-2", code: "narration_confirmed_final_token_mismatch" }] } },
+  { ttsReport: { ...staleComparisonRefresh.ttsReport,
+    blockers: [{ unit_id: "unit-1", code: "narration_unsettled_raw_audio_edge" }] },
+    unitDelivery: { ...staleComparisonRefresh.unitDelivery,
+      blockers: [{ unit_id: "unit-1", code: "narration_unsettled_raw_audio_edge" }] } },
+  { providerOutput: { ...staleComparisonRefresh.providerOutput, status: "blocked" } },
+  { providerOutput: { ...staleComparisonRefresh.providerOutput,
+    narration_generation_plan_sha256: "other-plan" } },
+  { unitDelivery: { ...staleComparisonRefresh.unitDelivery,
+    narration_generation_plan_file_sha256: "other-file" } },
+  { currentScriptHash: "other-script" },
+  { qualityContractSha256: "other-quality" },
+  { providerValidation: { status: "blocked" } },
+  { providerAudioHashesValid: false },
+]) assert.equal(refreshEligible(change), false);
 
 console.log("narration quality v2 tests passed");

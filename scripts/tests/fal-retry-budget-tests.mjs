@@ -55,6 +55,20 @@ test("Fal paid repairs are capped at floor(10% of planned scene frames)", async 
   } finally { await rm(episodeDir, { recursive: true, force: true }); }
 });
 
+test("Fal second repair counts as a separate paid retry and projected submission", async () => {
+  const episodeDir = await fixture(20);
+  try {
+    const root = path.join(episodeDir, "fal", "bulk");
+    await receipt(path.join(root, "repair-submission-receipts", "one.json"), "one");
+    const second = { image_id: "one", previous_assignment_sha256: "b".repeat(64),
+      submission_receipt_path: path.join(root, "repair-v2-submission-receipts", "one.json") };
+    assert.equal((await assertFalRetryBudget({ episodeDir, assignments: [second] })).requested_paid_retries, 1);
+    await receipt(second.submission_receipt_path, "one");
+    assert.equal((await falRetryBudgetState(episodeDir)).paid_retry_submissions, 2);
+    assert.equal((await falSpendProjectionState({ episodeDir, warningBudgetUsd: 30, hardBudgetUsd: 35 })).paid_submissions, 2);
+  } finally { await rm(episodeDir, { recursive: true, force: true }); }
+});
+
 test("Fal revised validation counts only shots already submitted in the original validation", async () => {
   const episodeDir = await fixture(10);
   try {

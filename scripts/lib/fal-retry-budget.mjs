@@ -12,6 +12,7 @@ const REPAIR_RECEIPT_DIRS = Object.freeze([
   "reference/repair-submission-receipts",
   "reference/review-repair-submission-receipts",
   "bulk/repair-submission-receipts",
+  "bulk/repair-v2-submission-receipts",
   "bulk/review-repair-submission-receipts",
   "bulk/transport-recovery-submission-receipts",
   "bulk/ambiguous-retry-submission-receipts",

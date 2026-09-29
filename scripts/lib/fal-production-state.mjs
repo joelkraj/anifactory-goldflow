@@ -6,8 +6,37 @@ import { falAmbiguousSubmissionAttempts, falRetryBudgetState, falSpendProjection
 async function exists(file) { return fs.access(file).then(() => true, () => false); }
 async function read(file) { return JSON.parse(await fs.readFile(file, "utf8")); }
 
+async function reviewedSecondRepair(root, imageId) {
+  const directivePath = path.join(root, "bulk", "repair-v2-directives", `${imageId}.json`);
+  if (!await exists(directivePath)) return null;
+  try {
+    const [directive, assignment, failure] = await Promise.all([
+      read(directivePath), read(path.join(root, "bulk", "repair-assignments", `${imageId}.json`)),
+      read(path.join(root, "bulk", "repair-failure-receipts", `${imageId}.json`)),
+    ]);
+    return directive.schema === "goldflow_fal_failed_repair_directive_v1" && directive.image_id === imageId
+      && assignment.image_id === imageId && failure.image_id === imageId
+      && directive.failed_repair_assignment_sha256 === assignment.assignment_sha256
+      && directive.failed_repair_assignment_sha256 === failure.assignment_sha256
+      && directive.failed_repair_request_id === failure.request_id
+      && typeof directive.replacement_prompt === "string" && directive.replacement_prompt.length > 40
+      && typeof directive.repair_reason === "string" && directive.repair_reason.trim()
+      && typeof directive.reviewer === "string" && directive.reviewer.trim()
+      && typeof directive.note === "string" && directive.note.trim() ? directivePath : null;
+  } catch { return null; }
+}
+
 export function falBlockedStageRecoveryAdmission(status, flags = {}) {
   const action = String(flags.action ?? "");
+  if (status?.current_stage === "image_generation" && status?.current_stage_state === "blocked"
+    && action === "repair-failed-repair") {
+    const id = String(flags["image-id"] ?? "");
+    const directives = String(flags.directives ?? "");
+    return { applicable: true, allowed: /^[a-z0-9][a-z0-9_-]{1,100}$/.test(id)
+      && String(status.next_command_shape ?? "").endsWith(`--action repair-failed-repair --image-id ${id} --directives ${directives} --confirm-spend exact_fal_repair_v2`)
+      && flags["confirm-spend"] === "exact_fal_repair_v2" && path.isAbsolute(directives),
+      reason: "Current status does not authorize this reviewed exact Fal second repair." };
+  }
   if (status?.current_stage === "image_generation" && status?.current_stage_state === "blocked"
     && action === "adjudicate-no-job")
     return { applicable: true, allowed: /--action adjudicate-no-job\b/.test(status.next_command_shape??""),
@@ -23,7 +52,7 @@ export function falBlockedStageRecoveryAdmission(status, flags = {}) {
     ? ["repair-reference-failures", "observe-reference-repairs"]
     : reviewRecovery ? ["repair-reviewed-references", "observe-reviewed-references", "finalize-reviewed-references"]
     : bulkReviewRecovery ? ["repair-reviewed-bulk", "observe-reviewed-bulk", "finalize-reviewed-bulk"]
-    : ["observe-bulk", "observe-holds", "recover-holds", "observe-transport-recovery", "repair-failures", "observe-repairs"]);
+    : ["observe-bulk", "observe-holds", "recover-holds", "observe-transport-recovery", "repair-failures", "observe-repairs", "inspect-repair-failure", "observe-repair-v2"]);
   if ((!referenceRecovery && !reviewRecovery && !bulkReviewRecovery && status?.current_stage !== "image_generation") || status?.current_stage_state !== "blocked") {
     return { applicable: false, allowed: false, reason: "Fal blocked-stage recovery is not current." };
   }
@@ -31,6 +60,12 @@ export function falBlockedStageRecoveryAdmission(status, flags = {}) {
     return { applicable: false, allowed: false, reason: "This is not a Fal blocked-stage recovery action." };
   }
   const expected = new RegExp(`\\bimagegen fal\\b[\\s\\S]*--action ${action}\\b`);
+  if (action === "inspect-repair-failure" || action === "observe-repair-v2") {
+    const imageId = String(flags["image-id"] ?? "");
+    return { applicable: true, allowed: /^[a-z0-9][a-z0-9_-]{1,100}$/.test(imageId)
+      && next.includes(`--action ${action} --image-id ${imageId}`),
+      reason: "Run status does not authorize inspection of this exact Fal repair failure." };
+  }
   return expected.test(next)
     ? { applicable: true, allowed: true }
     : { applicable: true, allowed: false, reason: "Run status does not authorize this exact Fal recovery action." };
@@ -88,6 +123,7 @@ export async function falProductionStageStates({ episodeDir, identity } = {}) {
       const originalResults = await Promise.all(referencePlan.assignments.map(row => exists(row.result_receipt_path)));
       const repairResults = await Promise.all(referencePlan.assignments.map(row => exists(path.join(root, "reference", "repair-result-receipts", `${row.image_id}.json`))));
       const repairSubmitted = await Promise.all(referencePlan.assignments.map(row => exists(path.join(root, "reference", "repair-submission-receipts", `${row.image_id}.json`))));
+      const repairFailures = await Promise.all(referencePlan.assignments.map(row => exists(path.join(root, "reference", "repair-failure-receipts", `${row.image_id}.json`))));
       const effectivePath = await Promise.all(referencePlan.assignments.map(async row => {
         const reviewed = path.join(root, "reference", "review-repair-result-receipts", `${row.image_id}.json`);
         if (await exists(reviewed)) return (await read(reviewed)).output_path;
@@ -121,6 +157,8 @@ export async function falProductionStageStates({ episodeDir, identity } = {}) {
               : `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action billing-submit-reference --image-id ${referencePlan.assignments[pendingProbe].image_id} --confirm-spend exact_fal_reference_probe` }
           : pendingOriginal
             ? { state: "missing", evidence: `Fal canonical references=${completed.filter(Boolean).length}/${completed.length}`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action observe-references` }
+          : repairFailures.some((value,index)=>value&&!completed[index])
+            ? { state: "blocked", evidence: `Fal reference repair failed for exact ID ${referencePlan.assignments[repairFailures.findIndex((value,index)=>value&&!completed[index])].image_id}; inspect immutable repair failure receipt before any new recovery decision` }
           : pendingRepair
             ? { state: "blocked", evidence: "Exact Fal reference repair is pending", next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action observe-reference-repairs` }
           : unresolved.some(Boolean)
@@ -188,9 +226,14 @@ export async function falProductionStageStates({ episodeDir, identity } = {}) {
     if (spend) projectedWithPendingBulkUsd = falProjectedSpendUsd(spend.paid_submissions + regularUnsubmittedCount + adjudicatedRetryPendingCount);
     const results = await Promise.all(bulk.assignments.map(row => exists(row.result_receipt_path)));
     const repairResults = await Promise.all(bulk.assignments.map(row => exists(path.join(root,"bulk","repair-result-receipts",`${row.image_id}.json`))));
+    const repairFailures = await Promise.all(bulk.assignments.map(row => exists(path.join(root,"bulk","repair-failure-receipts",`${row.image_id}.json`))));
+    const repairV2Results = await Promise.all(bulk.assignments.map(row => exists(path.join(root,"bulk","repair-v2-result-receipts",`${row.image_id}.json`))));
+    const repairV2Failures = await Promise.all(bulk.assignments.map(row => exists(path.join(root,"bulk","repair-v2-failure-receipts",`${row.image_id}.json`))));
+    const repairV2Submitted = await Promise.all(bulk.assignments.map(row => exists(path.join(root,"bulk","repair-v2-submission-receipts",`${row.image_id}.json`))));
+    const repairV2Assigned = await Promise.all(bulk.assignments.map(row => exists(path.join(root,"bulk","repair-v2-assignments",`${row.image_id}.json`))));
     const transportRecoveryResults = await Promise.all(bulk.assignments.map(row => exists(path.join(root,"bulk","transport-recovery-result-receipts",`${row.image_id}.json`))));
     const adjudicatedResults = await Promise.all(bulk.assignments.map(row => exists(path.join(root,"bulk","ambiguous-retry-result-receipts",`${row.image_id}.json`))));
-    const effectiveResults = results.map((value,index) => value || repairResults[index] || transportRecoveryResults[index] || adjudicatedResults[index]);
+    const effectiveResults = results.map((value,index) => value || repairResults[index] || repairV2Results[index] || transportRecoveryResults[index] || adjudicatedResults[index]);
     const failures = await Promise.all(bulk.assignments.map(row => exists(path.join(root,"bulk","failure-receipts",`${row.image_id}.json`))));
     const holds = await Promise.all(bulk.assignments.map(row => exists(path.join(root,"bulk","transport-holds",`${row.image_id}.json`))));
     const unsubmittedCount = regularUnsubmittedCount;
@@ -219,7 +262,23 @@ export async function falProductionStageStates({ episodeDir, identity } = {}) {
     }
     else if (failedUnresolved.some(Boolean)) {
       const repairSubmitted = await Promise.all(bulk.assignments.map(row => exists(path.join(root,"bulk","repair-submission-receipts",`${row.image_id}.json`))));
-      bulkState = repairSubmitted.some((value,index)=>value&&failedUnresolved[index]&&!repairResults[index])
+      const failedRepairIndex = repairFailures.findIndex((value,index)=>value&&failedUnresolved[index]);
+      const failedV2Index = repairV2Failures.findIndex((value,index)=>value&&failedUnresolved[index]);
+      const pendingV2Index = repairV2Submitted.findIndex((value,index)=>value&&failedUnresolved[index]&&!repairV2Results[index]&&!repairV2Failures[index]);
+      const unsubmittedV2Index = repairV2Assigned.findIndex((value,index)=>value&&failedUnresolved[index]&&!repairV2Submitted[index]);
+      const failedRepairId = failedRepairIndex >= 0 ? bulk.assignments[failedRepairIndex].image_id : null;
+      const reviewedV2Directive = failedRepairId ? await reviewedSecondRepair(root, failedRepairId) : null;
+      bulkState = failedV2Index >= 0
+        ? { state: "blocked", evidence: `Second Fal repair failed for exact ID ${bulk.assignments[failedV2Index].image_id}; inspect its immutable receipt and hold further paid retries` }
+        : pendingV2Index >= 0
+        ? { state: "blocked", evidence: `Second Fal repair is pending for exact ID ${bulk.assignments[pendingV2Index].image_id}`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action observe-repair-v2 --image-id ${bulk.assignments[pendingV2Index].image_id}` }
+        : unsubmittedV2Index >= 0
+        ? { state: "blocked", evidence: `Second Fal repair assignment exists without a submission receipt for exact ID ${bulk.assignments[unsubmittedV2Index].image_id}; reconcile the submission attempt before any paid action` }
+        : reviewedV2Directive && !retryCapEvidence
+        ? { state: "blocked", evidence: `Reviewed second Fal repair is ready for exact ID ${failedRepairId}; inspect the original and repair failure receipts before paid dispatch`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action repair-failed-repair --image-id ${failedRepairId} --directives ${reviewedV2Directive} --confirm-spend exact_fal_repair_v2` }
+        : failedRepairIndex >= 0
+        ? { state: "blocked", evidence: `Fal repair failed for exact ID ${failedRepairId}; inspect original and repair receipts before any new recovery decision${retryCapEvidence ? `; ${retryCapEvidence}` : ""}`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action inspect-repair-failure --image-id ${failedRepairId}` }
+        : repairSubmitted.some((value,index)=>value&&failedUnresolved[index]&&!repairResults[index])
         ? { state: "blocked", evidence: `${failedUnresolved.filter(Boolean).length} exact Fal repair is pending`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action observe-repairs` }
         : retryCapEvidence
           ? { state: "blocked", evidence: retryCapEvidence }

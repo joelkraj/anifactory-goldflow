@@ -36,8 +36,8 @@ export function exactVisualPromptRepairAdmission(status, flags) {
 }
 
 export function applyExactPromptText(row, replacement) {
-  if (!only(replacement, ["provider_prompt", "image_prompt", "staging_patch", "manifest_text_patch",
-    "reference_text_patch", "anatomy_contract_patch", "assert_absent_terms"]) || !nonempty(replacement.provider_prompt)
+  if (!only(replacement, ["provider_prompt", "image_prompt", "staging_patch", "staging_patches", "manifest_text_patch",
+    "reference_text_patch", "anatomy_contract_patch", "anatomy_contract_patches", "assert_absent_terms"]) || !nonempty(replacement.provider_prompt)
     || replacement.provider_prompt !== replacement.image_prompt || replacement.provider_prompt.length > 12000) {
     throw new Error("Replacement must contain the same nonempty provider_prompt and image_prompt, at most 12000 characters.");
   }
@@ -59,11 +59,18 @@ function exactTextPatch(value, patch, label) {
 
 function patchRowStructures(row, replacement) {
   const next = structuredClone(row);
-  if (replacement.staging_patch !== undefined) {
-    const patch = replacement.staging_patch;
+  if (replacement.staging_patch !== undefined && replacement.staging_patches !== undefined) {
+    throw new Error("Use staging_patch or staging_patches, never both.");
+  }
+  const stagingPatches = replacement.staging_patches ?? (replacement.staging_patch === undefined ? [] : [replacement.staging_patch]);
+  if (!Array.isArray(stagingPatches) || stagingPatches.length > 8) throw new Error("staging_patches must contain at most eight exact character patches.");
+  const stagedNames = new Set();
+  for (const patch of stagingPatches) {
     if (!only(patch, ["name", "wardrobe_from", "pose", "screen_position"]) || !nonempty(patch.name)) {
       throw new Error("Staging patch needs one exact visible character name.");
     }
+    if (stagedNames.has(patch.name)) throw new Error(`Duplicate staging patch for ${patch.name}.`);
+    stagedNames.add(patch.name);
     const matches = (next.shot_manifest?.character_staging ?? []).filter((item) => item.name === patch.name);
     if (matches.length !== 1 || !["wardrobe_from", "pose", "screen_position"].some((field) => patch[field])) {
       throw new Error("Staging patch must identify exactly one character and a changed field.");
@@ -107,14 +114,22 @@ function patchRowStructures(row, replacement) {
       }
     }
   }
-  if (replacement.anatomy_contract_patch !== undefined) {
-    const patch = replacement.anatomy_contract_patch;
+  if (replacement.anatomy_contract_patch !== undefined && replacement.anatomy_contract_patches !== undefined) {
+    throw new Error("Use anatomy_contract_patch or anatomy_contract_patches, never both.");
+  }
+  const anatomyPatches = replacement.anatomy_contract_patches ?? (replacement.anatomy_contract_patch === undefined ? [] : [replacement.anatomy_contract_patch]);
+  if (!Array.isArray(anatomyPatches) || anatomyPatches.length > 8) throw new Error("anatomy_contract_patches must contain at most eight exact contract patches.");
+  const anatomyKeys = new Set();
+  for (const patch of anatomyPatches) {
     if (!only(patch, ["entity", "identity_ref_id", "body_invariant", "reason"])
       || !nonempty(patch.entity) || !nonempty(patch.identity_ref_id)
       || !["body_invariant", "reason"].some((field) => patch[field])
       || !next.reference_requirements?.some((item) => item.ref_id === patch.identity_ref_id)) {
       throw new Error("Anatomy contract patch must identify one visible entity with an attached identity reference.");
     }
+    const key = `${patch.entity}\u0000${patch.identity_ref_id}`;
+    if (anatomyKeys.has(key)) throw new Error(`Duplicate anatomy contract patch for ${patch.entity}.`);
+    anatomyKeys.add(key);
     const contracts = next.shot_manifest?.anatomy_contracts?.filter((item) => item.entity === patch.entity && item.identity_ref_id === patch.identity_ref_id) ?? [];
     if (contracts.length !== 1) throw new Error("Anatomy contract entity and identity reference must match exactly once.");
     for (const field of ["body_invariant", "reason"]) {

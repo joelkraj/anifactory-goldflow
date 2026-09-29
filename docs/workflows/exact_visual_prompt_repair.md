@@ -40,11 +40,15 @@ Run `goldflow run status` first. Write a JSON spec outside the canonical plan:
 If the defect also affects structured metadata, `replacement` may include a
 `staging_patch` targeting one exact character name with reviewed
 `{ "before": "...", "to": "..." }` pairs for `wardrobe_from`, `pose`, or
-`screen_position`. `manifest_text_patch` may correct `foreground_action` and
+`screen_position`. Use `staging_patches` for multiple distinct characters in
+one cut; do not supply singular and plural forms together.
+`manifest_text_patch` may correct `foreground_action` and
 `continuity_notes`. `reference_text_patch` binds one already-attached `ref_id`
 and may correct its `slot_purpose` or `reason` in the requirement and matching
 manifest slot. `anatomy_contract_patch` binds one exact `entity` and
-`identity_ref_id` and may correct `body_invariant` or `reason`. Add
+`identity_ref_id` and may correct `body_invariant` or `reason`. Use
+`anatomy_contract_patches` for multiple distinct entity/reference pairs in
+one cut. Add
 `assert_absent_terms` to fail if rejected wording remains anywhere in the
 corrected row. All prose patches require exact before/after text; no ID, role,
 reference set, timing or other row may change.

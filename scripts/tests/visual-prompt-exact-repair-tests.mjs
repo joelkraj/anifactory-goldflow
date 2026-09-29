@@ -188,3 +188,66 @@ test("four independent exact cuts can be repaired sequentially before harden wit
     }
   } finally { await fs.rm(f.root, { recursive: true, force: true }); }
 });
+
+test("one cut can correct two anatomy contracts and two staging poses with exact reviewed prose", async () => {
+  const f = await fixture();
+  try {
+    const planPath = path.join(f.episodeDir, "section_image_prompts.json");
+    const refPath = path.join(f.episodeDir, "visual_reference_plan.json");
+    const refs = JSON.parse(await fs.readFile(refPath, "utf8"));
+    refs.reference_targets.push({ ref_id: "guard_state", scene_ids: ["scene_001"] });
+    refs.character_state_refs.push({ state_ref_id: "guard_state", character: "Guard", scene_ids: ["scene_001"] });
+    await fs.writeFile(refPath, json(refs)); f.spec.expected.visual_reference_plan_sha256 = hash(json(refs));
+    const plan = JSON.parse(await fs.readFile(planPath, "utf8"));
+    const row = plan.prompts[0];
+    row.reference_requirements.push({ ref_id: "guard_state", kind: "character_state" });
+    row.shot_manifest.reference_slots.push({ ref_id: "guard_state" });
+    row.shot_manifest.character_state_ref_ids.push("guard_state");
+    row.shot_manifest.visible_characters.push("Guard");
+    row.shot_manifest.character_staging.push({ name: "Guard", ref_id: "guard_state", wardrobe_from: "character_state_ref:guard_state",
+      pose: "Guard left hand grips Joey right wrist.", screen_position: "right" });
+    row.shot_manifest.character_staging[0].pose = "Joey right wrist held by guard left hand.";
+    row.shot_manifest.foreground_action = "Guard left hand holds Joey right wrist.";
+    row.shot_manifest.anatomy_contracts = [
+      { entity: "Tessa", identity_ref_id: "tessa_current", body_invariant: "Joey right wrist held.", reason: "Old incorrect side." },
+      { entity: "Guard", identity_ref_id: "guard_state", body_invariant: "Guard left hand grips.", reason: "Old incorrect side." },
+    ];
+    await fs.writeFile(planPath, json(plan)); f.spec.expected.prompt_plan_sha256 = hash(json(plan)); f.spec.old_row_sha256 = hash(json(row));
+    f.spec.replacement.provider_prompt = f.spec.replacement.image_prompt = "Joey's left hand catches the guard's right wrist; both bodies remain separate.";
+    f.spec.replacement.manifest_text_patch = { foreground_action: { before: "Guard left hand holds Joey right wrist.",
+      to: "Joey left hand catches the guard right wrist." } };
+    f.spec.replacement.staging_patches = [
+      { name: "Tessa", pose: { before: "Joey right wrist held by guard left hand.", to: "Joey reaches with his left hand to catch the guard's right wrist." } },
+      { name: "Guard", pose: { before: "Guard left hand grips Joey right wrist.", to: "Guard's right wrist is caught by Joey's left hand." } },
+    ];
+    f.spec.replacement.anatomy_contract_patches = [
+      { entity: "Tessa", identity_ref_id: "tessa_current", body_invariant: { before: "Joey right wrist held.", to: "Joey left hand catches guard right wrist." },
+        reason: { before: "Old incorrect side.", to: "Left-hand grab is visible." } },
+      { entity: "Guard", identity_ref_id: "guard_state", body_invariant: { before: "Guard left hand grips.", to: "Guard right wrist is caught." },
+        reason: { before: "Old incorrect side.", to: "Right-wrist contact is visible." } },
+    ];
+    await fs.writeFile(f.specPath, json(f.spec));
+    await repairVisualPromptExact(f);
+    const after = JSON.parse(await fs.readFile(planPath, "utf8")).prompts[0];
+    assert.deepEqual(after.reference_requirements.map((item) => item.ref_id), ["tessa_current", "guard_state"]);
+    assert.match(after.shot_manifest.character_staging[0].pose, /left hand/);
+    assert.match(after.shot_manifest.character_staging[1].pose, /right wrist/);
+    assert.match(after.shot_manifest.anatomy_contracts[0].body_invariant, /left hand/);
+    assert.match(after.shot_manifest.anatomy_contracts[1].body_invariant, /right wrist/);
+  } finally { await fs.rm(f.root, { recursive: true, force: true }); }
+});
+
+test("plural patches reject repeated character or anatomy targets", async () => {
+  const f = await fixture();
+  try {
+    const patch = { name: "Tessa", pose: { before: "At work", to: "Reaches left." } };
+    f.spec.replacement.staging_patches = [patch, patch];
+    await fs.writeFile(f.specPath, json(f.spec));
+    await assert.rejects(repairVisualPromptExact(f), /Duplicate staging patch/);
+    delete f.spec.replacement.staging_patches;
+    f.spec.replacement.anatomy_contract_patches = [{ entity: "Tessa", identity_ref_id: "tessa_current",
+      body_invariant: { before: "A", to: "B" } }];
+    await fs.writeFile(f.specPath, json(f.spec));
+    await assert.rejects(repairVisualPromptExact(f), /match exactly once/);
+  } finally { await fs.rm(f.root, { recursive: true, force: true }); }
+});

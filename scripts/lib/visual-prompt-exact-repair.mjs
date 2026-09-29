@@ -36,7 +36,8 @@ export function exactVisualPromptRepairAdmission(status, flags) {
 }
 
 export function applyExactPromptText(row, replacement) {
-  if (!only(replacement, ["provider_prompt", "image_prompt"]) || !nonempty(replacement.provider_prompt)
+  if (!only(replacement, ["provider_prompt", "image_prompt", "staging_patch", "manifest_text_patch",
+    "reference_text_patch", "anatomy_contract_patch", "assert_absent_terms"]) || !nonempty(replacement.provider_prompt)
     || replacement.provider_prompt !== replacement.image_prompt || replacement.provider_prompt.length > 12000) {
     throw new Error("Replacement must contain the same nonempty provider_prompt and image_prompt, at most 12000 characters.");
   }
@@ -47,6 +48,80 @@ export function applyExactPromptText(row, replacement) {
   }
   return { ...row, provider_prompt: replacement.provider_prompt, image_prompt: replacement.image_prompt,
     prompt_hash: sha256(replacement.provider_prompt) };
+}
+
+function exactTextPatch(value, patch, label) {
+  if (!only(patch, ["before", "to"]) || !nonempty(patch.to) || value !== patch.before || patch.before === patch.to) {
+    throw new Error(`${label} does not match its reviewed before/to values.`);
+  }
+  return patch.to;
+}
+
+function patchRowStructures(row, replacement) {
+  const next = structuredClone(row);
+  if (replacement.staging_patch !== undefined) {
+    const patch = replacement.staging_patch;
+    if (!only(patch, ["name", "wardrobe_from", "pose", "screen_position"]) || !nonempty(patch.name)) {
+      throw new Error("Staging patch needs one exact visible character name.");
+    }
+    const matches = (next.shot_manifest?.character_staging ?? []).filter((item) => item.name === patch.name);
+    if (matches.length !== 1 || !["wardrobe_from", "pose", "screen_position"].some((field) => patch[field])) {
+      throw new Error("Staging patch must identify exactly one character and a changed field.");
+    }
+    const target = matches[0];
+    for (const field of ["wardrobe_from", "pose", "screen_position"]) {
+      if (!patch[field]) continue;
+      const corrected = exactTextPatch(target[field], patch[field], `character_staging.${field}`);
+      if (field === "wardrobe_from" && corrected.startsWith("character_state_ref:")
+        && corrected !== target[field]) {
+        throw new Error("This exact repair cannot change the wardrobe state reference ID.");
+      }
+      target[field] = corrected;
+    }
+  }
+  if (replacement.manifest_text_patch !== undefined) {
+    const patch = replacement.manifest_text_patch;
+    if (!only(patch, ["foreground_action", "continuity_notes"]) || !Object.keys(patch).length) {
+      throw new Error("Manifest text patch supports only reviewed foreground_action and continuity_notes.");
+    }
+    for (const field of Object.keys(patch)) next.shot_manifest[field] = exactTextPatch(next.shot_manifest?.[field], patch[field], `shot_manifest.${field}`);
+  }
+  if (replacement.reference_text_patch !== undefined) {
+    const patch = replacement.reference_text_patch;
+    if (!only(patch, ["ref_id", "slot_purpose", "reason"]) || !nonempty(patch.ref_id)
+      || !["slot_purpose", "reason"].some((field) => patch[field])
+      || !next.reference_requirements?.some((item) => item.ref_id === patch.ref_id)
+      || !next.shot_manifest?.reference_slots?.some((item) => item.ref_id === patch.ref_id)) {
+      throw new Error("Reference text patch requires one attached reference with a matching manifest slot.");
+    }
+    for (const field of ["slot_purpose", "reason"]) {
+      if (!patch[field]) continue;
+      const requirement = next.reference_requirements.find((item) => item.ref_id === patch.ref_id);
+      const slot = next.shot_manifest.reference_slots.find((item) => item.ref_id === patch.ref_id);
+      requirement[field] = exactTextPatch(requirement[field], patch[field], `reference_requirements.${field}`);
+      slot[field] = exactTextPatch(slot[field], patch[field], `reference_slots.${field}`);
+      if (field === "reason") {
+        for (const item of [...(next.reference_usage ?? []), ...(next.anchor_roles ?? [])]) {
+          if (item.ref_id === patch.ref_id && item.reason === patch[field].before) item.reason = patch[field].to;
+        }
+      }
+    }
+  }
+  if (replacement.anatomy_contract_patch !== undefined) {
+    const patch = replacement.anatomy_contract_patch;
+    if (!only(patch, ["entity", "identity_ref_id", "body_invariant", "reason"])
+      || !nonempty(patch.entity) || !nonempty(patch.identity_ref_id)
+      || !["body_invariant", "reason"].some((field) => patch[field])
+      || !next.reference_requirements?.some((item) => item.ref_id === patch.identity_ref_id)) {
+      throw new Error("Anatomy contract patch must identify one visible entity with an attached identity reference.");
+    }
+    const contracts = next.shot_manifest?.anatomy_contracts?.filter((item) => item.entity === patch.entity && item.identity_ref_id === patch.identity_ref_id) ?? [];
+    if (contracts.length !== 1) throw new Error("Anatomy contract entity and identity reference must match exactly once.");
+    for (const field of ["body_invariant", "reason"]) {
+      if (patch[field]) contracts[0][field] = exactTextPatch(contracts[0][field], patch[field], `anatomy_contracts.${field}`);
+    }
+  }
+  return next;
 }
 
 export async function repairVisualPromptExact({ episodeDir, spec, specPath, status, now = new Date() }) {
@@ -106,7 +181,15 @@ export async function repairVisualPromptExact({ episodeDir, spec, specPath, stat
     original.shot_manifest?.location_ref_id,
   ].filter(Boolean);
   if (declared.some((id) => !allowed.has(id))) throw new Error("Prompt row contains an out-of-scope reference; repair refs with the guarded review route first.");
-  const corrected = applyExactPromptText(original, spec.replacement);
+  const corrected = applyExactPromptText(patchRowStructures(original, spec.replacement), spec.replacement);
+  if (spec.replacement.assert_absent_terms !== undefined) {
+    const terms = spec.replacement.assert_absent_terms;
+    if (!Array.isArray(terms) || !terms.length || terms.length > 8 || terms.some((term) => !nonempty(term) || term.length > 100)) {
+      throw new Error("assert_absent_terms must contain one to eight short exact phrases.");
+    }
+    const body = JSON.stringify(corrected).toLowerCase();
+    for (const term of terms) if (body.includes(term.toLowerCase())) throw new Error(`Corrected row still contains rejected term: ${term}.`);
+  }
   const changedPlan = structuredClone(plan);
   changedPlan.prompts[plan.prompts.indexOf(original)] = corrected;
   const at = now.toISOString();

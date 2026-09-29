@@ -2,10 +2,11 @@
 
 Use this optional route only when `visual_prompt_plan` passed and the next
 stage is the still-missing `visual_prompt_harden`. It fixes one reviewed cut's
-prompt wording without another planner or provider call. It cannot change the
-cut's image or beat ID, timing, narration, references, state, manifest,
-overlays, provider route, or other cuts. Review the source beat and all attached
-reference scopes before writing the replacement. The subsequent normal
+prompt and contradictory prose metadata without another planner or provider
+call. The route cannot change the cut's image or beat ID, timing, narration,
+visible cast, location, reference IDs or roles, overlays, provider route, or
+other cuts. Review the source beat and all attached reference scopes before
+writing the replacement. The subsequent normal
 `visual harden` command remains the structural and continuity gate.
 
 Run `goldflow run status` first. Write a JSON spec outside the canonical plan:
@@ -35,6 +36,18 @@ Run `goldflow run status` first. Write a JSON spec outside the canonical plan:
   "scope_reviewed": true
 }
 ```
+
+If the defect also affects structured metadata, `replacement` may include a
+`staging_patch` targeting one exact character name with reviewed
+`{ "before": "...", "to": "..." }` pairs for `wardrobe_from`, `pose`, or
+`screen_position`. `manifest_text_patch` may correct `foreground_action` and
+`continuity_notes`. `reference_text_patch` binds one already-attached `ref_id`
+and may correct its `slot_purpose` or `reason` in the requirement and matching
+manifest slot. `anatomy_contract_patch` binds one exact `entity` and
+`identity_ref_id` and may correct `body_invariant` or `reason`. Add
+`assert_absent_terms` to fail if rejected wording remains anywhere in the
+corrected row. All prose patches require exact before/after text; no ID, role,
+reference set, timing or other row may change.
 
 Then execute `node bin/goldflow.mjs visual repair-prompt --episode-dir
 <episode-dir> --repair-spec <reviewed-json>`. The command checks the current

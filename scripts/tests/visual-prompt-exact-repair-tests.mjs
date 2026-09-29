@@ -23,13 +23,24 @@ async function fixture() {
   const beat = { visual_beat_id: "beat_w000000_w000003", scene_id: "scene_001", parent_scene_id: "scene_001" };
   expected.visual_beat_plan_sha256 = await put("visual_beat_plan.json", { status: "passed", beats: [beat] });
   expected.visual_reference_plan_sha256 = await put("visual_reference_plan.json", { status: "passed",
-    reference_targets: [{ ref_id: "tessa_first_life", scene_ids: ["scene_001"] }], character_state_refs: [] });
+    reference_targets: [{ ref_id: "tessa_current", scene_ids: ["scene_001"] }, { ref_id: "tessa_first_life", scene_ids: ["scene_001"] }],
+    character_state_refs: [
+      { state_ref_id: "tessa_current", character: "Tessa", scene_ids: ["scene_001"] },
+      { state_ref_id: "tessa_first_life", character: "Tessa", scene_ids: ["scene_001"] },
+    ] });
   expected.reference_plan_approval_sha256 = await put("reference_plan_approval.json", { status: "approved" });
   expected.reference_image_approval_sha256 = await put("visual_reference_approval_ep_01.json", { status: "approved" });
   const original = { image_id: "ep_01-w000000-w000003", visual_beat_id: beat.visual_beat_id, scene_id: beat.scene_id,
     provider_prompt: "Original prompt", image_prompt: "Original prompt", prompt_hash: hash("Original prompt"),
     modelslab_image_prompt: "", codex_image_prompt: null,
-    reference_requirements: [{ ref_id: "tessa_first_life" }], shot_manifest: { character_state_ref_ids: ["tessa_first_life"] } };
+    reference_requirements: [{ ref_id: "tessa_current", kind: "character_state", slot_purpose: "Tessa current state" }],
+    reference_usage: [{ ref_id: "tessa_current", usage: "attach_existing_ref" }],
+    anchor_roles: [{ ref_id: "tessa_current", anchor_role: "source_anchor" }],
+    character_state_refs_used: ["tessa_current"],
+    required_reference_paths: [], shot_manifest: { visible_characters: ["Tessa"], forbidden_ref_ids: [], character_state_ref_ids: ["tessa_current"],
+      protagonist_state_ref_id: "tessa_current", reference_slots: [{ ref_id: "tessa_current", slot_purpose: "Tessa current state" }],
+      character_staging: [{ name: "Tessa", ref_id: "tessa_current", wardrobe_from: "character_state_ref:tessa_current", pose: "At work", screen_position: "left" }],
+      foreground_action: "Tessa works.", continuity_notes: "Current Tessa has no wrist burn." } };
   expected.prompt_plan_sha256 = await put("section_image_prompts.json", { schema: "goldflow_section_image_prompts_v1", status: "passed",
     source_script_hash: expected.source_script_sha256, source_hashes: {}, prompts: [original] });
   const spec = { schema: "goldflow_visual_prompt_exact_repair_v1", episode: "ep_01", expected,
@@ -57,6 +68,44 @@ test("repairs one reviewed row, preserves its refs and every immutable input, an
     assert.equal(receipt.provider_calls, 0);
     assert.equal(hash(await fs.readFile(receipt.before_snapshot_path)), f.expected.prompt_plan_sha256);
     assert.equal(receipt.after_plan_sha256, hash(await fs.readFile(path.join(f.episodeDir, "section_image_prompts.json"))));
+  } finally { await fs.rm(f.root, { recursive: true, force: true }); }
+});
+
+test("face-donor repair clears contradictory wrist prose across prompt, slot, anatomy, staging and continuity without changing IDs", async () => {
+  const f = await fixture();
+  try {
+    const planPath = path.join(f.episodeDir, "section_image_prompts.json");
+    const plan = JSON.parse(await fs.readFile(planPath, "utf8"));
+    const row = plan.prompts[0];
+    row.provider_prompt = row.image_prompt = "Tessa's wrist is unscarred.";
+    row.prompt_hash = hash(row.provider_prompt);
+    row.reference_requirements[0].slot_purpose = row.shot_manifest.reference_slots[0].slot_purpose = "Tessa unscarred wrist face and clothing";
+    row.reference_requirements[0].reason = row.shot_manifest.reference_slots[0].reason = "Keep Tessa unscarred.";
+    row.shot_manifest.anatomy_contracts = [{ entity: "Tessa", identity_ref_id: "tessa_current", body_invariant: "Right wrist unscarred.",
+      reason: "Show the unscarred wrist.", expected_visible_hands: 2 }];
+    row.shot_manifest.character_staging[0].wardrobe_from = "Tessa unscarred current clothing";
+    const oldBytes = json(plan); await fs.writeFile(planPath, oldBytes);
+    f.spec.expected.prompt_plan_sha256 = hash(oldBytes);
+    f.spec.old_row_sha256 = hash(json(row));
+    f.spec.replacement.provider_prompt = f.spec.replacement.image_prompt = "First-life Tessa wears factory work layers; the old right-wrist burn is visible.";
+    f.spec.replacement.reference_text_patch = {
+      ref_id: "tessa_current", slot_purpose: { before: "Tessa unscarred wrist face and clothing", to: "Tessa face identity only; first-life factory clothes and wrist burn come from scene direction" },
+      reason: { before: "Keep Tessa unscarred.", to: "Preserve Tessa's face while depicting her first-life state." },
+    };
+    f.spec.replacement.anatomy_contract_patch = { entity: "Tessa", identity_ref_id: "tessa_current",
+      body_invariant: { before: "Right wrist unscarred.", to: "Old burn mark visible at the right wrist." },
+      reason: { before: "Show the unscarred wrist.", to: "The first-life memory requires the old burn." } };
+    f.spec.replacement.staging_patch = { name: "Tessa", wardrobe_from: { before: "Tessa unscarred current clothing",
+      to: "First-life factory work layers with the old right-wrist burn" } };
+    f.spec.replacement.manifest_text_patch = { continuity_notes: { before: "Current Tessa has no wrist burn.",
+      to: "This is first-life Tessa, with her old right-wrist burn." } };
+    f.spec.replacement.assert_absent_terms = ["unscarred"];
+    await fs.writeFile(f.specPath, json(f.spec));
+    await repairVisualPromptExact(f);
+    const result = JSON.parse(await fs.readFile(planPath, "utf8"));
+    assert.equal(JSON.stringify(result.prompts[0]).toLowerCase().includes("unscarred"), false);
+    assert.deepEqual(result.prompts[0].reference_requirements.map((item) => item.ref_id), ["tessa_current"]);
+    assert.equal(result.prompts[0].shot_manifest.anatomy_contracts[0].expected_visible_hands, 2);
   } finally { await fs.rm(f.root, { recursive: true, force: true }); }
 });
 
@@ -91,5 +140,51 @@ test("requires one canonical prompt mirror and explicit reviewed scope", async (
     assert.equal(exactVisualPromptRepairAdmission(f.status, { "episode-dir": f.episodeDir, "repair-spec": f.specPath, "workflow-bypass": "true" }).allowed, false);
     f.spec.scope_reviewed = false; await fs.writeFile(f.specPath, json(f.spec));
     await assert.rejects(repairVisualPromptExact(f), /incomplete/);
+  } finally { await fs.rm(f.root, { recursive: true, force: true }); }
+});
+
+test("refuses ID-changing repairs and staging that silently selects another wardrobe reference", async () => {
+  const f = await fixture();
+  try {
+    f.spec.replacement.reference_swap = { from_ref_id: "tessa_current", to_ref_id: "tessa_first_life" };
+    await fs.writeFile(f.specPath, json(f.spec));
+    await assert.rejects(repairVisualPromptExact(f), /Replacement must contain/);
+    delete f.spec.replacement.reference_swap;
+    f.spec.replacement.staging_patch = { name: "Tessa", wardrobe_from: { before: "character_state_ref:tessa_current",
+      to: "character_state_ref:tessa_first_life" } };
+    await fs.writeFile(f.specPath, json(f.spec));
+    await assert.rejects(repairVisualPromptExact(f), /cannot change the wardrobe state reference ID/);
+  } finally { await fs.rm(f.root, { recursive: true, force: true }); }
+});
+
+test("four independent exact cuts can be repaired sequentially before harden without altering earlier corrections", async () => {
+  const f = await fixture();
+  try {
+    const beatPath = path.join(f.episodeDir, "visual_beat_plan.json");
+    const planPath = path.join(f.episodeDir, "section_image_prompts.json");
+    const beats = JSON.parse(await fs.readFile(beatPath, "utf8"));
+    const plan = JSON.parse(await fs.readFile(planPath, "utf8"));
+    for (let i = 1; i < 4; i++) {
+      const id = `beat_w00000${i}_w00000${i + 1}`;
+      beats.beats.push({ ...beats.beats[0], visual_beat_id: id });
+      plan.prompts.push({ ...structuredClone(plan.prompts[0]), image_id: `ep_01-w00000${i}-w00000${i + 1}`, visual_beat_id: id });
+    }
+    f.spec.expected.visual_beat_plan_sha256 = hash(json(beats)); await fs.writeFile(beatPath, json(beats));
+    await fs.writeFile(planPath, json(plan));
+    for (let i = 0; i < 4; i++) {
+      const current = JSON.parse(await fs.readFile(planPath, "utf8"));
+      const row = current.prompts[i];
+      f.spec.expected.prompt_plan_sha256 = hash(await fs.readFile(planPath));
+      f.spec.image_id = row.image_id;
+      f.spec.visual_beat_id = row.visual_beat_id;
+      f.spec.old_row_sha256 = hash(json(row));
+      const corrected = `Cut ${i} reviewed wardrobe wording.`;
+      f.spec.replacement.provider_prompt = f.spec.replacement.image_prompt = corrected;
+      await fs.writeFile(f.specPath, json(f.spec));
+      await repairVisualPromptExact(f);
+      const after = JSON.parse(await fs.readFile(planPath, "utf8"));
+      for (let prior = 0; prior <= i; prior++) assert.equal(after.prompts[prior].provider_prompt, `Cut ${prior} reviewed wardrobe wording.`);
+      for (let future = i + 1; future < 4; future++) assert.equal(after.prompts[future].provider_prompt, "Original prompt");
+    }
   } finally { await fs.rm(f.root, { recursive: true, force: true }); }
 });

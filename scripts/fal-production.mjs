@@ -5,7 +5,7 @@ import path from "node:path";
 import { buildReferenceBoard, referenceBoardPromptGuidance } from "./lib/openart-reference-board.mjs";
 import { falFileSha256, falObjectSha256, uploadFalReference, submitFalImage, observeFalImage, FAL_ENDPOINTS } from "./lib/fal-provider.mjs";
 import { falPortableAssetId, promoteApprovedFalReferences } from "./lib/fal-portable-bank.mjs";
-import { assertFalRetryBudget, assertFalSpendProjectionBudget, falSpendProjectionState } from "./lib/fal-retry-budget.mjs";
+import { assertFalRetryBudget, assertFalSpendProjectionBudget, falSpendProjectionState, falProjectedSpendUsd } from "./lib/fal-retry-budget.mjs";
 
 const digest = value => createHash("sha256").update(value).digest("hex");
 const bytes = value => `${JSON.stringify(value, null, 2)}\n`;
@@ -203,12 +203,14 @@ async function prepareBulk(ctx,f){
   const projectedBase=Number((assignments.filter(row=>!row.reused_validation_shot).length*0.00441).toFixed(4));
   const spend=await falSpendProjectionState({episodeDir:ctx.episodeDir,
     warningBudgetUsd:ctx.contract.warning_budget_usd,hardBudgetUsd:ctx.contract.hard_budget_usd});
-  need(spend.projected_base_spend_usd+projectedBase<ctx.contract.hard_budget_usd,
-    "Projected Fal episode base spend reaches the locked hard budget; estimate only, verify actual account spend.");
-  if(spend.projected_base_spend_usd+projectedBase>=ctx.contract.warning_budget_usd)
-    console.error("Fal projected episode base spend reaches the locked warning threshold; estimate only, verify actual account spend.");
-  const plan={schema:"goldflow_fal_bulk_plan_v1",created_at:new Date().toISOString(),run_identity_sha256:ctx.identityHash,model:FAL_ENDPOINTS.primary_edit,quality:"low",width:1920,height:1080,format:"png",reference_mode:"one_positional_collage",concurrency:ctx.contract.production_concurrency,assignment_count:assignments.length,projected_base_cost_usd:projectedBase,pricing_note:"Official endpoint base price at preparation; input-image token charges may increase actual cost.",assignments};
-  await write(path.join(ctx.root,"bulk-plan.json"),plan);return {status:"prepared",count:assignments.length,projected_base_cost_usd:projectedBase};
+  const projectedPending=assignments.filter(row=>!row.reused_validation_shot).length;
+  const projectedEpisode=falProjectedSpendUsd(spend.paid_submissions+projectedPending);
+  need(projectedEpisode<ctx.contract.hard_budget_usd,
+    "Projected Fal episode spend reaches the locked hard budget; estimate only, verify actual account spend.");
+  if(projectedEpisode>=ctx.contract.warning_budget_usd)
+    console.error(`Fal projected episode spend $${projectedEpisode} reaches the locked warning threshold; estimate only, verify actual account spend.`);
+  const plan={schema:"goldflow_fal_bulk_plan_v1",created_at:new Date().toISOString(),run_identity_sha256:ctx.identityHash,model:FAL_ENDPOINTS.primary_edit,quality:"low",width:1920,height:1080,format:"png",reference_mode:"one_positional_collage",concurrency:ctx.contract.production_concurrency,assignment_count:assignments.length,projected_base_cost_usd:projectedBase,projected_observed_rate_episode_cost_usd:projectedEpisode,pricing_note:"$0.00441 is base-output only. The episode spend projection uses $0.022 per paid request from observed Fal billing; actual charges require dashboard verification.",assignments};
+  await write(path.join(ctx.root,"bulk-plan.json"),plan);return {status:"prepared",count:assignments.length,projected_base_cost_usd:projectedBase,projected_observed_rate_episode_cost_usd:projectedEpisode};
 }
 async function submitRows(ctx,rows,limit){
   const pending=[];
@@ -224,7 +226,7 @@ async function submitRows(ctx,rows,limit){
   await assertFalRetryBudget({episodeDir:ctx.episodeDir,assignments:pending});
   const spend=await assertFalSpendProjectionBudget({episodeDir:ctx.episodeDir,assignments:pending,
     warningBudgetUsd:ctx.contract.warning_budget_usd,hardBudgetUsd:ctx.contract.hard_budget_usd});
-  if(spend.warning_after_batch)console.error(`Fal projected base spend warning: $${spend.projected_base_spend_after_batch_usd} against locked $${spend.warning_budget_usd}; estimate only, verify actual Fal balance.`);
+  if(spend.warning_after_batch)console.error(`Fal projected spend warning: $${spend.projected_spend_after_batch_usd} against locked $${spend.warning_budget_usd}; estimate only, verify actual Fal balance.`);
   return mapLimit(pending,limit,async row=>{
     if(!row.board_path)return submitFalImage({assignment:row,referenceUrls:[],receiptPath:row.submission_receipt_path});
     const upload=await uploadFalReference({localPath:row.board_path,expectedSha256:row.board_sha256,receiptPath:row.upload_receipt_path});

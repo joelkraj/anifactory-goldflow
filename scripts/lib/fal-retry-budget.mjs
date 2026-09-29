@@ -3,9 +3,10 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 
 const RETRY_FRACTION = 0.10;
-// The existing Fal bulk plan uses this published base-output estimate. It is a
-// lower bound: edit input-image tokens and provider billing are not in receipts.
-const BASE_IMAGE_PRICE_USD = 0.00441;
+// Conservative planning allowance based on the 2026-09-29 Fal dashboard:
+// 3,088 billed Sunburst edit requests cost $55.76 ($0.01806 each), while
+// text-to-image averaged about $0.005. This is not a provider-enforced quote.
+export const FAL_PROJECTED_PAID_REQUEST_USD = 0.022;
 const REPAIR_RECEIPT_DIRS = Object.freeze([
   "reference/repair-submission-receipts",
   "reference/review-repair-submission-receipts",
@@ -38,6 +39,19 @@ async function readReceipt(file) {
   }
   return receipt;
 }
+async function rejectedValidationIds(root) {
+  const revised = path.join(root, "validation-review-v2.json");
+  const reviewFile = await exists(revised) ? revised : path.join(root, "validation-review.json");
+  if (!await exists(reviewFile)) return new Set();
+  const review = JSON.parse(await fs.readFile(reviewFile, "utf8"));
+  if (review.status !== "passed") return new Set();
+  if (!Array.isArray(review.rejected_ids)) throw new Error(`Invalid Fal validation review: ${reviewFile}`);
+  return new Set(review.rejected_ids.map(String));
+}
+export function falProjectedSpendUsd(requestCount) {
+  if (!Number.isSafeInteger(requestCount) || requestCount < 0) throw new Error("Fal projection needs a nonnegative request count.");
+  return Number((requestCount * FAL_PROJECTED_PAID_REQUEST_USD).toFixed(4));
+}
 
 export async function falRetryBudgetState(episodeDir) {
   const beatPath = path.join(episodeDir, "visual_beat_plan.json");
@@ -57,6 +71,10 @@ export async function falRetryBudgetState(episodeDir) {
   for (const file of await receiptsIn(path.join(root, "validation-v2", "submission-receipts"))) {
     if (await exists(path.join(initialValidation, path.basename(file)))) receiptPaths.push(file);
   }
+  for (const imageId of await rejectedValidationIds(root)) {
+    const repeatedBulk = path.join(root, "bulk", "submission-receipts", `${imageId}.json`);
+    if (await exists(repeatedBulk)) receiptPaths.push(repeatedBulk);
+  }
   const receipts = await Promise.all(receiptPaths.map(readReceipt));
   const limit = Math.floor(plannedFrames * RETRY_FRACTION);
   return { planned_frames: plannedFrames, retry_limit: limit,
@@ -66,6 +84,7 @@ export async function falRetryBudgetState(episodeDir) {
 export async function assertFalRetryBudget({ episodeDir, assignments }) {
   const state = await falRetryBudgetState(episodeDir);
   const root = path.join(episodeDir, "fal");
+  const validationRejected = await rejectedValidationIds(root);
   const pending = [];
   for (const row of assignments) {
     const relative = path.relative(root, row.submission_receipt_path);
@@ -73,7 +92,9 @@ export async function assertFalRetryBudget({ episodeDir, assignments }) {
       || row.rejected_image_sha256;
     const isRepeatedValidation = relative.startsWith(`validation-v2${path.sep}submission-receipts${path.sep}`)
       && await exists(path.join(root, "submission-receipts", path.basename(row.submission_receipt_path)));
-    if (isRepair || isRepeatedValidation) pending.push(row);
+    const isRejectedValidationBulk = relative.startsWith(`bulk${path.sep}submission-receipts${path.sep}`)
+      && validationRejected.has(row.image_id);
+    if (isRepair || isRepeatedValidation || isRejectedValidationBulk) pending.push(row);
   }
   if (new Set(pending.map(row => row.submission_receipt_path)).size !== pending.length) {
     throw new Error("Fal retry batch contains duplicate submission receipt paths.");
@@ -94,24 +115,24 @@ export async function falSpendProjectionState({ episodeDir, warningBudgetUsd, ha
     .map(dir => receiptsIn(path.join(root, dir))))).flat();
   await Promise.all(receiptPaths.map(readReceipt));
   const paidSubmissions = receiptPaths.length;
-  const projectedBaseSpendUsd = Number((paidSubmissions * BASE_IMAGE_PRICE_USD).toFixed(4));
+  const projectedSpendUsd = falProjectedSpendUsd(paidSubmissions);
   return {
-    paid_submissions: paidSubmissions, projected_base_spend_usd: projectedBaseSpendUsd,
+    paid_submissions: paidSubmissions, projected_spend_usd: projectedSpendUsd,
     warning_budget_usd: warningBudgetUsd, hard_budget_usd: hardBudgetUsd,
-    warning_reached: projectedBaseSpendUsd >= warningBudgetUsd,
-    hard_reached: projectedBaseSpendUsd >= hardBudgetUsd,
+    warning_reached: projectedSpendUsd >= warningBudgetUsd,
+    hard_reached: projectedSpendUsd >= hardBudgetUsd,
     estimate_only: true, actual_charge_usd: null,
-    pricing_note: "Fal base-output estimate only; input-image tokens and actual provider billing are unavailable in submission/result receipts.",
+    pricing_note: "Conservative $0.022 per paid request from observed Fal dashboard billing; actual charges remain unavailable in submission/result receipts.",
   };
 }
 
 export async function assertFalSpendProjectionBudget({ episodeDir, assignments, warningBudgetUsd, hardBudgetUsd }) {
   const state = await falSpendProjectionState({ episodeDir, warningBudgetUsd, hardBudgetUsd });
-  const projectedAfterBatch = Number(((state.paid_submissions + assignments.length) * BASE_IMAGE_PRICE_USD).toFixed(4));
+  const projectedAfterBatch = falProjectedSpendUsd(state.paid_submissions + assignments.length);
   if (state.hard_reached || projectedAfterBatch >= hardBudgetUsd) {
-    throw new Error(`Fal projected base spend reaches the locked $${hardBudgetUsd} hard budget ($${state.projected_base_spend_usd} already projected + ${assignments.length} new requests). This is an estimate only; verify actual Fal balance before further spend.`);
+    throw new Error(`Fal projected spend reaches the locked $${hardBudgetUsd} hard budget ($${state.projected_spend_usd} already projected + ${assignments.length} new requests). This is an estimate only; verify actual Fal balance before further spend.`);
   }
   return { ...state, requested_submissions: assignments.length,
-    projected_base_spend_after_batch_usd: projectedAfterBatch,
+    projected_spend_after_batch_usd: projectedAfterBatch,
     warning_after_batch: projectedAfterBatch >= warningBudgetUsd };
 }

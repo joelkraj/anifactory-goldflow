@@ -1,6 +1,6 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { falRetryBudgetState, falSpendProjectionState } from "./fal-retry-budget.mjs";
+import { falRetryBudgetState, falSpendProjectionState, falProjectedSpendUsd } from "./fal-retry-budget.mjs";
 
 async function exists(file) { return fs.access(file).then(() => true, () => false); }
 async function read(file) { return JSON.parse(await fs.readFile(file, "utf8")); }
@@ -38,16 +38,20 @@ export async function falProductionStageStates({ episodeDir, identity } = {}) {
   const contract = identity?.image_provider_options?.fal;
   const spend = contract ? await falSpendProjectionState({ episodeDir,
     warningBudgetUsd: contract.warning_budget_usd, hardBudgetUsd: contract.hard_budget_usd }) : null;
+  let projectedWithPendingBulkUsd = null;
   const withSpendState = stageStates => {
-    if (!retryBudget && !spend?.warning_reached && !spend?.hard_reached) return { stageStates };
+    if (!retryBudget && !spend) return { stageStates };
     const annotated = Object.fromEntries(Object.entries(stageStates).map(([stage, state]) => {
       if (!state) return [stage, state];
       const retryNote = retryBudget
         ? `paid retries ${retryBudget.paid_retry_submissions}/${retryBudget.retry_limit}` : "";
-      const spendNote = spend?.warning_reached
-        ? `projected base spend $${spend.projected_base_spend_usd}/$${spend.hard_budget_usd} (estimate only; actual billing unavailable)` : "";
-      const next = { ...state, evidence: [state.evidence, retryNote, spendNote].filter(Boolean).join("; ") };
-      if (spend?.hard_reached && /\bimagegen fal\b.*--confirm-spend\b/.test(next.next_command_shape ?? "")) {
+      const spendNote = spend
+        ? `projected submitted spend $${spend.projected_spend_usd}/$${spend.hard_budget_usd} (estimate only; actual billing unavailable)` : "";
+      const forecastNote = projectedWithPendingBulkUsd !== null
+        ? `projected episode spend including unsubmitted bulk $${projectedWithPendingBulkUsd}/$${contract.hard_budget_usd} (estimate only)` : "";
+      const next = { ...state, evidence: [state.evidence, retryNote, spendNote, forecastNote].filter(Boolean).join("; ") };
+      if ((spend?.hard_reached || projectedWithPendingBulkUsd >= contract?.hard_budget_usd)
+        && /\bimagegen fal\b.*--confirm-spend\b/.test(next.next_command_shape ?? "")) {
         next.state = "blocked";
         next.evidence += "; locked hard budget reached; hold further paid submission";
         delete next.next_command_shape;
@@ -158,6 +162,7 @@ export async function falProductionStageStates({ episodeDir, identity } = {}) {
   if (validationPassed && !bulk) bulkState = { state: "missing", evidence: "Fal bulk plan is missing", next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action prepare-bulk --image-ids all` };
   else if (bulk) {
     const submitted = await Promise.all(bulk.assignments.map(row => exists(row.submission_receipt_path)));
+    if (spend) projectedWithPendingBulkUsd = falProjectedSpendUsd(spend.paid_submissions + submitted.filter(value => !value).length);
     const results = await Promise.all(bulk.assignments.map(row => exists(row.result_receipt_path)));
     const repairResults = await Promise.all(bulk.assignments.map(row => exists(path.join(root,"bulk","repair-result-receipts",`${row.image_id}.json`))));
     const transportRecoveryResults = await Promise.all(bulk.assignments.map(row => exists(path.join(root,"bulk","transport-recovery-result-receipts",`${row.image_id}.json`))));

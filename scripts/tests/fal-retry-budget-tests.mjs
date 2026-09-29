@@ -61,6 +61,22 @@ test("Fal revised validation counts only shots already submitted in the original
   } finally { await rm(episodeDir, { recursive: true, force: true }); }
 });
 
+test("a rejected validation shot regenerated during bulk is a paid retry", async () => {
+  const episodeDir = await fixture(10);
+  try {
+    const root = path.join(episodeDir, "fal");
+    await receipt(path.join(root, "submission-receipts", "bad.json"), "bad");
+    await writeFile(path.join(root, "validation-review.json"), JSON.stringify({ status: "passed", rejected_ids: ["bad"] }));
+    const repeated = { image_id: "bad",
+      submission_receipt_path: path.join(root, "bulk", "submission-receipts", "bad.json") };
+    assert.equal((await assertFalRetryBudget({ episodeDir, assignments: [repeated] })).requested_paid_retries, 1);
+    await receipt(repeated.submission_receipt_path, "bad");
+    assert.equal((await falRetryBudgetState(episodeDir)).paid_retry_submissions, 1);
+    await assert.rejects(assertFalRetryBudget({ episodeDir, assignments: [{ image_id: "another",
+      previous_assignment_sha256: "x", submission_receipt_path: path.join(root,"bulk","repair-submission-receipts","another.json") }] }), /retry cap reached/);
+  } finally { await rm(episodeDir, { recursive: true, force: true }); }
+});
+
 test("Fal retry accounting fails closed on a malformed paid submission receipt", async () => {
   const episodeDir = await fixture();
   try {
@@ -83,7 +99,7 @@ test("Fal status holds exact paid repair once the 10% cap is consumed", async ()
     await writeFile(path.join(root, "bulk-plan.json"), JSON.stringify({ assignments: [{ image_id: "failed",
       submission_receipt_path: submission,
       result_receipt_path: path.join(root, "bulk", "result-receipts", "failed.json") }] }));
-    await writeFile(path.join(root, "validation-review.json"), JSON.stringify({ status: "passed", approved_ids: [] }));
+    await writeFile(path.join(root, "validation-review.json"), JSON.stringify({ status: "passed", approved_ids: [], rejected_ids: [] }));
     const state = await falProductionStageStates({ episodeDir, identity: {} });
     assert.equal(state.stageStates.image_generation.state, "blocked");
     assert.match(state.stageStates.image_generation.evidence, /retry cap reached/);
@@ -91,19 +107,37 @@ test("Fal status holds exact paid repair once the 10% cap is consumed", async ()
   } finally { await rm(episodeDir, { recursive: true, force: true }); }
 });
 
-test("Fal projected base spend warns and stops at locked thresholds without claiming actual charges", async () => {
+test("Fal observed-rate projection warns and stops at locked thresholds without claiming actual charges", async () => {
   const episodeDir = await fixture();
   try {
     const root = path.join(episodeDir, "fal");
     await receipt(path.join(root, "bulk", "submission-receipts", "one.json"), "one");
-    const initial = await falSpendProjectionState({ episodeDir, warningBudgetUsd: 0.005, hardBudgetUsd: 0.01 });
-    assert.equal(initial.projected_base_spend_usd, 0.0044);
+    const initial = await falSpendProjectionState({ episodeDir, warningBudgetUsd: 0.03, hardBudgetUsd: 0.05 });
+    assert.equal(initial.projected_spend_usd, 0.022);
     assert.equal(initial.actual_charge_usd, null);
     const next = await assertFalSpendProjectionBudget({ episodeDir,
-      assignments: [{ image_id: "two" }], warningBudgetUsd: 0.005, hardBudgetUsd: 0.01 });
+      assignments: [{ image_id: "two" }], warningBudgetUsd: 0.03, hardBudgetUsd: 0.05 });
     assert.equal(next.warning_after_batch, true);
     await assert.rejects(assertFalSpendProjectionBudget({ episodeDir,
       assignments: [{ image_id: "two" }, { image_id: "three" }],
-      warningBudgetUsd: 0.005, hardBudgetUsd: 0.01 }), /estimate only/);
+      warningBudgetUsd: 0.03, hardBudgetUsd: 0.05 }), /estimate only/);
+  } finally { await rm(episodeDir, { recursive: true, force: true }); }
+});
+
+test("Fal status blocks pending bulk whose observed-rate projection reaches the hard budget", async () => {
+  const episodeDir = await fixture(1600);
+  try {
+    const root = path.join(episodeDir, "fal");
+    await mkdir(root, { recursive: true });
+    const assignments = Array.from({ length: 1591 }, (_, i) => ({ image_id: String(i),
+      submission_receipt_path: path.join(root, "bulk", "submission-receipts", `${i}.json`),
+      result_receipt_path: path.join(root, "bulk", "result-receipts", `${i}.json`) }));
+    await writeFile(path.join(root, "bulk-plan.json"), JSON.stringify({ assignments, concurrency: 20 }));
+    await writeFile(path.join(root, "validation-review.json"), JSON.stringify({ status: "passed", approved_ids: [], rejected_ids: [] }));
+    const state = await falProductionStageStates({ episodeDir,
+      identity: { image_provider_options: { fal: { warning_budget_usd: 30, hard_budget_usd: 35 } } } });
+    assert.equal(state.stageStates.image_generation.state, "blocked");
+    assert.match(state.stageStates.image_generation.evidence, /projected episode spend.*35\.002/);
+    assert.equal(state.stageStates.image_generation.next_command_shape, undefined);
   } finally { await rm(episodeDir, { recursive: true, force: true }); }
 });

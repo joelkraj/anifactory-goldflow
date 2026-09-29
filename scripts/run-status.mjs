@@ -118,6 +118,7 @@ import {
   narrationSynthesisIdentitySha256,
   validateNarrationProviderOutputManifest,
 } from "./lib/narration-provider-adapter.mjs";
+import { findExactBoundaryRepairResumeManifest } from "./lib/narration-boundary-resume.mjs";
 import { TRANSCRIPT_QA_COMPARISON_VERSION } from "./modelslab-qwen-episode-audio.mjs";
 import {
   NARRATION_EXACT_LISTEN_REVIEW_PACKET_SCHEMA,
@@ -3229,11 +3230,23 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
       const unitDeliveryPath = path.join(episodeDir, `narration_unit_delivery_qa_${episode}.json`);
       const providerOutputPath = path.join(episodeDir, `narration_provider_output_manifest_${episode}.json`);
       const unitDelivery = await readJson(unitDeliveryPath, null);
+      const plan = await readJson(planPath, null);
+      const planFileSha256 = await fileSha256(planPath);
+      const boundaryResume = await findExactBoundaryRepairResumeManifest({
+        episodeDir, episode, identity, plan,
+        planUnits: narrationPlanUnitsForStatus(plan), planFileSha256,
+        qualityContractSha256: narrationQualityContract.contract_sha256,
+        policy, ttsReport, unitDelivery, currentScriptHash,
+        currentComparisonVersion: TRANSCRIPT_QA_COMPARISON_VERSION,
+      });
+      if (boundaryResume) {
+        return { done: false, state: "blocked",
+          evidence: `Completed exact-boundary repair has ${boundaryResume.repairedUnitIds.length} hash-verified composite WAVs in its derived provider manifest; the blocked report selected the prior manifest. Re-adjudicate the derived manifest without synthesis`,
+          next_command_shape: `node bin/goldflow.mjs tts finalize-provider --episode-dir ${episodeDir} --manifest ${boundaryResume.manifestPath}` };
+      }
       if (unitDelivery?.transcript_comparison_version
         && unitDelivery.transcript_comparison_version !== TRANSCRIPT_QA_COMPARISON_VERSION) {
-        const [plan, providerOutput, planFileSha256] = await Promise.all([
-          readJson(planPath, null), readJson(providerOutputPath, null), fileSha256(planPath),
-        ]);
+        const providerOutput = await readJson(providerOutputPath, null);
         const providerValidation = validateNarrationProviderOutputManifest(
           providerOutput, narrationPlanUnitsForStatus(plan), {
             generationPlanSha256: plan?.plan_sha256 ?? planFileSha256,
@@ -3332,10 +3345,14 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
       episodeDir,
       `narration_unit_delivery_qa_${episode}.json`,
     );
-    const providerOutputPath = path.join(
-      episodeDir,
-      `narration_provider_output_manifest_${episode}.json`,
-    );
+    const providerOutputPath = ttsReport.provider_output_manifest_path;
+    if (!providerOutputPath || !path.isAbsolute(providerOutputPath)
+      || !providerOutputPath.startsWith(`${path.resolve(episodeDir)}${path.sep}`)
+      || await fileSha256(providerOutputPath)
+        !== ttsReport.provider_output_manifest_sha256) {
+      return { done: false, state: "blocked",
+        evidence: "Narration report provider manifest path or file hash is missing or stale" };
+    }
     const listenPacketPath = path.join(
       episodeDir,
       `narration_exact_listen_review_packet_${episode}.json`,

@@ -25,6 +25,15 @@ const beat = (number, place, id) => ({
   location_id: id,
   location: place,
   local_location: place,
+  location_timeline_label: `${Math.floor(number / 60)}:${String(number % 60).padStart(2, "0")} ${place}`,
+  ref_needs: [
+    { kind: "character", ref_id: "joey", subject: "Joey" },
+    { kind: "location", ref_id: id, subject: place },
+  ],
+  beat_ref_requirements: [
+    { kind: "character", ref_id: "joey", subject: "Joey" },
+    { kind: "location", ref_id: id, subject: place },
+  ],
   active_state_constraints: { location_id: id, wardrobe_state_id: "jacket" },
   visual_beat_focus: "A simple composition",
   visual_novelty_directive: "A simple composition",
@@ -34,6 +43,7 @@ const beat = (number, place, id) => ({
   preview_visible_characters: [],
   screen_visible_entity_ids: [],
   visible_entities: [{ entity_id: "joey", display_name: "Joey", kind: "person" }],
+  visual_beat_quality_findings: [],
 });
 
 async function fixture() {
@@ -70,7 +80,14 @@ async function fixture() {
     channel: "c", series_slug: "s", week: "w", episode: "ep_01",
     source_script_hash: hash(scriptBytes), source_hashes: sources,
     visual_beat_count: beats.length, editorial_director: { grouping_lock_sha256: grouping },
-    beats, location_timeline: [], updated_at: "2026-01-01T00:00:00Z" };
+    beats, location_timeline: [], visual_beat_quality_findings: [
+      { code: "location_mention_not_in_beat_location", severity: "warning",
+        visual_beat_id: beats[1].visual_beat_id, beat_location: "Home desk" },
+    ],
+    visual_beat_quality_summary: { finding_count: 1, warning_count: 1, blocker_count: 0,
+      codes: { location_mention_not_in_beat_location: 1 } },
+    beat_settings: { retention_ramp_sec: 180 },
+    updated_at: "2026-01-01T00:00:00Z" };
   const planPath = path.join(episodeDir, "visual_beat_plan.json");
   const planBytes = bytes(plan);
   await fs.writeFile(planPath, planBytes);
@@ -85,8 +102,9 @@ async function fixture() {
     stage_ledger: [
       { stage: "visual_beat_plan", state: "passed" },
       { stage: "visual_reference_plan", state: "missing" },
-      { stage: "reference_plan_approval", state: "missing" },
+      { stage: "reference_plan_approval", state: "stale" },
       { stage: "reference_generation", state: "missing" },
+      { stage: "visual_prompt_blocker_repair", state: "blocked" },
     ] };
   const ids = [beats[1].visual_beat_id, beats[2].visual_beat_id];
   const spec = { schema: "goldflow_visual_beat_exact_repair_v1", status: "approved",
@@ -147,6 +165,10 @@ await withFixture(async ({ episodeDir, status, ids, specPath, plan, planBytes, a
   assert.equal(after.beats[1].location_id, "alder_mill");
   assert.equal(after.beats[1].active_state_constraints, undefined, "repair must not invent absent state projection");
   assert.equal(after.beats[1].location, "Alder Mill office");
+  assert.equal(after.beats[1].location_timeline_label, "0:01 Alder Mill office");
+  assert.deepEqual(after.beats[1].ref_needs, [{ kind: "character", ref_id: "joey", subject: "Joey" }]);
+  assert.deepEqual(after.beats[1].beat_ref_requirements, after.beats[1].ref_needs);
+  assert.equal(after.visual_beat_quality_summary.finding_count, 0);
   assert.equal(after.beats[2].visual_beat_focus, "Blue light glows from the power source.");
   assert.equal(after.beats[2].visual_novelty_directive, after.beats[2].visual_beat_focus);
   assert.deepEqual(after.beats[2].physically_visible_entity_ids, ["joey"]);
@@ -159,6 +181,11 @@ await withFixture(async ({ episodeDir, status, ids, specPath, plan, planBytes, a
   assert.deepEqual(receipt.visual_beat_ids, ids);
   assert.equal(receipt.previous_visual_beat_plan_sha256, hash(planBytes));
   assert.equal(receipt.provider_cost_usd, 0);
+  assert.equal(receipt.changes.find((change) => change.field === "location")?.before.location_timeline_label,
+    "0:01 Home desk");
+  assert.equal(receipt.changes.find((change) => change.field === "location")?.after.location_timeline_label,
+    "0:01 Alder Mill office");
+  assert.equal(receipt.changes.find((change) => change.field === "location_quality_findings")?.before.length, 1);
   assert.deepEqual(await fs.readFile(path.join(path.dirname(result.receipt_path), "before_plan.json")), planBytes);
   assert.deepEqual(await fs.readFile(path.join(path.dirname(result.receipt_path), "before_approval.json")), approvalBytes);
   const events = (await fs.readFile(path.join(episodeDir, "execution_events.jsonl"), "utf8"))

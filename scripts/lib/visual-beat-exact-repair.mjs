@@ -3,6 +3,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { groupingLockHash } from "./editorial-beat-director.mjs";
 import { CURRENT_VISUAL_BEAT_CONTRACT_VERSION } from "./visual-beat-contract.mjs";
+import { locationDependentQualityFindings } from "./visual-beat-location-quality.mjs";
 
 const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const isHash = (value) => /^[a-f0-9]{64}$/.test(String(value ?? ""));
@@ -40,7 +41,10 @@ export function visualBeatExactRepairAdmission(status = {}, flags = {}) {
   if (beatIndex < 0 || rows[beatIndex]?.state !== "passed"
     || rows[beatIndex + 1]?.stage !== "visual_reference_plan"
     || rows[beatIndex + 1]?.state !== "missing") return deny("approved_beat_plan_and_missing_reference_stage_required");
-  if (rows.slice(beatIndex + 2).some((row) => !["missing", "skipped_with_waiver"].includes(row.state))) {
+  // Later rows can be derived stale/blocked before any work begins. The
+  // execution-event and artifact guards below decide whether a downstream
+  // stage actually started; status alone does not prove it did.
+  if (rows.slice(beatIndex + 2).some((row) => ["passed", "running", "failed"].includes(row.state))) {
     return deny("downstream_stage_already_started");
   }
   return { allowed: true, reason: "exact_approved_beat_repair_before_references", beat_ids: ids };
@@ -127,8 +131,10 @@ export function repairVisualBeatPlan(plan, spec, factLedger) {
     }
     if (own(repair, "location")) {
       const item = repair.location;
+      const beforeTimelineLabel = `${timestamp(beat.start_sec)} ${item.before_location}`;
       if (beat.location_id !== item.before_location_id || beat.location !== item.before_location
         || beat.local_location !== item.before_location
+        || beat.location_timeline_label !== beforeTimelineLabel
         || (own(beat, "active_state_constraints") && beat.active_state_constraints?.location_id !== item.before_location_id)) {
         throw new Error(`Location before-value changed: ${repair.visual_beat_id}.`);
       }
@@ -140,16 +146,31 @@ export function repairVisualBeatPlan(plan, spec, factLedger) {
       }
       const before = { location_id: beat.location_id, location: beat.location,
         local_location: beat.local_location, active_state_location_id: beat.active_state_constraints?.location_id ?? null,
+        location_timeline_label: beat.location_timeline_label,
+        ref_needs: structuredClone(beat.ref_needs ?? null),
+        beat_ref_requirements: structuredClone(beat.beat_ref_requirements ?? null),
         location_provenance: beat.location_provenance ?? null };
+      if (!Array.isArray(beat.ref_needs) || !Array.isArray(beat.beat_ref_requirements)
+        || !same(beat.ref_needs, beat.beat_ref_requirements)) {
+        throw new Error(`Location ref-needs mirrors are inconsistent: ${repair.visual_beat_id}.`);
+      }
+      const staleLocationNeed = (need) => need?.kind === "location"
+        && (need.subject === item.before_location || need.ref_id === item.before_location_id);
       beat.location_id = item.to_location_id;
       beat.location = item.to_location;
       beat.local_location = item.to_location;
+      beat.location_timeline_label = `${timestamp(beat.start_sec)} ${item.to_location}`;
+      beat.ref_needs = beat.ref_needs.filter((need) => !staleLocationNeed(need));
+      beat.beat_ref_requirements = beat.beat_ref_requirements.filter((need) => !staleLocationNeed(need));
       if (own(beat, "active_state_constraints")) beat.active_state_constraints.location_id = item.to_location_id;
       // A source-scene inference from the old location must not survive a reviewed correction.
       delete beat.location_provenance;
       changes.push({ visual_beat_id: repair.visual_beat_id, field: "location", before,
         after: { location_id: beat.location_id, location: beat.location,
           local_location: beat.local_location, active_state_location_id: beat.active_state_constraints?.location_id ?? null,
+          location_timeline_label: beat.location_timeline_label,
+          ref_needs: structuredClone(beat.ref_needs),
+          beat_ref_requirements: structuredClone(beat.beat_ref_requirements),
           location_provenance: null } });
     }
     if (own(repair, "focus")) {
@@ -193,6 +214,36 @@ export function repairVisualBeatPlan(plan, spec, factLedger) {
     }
   }
   output.location_timeline = locationTimeline(output.beats);
+  if (spec.repairs.some((repair) => own(repair, "location"))) {
+    const locationCodes = new Set(["location_mention_not_in_beat_location",
+      "repeated_location_visual_job_run", "long_same_location_beat_span"]);
+    const beforeQuality = output.visual_beat_quality_findings ?? [];
+    const nonLocationQuality = beforeQuality.filter((finding) => !locationCodes.has(finding.code));
+    const retentionRampSec = Number(output.beat_settings?.retention_ramp_sec);
+    if (!Number.isFinite(retentionRampSec) || retentionRampSec <= 0) {
+      throw new Error("Beat plan lacks current retention ramp for location quality recomputation.");
+    }
+    const recomputed = locationDependentQualityFindings(output.beats, retentionRampSec);
+    output.visual_beat_quality_findings = [...nonLocationQuality, ...recomputed];
+    output.visual_beat_quality_summary = {
+      finding_count: output.visual_beat_quality_findings.length,
+      warning_count: output.visual_beat_quality_findings.filter((finding) => finding.severity === "warning").length,
+      blocker_count: output.visual_beat_quality_findings.filter((finding) => finding.severity === "blocker").length,
+      codes: Object.fromEntries([...new Set(output.visual_beat_quality_findings.map((finding) => finding.code))]
+        .map((code) => [code, output.visual_beat_quality_findings.filter((finding) => finding.code === code).length])),
+    };
+    const byBeat = new Map();
+    for (const finding of output.visual_beat_quality_findings) {
+      const id = finding.visual_beat_id ?? finding.first_visual_beat_id ?? null;
+      if (!id) continue;
+      const rows = byBeat.get(id) ?? [];
+      rows.push(finding);
+      byBeat.set(id, rows);
+    }
+    for (const beat of output.beats) beat.visual_beat_quality_findings = byBeat.get(beat.visual_beat_id) ?? [];
+    changes.push({ field: "location_quality_findings", scope: "derived_plan_diagnostics",
+      before: beforeQuality, after: output.visual_beat_quality_findings });
+  }
   output.updated_at = new Date().toISOString();
   const lock = groupingLockHash(output.beats);
   if (lock !== spec.grouping_lock_sha256 || lock !== plan.editorial_director?.grouping_lock_sha256) {

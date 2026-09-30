@@ -2354,8 +2354,9 @@ function testPinnedCodexRuntimeContracts() {
   assert.equal(DEFAULT_CODEX_REASONING_EFFORT, "medium");
   const oldCli = parseCodexVersion("codex-cli 0.141.0");
   const qualifyingBundledCli = parseCodexVersion("codex-cli 0.144.0-alpha.4");
-  assert.equal(codexVersionSupportsModel(oldCli, DEFAULT_CODEX_MODEL), false);
-  assert.equal(codexVersionSupportsModel(qualifyingBundledCli, DEFAULT_CODEX_MODEL), true);
+  const versionGatedModel = "gpt-5.6-sol";
+  assert.equal(codexVersionSupportsModel(oldCli, versionGatedModel), false);
+  assert.equal(codexVersionSupportsModel(qualifyingBundledCli, versionGatedModel), true);
   assert.equal(compareCodexVersions(qualifyingBundledCli, oldCli) > 0, true);
 
   const promptHash = sha256("fixture prompt");

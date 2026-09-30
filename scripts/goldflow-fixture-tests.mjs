@@ -147,6 +147,7 @@ import {
 } from "./modelslab-image-helper.mjs";
 import {
   activeStateConstraintFindingsForTests,
+  alignBackgroundPopulationProviderPromptForTests,
   adaptivePromptChunksForTests,
   editorialReuseCandidatesForTests,
   enforceEditorialReusePolicyForTests,
@@ -6040,6 +6041,18 @@ function testLocalBeatFidelityEditorialCases() {
     provider_prompt: "Joey stands completely alone in the hearing chamber.",
     shot_manifest: { background_population: impliedPopulation },
   }).some((finding) => finding.code === "background_population_missing_from_prompt"), true);
+  const alignedPopulationPrompt = alignBackgroundPopulationProviderPromptForTests(
+    "Joey absorbs the ruling in a medium reaction shot.",
+    { background_population: impliedPopulation },
+  );
+  assert.match(alignedPopulationPrompt, /Background extras/i);
+  assert.match(alignedPopulationPrompt, /silent hearing attendees/i);
+  assert.match(alignedPopulationPrompt, /two restrained rows behind Joey/i);
+  assert.equal(backgroundPopulationFindings({
+    image_id: "ep_01-cut-hearing-aligned",
+    provider_prompt: alignedPopulationPrompt,
+    shot_manifest: { background_population: impliedPopulation },
+  }).length, 0);
   const droppedPopulationFindings = localBeatFidelityFindingsForTests([{
     image_id: "ep_01-cut-hearing-dropped",
     image_prompt: "Joey stands completely alone in the hearing chamber.",
@@ -6387,6 +6400,9 @@ async function testVisualPlannerDriftContracts() {
   assert.match(files["scripts/visual-reference-plan.mjs"], /A location contract is not an image reference/i);
   assert.match(files["scripts/visual-reference-plan.mjs"], /sole episode-level reference director/i);
   assert.match(files["scripts/visual-reference-plan.mjs"], /never restores an asset you omit/i);
+  assert.match(files["scripts/visual-reference-plan.mjs"], /planned_beat_ids: compactIds\(target\.planned_beat_ids, 6\)/);
+  assert.match(files["scripts/visual-reference-plan.mjs"], /visual-ref-merge-ledger-max-assets"\] \?\? 120/);
+  assert.match(files["scripts/visual-reference-plan.mjs"], /compactLocationContractLedger/);
   assert.doesNotMatch(files["scripts/visual-reference-plan.mjs"], /function applyReferenceBudgetProfile\b/);
   assert.doesNotMatch(files["scripts/visual-reference-plan.mjs"], /function ensureRequiredDirectorAssets\b/);
   assert.doesNotMatch(files["scripts/visual-reference-plan.mjs"], /termination papers|unauthorized data leak|proposal owner changed/i);
@@ -8729,6 +8745,92 @@ async function testVisualHardenTreatsCollectiveSubjectsAsGeneric() {
     finding.code === "visible_character_ref_not_attached"
     || finding.code === "visible_character_ref_scope_missing"
   )), false);
+}
+
+async function testVisualHardenDoesNotSubstringMatchShortAliasesInsideWords() {
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
+  const promptText = "An academy frame-left official closes the hall doors while the dean addresses the students.";
+  const { plan, report, error } = await runVisualHardenFixture({
+    dataRoot,
+    promptText,
+    includeDefaultCharacterRef: false,
+    extraReferenceTargets: [
+      {
+        ref_id: "stoneback_ram_creature_identity",
+        kind: "character_state",
+        subject: "Stoneback Ram",
+        scene_ids: ["scene_002"],
+        reference_image_path: "/tmp/stoneback_ram.png",
+      },
+      {
+        ref_id: "emily_world_crown_state",
+        kind: "character_state",
+        subject: "Emily Hart in World Goddess festival state with the completed luminous Crown",
+        scene_ids: ["scene_002"],
+        reference_image_path: "/tmp/emily_world_crown.png",
+      },
+    ],
+    extraCharacterStateRefs: [{
+      state_ref_id: "emily_world_crown_state",
+      source_ref_id: "emily_world_crown_state",
+      character: "Emily Hart",
+      scene_ids: ["scene_002"],
+      reference_image_path: "/tmp/emily_world_crown.png",
+      scene_prompt_anchor: "Emily Hart with her approved face and completed luminous Crown",
+    }],
+    referenceRequirements: [{ ref_id: "loc_apartment", kind: "location", slot_order: 1 }],
+    shotManifest: {
+      visible_characters: ["academy official frame-left", "Crown Academy dean"],
+      character_state_ref_ids: [],
+      protagonist_state_ref_id: null,
+    },
+  });
+  assert.equal(error, null);
+  assert.equal(plan.status, "passed");
+  assert.equal(report.findings.some((finding) => (
+    finding.code === "visible_character_ref_scope_missing"
+    && finding.out_of_scope_ref_ids?.some((refId) => (
+      refId === "stoneback_ram_creature_identity"
+      || refId === "emily_world_crown_state"
+    ))
+  )), false);
+}
+
+async function testVisualHardenWaivesOutOfScopeScreenOnlyIdentity() {
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
+  const promptText = "Joey studies a result display containing Emily's completed A-rank halo.";
+  const { plan, report, error } = await runVisualHardenFixture({
+    dataRoot,
+    promptText,
+    includeDefaultCharacterRef: false,
+    extraReferenceTargets: [{
+      ref_id: "emily_identity",
+      kind: "character_state",
+      subject: "Emily Hart",
+      scene_ids: ["scene_002"],
+      reference_image_path: "/tmp/emily.png",
+    }],
+    referenceRequirements: [{ ref_id: "loc_apartment", kind: "location", slot_order: 1 }],
+    shotManifest: {
+      visible_characters: ["Emily Hart"],
+      character_state_ref_ids: [],
+      protagonist_state_ref_id: null,
+      foreground_action: "Emily appears inside the result display only.",
+      character_staging: [{
+        name: "Emily Hart",
+        ref_id: null,
+        screen_position: "frame-right inside result display only",
+        wardrobe_from: "current screen portrait",
+        pose: "Contained remote portrait beneath the halo.",
+      }],
+    },
+  });
+  assert.equal(error, null);
+  assert.equal(plan.status, "passed");
+  assert.equal(report.findings.some((finding) => (
+    finding.code === "preview_character_ref_scope_waived"
+    && finding.character === "Emily Hart"
+  )), true);
 }
 
 async function testVisualHardenBlocksAttachedCharacterRefWhenAnchorIgnored() {
@@ -11290,6 +11392,8 @@ const FIXTURE_SUITES = {
     testVisualHardenBlocksVisibleCharacterWhenScopedRefOmitted,
     testVisualHardenBlocksVisibleCharacterWhenOnlyOutOfScopeRefExists,
     testVisualHardenTreatsCollectiveSubjectsAsGeneric,
+    testVisualHardenDoesNotSubstringMatchShortAliasesInsideWords,
+    testVisualHardenWaivesOutOfScopeScreenOnlyIdentity,
     testVisualHardenBlocksAttachedCharacterRefWhenAnchorIgnored,
     testVisualHardenAllowsAttachedCharacterRefWhenAnchorReaffirmed,
     testVisualHardenPreservesAttachableFaceOnlyStateRef,

@@ -381,7 +381,7 @@ function buildIndexes(visualReferencePlan, characterStateRefs, referenceInventor
       kind: "character_state",
       ref_id: sourceId,
       subject: existing.subject ?? ref.character,
-      character: ref.character ?? existing.character ?? existing.subject,
+      character: existing.character ?? ref.character ?? existing.subject,
       source_ref_id: sourceId,
       scene_prompt_anchor: existing.scene_prompt_anchor ?? ref.scene_prompt_anchor ?? null,
       prompt_anchor: existing.prompt_anchor ?? ref.prompt_anchor ?? null,
@@ -439,7 +439,15 @@ function characterRefNameMatches(ref, names) {
     ref?.subject,
     ...(ref ? characterAliases(ref) : []),
   ].map(normalize).filter(Boolean);
-  return labels.some((label) => names.has(label) || [...names].some((name) => label.includes(name) || name.includes(label)));
+  const containsPhrase = (whole, phrase) => (
+    whole === phrase
+    || whole.startsWith(`${phrase} `)
+    || whole.endsWith(` ${phrase}`)
+    || whole.includes(` ${phrase} `)
+  );
+  return labels.some((label) => names.has(label) || [...names].some((name) => (
+    containsPhrase(label, name) || containsPhrase(name, label)
+  )));
 }
 
 function targetReferencePath(target) {
@@ -721,7 +729,7 @@ function requirementRefIdForPrompt(rawRefId, req, prompt, indexes) {
 function genericVisibleGroupName(value) {
   const text = normalize(value);
   if (!text) return true;
-  if (/\b(?:men|women|clerks|priests|guards|students|citizens|crowd|crowds|witnesses|workers|staff|audience|spectators|officials|soldiers|nobles|reporters|followers|teams?|merchants?|employees?|members?|representatives?|managers?|executives?|founders?|investors?|clients?|customers?|users?)\b/.test(text)) return true;
+  if (/\b(?:anonymous|men|women|clerks|priests|guards|students|citizens|crowd|crowds|witnesses|workers|staff|audience|spectators|officials?|council|soldiers|nobles|reporters|followers|teams?|merchants?|employees?|members?|representatives?|managers?|executives?|founders?|investors?|clients?|customers?|users?)\b/.test(text)) return true;
   if (/\b[a-z]+\s+s\b/.test(text)) return true;
   return false;
 }
@@ -1007,14 +1015,14 @@ function sanitizePrompt(prompt, indexes) {
       const outOfScopeRefs = attachableCharacterRefsForVisibleNameAnyScope(indexes, visibleName);
       if (outOfScopeRefs.length) {
         const staging = (shotManifest?.character_staging ?? []).find((row) => normalize(row?.name) === normalize(visibleName));
-        const previewOnly = /\b(?:hypothetical|preview|inset|shadowed)\b/i.test(`${staging?.screen_position ?? ""} ${staging?.pose ?? ""} ${staging?.wardrobe_from ?? ""}`);
+        const previewOnly = /\b(?:hypothetical|preview|inset|shadowed|projected|projection|screen[- ]visible|inside (?:the )?(?:monitor|screen|display|panel)|remote (?:broadcast|image|portrait)|screen portrait|name token)\b/i.test(`${staging?.screen_position ?? ""} ${staging?.pose ?? ""} ${staging?.wardrobe_from ?? ""} ${shotManifest?.foreground_action ?? ""} ${shotManifest?.continuity_notes ?? ""}`);
         findings.push({
           image_id: prompt.image_id,
           scene_id: prompt.scene_id,
           severity: previewOnly ? "warning" : "blocker",
           code: previewOnly ? "preview_character_ref_scope_waived" : "visible_character_ref_scope_missing",
           message: previewOnly
-            ? `Visible ${visibleName} is a clearly marked hypothetical/preview depiction, so no out-of-scope identity reference is attached.`
+            ? `Visible ${visibleName} is a clearly marked hypothetical, preview, or screen-only depiction, so no out-of-scope identity reference is attached.`
             : `Shot manifest shows ${visibleName}, but matching attachable character ref(s) ${outOfScopeRefs.map((ref) => ref.ref_id).slice(0, 4).join(", ")} are not scoped to scene ${prompt.scene_id}. Repair the reference scope or author an explicit approved state before imagegen; harden will not guess the replacement ref.`,
           character: visibleName,
           out_of_scope_ref_ids: outOfScopeRefs.map((ref) => ref.ref_id),

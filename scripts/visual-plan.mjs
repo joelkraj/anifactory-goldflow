@@ -14,6 +14,7 @@ import {
 } from "./lib/visual-scope-utils.mjs";
 import { CHARACTER_STAGING_POSITIONS, sanitizeCharacterStaging } from "./lib/character-staging-utils.mjs";
 import {
+  backgroundPopulationCuePresent,
   backgroundPopulationFindings,
   backgroundPopulationIsRequired,
   sanitizeBackgroundPopulation,
@@ -1352,7 +1353,8 @@ function normalizePrompt(row, index, episodeId, sourceUnit = null, scope = {}) {
     })).filter((slot) => slot.ref_id);
   }
   const route = routedProviderForPrompt(sourceUnit ?? row, scope.activeImageProvider ?? row.image_provider_route ?? "modelslab", scope.activeImageProviderOptions ?? {});
-  const providerPrompt = String(row.provider_prompt ?? row.image_prompt ?? row.modelslab_image_prompt ?? row.codex_image_prompt ?? "").trim();
+  const authoredProviderPrompt = String(row.provider_prompt ?? row.image_prompt ?? row.modelslab_image_prompt ?? row.codex_image_prompt ?? "").trim();
+  const providerPrompt = alignBackgroundPopulationProviderPrompt(authoredProviderPrompt, manifest);
   const referenceRequirements = (manifest?.reference_slots ?? []).map((slot) => ({
     ref_id: slot.ref_id,
     kind: slot.kind,
@@ -1419,6 +1421,18 @@ function normalizePrompt(row, index, episodeId, sourceUnit = null, scope = {}) {
     characterStateRefs: scopedCharacterRefs,
   });
   return dropOutOfScopePromptRefs(basePrompt, allowedRefIds);
+}
+
+function alignBackgroundPopulationProviderPrompt(providerPrompt, manifest) {
+  const text = String(providerPrompt ?? "").trim();
+  const population = sanitizeBackgroundPopulation(manifest?.background_population);
+  if (!backgroundPopulationIsRequired(population) || backgroundPopulationCuePresent(text)) return text;
+  if (!population.description || !population.staging) return text;
+  return `${text}\nBackground extras — ${population.description}; staging: ${population.staging}.`.trim();
+}
+
+export function alignBackgroundPopulationProviderPromptForTests(providerPrompt, manifest) {
+  return alignBackgroundPopulationProviderPrompt(providerPrompt, manifest);
 }
 
 function plannerRecoveryPlaceholder(sourceUnit, episodeId, scope = {}) {

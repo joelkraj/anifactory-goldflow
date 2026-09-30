@@ -73,6 +73,7 @@ const referenceImageWidth = Number(flags["reference-image-width"] ?? process.env
 const referenceImageHeight = Number(flags["reference-image-height"] ?? process.env.ANIFACTORY_MODELSLAB_REFERENCE_IMAGE_HEIGHT ?? process.env.ANIFACTORY_MODELSLAB_IMAGE_HEIGHT ?? 576);
 const seedDerivedRefs = flags["seed-derived-refs"] === "true";
 const promoteDerivedRefs = flags["promote-derived-refs"] === "true";
+const materializeExistingImages = flags["materialize-existing-images"] === "true";
 const providerCircuitFailureThreshold = Math.max(2, Number(flags["provider-circuit-failures"] ?? process.env.ANIFACTORY_IMAGE_PROVIDER_CIRCUIT_FAILURES ?? 3));
 const invocationStartedAt = new Date().toISOString();
 const invocationStartedMs = Date.now();
@@ -2171,7 +2172,19 @@ async function main() {
   const allPromptIds = new Set(plan.prompts.filter((prompt) => prompt.image_generation_required !== false).map((prompt) => prompt.image_id));
   let providerHealthReport = null;
   let probeResults = [];
-  if (generationPrompts.length && providerHealthProbeEnabled(generationPrompts)) {
+  if (materializeExistingImages) {
+    const existingRows = await probePromptImageRows({ prompts: generationPrompts });
+    const missingExistingIds = generationPrompts
+      .map((prompt) => String(prompt.image_id ?? ""))
+      .filter((imageId) => !existingRows.has(imageId));
+    if (missingExistingIds.length) {
+      throw new Error(
+        `Existing-image materialization refused: ${missingExistingIds.length} selected image file(s) are missing: `
+        + `${missingExistingIds.slice(0, 24).join(", ")}${missingExistingIds.length > 24 ? ` +${missingExistingIds.length - 24} more` : ""}`,
+      );
+    }
+    probeResults = [...existingRows.values()];
+  } else if (generationPrompts.length && providerHealthProbeEnabled(generationPrompts)) {
     providerHealthReport = await runProviderHealthProbe(generationPrompts);
     probeResults = providerHealthReport.results ?? [];
   }
@@ -2217,6 +2230,7 @@ async function main() {
     modelslab_account_pools: pool.account_pools,
     provider_health_probe_enabled: Boolean(providerHealthReport),
     provider_health_report_path: providerHealthReport ? providerHealthReportPath : null,
+    materialize_existing_images: materializeExistingImages,
     provider_circuit_open: pool.circuit_open,
     provider_circuit_reason: pool.circuit_reason,
     provider_circuit_failure_threshold: pool.failure_threshold,
@@ -2244,7 +2258,8 @@ async function main() {
     updated_at: new Date().toISOString(),
   };
   const materialized = await writeAuditableImagegenReport(report, {
-    kind: batchKindOverride ?? (seedDerivedRefs ? "seed_derived_refs" : scope.size ? "scoped_scene_retry" : "scene_images"),
+    kind: batchKindOverride
+      ?? (materializeExistingImages ? "materialize_existing_images" : seedDerivedRefs ? "seed_derived_refs" : scope.size ? "scoped_scene_retry" : "scene_images"),
     currentRows: [...referenceRun.results, ...results],
   });
   console.log(JSON.stringify({ status: materialized.status, current_batch_status: materialized.current_batch_status, report_path: reportPath, immutable_batch_report_path: materialized.immutable_batch_report_path, image_count: materialized.image_count, current_batch_image_count: materialized.current_batch_image_count }, null, 2));

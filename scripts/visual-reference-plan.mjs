@@ -1046,6 +1046,15 @@ Return:
 }
 
 function buildMergePrompt(semanticPlan, chunkPlans, guidance = {}, inventoryLedger = null, locationContractLedger = null) {
+  const compactText = (value, limit) => {
+    const text = String(value ?? "").trim();
+    return text.length > limit ? `${text.slice(0, Math.max(0, limit - 1))}…` : text;
+  };
+  const compactIds = (values, limit) => (
+    Array.isArray(values)
+      ? [...new Set(values.map((value) => String(value ?? "").trim()).filter(Boolean))].slice(0, limit)
+      : []
+  );
   const compact = {
     source_script_hash: semanticPlan.source_script_hash,
     episode_summary: semanticPlan.episode_summary ?? "",
@@ -1058,42 +1067,48 @@ function buildMergePrompt(semanticPlan, chunkPlans, guidance = {}, inventoryLedg
     reference_targets: (plan.reference_targets ?? []).map((target) => ({
       ref_id: target.ref_id,
       kind: target.kind,
-      subject: target.subject,
-      scene_ids: target.scene_ids ?? [],
+      subject: compactText(target.subject, 120),
+      scene_ids: compactIds(target.scene_ids, 10),
       priority: target.priority,
       generation_mode: target.generation_mode,
       required_before_imagegen: target.required_before_imagegen,
-      prompt_anchor: String(target.prompt_anchor ?? "").slice(0, 280),
+      prompt_anchor: compactText(target.prompt_anchor, 180),
       anchor_cut_policy: target.anchor_cut_policy,
       appearance_count: target.appearance_count,
-      risk_notes: (target.risk_notes ?? []).slice(0, 2).map((note) => String(note).slice(0, 120)),
+      risk_notes: (target.risk_notes ?? []).slice(0, 1).map((note) => compactText(note, 80)),
       manual_review_required: target.manual_review_required,
       inventory_asset_id: target.inventory_asset_id ?? null,
-      evidence_asset_ids: target.evidence_asset_ids ?? [],
+      evidence_asset_ids: compactIds(target.evidence_asset_ids, 4),
       canonical_subject_id: target.canonical_subject_id ?? null,
       base_asset_id: target.base_asset_id ?? null,
-      state_delta: target.state_delta ?? null,
-      location_contract_ids: target.location_contract_ids ?? [],
-      planned_beat_ids: target.planned_beat_ids ?? [],
+      state_delta: target.state_delta ? compactText(target.state_delta, 140) : null,
+      location_contract_ids: compactIds(target.location_contract_ids, 4),
+      planned_beat_ids: compactIds(target.planned_beat_ids, 6),
       estimated_use_count: target.estimated_use_count ?? target.appearance_count ?? 0,
-      reference_value_reason: target.reference_value_reason ?? null,
-      why_text_is_insufficient: target.why_text_is_insufficient ?? null,
+      reference_value_reason: target.reference_value_reason ? compactText(target.reference_value_reason, 160) : null,
+      why_text_is_insufficient: target.why_text_is_insufficient ? compactText(target.why_text_is_insufficient, 160) : null,
       conditioning_asset_role: target.conditioning_asset_role ?? null,
       identity_subtype: target.identity_subtype ?? null,
     })),
-    character_state_refs: (plan.character_state_refs ?? []).map((ref) => ({
-      state_ref_id: ref.state_ref_id,
-      character: ref.character,
-      scene_ids: ref.scene_ids ?? [],
-      prompt_anchor: String(ref.prompt_anchor ?? "").slice(0, 280),
-      scene_prompt_anchor: String(ref.scene_prompt_anchor ?? "").slice(0, 280),
-      source_ref_id: ref.source_ref_id,
-      base_identity_ref_id: ref.base_identity_ref_id,
-      identity_usage: ref.identity_usage,
-      identity_subtype: ref.identity_subtype ?? null,
-    })),
-    warnings: (plan.warnings ?? []).slice(0, 5),
+    warnings: [],
   }));
+  const compactLocationContractLedger = locationContractLedger && typeof locationContractLedger === "object"
+    ? {
+      schema: locationContractLedger.schema ?? null,
+      source_script_hash: locationContractLedger.source_script_hash ?? null,
+      contract_count: Array.isArray(locationContractLedger.contracts) ? locationContractLedger.contracts.length : 0,
+      contracts: (locationContractLedger.contracts ?? []).map((contract) => ({
+        location_contract_id: contract.location_contract_id,
+        semantic_ref_id: contract.semantic_ref_id ?? null,
+        description: compactText(contract.description, 160),
+        prompt_anchor: compactText(contract.prompt_anchor, 180),
+        scene_ids: compactIds(contract.scene_ids, 10),
+        beat_ids: compactIds(contract.beat_ids, 6),
+        local_location_labels: (contract.local_location_labels ?? []).slice(0, 4).map((label) => compactText(label, 80)),
+        reasons: (contract.reasons ?? []).slice(0, 2).map((reason) => compactText(reason, 120)),
+      })),
+    }
+    : locationContractLedger;
   return `Merge chunked visual reference strategy outputs into one coherent episode-level visual reference plan.
 
 Rules:
@@ -1155,10 +1170,10 @@ VISUAL BIBLES AND OPERATOR DIRECTION:
 ${visualGuidanceBlock(guidance)}
 
 REFERENCE EVIDENCE LEDGER:
-${JSON.stringify(compactInventoryForPrompt(inventoryLedger, null, { referenceValueOnly: true, maxAssets: Number(flags["visual-ref-merge-ledger-max-assets"] ?? 320), evidenceLimit: 0, sceneIdLimit: 18 }), null, 2)}
+${JSON.stringify(compactInventoryForPrompt(inventoryLedger, null, { referenceValueOnly: true, maxAssets: Number(flags["visual-ref-merge-ledger-max-assets"] ?? 120), evidenceLimit: 0, sceneIdLimit: 8 }), null, 2)}
 
 LOCATION CONTRACT LEDGER:
-${JSON.stringify(locationContractLedger, null, 2)}
+${JSON.stringify(compactLocationContractLedger, null, 2)}
 
 EPISODE SUMMARY:
 ${JSON.stringify(compact, null, 2)}

@@ -1,0 +1,278 @@
+{
+  "schema": "goldflow_true_crime_editorial_proof_plan_v1",
+  "status": "editorial_draft",
+  "production_eligible": false,
+  "working_channel": "CrimeDungeon",
+  "case_name": "Chandler Halderson",
+  "title": "His Parents Never Made It to the Cabin",
+  "target_duration_sec": 120,
+  "sources": [
+    {
+      "id": "E01",
+      "url": "https://bloximages.chicago2.vip.townnews.com/madison.com/content/tncms/assets/v3/editorial/8/b7/8b7fc425-ea29-50bb-8d0d-d770a106bdd8/60f0bea8818de.pdf.pdf",
+      "title": "Original criminal complaint, July 15, 2021",
+      "kind": "court_record",
+      "locator": "Document 2, PDF/printed pp2–3; Initial Report and Sims/Shunk evening interview",
+      "acquisition_status": "research_copy",
+      "use_basis_status": "unresolved",
+      "use_basis_note": "Research PDF and text retained; selected on-screen excerpt/use review remains separate.",
+      "planned_use": "media_candidate"
+    },
+    {
+      "id": "E02",
+      "url": "https://storage.googleapis.com/www-courttv-uploads/2022/01/c5f36342-wi_halderson_criminal_complaint_08242021.pdf",
+      "title": "Amended complaint, August 24, 2021",
+      "kind": "court_record",
+      "locator": "Document 26 p17 / bundle PDF p20, reproduced July 4 message and White Lake parade date",
+      "acquisition_status": "research_copy",
+      "use_basis_status": "unresolved",
+      "use_basis_note": "Research PDF and text retained; exact display crop/use review remains separate.",
+      "planned_use": "media_candidate"
+    },
+    {
+      "id": "V02",
+      "url": "https://www.youtube.com/watch?v=ucp7aTNLgEQ",
+      "title": "Sgt. Justin Grones cabin-search testimony, trial day 1",
+      "kind": "court_testimony_reference",
+      "locator": "Upload 01:22–05:34 dates/authenticates July 8 visit; 29:37–30:41 cabin search; caption/context and individual frame review only",
+      "planned_use": "evidence_only",
+      "acquisition_status": "reference_only",
+      "use_basis_status": "unresolved",
+      "use_basis_note": "Factual source lead only; the current proof does not play or quote this upload. No source-footage acquisition dependency is intended."
+    }
+  ],
+  "claims": [
+    {
+      "id": "P01",
+      "text": "The complaint places the missing-person report on July 7, 2021 and describes the cabin account.",
+      "source_ids": [
+        "E01"
+      ]
+    },
+    {
+      "id": "P02",
+      "text": "Chandler said his parents left July 2 with unidentified friends to repair a pump/fire pit.",
+      "source_ids": [
+        "E01"
+      ]
+    },
+    {
+      "id": "P03",
+      "text": "The July 7 evening interview summary says he did not hear or see them leave and woke about 6:15 to find them gone.",
+      "source_ids": [
+        "E01"
+      ]
+    },
+    {
+      "id": "P04",
+      "text": "Chandler attributed a July 4 message about going to White Lake that day to his mother; the later amended complaint says the parade took place July 3 at 2 p.m.",
+      "source_ids": [
+        "E01",
+        "E02"
+      ]
+    },
+    {
+      "id": "P05",
+      "text": "The message date and parade date differ by one day; that discrepancy tests a specific detail of the reported trip, without establishing the parents’ location or the sender’s identity.",
+      "source_ids": [
+        "E02"
+      ]
+    },
+    {
+      "id": "P06",
+      "text": "The next scene returns to the July 8 cabin search, as identified in Grones’s testimony; this is editorial order, not evidence that the later parade-date check caused the search.",
+      "source_ids": [
+        "V02"
+      ]
+    }
+  ],
+  "scenes": [
+    {
+      "id": "S01",
+      "start_sec": 0,
+      "end_sec": 15,
+      "claim_ids": [
+        "P01",
+        "P03"
+      ],
+      "source_ids": [
+        "E01"
+      ],
+      "picture": {
+        "origin": "authored",
+        "description": "Planned actual complaint excerpt and July 7 date card; reveal the reported cabin trip separately.",
+        "label": "COMPLAINT — JULY 15, 2021 · pp2–3"
+      },
+      "audio": {
+        "origin": "narration",
+        "text_mode": "paraphrase",
+        "text": "On July seventh, twenty twenty-one, Chandler Halderson reported his parents missing. His explanation was a trip to the family's cabin. But he hadn't witnessed their departure.",
+        "source_ids": [
+          "E01"
+        ],
+        "exact_words_verified": false
+      }
+    },
+    {
+      "id": "S02",
+      "start_sec": 15,
+      "end_sec": 32,
+      "claim_ids": [
+        "P02"
+      ],
+      "source_ids": [
+        "E01"
+      ],
+      "picture": {
+        "origin": "recreated",
+        "description": "Planned source-derived Chandler cutout beside repair and unidentified-friends cards; no depicted departure.",
+        "label": "ILLUSTRATIVE RECONSTRUCTION · HIS REPORTED ACCOUNT"
+      },
+      "audio": {
+        "origin": "narration",
+        "text_mode": "paraphrase",
+        "text": "According to the criminal complaint, he said Bart and Krista had left five days earlier with friends. They were going to repair a water pump and a fire pit. He couldn't identify those friends.",
+        "source_ids": [
+          "E01"
+        ],
+        "exact_words_verified": false
+      }
+    },
+    {
+      "id": "S03",
+      "start_sec": 32,
+      "end_sec": 46,
+      "claim_ids": [
+        "P03"
+      ],
+      "source_ids": [
+        "E01"
+      ],
+      "picture": {
+        "origin": "recreated",
+        "description": "Separate Chandler and illustrative Detective Shunk layers on an explanatory board; dated July 7 evening at the family home, not the July 8 interrogation.",
+        "label": "ILLUSTRATIVE RECONSTRUCTION · JULY 7 EVENING"
+      },
+      "audio": {
+        "origin": "narration",
+        "text_mode": "paraphrase",
+        "text": "That evening, detectives asked whether he'd seen or heard them leave. The complaint records his answer in a single sentence.",
+        "source_ids": [
+          "E01"
+        ],
+        "exact_words_verified": false
+      }
+    },
+    {
+      "id": "S04",
+      "start_sec": 46,
+      "end_sec": 55,
+      "claim_ids": [
+        "P03"
+      ],
+      "source_ids": [
+        "E01"
+      ],
+      "picture": {
+        "origin": "authored",
+        "description": "Large exact third-person document sentence from E01 p3; labeled typeset excerpt in editorial visualization, actual selected crop in eventual media proof.",
+        "label": "TYPESET EXCERPT — COMPLAINT p3"
+      },
+      "audio": {
+        "origin": "narration",
+        "text_mode": "document_reading",
+        "text": "Chandler stated he didn't hear or see anything.",
+        "source_ids": [
+          "E01"
+        ],
+        "exact_words_verified": true,
+        "label": "DOCUMENT READING — COMPLAINT, PAGE 3"
+      }
+    },
+    {
+      "id": "S05",
+      "start_sec": 55,
+      "end_sec": 75,
+      "claim_ids": [
+        "P03"
+      ],
+      "source_ids": [
+        "E01"
+      ],
+      "picture": {
+        "origin": "authored",
+        "description": "Reported absence and departure-not-witnessed cards enter separately; preserve attribution to Chandler's account.",
+        "label": "HIS REPORTED ACCOUNT · JULY 2"
+      },
+      "audio": {
+        "origin": "narration",
+        "text_mode": "paraphrase",
+        "text": "He said he'd woken at around six fifteen on Friday morning and found them gone. The distinction matters: he was describing an absence, without having witnessed the trip.",
+        "source_ids": [
+          "E01"
+        ],
+        "exact_words_verified": false
+      }
+    },
+    {
+      "id": "S06",
+      "start_sec": 75,
+      "end_sec": 97,
+      "claim_ids": [
+        "P04"
+      ],
+      "source_ids": [
+        "E01",
+        "E02"
+      ],
+      "picture": {
+        "origin": "authored",
+        "description": "Explicit later-record-review transition; July 4 message date beside the amended complaint’s statement that the parade took place July 3. Use an authored comparison, not a fake phone screenshot.",
+        "label": "LATER RECORD REVIEW · AMENDED COMPLAINT p17"
+      },
+      "audio": {
+        "origin": "narration",
+        "text_mode": "paraphrase",
+        "text": "He also reported a message from his mother on Sunday, July fourth, saying they were going to White Lake for the parade that day. But the later amended complaint places that parade on Saturday, July third. One day earlier.",
+        "source_ids": [
+          "E01",
+          "E02"
+        ],
+        "exact_words_verified": false
+      }
+    },
+    {
+      "id": "S07",
+      "start_sec": 97,
+      "end_sec": 120,
+      "claim_ids": [
+        "P05",
+        "P06"
+      ],
+      "source_ids": [
+        "E02",
+        "V02"
+      ],
+      "picture": {
+        "origin": "authored",
+        "description": "Hold the July 4 message / July 3 parade comparison, then explicitly return to July 8 for the cabin scene. No suggestion that the later parade check caused the earlier search.",
+        "label": "REPORTED MESSAGE: JULY 4 · PARADE: JULY 3"
+      },
+      "audio": {
+        "origin": "narration",
+        "text_mode": "paraphrase",
+        "text": "That mismatch did not explain where Bart and Krista were. But it gave investigators a specific detail to check. To follow the search for them, we need to go back to July eighth—and to the cabin.",
+        "source_ids": [
+          "E02",
+          "V02"
+        ],
+        "exact_words_verified": false
+      }
+    }
+  ],
+  "readiness": {
+    "voice": "unresolved",
+    "voice_note": "Local Qwen proposed; user has been asked whether to use the existing Joel voice for this proof or a separate documentary voice.",
+    "execution_route": "unsupported"
+  }
+}

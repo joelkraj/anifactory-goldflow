@@ -359,6 +359,10 @@ function testAuthoritativeStageRegistry() {
   assert.equal(commandStageFor("imagegen", "codex-work"), "image_generation");
   assert.equal(commandStageFor("imagegen", "codex-work", { "references-only": "true" }), "reference_generation");
   assert.equal(commandStageFor("imagegen", "codex-work", { "qa-recovery": "true" }), "image_output_qa");
+  assert.equal(commandStageFor("imagegen", "qwen-vehicle-recovery", { action: "validate" }), null);
+  assert.equal(commandStageFor("imagegen", "qwen-vehicle-recovery", { action: "generate" }), "image_output_qa");
+  assert.equal(commandStageFor("imagegen", "qwen-vehicle-recovery", { action: "review" }), "image_output_qa");
+  assert.equal(commandStageFor("imagegen", "qwen-vehicle-recovery", { action: "promote" }), "image_output_qa");
   assert.equal(commandStageFor("visual", "approve-parallax"), "parallax_asset_approval");
   assert.equal(commandStageFor("visual", "ltx-video"), "generated_video_motion");
   assert.equal(commandStageFor("visual", "animation-plan"), "animation_direction_plan");

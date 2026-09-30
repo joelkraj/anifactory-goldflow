@@ -29,6 +29,15 @@ import {
   publicLtxModelslabAccountPool,
   redactLtxAccountProfileNames,
 } from "./lib/ltx-video-report-contract.mjs";
+import {
+  isTransientLtxOmission,
+  ltxCandidateId,
+  mergeLtxPlanForRepair,
+  mergeLtxReportRowsForRepair,
+  providerRetryDeadlineMs,
+  providerRetryDelayMs,
+  reportRowMatchesPlanClip,
+} from "./lib/ltx-video-repair.mjs";
 
 const execFile = promisify(execFileCb);
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
@@ -57,6 +66,9 @@ const requestedDuration = flags.duration == null ? null : clampLtxDuration(flags
 const pollIntervalMs = boundedInteger(flags["poll-interval-ms"], 7000, 2000, 60000);
 const timeoutMs = boundedInteger(flags["timeout-ms"], 900000, 30000, 3600000);
 const revalidateExisting = boolFlag(flags["revalidate-existing"]);
+const repairExisting = boolFlag(flags["repair-existing"]);
+const operatorAuthorizedRetry = boolFlag(flags["operator-authorized-retry"]);
+const preserveUntouchedSourceStable = boolFlag(flags["preserve-untouched-source-stable"]);
 const modelslabProfiles = configuredModelslabProfiles({
   flagValue: flags["modelslab-profiles"],
 });
@@ -94,6 +106,55 @@ async function readJson(filePath, fallback = null) {
 async function writeJson(filePath, value) {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   await fs.writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
+function serializedJson(value) {
+  return `${JSON.stringify(value, null, 2)}\n`;
+}
+
+export async function atomicWriteJsonPair(firstPath, firstValue, secondPath, secondValue) {
+  await Promise.all([
+    fs.mkdir(path.dirname(firstPath), { recursive: true }),
+    fs.mkdir(path.dirname(secondPath), { recursive: true }),
+  ]);
+  const token = `${process.pid}-${Date.now()}`;
+  const firstTemporaryPath = `${firstPath}.tmp-${token}`;
+  const secondTemporaryPath = `${secondPath}.tmp-${token}`;
+  const [firstBackup, secondBackup] = await Promise.all([
+    fs.readFile(firstPath).catch(() => null),
+    fs.readFile(secondPath).catch(() => null),
+  ]);
+  await Promise.all([
+    fs.writeFile(firstTemporaryPath, serializedJson(firstValue), "utf8"),
+    fs.writeFile(secondTemporaryPath, serializedJson(secondValue), "utf8"),
+  ]);
+  let firstCommitted = false;
+  try {
+    await fs.rename(firstTemporaryPath, firstPath);
+    firstCommitted = true;
+    await fs.rename(secondTemporaryPath, secondPath);
+  } catch (error) {
+    if (firstCommitted) {
+      const restorePath = `${firstPath}.restore-${token}`;
+      if (firstBackup == null) {
+        await fs.rm(firstPath, { force: true });
+      } else {
+        await fs.writeFile(restorePath, firstBackup);
+        await fs.rename(restorePath, firstPath);
+      }
+    }
+    if (secondBackup != null && await hashFile(secondPath) == null) {
+      const restorePath = `${secondPath}.restore-${token}`;
+      await fs.writeFile(restorePath, secondBackup);
+      await fs.rename(restorePath, secondPath);
+    }
+    throw error;
+  } finally {
+    await Promise.all([
+      fs.rm(firstTemporaryPath, { force: true }),
+      fs.rm(secondTemporaryPath, { force: true }),
+    ]);
+  }
 }
 
 function jsonEqual(left, right) {
@@ -343,9 +404,7 @@ function responseUrls(json = {}) {
 }
 
 function providerRateLimitDelayMs(message) {
-  const match = String(message ?? "").match(/try again in\s+(\d+)\s+minute/i);
-  if (!match) return null;
-  return (Number(match[1]) * 60 + 5) * 1000;
+  return providerRetryDelayMs(message);
 }
 
 async function postJson(url, body, {
@@ -410,6 +469,22 @@ async function pollResult(requestId, startedAtMs, account) {
     if (["error", "failed"].includes(String(json.status ?? ""))) throw new Error(json.message ?? `LTX request ${requestId} failed.`);
   }
   throw new Error(`LTX request ${requestId} timed out after ${Math.round(timeoutMs / 1000)} seconds.`);
+}
+
+async function fetchExistingResult(requestId, account) {
+  return postJson(
+    `https://modelslab.com/api/v6/video/fetch/${requestId}`,
+    {},
+    { account, retries: 0 },
+  );
+}
+
+async function waitForRecordedCooldown(row, fallbackTimestamp = null) {
+  const cooldownDeadline = providerRetryDeadlineMs(row, fallbackTimestamp);
+  if (cooldownDeadline == null) return;
+  const cooldownMs = cooldownDeadline - Date.now();
+  if (cooldownMs <= 0) return;
+  await new Promise((resolve) => setTimeout(resolve, cooldownMs));
 }
 
 async function downloadResult(json, outputFile) {
@@ -569,6 +644,90 @@ async function buildPlan({ promptPlan, imagegenReport, imageQa, identity }) {
   return plan;
 }
 
+async function buildAnimationDirectionPlan(animationDirection) {
+  if (animationDirection?.schema !== "goldflow_animation_direction_plan_v1" || animationDirection?.status !== "passed") {
+    throw new Error(`Production LTX generation requires a passed animation direction plan: ${animationDirectionPath}`);
+  }
+  const clips = (animationDirection.directions ?? []).map((row) => {
+    const coverage = row.coverage ?? [{
+      image_id: row.image_id,
+      image_sha256: row.source_image_sha256,
+      source_offset_sec: 0,
+      source_end_offset_sec: row.cut_duration_sec,
+    }];
+    if (row.sequence_mode !== "standalone_shot" || coverage.length !== 1
+      || String(coverage[0]?.image_id ?? "") !== String(row.image_id ?? "")) {
+      throw new Error(
+        `LTX direction ${row.image_id} violates the one-init-image/one-reachable-shot production contract.`,
+      );
+    }
+    if (!String(row.start_frame_contract?.state ?? "").trim()
+      || !String(row.end_frame_contract?.state ?? "").trim()
+      || !String(row.end_frame_contract?.camera_state ?? "").trim()
+      || !String(row.end_frame_contract?.composition ?? "").trim()
+      || !String(row.end_frame_contract?.continuity_bridge ?? "").trim()) {
+      throw new Error(`LTX direction ${row.image_id} is missing its explicit single-shot terminal contract.`);
+    }
+    return {
+      image_id: row.image_id,
+      scene_id: row.scene_id,
+      visual_beat_id: row.visual_beat_id,
+      start_sec: row.start_sec,
+      cut_duration_sec: row.cut_duration_sec,
+      duration_sec: row.requested_generation_duration_sec,
+      animation_sequence_id: row.animation_sequence_id ?? null,
+      sequence_mode: "standalone_shot",
+      sequence_timeline_duration_sec: row.cut_duration_sec,
+      coverage,
+      start_frame_contract: row.start_frame_contract,
+      end_frame_contract: row.end_frame_contract,
+      provider_image_inputs: ["init_image"],
+      source_image_path: row.source_image_path,
+      source_image_sha256: row.source_image_sha256,
+      source_prompt_sha256: row.source_prompt_sha256,
+      motion_prompt: row.motion_prompt,
+      motion_prompt_sha256: sha256(row.motion_prompt),
+      negative_prompt: row.negative_prompt,
+      candidate_count: LTX_SINGLE_SHOT_POLICY.candidates_per_motion_moment,
+    };
+  });
+  const plan = {
+    schema: "goldflow_ltx23_video_plan_v1",
+    status: "passed",
+    channel,
+    series_slug: series,
+    week,
+    episode,
+    proof,
+    proof_label: proof ? proofLabel : null,
+    provider: LTX_VIDEO_PROVIDER,
+    model_id: LTX_VIDEO_MODEL_ID,
+    resolution: "16:9",
+    requested_concurrency: concurrency,
+    provider_image_inputs: [...LTX_SINGLE_SHOT_POLICY.provider_image_inputs],
+    automatic_generation_retries: LTX_SINGLE_SHOT_POLICY.automatic_generation_retries,
+    animation_direction_plan_path: animationDirectionPath,
+    source_hashes: { ...animationDirection.source_hashes, [animationDirectionPath]: await hashFile(animationDirectionPath) },
+    clip_count: clips.length,
+    clips,
+    updated_at: new Date().toISOString(),
+  };
+  plan.plan_sha256 = ltxPlanHash(plan);
+  return plan;
+}
+
+function selectPlanClips(plan, requestedIds) {
+  const explicit = new Set(requestedIds);
+  if (!explicit.size) return plan;
+  const clips = (plan.clips ?? []).filter((row) => explicit.has(String(row.image_id)));
+  if (clips.length !== explicit.size) {
+    throw new Error("One or more requested --cut-ids are absent from the animation direction plan.");
+  }
+  const selected = { ...plan, clips, clip_count: clips.length, updated_at: new Date().toISOString() };
+  selected.plan_sha256 = ltxPlanHash(selected);
+  return selected;
+}
+
 async function contactSheet(clips, sheetPath) {
   const frameDir = path.join(path.dirname(sheetPath), "contact_frames");
   await fs.mkdir(frameDir, { recursive: true });
@@ -599,7 +758,155 @@ async function contactSheet(clips, sheetPath) {
   await background.composite(composites).jpeg({ quality: 90 }).toFile(sheetPath);
 }
 
+function reportRows(report = {}) {
+  return [...(report.clips ?? []), ...(report.omitted_clips ?? [])];
+}
+
+async function loadRepairBaseline(freshPlan, scopeIds) {
+  const [priorPlan, priorReport, priorPlanFileHash, priorReportFileHash] = await Promise.all([
+    readJson(planPath, null),
+    readJson(outputPath, null),
+    hashFile(planPath),
+    hashFile(outputPath),
+  ]);
+  if (priorPlan?.schema !== "goldflow_ltx23_video_plan_v1" || priorPlan?.status !== "passed") {
+    throw new Error(`Scoped LTX repair requires the existing passed canonical plan: ${planPath}`);
+  }
+  if (priorReport?.schema !== "goldflow_ltx23_video_report_v1" || priorReport?.status !== "passed") {
+    throw new Error(`Scoped LTX repair requires the existing passed canonical report: ${outputPath}`);
+  }
+  if (priorReport.plan_sha256 !== priorPlanFileHash
+    || priorPlan.plan_sha256 !== ltxPlanHash(priorPlan)
+    || priorReport.plan_contract_sha256 !== priorPlan.plan_sha256) {
+    throw new Error("Scoped LTX repair refused a stale or internally inconsistent canonical plan/report pair.");
+  }
+  const freshSourceEntries = Object.entries(freshPlan.source_hashes ?? {});
+  if (!freshSourceEntries.length) throw new Error("Scoped LTX repair requires current animation-plan source provenance.");
+  for (const [sourcePath, expectedHash] of freshSourceEntries) {
+    if (!expectedHash || await hashFile(sourcePath) !== expectedHash) {
+      throw new Error(`Scoped LTX repair animation source hash is missing or stale: ${sourcePath}.`);
+    }
+  }
+  const priorRows = reportRows(priorReport);
+  const priorIds = new Set(priorRows.map((row) => String(row.image_id ?? "")));
+  if (priorIds.size !== priorRows.length) throw new Error("Scoped LTX repair refused duplicate prior report image IDs.");
+  const plan = mergeLtxPlanForRepair({
+    freshPlan,
+    priorPlan,
+    scopeIds,
+    preserveUntouchedSourceStable,
+  });
+  plan.plan_sha256 = ltxPlanHash(plan);
+  for (const clip of plan.clips ?? []) {
+    if (!clip.source_image_path || await hashFile(clip.source_image_path) !== clip.source_image_sha256) {
+      throw new Error(`Scoped LTX repair source image is missing or stale for ${clip.image_id}.`);
+    }
+  }
+  const scope = scopeIds instanceof Set ? scopeIds : new Set(scopeIds);
+  for (const row of priorRows) {
+    if (scope.has(String(row.image_id ?? ""))) continue;
+    if (row.status === "generated"
+      && (!row.normalized_video_path
+        || await hashFile(row.normalized_video_path) !== row.normalized_video_sha256)) {
+      throw new Error(`Untouched LTX video is missing or stale outside repair scope: ${row.image_id}.`);
+    }
+  }
+  return { plan, priorPlan, priorReport, priorPlanFileHash, priorReportFileHash };
+}
+
+function reboundGeneratedRow(prior, clip) {
+  if (reportRowMatchesPlanClip(prior, clip)) return prior;
+  return {
+    ...prior,
+    image_id: clip.image_id,
+    scene_id: clip.scene_id ?? null,
+    visual_beat_id: clip.visual_beat_id ?? null,
+    start_sec: clip.start_sec,
+    cut_duration_sec: clip.cut_duration_sec,
+    requested_duration_sec: clip.duration_sec,
+    animation_sequence_id: clip.animation_sequence_id ?? null,
+    sequence_mode: clip.sequence_mode ?? "standalone_shot",
+    sequence_timeline_duration_sec: clip.sequence_timeline_duration_sec ?? clip.cut_duration_sec,
+    coverage: clip.coverage ?? null,
+    start_frame_contract: clip.start_frame_contract ?? null,
+    end_frame_contract: clip.end_frame_contract ?? null,
+    source_image_path: clip.source_image_path,
+    source_image_sha256: clip.source_image_sha256,
+    source_prompt_sha256: clip.source_prompt_sha256,
+    motion_prompt_sha256: clip.motion_prompt_sha256,
+  };
+}
+
+function sameCreativeContract(row, clip) {
+  return row?.source_image_sha256 === clip.source_image_sha256
+    && row?.source_prompt_sha256 === clip.source_prompt_sha256
+    && row?.motion_prompt_sha256 === clip.motion_prompt_sha256
+    && Number(row?.requested_duration_sec) === Number(clip.duration_sec)
+    && jsonEqual(row?.start_frame_contract ?? null, clip.start_frame_contract ?? null)
+    && jsonEqual(row?.end_frame_contract ?? null, clip.end_frame_contract ?? null);
+}
+
+function setTransientOmissionMetadata(row) {
+  const retryAfterMs = providerRetryDelayMs(row.error);
+  row.retryable_transient = isTransientLtxOmission(row);
+  row.retry_after_ms = retryAfterMs;
+  row.omitted_at = new Date().toISOString();
+  row.cooldown_until = retryAfterMs == null
+    ? null
+    : new Date(Date.now() + retryAfterMs).toISOString();
+}
+
+function omitRow(row, stage, error) {
+  row.status = "omitted";
+  row.omission_stage = stage;
+  row.disposition = LTX_SINGLE_SHOT_POLICY.unavailable_or_rejected_disposition;
+  row.error = error instanceof Error ? error.message : String(error);
+  delete row.init_image_url;
+  delete row.download_url;
+  delete row.initial_provider_result;
+  setTransientOmissionMetadata(row);
+}
+
+function versionedMediaPaths(row) {
+  const sourceVersion = String(row.source_image_sha256 ?? "unknown").slice(0, 12);
+  const attemptVersion = String(Math.max(1, Number(row.creative_generation_attempt ?? 1))).padStart(2, "0");
+  const version = `${sourceVersion}-a${attemptVersion}`;
+  return {
+    rawPath: path.join(outputDir, "raw", `${row.candidate_id}-${version}-ltx23.mp4`),
+    normalizedPath: path.join(outputDir, "normalized", `${row.candidate_id}-${version}-ltx23-1920x1080.mp4`),
+  };
+}
+
+async function materializeProviderResult(row, result, startedAtMs) {
+  row.provider_generation_time_sec = result.generationTime ?? null;
+  const { rawPath, normalizedPath } = versionedMediaPaths(row);
+  row.download_url = await downloadResult(result, rawPath);
+  row.raw_video_path = rawPath;
+  row.raw_video_sha256 = await hashFile(rawPath);
+  row.raw_probe = await probeVideo(rawPath);
+  row.normalized_probe = await normalizeVideo(rawPath, normalizedPath, row.duration_sec);
+  row.normalized_video_path = normalizedPath;
+  row.normalized_video_sha256 = await hashFile(normalizedPath);
+  row.wall_time_sec = Number(((Date.now() - startedAtMs) / 1000).toFixed(3));
+  row.status = "generated";
+  delete row.init_image_url;
+  delete row.download_url;
+  delete row.initial_provider_result;
+}
+
 async function main() {
+  if (repairExisting && (proof || revalidateExisting)) {
+    throw new Error("--repair-existing is production-only and cannot be combined with proof or timing revalidation.");
+  }
+  const repairScope = new Set(requestedCutIds());
+  if (repairExisting && !repairScope.size) {
+    throw new Error("--repair-existing requires exact --cut-ids or --image-ids scope.");
+  }
+  if (!proof && !repairExisting && repairScope.size) {
+    throw new Error(
+      "Production --cut-ids/--image-ids are a scoped repair operation. Add --repair-existing true so canonical full-plan rows are merged instead of truncated.",
+    );
+  }
   const [promptPlan, imagegenReport, imageQa, identity, animationDirection] = await Promise.all([
     readJson(promptPath),
     readJson(imagegenReportPath),
@@ -611,128 +918,180 @@ async function main() {
     await revalidateExistingLtx({ animationDirection });
     return;
   }
-  const modelslabAccounts = await loadConfiguredModelslabAccounts(modelslabProfiles, { cwd: repoRoot });
-  const accountByProfile = new Map(modelslabAccounts.map((account) => [account.profile, account]));
+  if (!proof && !repairExisting) {
+    const existingCanonical = await readJson(outputPath, null);
+    if (existingCanonical?.schema === "goldflow_ltx23_video_report_v1" && existingCanonical?.status === "passed") {
+      throw new Error(
+        "A passed canonical LTX report already exists. Production reruns must use exact --cut-ids with --repair-existing true.",
+      );
+    }
+  }
   let plan;
+  let priorPlan = null;
+  let priorReport = null;
+  let priorPlanFileHash = null;
+  let priorReportFileHash = null;
   const explicitProofDirection = proof && workflowBypass && Boolean(flags["animation-direction-plan"]);
   if ((!proof && ltxVideoEnabled(identity)) || explicitProofDirection) {
-    if (animationDirection?.schema !== "goldflow_animation_direction_plan_v1" || animationDirection?.status !== "passed") {
-      throw new Error(`Production LTX generation requires a passed animation direction plan: ${animationDirectionPath}`);
+    const fullPlan = await buildAnimationDirectionPlan(animationDirection);
+    if (repairExisting) {
+      ({ plan, priorPlan, priorReport, priorPlanFileHash, priorReportFileHash } = await loadRepairBaseline(fullPlan, repairScope));
+    } else {
+      plan = selectPlanClips(fullPlan, requestedCutIds());
     }
-    const explicit = new Set(requestedCutIds());
-    const selected = (animationDirection.directions ?? []).filter((row) => !explicit.size || explicit.has(String(row.image_id)));
-    if (explicit.size && selected.length !== explicit.size) throw new Error("One or more requested --cut-ids are absent from the animation direction plan.");
-    const clips = selected.map((row) => {
-      const coverage = row.coverage ?? [{
-        image_id: row.image_id,
-        image_sha256: row.source_image_sha256,
-        source_offset_sec: 0,
-        source_end_offset_sec: row.cut_duration_sec,
-      }];
-      if (row.sequence_mode !== "standalone_shot" || coverage.length !== 1
-        || String(coverage[0]?.image_id ?? "") !== String(row.image_id ?? "")) {
-        throw new Error(
-          `LTX direction ${row.image_id} violates the one-init-image/one-reachable-shot production contract.`,
-        );
-      }
-      if (!String(row.start_frame_contract?.state ?? "").trim()
-        || !String(row.end_frame_contract?.state ?? "").trim()
-        || !String(row.end_frame_contract?.camera_state ?? "").trim()
-        || !String(row.end_frame_contract?.composition ?? "").trim()
-        || !String(row.end_frame_contract?.continuity_bridge ?? "").trim()) {
-        throw new Error(`LTX direction ${row.image_id} is missing its explicit single-shot terminal contract.`);
-      }
-      return {
-        image_id: row.image_id,
-        scene_id: row.scene_id,
-        visual_beat_id: row.visual_beat_id,
-        start_sec: row.start_sec,
-        cut_duration_sec: row.cut_duration_sec,
-        duration_sec: row.requested_generation_duration_sec,
-        animation_sequence_id: row.animation_sequence_id ?? null,
-        sequence_mode: "standalone_shot",
-        sequence_timeline_duration_sec: row.cut_duration_sec,
-        coverage,
-        start_frame_contract: row.start_frame_contract,
-        end_frame_contract: row.end_frame_contract,
-        provider_image_inputs: ["init_image"],
-        source_image_path: row.source_image_path,
-        source_image_sha256: row.source_image_sha256,
-        source_prompt_sha256: row.source_prompt_sha256,
-        motion_prompt: row.motion_prompt,
-        motion_prompt_sha256: sha256(row.motion_prompt),
-        negative_prompt: row.negative_prompt,
-        candidate_count: LTX_SINGLE_SHOT_POLICY.candidates_per_motion_moment,
-      };
-    });
-    plan = {
-      schema: "goldflow_ltx23_video_plan_v1",
-      status: "passed",
-      channel,
-      series_slug: series,
-      week,
-      episode,
-      proof,
-      proof_label: proof ? proofLabel : null,
-      provider: LTX_VIDEO_PROVIDER,
-      model_id: LTX_VIDEO_MODEL_ID,
-      resolution: "16:9",
-      requested_concurrency: concurrency,
-      provider_image_inputs: [...LTX_SINGLE_SHOT_POLICY.provider_image_inputs],
-      automatic_generation_retries: LTX_SINGLE_SHOT_POLICY.automatic_generation_retries,
-      animation_direction_plan_path: animationDirectionPath,
-      source_hashes: { ...animationDirection.source_hashes, [animationDirectionPath]: await hashFile(animationDirectionPath) },
-      clip_count: clips.length,
-      clips,
-      updated_at: new Date().toISOString(),
-    };
-    plan.plan_sha256 = ltxPlanHash(plan);
   } else {
+    if (repairExisting) throw new Error("Scoped LTX repair requires an enabled production animation policy.");
     plan = await buildPlan({ promptPlan, imagegenReport, imageQa, identity });
   }
-  await writeJson(planPath, plan);
+
+  const modelslabAccounts = await loadConfiguredModelslabAccounts(modelslabProfiles, { cwd: repoRoot });
+  const accountByProfile = new Map(modelslabAccounts.map((account) => [account.profile, account]));
+  if (!repairExisting) await writeJson(planPath, plan);
   await fs.mkdir(path.join(outputDir, "raw"), { recursive: true });
   await fs.mkdir(path.join(outputDir, "normalized"), { recursive: true });
-  const rows = plan.clips.map((clip) => ({
-    ...clip,
-    candidate_count: LTX_SINGLE_SHOT_POLICY.candidates_per_motion_moment,
-    candidate_index: 1,
-    candidate_id: `${clip.image_id}-candidate-01`,
-    creative_generation_attempt: 1,
-    automatic_generation_retry_allowed: false,
-    status: "planned",
-  }));
+
+  const priorRowsById = new Map(reportRows(priorReport ?? {}).map((row) => [String(row.image_id ?? ""), row]));
+  const workClips = repairExisting
+    ? (plan.clips ?? []).filter((clip) => repairScope.has(String(clip.image_id ?? "")))
+    : (plan.clips ?? []);
+  const rows = [];
+  for (const clip of workClips) {
+    const prior = priorRowsById.get(String(clip.image_id ?? "")) ?? null;
+    const candidateId = ltxCandidateId(clip.image_id);
+    if (repairExisting && prior?.status === "generated" && sameCreativeContract(prior, clip)) {
+      if (!prior.normalized_video_path || await hashFile(prior.normalized_video_path) !== prior.normalized_video_sha256) {
+        throw new Error(`Scoped LTX repair cannot preserve stale generated media for ${clip.image_id}.`);
+      }
+      const publicRow = reboundGeneratedRow(prior, clip);
+      if (!reportRowMatchesPlanClip(publicRow, clip)) {
+        throw new Error(`Scoped LTX repair could not safely rebind the prior generated clip for ${clip.image_id}.`);
+      }
+      rows.push({ ...clip, candidate_id: candidateId, status: "preserved_generated", _public_row: publicRow });
+      continue;
+    }
+    const sameContractOmission = repairExisting && prior?.status === "omitted" && sameCreativeContract(prior, clip);
+    const priorCreativeRequestAttempted = sameContractOmission && (
+      Boolean(prior.request_id)
+      || Number(prior.provider_request_attempt ?? 0) > 0
+      || ["creative_generation_submission", "provider_result_or_normalization", "existing_request_resume"]
+        .includes(String(prior.omission_stage ?? ""))
+    );
+    if (priorCreativeRequestAttempted && !operatorAuthorizedRetry) {
+      throw new Error(
+        `LTX cut ${clip.image_id} already consumed its creative submission. Exact retry requires --operator-authorized-retry true.`,
+      );
+    }
+    if (priorCreativeRequestAttempted && !isTransientLtxOmission(prior)) {
+      throw new Error(`LTX cut ${clip.image_id} is not a transient provider omission and cannot use the retry route.`);
+    }
+    const previousAttempt = Math.max(0, Number(prior?.creative_generation_attempt ?? 0));
+    const changedSource = Boolean(prior && prior.source_image_sha256 !== clip.source_image_sha256);
+    const resumeExisting = priorCreativeRequestAttempted && Boolean(prior.request_id);
+    const creativeGenerationAttempt = resumeExisting
+      ? Math.max(1, previousAttempt)
+      : (changedSource || !prior
+          ? 1
+          : (sameContractOmission && !priorCreativeRequestAttempted
+              ? Math.max(1, previousAttempt)
+              : Math.max(1, previousAttempt + 1)));
+    rows.push({
+      ...clip,
+      candidate_count: LTX_SINGLE_SHOT_POLICY.candidates_per_motion_moment,
+      candidate_index: 1,
+      candidate_id: candidateId,
+      creative_generation_attempt: creativeGenerationAttempt,
+      provider_request_attempt: Math.max(0, Number(prior?.provider_request_attempt ?? previousAttempt)),
+      automatic_generation_retry_allowed: false,
+      operator_authorized_retry: priorCreativeRequestAttempted,
+      retry_of_error: sameContractOmission ? prior.error ?? null : null,
+      request_id: resumeExisting ? prior.request_id : null,
+      resumed_existing_request: resumeExisting,
+      _prior_row: prior,
+      _prior_report_updated_at: priorReport?.updated_at ?? null,
+      status: resumeExisting ? "resume_pending" : "planned",
+    });
+  }
   for (const row of rows) {
-    const profile = modelslabProfileForWorkId(row.candidate_id, modelslabProfiles);
-    row.modelslab_account = accountByProfile.get(profile);
+    if (row.status === "preserved_generated") continue;
+    if (row.status === "resume_pending") {
+      const fingerprint = String(row._prior_row?.modelslab_account_fingerprint ?? "").trim();
+      if (!fingerprint) {
+        throw new Error(`Cannot resume LTX request ${row.request_id} without its persisted ModelsLab account fingerprint.`);
+      }
+      row.modelslab_account = modelslabAccounts.find((account) => account.fingerprint === fingerprint) ?? null;
+      if (!row.modelslab_account) {
+        throw new Error(
+          `Cannot resume LTX request ${row.request_id}: its persisted ModelsLab account is not among the configured accounts.`,
+        );
+      }
+    } else {
+      const profile = modelslabProfileForWorkId(row.candidate_id, modelslabProfiles);
+      row.modelslab_account = accountByProfile.get(profile);
+    }
     if (!row.modelslab_account) throw new Error("The assigned ModelsLab account was not loaded.");
   }
+
   const batchStartedMs = Date.now();
-  await runLimited(rows, concurrency, async (row) => {
+  let providerRequestAttemptCount = 0;
+  let creativeResubmissionCount = 0;
+  let resumedExistingRequestCount = 0;
+
+  const resumeRows = rows.filter((row) => row.status === "resume_pending");
+  await runLimited(resumeRows, concurrency, async (row) => {
+    const startedAtMs = Date.now();
+    row.request_started_at = new Date(startedAtMs).toISOString();
+    await waitForRecordedCooldown(row._prior_row, row._prior_report_updated_at);
+    try {
+      const fetched = await fetchExistingResult(row.request_id, row.modelslab_account);
+      const result = fetched.status === "success" && responseUrls(fetched).length
+        ? fetched
+        : await pollResult(row.request_id, Date.now(), row.modelslab_account);
+      resumedExistingRequestCount += 1;
+      await materializeProviderResult(row, result, startedAtMs);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const confirmedTerminal = /ModelsLab\s+(?:404|410)\b|ModelsLab\s+\d+:.*"status":"(?:error|failed)"/i.test(message);
+      if (confirmedTerminal) {
+        row.prior_request_id = row.request_id;
+        row.request_id = null;
+        row.resumed_existing_request = true;
+        row.confirmed_terminal_prior_request = true;
+        row.creative_generation_attempt = Math.max(1, Number(row.creative_generation_attempt ?? 1) + 1);
+        row.status = "planned";
+      } else {
+        omitRow(row, "existing_request_resume", error);
+      }
+    }
+  });
+
+  const plannedRows = rows.filter((row) => row.status === "planned");
+  await runLimited(plannedRows, concurrency, async (row) => {
     row.upload_started_at = new Date().toISOString();
+    await waitForRecordedCooldown(row._prior_row, row._prior_report_updated_at);
     try {
       row.init_image_url = await uploadImage(row.source_image_path, row.modelslab_account);
       row.upload_elapsed_ms = Date.now() - Date.parse(row.upload_started_at);
       row.status = "uploaded";
     } catch (error) {
-      row.status = "omitted";
-      row.omission_stage = "init_image_upload";
-      row.disposition = LTX_SINGLE_SHOT_POLICY.unavailable_or_rejected_disposition;
-      row.error = error instanceof Error ? error.message : String(error);
+      omitRow(row, "init_image_upload", error);
     }
   });
   const uploadedRows = rows.filter((row) => row.status === "uploaded");
   await runLimited(uploadedRows, concurrency, async (row) => {
     const startedAtMs = Date.now();
     row.request_started_at = new Date(startedAtMs).toISOString();
+    row.provider_request_attempt = Math.max(0, Number(row.provider_request_attempt ?? 0)) + 1;
+    providerRequestAttemptCount += 1;
+    const creativeRetry = Boolean(row.operator_authorized_retry || row.confirmed_terminal_prior_request);
+    if (creativeRetry) creativeResubmissionCount += 1;
     try {
       const initial = await postJson(
         "https://modelslab.com/api/v6/video/img2video_ultra",
         ltxProviderPayloadForClip(row, {
-          trackId: `goldflow-${episode}-${proofLabel}-${row.candidate_id}`,
+          trackId: `goldflow-${episode}-${row.image_id}-${String(row.source_image_sha256).slice(0, 12)}-a${row.creative_generation_attempt}`,
         }),
         {
-        account: row.modelslab_account,
+          account: row.modelslab_account,
           retries: LTX_SINGLE_SHOT_POLICY.automatic_generation_retries,
           rateLimitRetries: 0,
         },
@@ -749,46 +1108,69 @@ async function main() {
         message: initial.message ?? null,
       };
     } catch (error) {
-      row.status = "omitted";
-      row.omission_stage = "creative_generation_submission";
-      row.disposition = LTX_SINGLE_SHOT_POLICY.unavailable_or_rejected_disposition;
-      row.error = error instanceof Error ? error.message : String(error);
+      omitRow(row, "creative_generation_submission", error);
     }
   });
-  const submittedRows = rows.filter((row) => row.request_id || row.status === "success");
+  const submittedRows = rows.filter((row) => row.status !== "generated"
+    && row.status !== "omitted"
+    && (row.request_id || row.status === "success"));
   await runLimited(submittedRows, concurrency, async (row) => {
     const startedAtMs = Date.parse(row.request_started_at);
     try {
       const result = row.status === "success" && responseUrls(row.initial_provider_result).length
         ? row.initial_provider_result
         : await pollResult(row.request_id, startedAtMs, row.modelslab_account);
-      row.provider_generation_time_sec = result.generationTime ?? null;
-      const rawPath = path.join(outputDir, "raw", `${row.candidate_id}-ltx23.mp4`);
-      row.download_url = await downloadResult(result, rawPath);
-      row.raw_video_path = rawPath;
-      row.raw_video_sha256 = await hashFile(rawPath);
-      row.raw_probe = await probeVideo(rawPath);
-      const normalizedPath = path.join(outputDir, "normalized", `${row.candidate_id}-ltx23-1920x1080.mp4`);
-      row.normalized_probe = await normalizeVideo(rawPath, normalizedPath, row.duration_sec);
-      row.normalized_video_path = normalizedPath;
-      row.normalized_video_sha256 = await hashFile(normalizedPath);
-      row.wall_time_sec = Number(((Date.now() - startedAtMs) / 1000).toFixed(3));
-      row.status = "generated";
-      delete row.init_image_url;
-      delete row.download_url;
-      delete row.initial_provider_result;
+      await materializeProviderResult(row, result, startedAtMs);
     } catch (error) {
-      row.status = "omitted";
-      row.omission_stage = "provider_result_or_normalization";
-      row.disposition = LTX_SINGLE_SHOT_POLICY.unavailable_or_rejected_disposition;
-      row.error = error instanceof Error ? error.message : String(error);
+      omitRow(row, "provider_result_or_normalization", error);
     }
   });
-  const completed = rows.filter((row) => row.status === "generated");
-  const omitted = rows.filter((row) => row.status !== "generated");
-  const sheetPath = path.join(outputDir, `ltx_video_contact_sheet_${episode}${proof ? `-${proofLabel}` : ""}.jpg`);
+
+  const scopedPublicRows = rows.map((row) => row._public_row
+    ?? publicLtxClipResult(row, { accountProfiles: modelslabProfiles }));
+  const merged = repairExisting
+    ? mergeLtxReportRowsForRepair({
+        mergedPlan: plan,
+        priorReport,
+        scopeIds: repairScope,
+        scopedRows: scopedPublicRows,
+      })
+    : {
+        rows: scopedPublicRows,
+        generated: scopedPublicRows.filter((row) => row.status === "generated"),
+        omitted: scopedPublicRows.filter((row) => row.status !== "generated"),
+      };
+  const completed = merged.generated;
+  const omitted = merged.omitted;
+  const repairedAt = new Date().toISOString();
+  const repairSheetToken = repairedAt.replace(/[^0-9]/g, "");
+  const sheetPath = path.join(outputDir, repairExisting
+    ? `ltx_video_contact_sheet_${episode}-repair-${repairSheetToken}.jpg`
+    : `ltx_video_contact_sheet_${episode}${proof ? `-${proofLabel}` : ""}.jpg`);
   if (completed.length) await contactSheet(completed, sheetPath);
+  if (repairExisting) {
+    plan.repair_history = [
+      ...(priorPlan.repair_history ?? []),
+      {
+        repaired_at: repairedAt,
+        prior_plan_sha256: priorPlanFileHash,
+        prior_report_sha256: priorReportFileHash,
+        exact_cut_ids: [...repairScope],
+        operator_authorized_retry: operatorAuthorizedRetry,
+        provider_request_attempt_count: providerRequestAttemptCount,
+        creative_resubmission_count: creativeResubmissionCount,
+        resumed_existing_request_count: resumedExistingRequestCount,
+      },
+    ];
+  }
+  plan.updated_at = repairedAt;
+  plan.plan_sha256 = ltxPlanHash(plan);
+  const nextPlanFileHash = sha256(serializedJson(plan));
+  const priorSubmissionCount = repairExisting ? Number(priorReport.creative_submission_count ?? 0) : 0;
+  const priorResubmissionCount = repairExisting ? Number(priorReport.creative_resubmission_count ?? 0) : 0;
+  const priorProviderAttemptCount = repairExisting ? Number(priorReport.provider_request_attempt_count ?? priorSubmissionCount) : 0;
   const report = {
+    ...(repairExisting ? priorReport : {}),
     schema: "goldflow_ltx23_video_report_v1",
     status: "passed",
     channel,
@@ -800,7 +1182,7 @@ async function main() {
     provider: LTX_VIDEO_PROVIDER,
     model_id: LTX_VIDEO_MODEL_ID,
     plan_path: planPath,
-    plan_sha256: await hashFile(planPath),
+    plan_sha256: nextPlanFileHash,
     plan_contract_sha256: plan.plan_sha256,
     source_hashes: plan.source_hashes,
     requested_concurrency: concurrency,
@@ -808,10 +1190,16 @@ async function main() {
     candidate_policy: "one_candidate_per_motion_moment",
     automatic_generation_retries: LTX_SINGLE_SHOT_POLICY.automatic_generation_retries,
     modelslab_account_pool: publicLtxModelslabAccountPool(modelslabAccounts),
-    planned_count: rows.length,
-    attempted_count: uploadedRows.length,
-    creative_submission_count: uploadedRows.length,
-    creative_resubmission_count: 0,
+    planned_count: merged.rows.length,
+    attempted_count: merged.rows.filter((row) => Number(row.creative_generation_attempt ?? 0) > 0).length,
+    creative_submission_count: priorSubmissionCount + providerRequestAttemptCount,
+    provider_request_attempt_count: priorProviderAttemptCount + providerRequestAttemptCount,
+    generation_requests_submitted: providerRequestAttemptCount,
+    creative_resubmission_count: priorResubmissionCount + creativeResubmissionCount,
+    operator_authorized_retry_count: (repairExisting ? Number(priorReport.operator_authorized_retry_count ?? 0) : 0)
+      + rows.filter((row) => row.operator_authorized_retry).length,
+    resumed_existing_request_count: (repairExisting ? Number(priorReport.resumed_existing_request_count ?? 0) : 0)
+      + resumedExistingRequestCount,
     clip_count: completed.length,
     generated_count: completed.length,
     failed_count: 0,
@@ -819,11 +1207,31 @@ async function main() {
     omitted_disposition: LTX_SINGLE_SHOT_POLICY.unavailable_or_rejected_disposition,
     batch_wall_time_sec: Number(((Date.now() - batchStartedMs) / 1000).toFixed(3)),
     contact_sheet_path: completed.length ? sheetPath : null,
-    clips: completed.map((row) => publicLtxClipResult(row, { accountProfiles: modelslabProfiles })),
-    omitted_clips: omitted.map((row) => publicLtxClipResult(row, { accountProfiles: modelslabProfiles })),
-    updated_at: new Date().toISOString(),
+    clips: completed,
+    omitted_clips: omitted,
+    timing_revalidated_without_provider_submission: false,
+    timing_revalidated_at: null,
+    timing_revalidated_from_report_sha256: null,
+    repair_history: repairExisting
+      ? [
+          ...(priorReport.repair_history ?? []),
+          {
+            repaired_at: repairedAt,
+            prior_plan_sha256: priorPlanFileHash,
+            prior_report_sha256: priorReportFileHash,
+            exact_cut_ids: [...repairScope],
+            operator_authorized_retry: operatorAuthorizedRetry,
+            provider_request_attempt_count: providerRequestAttemptCount,
+            creative_resubmission_count: creativeResubmissionCount,
+            resumed_existing_request_count: resumedExistingRequestCount,
+            generated_count: completed.length,
+            omitted_count: omitted.length,
+          },
+        ]
+      : [],
+    updated_at: repairedAt,
   };
-  await writeJson(outputPath, report);
+  await atomicWriteJsonPair(planPath, plan, outputPath, report);
   console.log(JSON.stringify({
     status: report.status,
     output_path: outputPath,
@@ -833,6 +1241,9 @@ async function main() {
     generated_count: report.generated_count,
     failed_count: report.failed_count,
     omitted_count: report.omitted_count,
+    generation_requests_submitted: report.generation_requests_submitted,
+    creative_resubmission_count: report.creative_resubmission_count,
+    repaired_cut_ids: repairExisting ? [...repairScope] : [],
     batch_wall_time_sec: report.batch_wall_time_sec,
   }, null, 2));
 }
@@ -840,13 +1251,16 @@ async function main() {
 if (path.resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {
   main().catch(async (error) => {
     const errorMessage = error instanceof Error ? error.message : String(error);
-    if (!revalidateExisting) {
-      await writeJson(outputPath, {
-        schema: "goldflow_ltx23_video_report_v1",
-        status: "failed",
-        error: redactLtxAccountProfileNames(errorMessage, modelslabProfiles),
-        updated_at: new Date().toISOString(),
-      }).catch(() => {});
+    if (!revalidateExisting && !repairExisting) {
+      const existingCanonical = await readJson(outputPath, null).catch(() => null);
+      if (existingCanonical?.status !== "passed") {
+        await writeJson(outputPath, {
+          schema: "goldflow_ltx23_video_report_v1",
+          status: "failed",
+          error: redactLtxAccountProfileNames(errorMessage, modelslabProfiles),
+          updated_at: new Date().toISOString(),
+        }).catch(() => {});
+      }
     }
     console.error(errorMessage);
     process.exitCode = 1;

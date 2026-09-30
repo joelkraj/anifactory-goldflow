@@ -434,6 +434,10 @@ export function stageIsSatisfied(state) {
 
 export function commandStageFor(commandName, subcommandName, flags = {}) {
   const key = `${commandName} ${subcommandName}`.trim();
+  if (key === "imagegen qwen-vehicle-recovery") {
+    if (String(flags.action ?? "generate").trim().toLowerCase() === "validate") return null;
+    return "image_output_qa";
+  }
   if (key === "imagegen start" || key === "imagegen codex-work" || key === "imagegen import-staged-codex") {
     if (/^(true|1|yes)$/i.test(String(flags["references-only"] ?? ""))) return "reference_generation";
     if (/^(true|1|yes)$/i.test(String(flags["qa-recovery"] ?? ""))) return "image_output_qa";

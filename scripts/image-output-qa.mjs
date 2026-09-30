@@ -105,6 +105,25 @@ function visibleCharacterCount(prompt) {
   ].map((value) => String(value ?? "").trim()).filter(Boolean)).size;
 }
 
+export function promptHasVehicleTopologyRisk(prompt) {
+  const manifest = prompt?.shot_manifest ?? {};
+  const text = [
+    prompt?.visual_beat_script_excerpt,
+    prompt?.visual_beat_action,
+    prompt?.visual_job,
+    prompt?.image_prompt,
+    prompt?.modelslab_image_prompt,
+    manifest?.location,
+    manifest?.shot_job,
+    manifest?.foreground_action,
+    manifest?.composition,
+    ...(manifest?.visible_characters ?? []),
+  ].filter(Boolean).join(" ");
+  const physicalVehicle = /\b(?:car|sedan|suv|van|truck|taxi|rideshare|uber|vehicle|limousine)\b/i.test(text);
+  const topology = /\b(?:cabin|interior|driver(?:'s)?\s+seat|passenger(?:'s)?\s+seat|front\s+(?:row|seat|passenger)|rear\s+(?:row|seat|bench|passenger)|back\s+seat|dashboard|steering\s+wheel|rearview\s+mirror|windshield|center\s+console|car\s+door|vehicle\s+door|passenger\s+door|rear\s+door|door\s+handle|car\s+window|passenger\s+window|seat\s+beside)\b/i.test(text);
+  return physicalVehicle && topology;
+}
+
 export function imageRiskReasons(prompt, { openingSec = 180 } = {}) {
   const reasons = [];
   if (Number(prompt?.start_sec ?? 0) < openingSec) reasons.push("opening_retention");
@@ -113,6 +132,7 @@ export function imageRiskReasons(prompt, { openingSec = 180 } = {}) {
   if (job === "physical_action" || /\b(?:lift|carry|catch|pin|restrain|shield|stab|strike|hit|shove|grab|rescue|fight)\b/i.test(action)) reasons.push("physical_action_geometry");
   if (promptHasImmutableAnatomyRisk(prompt)) reasons.push("immutable_anatomy_adherence");
   if (promptHasEquipmentGeometryRisk(prompt)) reasons.push("equipment_count_hand_and_contact_geometry");
+  if (promptHasVehicleTopologyRisk(prompt)) reasons.push("vehicle_cabin_topology");
   if (visibleCharacterCount(prompt) >= 3) reasons.push("dense_cast");
   if (backgroundPopulationIsRequired(prompt?.shot_manifest?.background_population)) reasons.push("background_population");
   const referenceCount = Math.max(prompt?.reference_slots?.length ?? 0, prompt?.reference_requirements?.length ?? 0);
@@ -145,6 +165,14 @@ export function imageManualReviewPolicy(prompt, compositionFindings = [], option
     ...reasons,
     ...compositionReasons,
   ])];
+  if (advisoryReasons.includes("vehicle_cabin_topology")) {
+    return {
+      tier: "mandatory_story_geometry_review",
+      requires_manual_review: true,
+      reasons: advisoryReasons,
+      sampled,
+    };
+  }
   if (advisoryReasons.length) {
     return { tier: "advisory_review_log", requires_manual_review: false, reasons: advisoryReasons, sampled };
   }
@@ -612,7 +640,7 @@ async function main() {
       opening_review_sec: openingReviewSec,
       integration_sample_rate: integrationSampleRate,
       full_contact_sheets_enabled: writeFullContactSheets,
-      manual_review_tiers: [],
+      manual_review_tiers: ["mandatory_story_geometry_review"],
       advisory_review_tiers: ["advisory_review_log"],
       structural_auto_pass_count: audit.rows.filter((row) => row.qa_tier === "structural_auto_pass").length,
       advisory_review_log_count: audit.rows.filter((row) => row.qa_tier === "advisory_review_log").length,

@@ -346,6 +346,8 @@ if (command === "help" || command === "--help" || command === "-h") {
   run("codex-image-manual-import.mjs", flags);
 } else if (command === "imagegen" && subcommand === "import-staged-codex") {
   run("codex-image-import-staged.mjs", flags);
+} else if (command === "imagegen" && subcommand === "qwen-vehicle-recovery") {
+  run("qwen-vehicle-recovery.mjs", flags);
 } else if (command === "imagegen" && subcommand === "qa") {
   run("image-output-qa.mjs", flags);
 } else if (command === "imagegen" && subcommand === "analyze") {

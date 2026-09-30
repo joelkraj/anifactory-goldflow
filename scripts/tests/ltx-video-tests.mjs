@@ -163,12 +163,19 @@ const publicClip = publicLtxClipResult({
   candidate_id: "cut_account_fixture-candidate-01",
   candidate_index: 1,
   creative_generation_attempt: 1,
+  provider_request_attempt: 2,
   automatic_generation_retry_allowed: false,
+  operator_authorized_retry: true,
+  resumed_existing_request: true,
   duration_sec: 5,
   modelslab_account: privateAccount,
   status: "omitted",
   disposition: "accepted_still_fallback",
   omission_stage: "creative_generation_submission",
+  retryable_transient: true,
+  retry_after_ms: 1_805_000,
+  cooldown_until: "2026-08-03T13:30:00.000Z",
+  omitted_at: "2026-08-03T13:00:00.000Z",
   error: "ModelsLab CLI profile fixture-secondary failed.",
 }, { accountProfiles: [privateAccount.profile] });
 const persistedProvenance = JSON.stringify({
@@ -182,9 +189,14 @@ assert.deepEqual(publicAccountPool, [{
 assert.equal(publicClip.modelslab_account_fingerprint, "ml_fixture1234");
 assert.equal(publicClip.modelslab_account_credential_source, "modelslab_cli_profile");
 assert.equal(publicClip.creative_generation_attempt, 1);
+assert.equal(publicClip.provider_request_attempt, 2);
 assert.equal(publicClip.automatic_generation_retry_allowed, false);
+assert.equal(publicClip.operator_authorized_retry, true);
+assert.equal(publicClip.resumed_existing_request, true);
 assert.equal(publicClip.disposition, "accepted_still_fallback");
 assert.equal(publicClip.omission_stage, "creative_generation_submission");
+assert.equal(publicClip.retryable_transient, true);
+assert.equal(publicClip.retry_after_ms, 1_805_000);
 assert.equal(Object.hasOwn(publicClip, "modelslab_account_profile"), false);
 assert.doesNotMatch(persistedProvenance, /fixture-secondary/u);
 assert.doesNotMatch(persistedProvenance, /fixture-secret-key/u);

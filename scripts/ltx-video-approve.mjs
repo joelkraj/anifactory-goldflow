@@ -4,6 +4,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { hashFile } from "./lib/ltx-video-contract.mjs";
+import { mergeLtxApprovalDecisions } from "./lib/ltx-video-repair.mjs";
 
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const flags = parseFlags(process.argv.slice(2));
@@ -20,6 +21,7 @@ const outputDir = path.resolve(flags["output-dir"] ?? (proof
 const reportPath = path.resolve(flags.report ?? path.join(outputDir, `ltx_video_report_${episode}${proof ? `-${proofLabel}` : ""}.json`));
 const outputPath = path.resolve(flags.output ?? path.join(outputDir, `ltx_video_approval_${episode}${proof ? `-${proofLabel}` : ""}.json`));
 const revalidateExisting = boolFlag(flags["revalidate-existing"]);
+const repairExisting = boolFlag(flags["repair-existing"]);
 
 function parseFlags(parts) {
   const parsed = {};
@@ -55,7 +57,17 @@ async function writeJson(filePath, value) {
   await fs.writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
 }
 
+async function atomicWriteJson(filePath, value) {
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  const temporaryPath = `${filePath}.tmp-${process.pid}-${Date.now()}`;
+  await fs.writeFile(temporaryPath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+  await fs.rename(temporaryPath, filePath);
+}
+
 async function main() {
+  if (repairExisting && (proof || revalidateExisting)) {
+    throw new Error("--repair-existing approval is production-only and cannot be combined with proof or timing revalidation.");
+  }
   const report = await readJson(reportPath);
   if (report?.schema !== "goldflow_ltx23_video_report_v1" || report?.status !== "passed") {
     throw new Error(`LTX approval requires a passed generation report: ${reportPath}`);
@@ -116,20 +128,19 @@ async function main() {
   }
   const approveIds = ids(flags["approve-ids"]);
   const rejectIds = ids(flags["reject-ids"] ?? flags["decline-ids"]);
-  const decisionId = (row) => String(row.candidate_id ?? row.image_id ?? "");
-  const known = new Set((report.clips ?? []).map(decisionId));
-  for (const id of [...approveIds, ...rejectIds]) {
-    if (!known.has(id)) throw new Error(`Unknown LTX clip id in approval flags: ${id}`);
-  }
-  for (const id of approveIds) {
-    if (rejectIds.has(id)) throw new Error(`LTX clip ${id} cannot be both approved and rejected.`);
-  }
-  const missing = [...known].filter((id) => !approveIds.has(id) && !rejectIds.has(id));
-  if (missing.length) throw new Error(`Every LTX clip requires a decision. Missing: ${missing.join(", ")}`);
   const reviewer = String(flags.reviewer ?? "").trim();
   const note = String(flags.note ?? "").trim();
-  if (!reviewer || !note) throw new Error("--reviewer and --note are required.");
-  const decisions = [];
+  const priorApproval = repairExisting ? await readJson(outputPath) : null;
+  if (repairExisting
+    && (priorApproval?.schema !== "goldflow_ltx23_video_approval_v1" || priorApproval?.status !== "passed")) {
+    throw new Error(`Scoped LTX approval repair requires the existing passed canonical approval: ${outputPath}`);
+  }
+  const generationRepairAncestors = new Set((repairExisting ? report.repair_history ?? [] : [])
+    .map((row) => String(row.prior_report_sha256 ?? ""))
+    .filter(Boolean));
+  if (repairExisting && !generationRepairAncestors.has(String(priorApproval.report_sha256 ?? ""))) {
+    throw new Error("Scoped LTX approval repair refused an approval outside the report's hash-bound repair ancestry.");
+  }
   const acceptedImages = new Set();
   for (const clip of report.clips ?? []) {
     if (await hashFile(clip.source_image_path) !== clip.source_image_sha256) {
@@ -138,23 +149,35 @@ async function main() {
     if (await hashFile(clip.normalized_video_path) !== clip.normalized_video_sha256) {
       throw new Error(`Normalized video is stale for ${clip.image_id}.`);
     }
-    const id = decisionId(clip);
-    const accepted = approveIds.has(id);
-    if (accepted && acceptedImages.has(String(clip.image_id))) {
-      throw new Error(`Only one LTX candidate may be accepted for ${clip.image_id}.`);
-    }
-    if (accepted) acceptedImages.add(String(clip.image_id));
-    decisions.push({
-      image_id: clip.image_id,
-      candidate_id: clip.candidate_id ?? clip.image_id,
-      decision: accepted ? "accepted" : "rejected",
-      source_image_sha256: clip.source_image_sha256,
-      video_sha256: clip.normalized_video_sha256,
-      reviewer,
-      note,
-    });
   }
+  const decisions = mergeLtxApprovalDecisions({
+    report,
+    priorApproval,
+    approveIds,
+    rejectIds,
+    reviewer,
+    note,
+    repairExisting,
+  });
+  const currentDecisionIds = new Set(decisions.map((row) => String(row.candidate_id ?? row.image_id ?? "")));
+  const removedCandidateIds = repairExisting
+    ? (priorApproval.decisions ?? [])
+        .map((row) => String(row.candidate_id ?? row.image_id ?? ""))
+        .filter((id) => id && !currentDecisionIds.has(id))
+    : [];
+  if (removedCandidateIds.length && (!reviewer || !note)) {
+    throw new Error("--reviewer and --note are required when repaired omissions remove prior LTX decisions.");
+  }
+  for (const decision of decisions) {
+    if (decision.decision !== "accepted") continue;
+    if (acceptedImages.has(String(decision.image_id))) {
+      throw new Error(`Only one LTX candidate may be accepted for ${decision.image_id}.`);
+    }
+    acceptedImages.add(String(decision.image_id));
+  }
+  const repairedAt = new Date().toISOString();
   const approval = {
+    ...(repairExisting ? priorApproval : {}),
     schema: "goldflow_ltx23_video_approval_v1",
     status: "passed",
     channel,
@@ -170,11 +193,26 @@ async function main() {
     accepted_count: decisions.filter((row) => row.decision === "accepted").length,
     rejected_count: decisions.filter((row) => row.decision === "rejected").length,
     decisions,
-    reviewer,
-    note,
-    updated_at: new Date().toISOString(),
+    reviewer: reviewer || priorApproval?.reviewer || null,
+    note: note || priorApproval?.note || null,
+    decision_repair_history: repairExisting
+      ? [
+          ...(priorApproval.decision_repair_history ?? []),
+          {
+            repaired_at: repairedAt,
+            prior_report_sha256: priorApproval.report_sha256,
+            exact_candidate_ids: [...new Set([...approveIds, ...rejectIds])],
+            removed_candidate_ids: removedCandidateIds,
+            reviewer,
+            note,
+          },
+        ]
+      : [],
+    timing_revalidated_without_review_change: false,
+    timing_revalidated_at: null,
+    updated_at: repairedAt,
   };
-  await writeJson(outputPath, approval);
+  await atomicWriteJson(outputPath, approval);
   console.log(JSON.stringify({
     status: approval.status,
     output_path: outputPath,
@@ -186,13 +224,16 @@ async function main() {
 
 if (path.resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {
   main().catch(async (error) => {
-    if (!revalidateExisting) {
-      await writeJson(outputPath, {
-        schema: "goldflow_ltx23_video_approval_v1",
-        status: "failed",
-        error: error instanceof Error ? error.message : String(error),
-        updated_at: new Date().toISOString(),
-      }).catch(() => {});
+    if (!revalidateExisting && !repairExisting) {
+      const existingCanonical = await readJson(outputPath).catch(() => null);
+      if (existingCanonical?.status !== "passed") {
+        await writeJson(outputPath, {
+          schema: "goldflow_ltx23_video_approval_v1",
+          status: "failed",
+          error: error instanceof Error ? error.message : String(error),
+          updated_at: new Date().toISOString(),
+        }).catch(() => {});
+      }
     }
     console.error(error instanceof Error ? error.message : String(error));
     process.exitCode = 1;

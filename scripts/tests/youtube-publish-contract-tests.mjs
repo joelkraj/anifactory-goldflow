@@ -378,6 +378,29 @@ export async function runYoutubePublishContractTests() {
   approvedCodexThumbnail.thumbnail_candidates[0].reference_count = 1;
   assert.equal(validateYoutubePackagingSpec(approvedCodexThumbnail, { now }).blockers.includes("selected_thumbnail_reference_count_must_be_zero"), true);
 
+  const scopedEdit = structuredClone(spec);
+  Object.assign(scopedEdit.thumbnail_candidates[0], {
+    provider: "codex_imagegen",
+    generation_mode: "scoped_edit_from_local_raster",
+    reference_count: 1,
+    edit_source_path: "thumbnail_previous_v5.png",
+    edit_source_sha256: "a".repeat(64),
+    final_sha256: "b".repeat(64),
+    edit_scope: "Blue veins on the brother and a blue glow on Joey's hand; preserve composition.",
+    edit_user_request: "Make an edit to the previous version, not a new image.",
+  });
+  assert.equal(validateYoutubePackagingSpec(scopedEdit, {
+    now, thumbnailFinalSha256: "b".repeat(64), thumbnailEditSourceSha256: "a".repeat(64),
+  }).status, "passed");
+  assert.equal(validateYoutubePackagingSpec(scopedEdit, {
+    now, thumbnailFinalSha256: "c".repeat(64), thumbnailEditSourceSha256: null,
+  }).blockers.includes("selected_thumbnail_scoped_edit_source_hash_stale"), true);
+  assert.equal(validateYoutubePackagingSpec(scopedEdit, {
+    now, thumbnailFinalSha256: "c".repeat(64), thumbnailEditSourceSha256: null,
+  }).blockers.includes("selected_thumbnail_scoped_edit_final_hash_stale"), true);
+  scopedEdit.thumbnail_candidates[0].reference_count = 2;
+  assert.equal(validateYoutubePackagingSpec(scopedEdit, { now }).blockers.includes("selected_thumbnail_scoped_edit_requires_one_reference"), true);
+
   const invalidThumbnailGenerationContract = structuredClone(spec);
   Object.assign(invalidThumbnailGenerationContract.thumbnail_candidates[0], {
     provider: "modelslab",

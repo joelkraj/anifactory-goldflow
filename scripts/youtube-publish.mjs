@@ -17,6 +17,7 @@ import {
   YOUTUBE_UPLOAD_RECEIPT_SCHEMA,
   listYoutubeThumbnailUpdateReceipts,
   packagingWorkflowSupport,
+  selectedThumbnailCandidate,
   validateYoutubeThumbnailUpdateReceipt,
   validateYoutubePackagingSpec,
   validateYoutubePinnedCommentReceipt,
@@ -147,6 +148,11 @@ async function packagingInputs(episodeDir, episode) {
     throw new Error(`Unsupported packaging spec schema: ${spec.schema ?? "missing"}`);
   }
   const thumbnailPath = path.resolve(episodeDir, clean(spec.thumbnail_final_path));
+  const selected = selectedThumbnailCandidate(spec);
+  if (selected?.generation_mode === YOUTUBE_THUMBNAIL_GENERATION_CONTRACT.scoped_edit_mode
+      && path.resolve(episodeDir, clean(selected.edit_source_path)) === thumbnailPath) {
+    throw new Error("Scoped thumbnail edit must preserve its source at a separate path.");
+  }
   if (!(await exists(thumbnailPath))) throw new Error(`Missing final thumbnail: ${thumbnailPath}`);
   const [metadata, stat] = await Promise.all([
     sharp(thumbnailPath).metadata(),
@@ -164,6 +170,10 @@ async function packagingInputs(episodeDir, episode) {
       format: metadata.format,
     },
     thumbnailBytes: stat.size,
+    thumbnailFinalSha256: await sha256File(thumbnailPath),
+    ...(selected?.generation_mode === YOUTUBE_THUMBNAIL_GENERATION_CONTRACT.scoped_edit_mode
+      ? { thumbnailEditSourceSha256: await sha256File(path.resolve(episodeDir, clean(selected.edit_source_path))).catch(() => null) }
+      : {}),
   };
 }
 
@@ -203,6 +213,8 @@ function packagingValidation(inputs, options = {}) {
     markdown: inputs.markdown,
     thumbnailMetadata: inputs.thumbnailMetadata,
     thumbnailBytes: inputs.thumbnailBytes,
+    thumbnailFinalSha256: inputs.thumbnailFinalSha256,
+    thumbnailEditSourceSha256: inputs.thumbnailEditSourceSha256,
     ...options,
   });
 }
@@ -224,6 +236,8 @@ async function approvePackaging() {
     markdown: inputs.markdown,
     thumbnailMetadata: inputs.thumbnailMetadata,
     thumbnailBytes: inputs.thumbnailBytes,
+    thumbnailFinalSha256: inputs.thumbnailFinalSha256,
+    thumbnailEditSourceSha256: inputs.thumbnailEditSourceSha256,
   });
   const experiment = await channelExperimentContext({ episodeDir, identity, episode, spec: approvedSpec });
   if (experiment?.validation.applies && experiment.validation.blockers.length) {
@@ -382,6 +396,8 @@ async function prepareManifest() {
     inputs.packagePath,
     inputs.specPath,
     inputs.thumbnailPath,
+    ...(selectedThumbnail?.generation_mode === YOUTUBE_THUMBNAIL_GENERATION_CONTRACT.scoped_edit_mode
+      ? [path.resolve(episodeDir, clean(selectedThumbnail.edit_source_path))] : []),
     ...(experiment?.validation.applies ? [experiment.path] : []),
     ...(abPlan ? [abPlanPath, ...abPlan.variants.map((row) => row.thumbnail_path)] : []),
   ];
@@ -426,6 +442,11 @@ async function prepareManifest() {
       provider: selectedThumbnail.provider ?? null,
       generation_mode: selectedThumbnail.generation_mode ?? null,
       reference_count: selectedThumbnail.reference_count ?? null,
+      edit_source_path: selectedThumbnail.edit_source_path ?? null,
+      edit_source_sha256: selectedThumbnail.edit_source_sha256 ?? null,
+      final_sha256: selectedThumbnail.final_sha256 ?? null,
+      edit_scope: selectedThumbnail.edit_scope ?? null,
+      edit_user_request: selectedThumbnail.edit_user_request ?? null,
       text_rendered_by_model: selectedThumbnail.text_rendered_by_model ?? null,
       locally_composited_text: selectedThumbnail.locally_composited_text ?? null,
       locally_composited_arrows: selectedThumbnail.locally_composited_arrows ?? null,

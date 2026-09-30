@@ -27,6 +27,7 @@ export const YOUTUBE_THUMBNAIL_GENERATION_CONTRACT = Object.freeze({
   ]),
   fallback_provider: "chatgpt_web_gpt_image",
   generation_mode: "full_raster_from_scratch",
+  scoped_edit_mode: "scoped_edit_from_local_raster",
   reference_count: 0,
   text_rendered_by_model: true,
   locally_composited_text: false,
@@ -277,16 +278,28 @@ function validateThumbnail(spec, blockers, validEvidenceIds, options = {}) {
         !YOUTUBE_THUMBNAIL_GENERATION_CONTRACT.allowed_providers.includes(clean(selected?.provider)),
         "selected_thumbnail_provider_must_be_approved_imagen_route",
       );
-      push(
-        blockers,
-        clean(selected?.generation_mode) !== YOUTUBE_THUMBNAIL_GENERATION_CONTRACT.generation_mode,
-        "selected_thumbnail_generation_mode_must_be_full_raster_from_scratch",
-      );
-      push(
-        blockers,
-        selected?.reference_count !== YOUTUBE_THUMBNAIL_GENERATION_CONTRACT.reference_count,
-        "selected_thumbnail_reference_count_must_be_zero",
-      );
+      const scopedEdit = clean(selected?.generation_mode) === YOUTUBE_THUMBNAIL_GENERATION_CONTRACT.scoped_edit_mode;
+      push(blockers, !scopedEdit && clean(selected?.generation_mode) !== YOUTUBE_THUMBNAIL_GENERATION_CONTRACT.generation_mode,
+        "selected_thumbnail_generation_mode_must_be_full_raster_from_scratch");
+      push(blockers, selected?.reference_count !== (scopedEdit ? 1 : 0),
+        scopedEdit ? "selected_thumbnail_scoped_edit_requires_one_reference" : "selected_thumbnail_reference_count_must_be_zero");
+      if (scopedEdit) {
+        const sourcePath = clean(selected?.edit_source_path);
+        const finalPath = clean(spec?.thumbnail_final_path);
+        const sha = /^[a-f0-9]{64}$/i;
+        push(blockers, clean(selected?.provider) !== "codex_imagegen", "selected_thumbnail_scoped_edit_requires_codex_imagegen");
+        push(blockers, !sourcePath || sourcePath === finalPath, "selected_thumbnail_scoped_edit_source_path_invalid");
+        push(blockers, !sha.test(clean(selected?.edit_source_sha256)), "selected_thumbnail_scoped_edit_source_hash_missing");
+        push(blockers, !sha.test(clean(selected?.final_sha256)), "selected_thumbnail_scoped_edit_final_hash_missing");
+        push(blockers, !clean(selected?.edit_scope), "selected_thumbnail_scoped_edit_scope_missing");
+        push(blockers, !clean(selected?.edit_user_request), "selected_thumbnail_scoped_edit_user_request_missing");
+        if (options.thumbnailFinalSha256 !== undefined) {
+          push(blockers, options.thumbnailFinalSha256 !== clean(selected?.final_sha256), "selected_thumbnail_scoped_edit_final_hash_stale");
+        }
+        if (options.thumbnailEditSourceSha256 !== undefined) {
+          push(blockers, options.thumbnailEditSourceSha256 !== clean(selected?.edit_source_sha256), "selected_thumbnail_scoped_edit_source_hash_stale");
+        }
+      }
       push(
         blockers,
         selected?.text_rendered_by_model !== YOUTUBE_THUMBNAIL_GENERATION_CONTRACT.text_rendered_by_model,
@@ -404,6 +417,8 @@ export function validateYoutubePackagingSpec(spec, options = {}) {
   validateTitle(spec, blockers, validEvidenceIds);
   validateThumbnail(spec, blockers, validEvidenceIds, {
     enforceGenerationContract: schemaMode !== "legacy_adapter_v1",
+    thumbnailFinalSha256: options.thumbnailFinalSha256,
+    thumbnailEditSourceSha256: options.thumbnailEditSourceSha256,
   });
   validateDescriptionAndComment(spec, blockers);
   validatePublishSettings(spec, blockers);
@@ -528,6 +543,10 @@ export async function youtubeUploadPackagingComplete(episodeDir, episode, runIde
     markdown,
     thumbnailMetadata: evidence.metadata,
     thumbnailBytes: evidence.bytes,
+    thumbnailFinalSha256: await sha256File(thumbnailPath),
+    ...(selectedThumbnailCandidate(spec)?.generation_mode === YOUTUBE_THUMBNAIL_GENERATION_CONTRACT.scoped_edit_mode
+      ? { thumbnailEditSourceSha256: await sha256File(resolveEpisodeArtifact(episodeDir, selectedThumbnailCandidate(spec)?.edit_source_path)).catch(() => null) }
+      : {}),
     allowLegacyAdapter: true,
   });
   if (validation.status === "passed") {

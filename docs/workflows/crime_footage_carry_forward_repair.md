@@ -1,0 +1,15 @@
+# CrimeDungeon v2 technical carry-forward
+
+This narrow recovery preserves the completed Lindsay Clancy proof-v1 stages and identity. Public metadata identified its selected V03 HD audio as an Arabic alternate track. The same window's retained 144p file contains original English court audio; its HD picture can be retained after a source-bound picture correspondence check. No new acquisition, narration generation, different source window or release is enabled.
+
+The [carry-forward helper](../../scripts/lib/crime-footage-proof-carry-forward.mjs) operates only inside fresh proof-v2 `source_assets` and `narration` attempts opened by the existing private controller. Bind the helper file and exact recovery recipe as stage inputs before either call. The old/new plan and script hashes, narrator lock, selected sources/windows and editorial identity must match. Both original completed stage receipts and every declared artifact are rechecked; imports cannot substitute arbitrary files.
+
+The recipe schema is `crime_footage_v2_carry_forward_v1`, scope `same_case_sources_windows_script_voice_no_new_generation`. It records `from_proof_dir`, `to_proof_dir`, `from_identity`, `from_source_stage`, `from_narration_stage`, `language_audit`, `picture_alignment`, a specific `review_note`, and `source_audio_repair: {source_id:"V03", window_id:"cvs_exhibit", hd_artifact_id:"V03_cvs_exhibit_hd", english_audio_artifact_id:"V03_cvs_exhibit_preview144"}`. References contain absolute paths and current SHA256 hashes.
+
+The picture review binds `hd_source` and `sd_source`, reports actual `offset_sec`, and declares `alignment_tolerance_sec` no greater than one 15fps source frame, `applied_offset_sec:0`, `no_retiming_required:true`, `picture_alignment_passed:true`, and `status:"passed"`. A coarse-source frame correspondence within that explicit bound is not described as perfect zero-lag alignment.
+
+`carryForwardCrimeFootageSources({proofDir,attemptToken,recipePath})` copies the three valid HD windows byte for byte and muxes the V03 HD video stream with the existing English audio stream. Both streams use codec copy without trimming or retiming. Compressed packet payload hashes prove unchanged source streams; measured durations preserve the full selected window, including its AAC tail. The original Arabic-bearing file remains retained in proof-v1 as failure evidence.
+
+`carryForwardCrimeFootageNarration({proofDir,attemptToken,recipePath})` copies the three raw Qwen WAVs and every original declared provider/QA artifact exactly. Its separate receipt identifies proof-v1 as the generation identity; copied historical receipts retain their original paths and contents. It records no new generation, zero provider calls and zero new spend. Narration QA findings and missing listening approval carry forward.
+
+Both return strict producer results for the existing controller's finish call. Empty outputs and exclusive writes prevent reruns. Run `node scripts/tests/crime-footage-proof-carry-forward-tests.mjs` for provider-free identity/import refusals and an actual synthetic stream-copy check. These fixtures do not constitute review of the real case media.

@@ -64,6 +64,8 @@ function isTrue(value) {
 }
 
 function commandStage(commandName, subcommandName, parsedFlags, episodeDir) {
+  // The private proof has its own stage controller and never enters the generated registry.
+  if (commandName === "crime-proof") return null;
   const identity = episodeDir ? readEpisodeRoutingIdentity(episodeDir) ?? {} : {};
   return commandStageFor(commandName, subcommandName, parsedFlags, identity);
 }
@@ -393,6 +395,12 @@ ${registryCommands}
   goldflow pilot use-local-concept-fallback Replace all three refused AI concept stills with source-bound local editorial composites; --input <request.json> --accept true --reviewer <name> --note <reason>
   goldflow pilot preview-style        Render an isolated 8–12-second local visual-review candidate at pilot_media; --input <request.json>; no approvals, provider calls, stage completion or publishing
   goldflow pilot preview-program      Extend an operator-accepted style preview into one separate exactly 90-second private review candidate; --input <request.json>; no exact-edit approval or official stage completion
+  goldflow crime-proof preflight    Lock the private CrimeDungeon hybrid proof; --episode-dir <new-dir> --identity <config.json>
+  goldflow crime-proof status       Show exact next stage/command; --episode-dir <dir> --format markdown
+  goldflow crime-proof begin-assets Bind --recipe <assets.json>, acquire selected inputs and prepare scoped external image requests
+  goldflow crime-proof finish-assets Retain inspected assets; --result <result.json> --attempt-token <exact-token>; no approval or publishing
+  goldflow crime-proof narrate      Produce the exact owned-voice narration candidate for whole-program listening
+  goldflow crime-proof render       Render the private review candidate from --manifest <render.json>; no release authority
   goldflow visual planner-ab       Run the diagnostic editorial A/B
   goldflow visual prompt-benchmark Run the locked 25-cut provider prompt benchmark
   goldflow visual parallax-proof-assets Build foreground/background layers for an isolated diagnostic proof
@@ -531,7 +539,9 @@ Prompt-repair migration guardrails:
 `);
 }
 
-if (command === "pilot" && !helpRequested) {
+if (command === "crime-proof" && !helpRequested) {
+  run("true-crime-proof.mjs", ["--action", subcommand, ...flags]);
+} else if (command === "pilot" && !helpRequested) {
   try {
     const { executePilotCommand } = await import("../scripts/lib/avatar-pilot-workflow.mjs");
     const result = await executePilotCommand(subcommand, parseFlags(flags), { repoRoot });

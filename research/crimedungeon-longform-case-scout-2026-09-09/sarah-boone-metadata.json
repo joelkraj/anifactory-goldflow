@@ -1,0 +1,89 @@
+{
+  "schema": "crimedungeon_case_source_metadata_v1",
+  "checked_date": "2026-09-09",
+  "case": "Sarah Boone / Jorge Torres",
+  "source": "vidIQ public YouTube search and get_videos_by_ids",
+  "notes": "Upload durations only. No media download or full playback inspection. Metadata verification is not acquisition or reuse approval.",
+  "videos": [
+    {
+      "id": "w1u1-i_ubeU",
+      "url": "https://www.youtube.com/watch?v=w1u1-i_ubeU",
+      "title": "FULL Police Interrogation of Accused 'Suitcase Murderer' Sarah Boone",
+      "channelId": "UCbinhfv9dTgP0dH_K6RJUbw",
+      "channelTitle": "Law&Crime Investigates",
+      "publishedAt": "2022-07-13T22:00:36Z",
+      "duration": "PT1H55M50S",
+      "viewCount": 6666774
+    },
+    {
+      "id": "wdDuQAO1RGs",
+      "url": "https://www.youtube.com/watch?v=wdDuQAO1RGs",
+      "title": "Police Grill Accused Murderer Sarah Boone the Morning After Her Boyfriend Died (FULL VIDEO)",
+      "channelId": "UCz8K1occVvDTYDfFo7N5EZw",
+      "channelTitle": "Law&Crime Network",
+      "publishedAt": "2022-07-13T23:00:21Z",
+      "duration": "PT41M53S",
+      "viewCount": 4199732
+    },
+    {
+      "id": "0MsZNNu9QL0",
+      "url": "https://www.youtube.com/watch?v=0MsZNNu9QL0",
+      "title": "911 call released in Florida suitcase murder trial of Sarah Boone",
+      "channelId": "UCuXT13wiqK56NR7QSfDWpvg",
+      "channelTitle": "FOX 35 Orlando",
+      "publishedAt": "2023-07-11T19:23:04Z",
+      "duration": "PT8M24S",
+      "viewCount": 45460
+    },
+    {
+      "id": "6okqdIkTBPY",
+      "url": "https://www.youtube.com/watch?v=6okqdIkTBPY",
+      "title": "Bodycam & 911 Calls: Sarah Boone & Jorge Torres | Suitcase Murder Trial",
+      "channelId": "UCo5E9pEhK_9kWG7-5HHcyRg",
+      "channelTitle": "COURT TV",
+      "publishedAt": "2024-10-25T01:00:06Z",
+      "duration": "PT2H25M25S",
+      "viewCount": 87775
+    },
+    {
+      "id": "VFm-rbv9Xhg",
+      "url": "https://www.youtube.com/watch?v=VFm-rbv9Xhg",
+      "title": "LIVE: FL v. Sarah Boone - Sentencing | Suitcase Murder Trial",
+      "channelId": "UCo5E9pEhK_9kWG7-5HHcyRg",
+      "channelTitle": "COURT TV",
+      "publishedAt": "2024-12-02T21:02:35Z",
+      "duration": "PT2H22M4S",
+      "viewCount": 189952
+    },
+    {
+      "id": "kr542nbNoRE",
+      "url": "https://www.youtube.com/watch?v=kr542nbNoRE",
+      "title": "Interrogation of Sarah Boone",
+      "channelId": "UCXCLaaClAWQiTkl3pw9ZdLw",
+      "channelTitle": "Law&Crime Trials",
+      "publishedAt": "2024-10-05T21:00:20Z",
+      "duration": "PT2H4M11S",
+      "viewCount": 240596
+    },
+    {
+      "id": "QvL6A0rCcKo",
+      "url": "https://www.youtube.com/watch?v=QvL6A0rCcKo",
+      "title": "Sarah Boone Trial: Prosecution plays full 911 call",
+      "channelId": "UCuXT13wiqK56NR7QSfDWpvg",
+      "channelTitle": "FOX 35 Orlando",
+      "publishedAt": "2024-10-18T19:21:49Z",
+      "duration": "PT9M2S",
+      "viewCount": 7400
+    },
+    {
+      "id": "mOZ3GVBwztA",
+      "url": "https://www.youtube.com/watch?v=mOZ3GVBwztA",
+      "title": "💥ALL UNREDACTED SARAH BOONE BODY CAM FOOTAGE 2018-2020 /TIMESTAMPED (SENSITIVE CONTENT)",
+      "channelId": "UCQ9mYY-w-vGT-VafJUQKLKg",
+      "channelTitle": "Kerryctures Productions",
+      "publishedAt": "2024-10-03T11:01Z",
+      "duration": "PT3H48M55S",
+      "viewCount": 19606
+    }
+  ]
+}

@@ -1,0 +1,52 @@
+{
+  "checked_at": "2026-09-08",
+  "plan": "research/chandler-halderson-development/proof-plan-v3.json",
+  "plan_sha256": "4900a5238f3130b9da9845d1a48bff692941ea1eefe17ea7268f259c82dc6ab7",
+  "spoken_word_count": 191,
+  "scene_count": 7,
+  "valid": true,
+  "errors": [],
+  "unresolved_readiness": [
+    {
+      "code": "source_use_basis",
+      "path": "source.E01",
+      "detail": "Record the applicable basis for the selected use; online availability alone does not establish it."
+    },
+    {
+      "code": "research_copy_media_binding",
+      "path": "source.E01",
+      "detail": "The research copy exists; any selected production use still needs exact-file binding and review under its supported route."
+    },
+    {
+      "code": "source_use_basis",
+      "path": "source.E02",
+      "detail": "Record the applicable basis for the selected use; online availability alone does not establish it."
+    },
+    {
+      "code": "research_copy_media_binding",
+      "path": "source.E02",
+      "detail": "The research copy exists; any selected production use still needs exact-file binding and review under its supported route."
+    },
+    {
+      "code": "voice_selection",
+      "path": "plan.readiness.voice",
+      "detail": "Select narrator and any reconstruction cast before a scoped audition."
+    },
+    {
+      "code": "factual_and_source_context_review",
+      "path": "plan",
+      "detail": "A reviewer must check actual source support, selected words, scope and context; structural validation does not perform that review."
+    },
+    {
+      "code": "supported_execution_route",
+      "path": "plan.readiness.execution_route",
+      "detail": "Implement and validate an applicable hybrid proof route, then lock exact scope, files, voices and required approvals before media execution."
+    },
+    {
+      "code": "timing_and_listening_review",
+      "path": "plan",
+      "detail": "These scene times are an editorial budget; complete speech, source context and final duration need actual listening and edit review."
+    }
+  ],
+  "production_ready": false
+}

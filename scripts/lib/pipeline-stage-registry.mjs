@@ -443,6 +443,7 @@ const stagesById = new Map(PIPELINE_STAGE_REGISTRY.map((entry) => [entry.id, ent
 // Other workflows must supply a real registry and validators before dispatch.
 export function stageRegistryFor(identity = {}) {
   const workflow = assertAvailableMediaWorkflow(identity);
+  if (workflow.id === "true_crime_hybrid_proof_v1") throw new Error("True-crime proof uses its dedicated private stage registry; use crime-proof commands or run status.");
   if (workflow.id === "avatar_footage_pilot_v1") return AVATAR_PILOT_STAGES;
   return PIPELINE_STAGE_REGISTRY;
 }

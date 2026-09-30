@@ -1,0 +1,48 @@
+# CrimeDungeon — segment picture and sound style
+
+Use the [house style and recurring review process](crimedungeon_style_bible_v1.md) for the current concrete presets and pre-render preparation. The reference observations and source/recreation distinctions below remain applicable; effects not directly verified remain proposals.
+
+Creative design, September 9, 2026. Extends the [editorial standard](crimedungeon_editorial_standard_v1.md) and [hybrid format](true_crime_hybrid_format_v2.md). The user explicitly wants labeled Qwen/cloned audio recreations with on-screen transcripts, and close attention to effects and style across all segments. This document does not add a production command, expand a frozen proof identity or claim a render was reviewed.
+
+## Reference basis
+
+The [segment study](../../research/crimedungeon-segment-style-2026-09-09/README.md) and its [evidence matrix](../../research/crimedungeon-segment-style-2026-09-09/existing-reference-audit.md) distinguish directly inspected compositions from automated listening/motion leads. Dr Insanity's Attic recreation passage shows an aerial background, luminous waveform, central dialogue and a lower-left recreation label. Other checked samples show large source-dialogue captions, a witness beside a timeline, documents with highlighted lines, framed footage over geography, and separate outcome layouts. Precise VHS treatment, mix recipes and transition timing were not measured. Our choices below are authored design starting points.
+
+## Audio and transcript scene
+
+Treat the exchange as its own scene. Identify the speakers, let the call or reading carry the selected passage, and make the narrator yield. A waveform attached to uninterrupted narration does not demonstrate this treatment.
+
+- **Picture:** a source-relevant exterior, map, document detail or restrained dark background. Dim/soften background detail behind text. Movement should be slow enough that the words remain the focal point. A map needs actual supported geography; otherwise use a neutral backdrop.
+- **Text:** reveal short, complete phrases in sync with speech, normally one or two lines. Keep a stable reading area and speaker identifier; use a consistent speaker accent plus the written role, not color alone. Do not reveal the answer before the spoken line. Avoid karaoke bouncing and slow character-by-character typing that trails the voice. Verify at phone size.
+- **Waveform:** secondary to the words. In a real scene, derive it from the selected original or synthesized sound, accurately identified. A recreated waveform is not a forensic display of the original call.
+- **Disclosure:** persistent **AI AUDIO RECREATION** for synthetic readings, outside the caption area and above any texture. Add an accurate source line such as **Reading of [source] transcript excerpt**. If text is approximate courtroom reporting, say so; do not label it an official verbatim transcript. Original audio uses an appropriate original-recording label instead.
+- **Voice:** Qwen and deliberate voice cloning are part of the requested design. Lock each speaker's selected voice/reference and text before generation. A matched real voice and an independently cast voice are different choices. Preserve the existing narrator identity; do not silently substitute it for every role. The current local Base adapter does not establish an effective per-line emotion-control feature, so a distressed performance needs auditioning rather than assumed acting tags.
+- **Sound:** keep voices intelligible with restrained telephone coloration if useful. Lower or remove score where the exchange should carry attention. Preserve meaningful hesitations in originals; do not invent original timing, cries, screams, incidental dialogue or background events in a recreation. Do not fill unknown text with plausible dispatch dialogue. Caption and listen to the actual generated take, not an assumed duration.
+- **Texture:** offer a clean treatment and a light analog/VHS treatment for comparison. In the latter, put subtle scanlines, grain, edge softness and slight color separation on the background layer; keep text and disclosure crisp. Treat this as a modern editorial effect, not proof of an old tape. Do not add fake original timestamps, a REC badge or dropouts that obscure meaning. No flashing/glitch effect on every line.
+- **Entry/exit:** introduce the call's context briefly, then enter on its meaningful first selected line. End on a completed exchange or clearly marked excerpt boundary, and cut or carry the sound naturally into the next recorded scene. A short sound tail can bridge pictures; separate recordings must not appear to be one continuous event. No added long silence to pad the scene.
+
+Exact checked excerpts can support a recreated reading. A report that only paraphrases an exchange stays attributed narration. Source accuracy, voice provenance and the applicable use basis are separate from the AI label. The original 911 recording's unavailability does not automatically make an invented reconstruction acceptable, and it does not establish a universal ban on source-backed readings.
+
+## Treatments across the film
+
+| Segment | Picture, text and movement | Sound and transition |
+| --- | --- | --- |
+| Cold open | A meaningful source moment fills the picture; only essential dialogue/context labels. Crop only to improve comprehension. | Enter on consequential original action or speech. Brief narrator orientation, then yield. No long logo sequence before the scene pays off. |
+| Encounter / interview / courtroom testimony | Full-screen recording with readable phrase captions and speaker identification when needed. Reframe at an actual change in attention; allow sustained shots. | Original voices and environment carry the scene. Narration supplies missing context between useful exchanges. Remove inert gaps without changing the meaning of an answer. |
+| Audio / transcript | The separate layout above, with distinct original/recreated status. | A distinct voice perspective, clear words, restrained filtering/score, deliberate return to footage. |
+| Footage in a card | Place the moving recording beside the map, timeline or comparison it helps explain; preserve enough size to follow the action. | Keep the relevant source sound or narrator connection coherent. Return to full frame when the comparison ends; a permanent decorative border is unnecessary. |
+| Document / exhibit | Establish the real record, then crop and reveal the relevant clause, mark or object as it is discussed. One focal relationship at a time. | Narration or a labeled reading supplies meaning. Optional quiet editorial accent at an actual evidence reveal; do not add an interface click to every highlight. |
+| Map / timeline | Reveal supported points, dates and connections in the order needed. Keep source footage visible in an inset only when it aids orientation. | Carry the explanation over the composition change, then hand back to the recording. Depicted routes and timing must follow evidence. |
+| Date / chapter transition | Short readable place/date or question reset. Modest text entrance and exit; avoid a repeated oversized chapter bumper. | A brief tonal change or accent can signal a meaningful shift. Return promptly to a source scene; title length follows reading needs rather than a fixed silence. |
+| Cutout reconstruction | Source-derived cutouts, independent motion and object emphasis over a supported or explicitly illustrative setting. Label reconstruction; never invent an incriminating gesture or expression. | Checked dialogue reading or narrator paraphrase according to source status. Editorial sound must not masquerade as captured scene sound. |
+| Conclusion | The final consequential source moment, then a clear dated outcome and human consequence. Keep findings, allegations and unresolved issues distinct. | Let the last recorded exchange finish; narrator closes the promised question. Reduce musical pressure and avoid an extended repeated recap. |
+
+Use changes in picture scale, text hierarchy, source sound and score to create contrast. Constant effects or constant narration erase that contrast. Cut frequency, footage share, pause length and final runtime are decisions made from the selected material, not channel-wide quotas.
+
+## What the next edit must demonstrate
+
+Log picture and sound separately for each selected source window: the viewer's question, meaningful line/action, what changes, full-screen/inset choice, caption/reveal cue, motion, voice entry/exit, ambience, score/effect entry/exit and transition into the next scene. Tie reference comparisons to actual timestamps and distinguish direct viewing/listening from automated analysis.
+
+A representative sequence should show a real opening moment, narrator handoff, one explanatory insert, an audio/transcript scene when its source supports it, return to footage, and a local payoff. The current document/cutout proof demonstrates only part of that vocabulary. Compare actual playback, read at phone size and listen to the complete mix; a style document or clean encoding is not evidence of a successful scene.
+
+For Clancy, [a public rough transcript was located](../../research/lindsay-clancy-development/911-transcript-and-recreation-scope-2026-09-09.md). Exact text selection and the effect of the actual court order on a synthetic reading remain unresolved. Develop the visual template independently; keep Patrick's available testimony as a source-scene option. The current private adapter remains narrator/document-reading only; cast-audio production needs its applicable guarded extension before dispatch.

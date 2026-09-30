@@ -66,7 +66,9 @@ export function assertEpisodeWorkflowFlags(identity = {}, flags = {}) {
     throw new Error(`Media workflow is identity-locked to ${workflow.id}; --media-workflow cannot switch an existing run.`);
   }
   if (Object.hasOwn(flags, "content-profile")) {
-    const requested = contentProfileDefinition(flags["content-profile"]);
+    const requested = workflow.id === "true_crime_hybrid_proof_v1" && flags["content-profile"] === "true_crime_proof_v1"
+      ? { config: { id: "true_crime_proof_v1" } }
+      : contentProfileDefinition(flags["content-profile"]);
     const locked = identity.content_profile_config?.id ?? identity.content_profile ?? DEFAULT_CONTENT_PROFILE;
     if (requested.config.id !== locked) {
       throw new Error(`Content profile is identity-locked to ${locked}; --content-profile cannot switch an existing run.`);
@@ -100,6 +102,7 @@ export function assertCommandWorkflowRoute({ command, subcommand, script, flags 
       mediaWorkflow: flags["media-workflow"],
     });
     if (binding.media_workflow === "avatar_footage_pilot_v1") throw new Error("Use pilot preflight for the bounded avatar proof; run preflight is generated-visuals only.");
+    if (binding.media_workflow === "true_crime_hybrid_proof_v1") throw new Error("Use crime-proof preflight for the private true-crime proof; run preflight is generated-visuals only.");
     // Validate custom profile paths too, before beginStageExecution can write.
     const profile = contentProfileDefinition(flags["content-profile"]);
     assertAvailableMediaWorkflow({ ...binding, content_profile: profile.config.id, content_profile_config: profile.config });
@@ -110,6 +113,9 @@ export function assertCommandWorkflowRoute({ command, subcommand, script, flags 
   let workflow = null;
   if (identity) {
     workflow = assertEpisodeWorkflowFlags(identity, flags);
+    if (workflow.id === "true_crime_hybrid_proof_v1" && command !== "crime-proof" && !(command === "run" && subcommand === "status")) {
+      throw new Error("True-crime proof permits only crime-proof commands and run status. Generated production, auto-advance and publishing are unavailable, including with workflow bypass.");
+    }
     if (identity.image_provider === "openart_cli") {
       const imageMutation = command === "imagegen" && !["openart", "analyze", "qa"].includes(subcommand);
       const visualMutation = command === "visual" && ["refs", "approve-ref-plan", "approve-refs", "plan", "harden", "review"].includes(subcommand);

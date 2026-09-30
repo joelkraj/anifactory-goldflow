@@ -855,10 +855,19 @@ async function imageReportComplete(episodeDir, episode, identity) {
       const hash = row.generated?.output_sha256 ?? await fileSha256(row.image_path);
       if (!hash) continue;
       const rows = byHash.get(hash) ?? [];
-      rows.push(row.image_id);
+      rows.push(row);
       byHash.set(hash, rows);
     }
-    return [...byHash.values()].filter((rows) => rows.length > 1).map((rows) => rows.join("="));
+    return [...byHash.values()]
+      .filter((rows) => {
+        if (rows.length <= 1) return false;
+        const approvedReuseCount = rows.filter((row) =>
+          String(row?.status ?? "").toLowerCase() === "editorial_reuse"
+          || row?.generated?.editorial_reuse_approved === true
+        ).length;
+        return approvedReuseCount !== rows.length - 1;
+      })
+      .map((rows) => rows.map((row) => row.image_id).join("="));
   }
   const latestReport = reports[0]?.report ?? null;
   const cutExecutionLedger = await readJson(path.join(episodeDir, "cut_execution_ledger.json"), null);
@@ -3368,6 +3377,14 @@ async function main() {
       })();
   const runIdentityPath = path.join(episodeDir, "run_identity.json");
   const runIdentity = await readJson(runIdentityPath, {});
+  const motionPolicyOverridePath = path.join(episodeDir, "operator_motion_policy_override.json");
+  const motionPolicyOverride = await readJson(motionPolicyOverridePath, null);
+  const runIdentitySha256 = await fileSha256(runIdentityPath);
+  const currentMotionPolicyOverride = motionPolicyOverride?.schema === "goldflow_operator_motion_policy_override_v1"
+    && motionPolicyOverride?.status === "passed"
+    && motionPolicyOverride?.run_identity_sha256 === runIdentitySha256
+    ? motionPolicyOverride
+    : null;
   const productionManifest = await readJson(path.join(episodeDir, "production_manifest.json"), null);
   const ttsIdentityFields = ttsStatusIdentityFields(runIdentity, flags);
   const identity = {
@@ -3389,8 +3406,8 @@ async function main() {
     pace_targets: runIdentity.pace_targets ?? null,
     render_profile: flags["render-profile"] ?? runIdentity.render_profile ?? "smooth_subpixel_ken_burns",
     motion_policy: runIdentity.motion_policy ?? null,
-    animation_policy: runIdentity.animation_policy ?? runIdentity.ltx_video_policy ?? "disabled",
-    ltx_video_policy: runIdentity.ltx_video_policy ?? runIdentity.animation_policy ?? "disabled",
+    animation_policy: currentMotionPolicyOverride?.ltx_video_policy ?? runIdentity.animation_policy ?? runIdentity.ltx_video_policy ?? "disabled",
+    ltx_video_policy: currentMotionPolicyOverride?.ltx_video_policy ?? runIdentity.ltx_video_policy ?? runIdentity.animation_policy ?? "disabled",
     parallax_policy: runIdentity.parallax_policy ?? null,
     parallax_target_max: runIdentity.parallax_target_max ?? null,
     parallax_min_spacing_sec: runIdentity.parallax_min_spacing_sec ?? null,

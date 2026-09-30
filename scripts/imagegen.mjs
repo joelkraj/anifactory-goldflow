@@ -167,11 +167,11 @@ async function assertRunIdentityImageProvider() {
 }
 
 function effectiveSceneImageModel(prompt = null) {
-  return imageModelOverride ?? runIdentityImageModel ?? prompt?.image_model_route ?? "flux-klein";
+  return imageModelOverride ?? prompt?.image_model_route ?? runIdentityImageModel ?? "flux-klein";
 }
 
 function effectiveReferenceImageModel(target = null) {
-  return referenceImageModelOverride ?? runIdentityReferenceModel ?? target?.image_model_route ?? effectiveSceneImageModel() ?? "flux-klein";
+  return referenceImageModelOverride ?? target?.image_model_route ?? runIdentityReferenceModel ?? effectiveSceneImageModel() ?? "flux-klein";
 }
 
 function runIdentityCodexOpeningSec(runIdentity) {
@@ -1154,7 +1154,16 @@ async function promptFresh(prompt, outputPath) {
   const sidecar = `${outputPath}.prompt.sha256`;
   if (!(await exists(sidecar))) return false;
   const current = String(await fs.readFile(sidecar, "utf8")).trim();
-  return current === (prompt.prompt_hash ?? sha256(promptTextForImageProvider(prompt, imageProvider)));
+  if (current !== (prompt.prompt_hash ?? sha256(promptTextForImageProvider(prompt, imageProvider)))) return false;
+  const requestedModel = effectiveSceneImageModel(prompt);
+  const metadata = await readJson(`${outputPath}.metadata.json`, null);
+  const actualModel = String(metadata?.generated?.modelslab_model_id ?? metadata?.image_model_route ?? "").trim();
+  if (!actualModel) return false;
+  if (isFluxKleinRoute(requestedModel)) return isFluxKleinRoute(actualModel);
+  if (/^qwen[-_]?image[-_]?2(?:\.0)?[-_]?pro/i.test(String(requestedModel ?? ""))) {
+    return /^qwen[-_]?image[-_]?2(?:\.0)?[-_]?pro/i.test(actualModel);
+  }
+  return actualModel === requestedModel;
 }
 
 async function reusableImportedCodexImage(prompt, outputPath) {
@@ -1612,7 +1621,17 @@ function isEditorialReusePrompt(prompt = {}) {
 
 async function materializeEditorialReuse(prompt, availableById) {
   const sourceId = String(prompt.reuse_source_image_id ?? "");
-  const source = availableById.get(sourceId);
+  let source = availableById.get(sourceId);
+  if (!source?.image_path || !(await exists(source.image_path))) {
+    const existingSourcePath = imagePathFor({ image_id: sourceId }, "modelslab");
+    if (await exists(existingSourcePath)) {
+      source = {
+        image_id: sourceId,
+        image_path: existingSourcePath,
+        status: "existing_file",
+      };
+    }
+  }
   if (!source?.image_path || !(await exists(source.image_path))) {
     return {
       image_id: prompt.image_id,
@@ -2099,6 +2118,28 @@ async function mergeImagegenResults({ currentResults, promptIds, promptPlanHash 
   }
   for (const row of currentResults) {
     if (row?.image_id) mergedById.set(row.image_id, row);
+  }
+  for (const imageId of promptIds) {
+    if (mergedById.has(imageId)) continue;
+    const candidates = [
+      imagePathFor({ image_id: imageId }, "modelslab"),
+      imagePathFor({ image_id: imageId }, "codex_imagegen"),
+    ];
+    for (const imagePath of candidates) {
+      if (!(await exists(imagePath))) continue;
+      const metadata = await readJson(`${imagePath}.metadata.json`, null);
+      if (!metadata || String(metadata.image_id ?? "") !== String(imageId)) continue;
+      mergedById.set(imageId, {
+        image_id: imageId,
+        status: metadata.editorial_reuse_approved === true ? "editorial_reuse" : "existing_file",
+        image_path: imagePath,
+        prompt_hash: metadata.prompt_hash ?? null,
+        image_provider: metadata.image_provider ?? metadata.image_provider_route ?? null,
+        image_provider_route: metadata.image_provider_route ?? metadata.image_provider ?? null,
+        generated: metadata.generated ?? null,
+      });
+      break;
+    }
   }
   return [...mergedById.values()].sort((a, b) => String(a.image_id).localeCompare(String(b.image_id), undefined, { numeric: true }));
 }

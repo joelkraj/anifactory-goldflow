@@ -37,6 +37,7 @@ const parallaxReportPath = flags["parallax-report"] ?? path.join(episodeDir, `pa
 const parallaxApprovalPath = flags["parallax-approval"] ?? path.join(episodeDir, `parallax_asset_approval_${episode}.json`);
 const ltxVideoReportPath = flags["ltx-video-report"] ?? path.join(episodeDir, "assets", "motion", "ltx23", `ltx_video_report_${episode}.json`);
 const ltxVideoApprovalPath = flags["ltx-video-approval"] ?? path.join(episodeDir, "assets", "motion", "ltx23", `ltx_video_approval_${episode}.json`);
+const motionPolicyOverridePath = flags["motion-policy-override"] ?? path.join(episodeDir, "operator_motion_policy_override.json");
 const outputPath = flags.output ?? path.join(episodeDir, `motion_edit_plan_${episode}.json`);
 const allowLtxRescue = /^(true|1|yes)$/i.test(String(flags["allow-ltx-rescue"] ?? "false"));
 
@@ -122,7 +123,7 @@ export function applyAutomaticFocalAnchorForTests(intent, analysis, decision = n
 }
 
 async function main() {
-  const [promptPlan, imagegenReport, imageQa, focalAnalysis, decisions, ledger, audioBedReport, identity, parallaxReport, parallaxApproval, ltxVideoReport, ltxVideoApproval] = await Promise.all([
+  const [promptPlan, imagegenReport, imageQa, focalAnalysis, decisions, ledger, audioBedReport, identity, parallaxReport, parallaxApproval, ltxVideoReport, ltxVideoApproval, motionPolicyOverride] = await Promise.all([
     readJson(promptPath),
     readJson(imagegenReportPath),
     readJson(imageQaPath),
@@ -135,7 +136,17 @@ async function main() {
     readJson(parallaxApprovalPath, null),
     readJson(ltxVideoReportPath, null),
     readJson(ltxVideoApprovalPath, null),
+    readJson(motionPolicyOverridePath, null),
   ]);
+  const identitySha256 = await hashFile(identityPath);
+  const currentMotionPolicyOverride = motionPolicyOverride?.schema === "goldflow_operator_motion_policy_override_v1"
+    && motionPolicyOverride?.status === "passed"
+    && motionPolicyOverride?.run_identity_sha256 === identitySha256
+    ? motionPolicyOverride
+    : null;
+  const effectiveIdentity = currentMotionPolicyOverride
+    ? { ...identity, animation_policy: currentMotionPolicyOverride.ltx_video_policy, ltx_video_policy: currentMotionPolicyOverride.ltx_video_policy }
+    : identity;
   if (promptPlan?.status !== "passed" || !Array.isArray(promptPlan.prompts)) throw new Error(`Missing passed hardened prompt plan: ${promptPath}`);
   if (imagegenReport?.status !== "passed") throw new Error(`Missing passed imagegen report: ${imagegenReportPath}`);
   if (imageQa?.status !== "passed") throw new Error(`Motion planning requires passed per-cut image QA: ${imageQaPath}`);
@@ -214,8 +225,8 @@ async function main() {
   }
   let approvedLtxById = new Map();
   const ltxSourcePaths = [];
-  if (ltxVideoEnabled(identity) || allowLtxRescue) {
-    if (allowLtxRescue && ltxVideoEnabled(identity)) {
+  if (ltxVideoEnabled(effectiveIdentity) || allowLtxRescue) {
+    if (allowLtxRescue && ltxVideoEnabled(effectiveIdentity)) {
       throw new Error("--allow-ltx-rescue is only for an existing identity whose animation policy is disabled.");
     }
     if (allowLtxRescue && ltxVideoApproval?.production_eligible !== true) {
@@ -253,6 +264,7 @@ async function main() {
     decisionPath,
     audioBedReportPath,
     identityPath,
+    ...(currentMotionPolicyOverride ? [motionPolicyOverridePath] : []),
     ...parallaxSourcePaths,
     ...ltxSourcePaths,
   ];
@@ -281,10 +293,10 @@ async function main() {
     static_hold_count: intents.filter((row) => row.behavior === "static_hold").length,
     layered_parallax_count: intents.filter((row) => row.depth_treatment?.mode === "layered_parallax").length,
     approved_parallax_candidate_count: approvedParallaxById.size,
-    ltx_video_policy: identity?.ltx_video_policy ?? "disabled",
+    ltx_video_policy: effectiveIdentity?.ltx_video_policy ?? "disabled",
     approved_ltx_video_count: approvedLtxById.size,
-    ltx_video_report_path: ltxVideoEnabled(identity) || allowLtxRescue ? ltxVideoReportPath : null,
-    ltx_video_approval_path: ltxVideoEnabled(identity) || allowLtxRescue ? ltxVideoApprovalPath : null,
+    ltx_video_report_path: ltxVideoEnabled(effectiveIdentity) || allowLtxRescue ? ltxVideoReportPath : null,
+    ltx_video_approval_path: ltxVideoEnabled(effectiveIdentity) || allowLtxRescue ? ltxVideoApprovalPath : null,
     qa_override_count: intents.filter((row) => row.qa_override).length,
     auto_focal_override_count: intents.filter((row) => row.auto_focal_override).length,
     llm_authored_intent_count: intents.filter((row) => row.focal_source === "llm_authored_shot_manifest_motion_intent").length,

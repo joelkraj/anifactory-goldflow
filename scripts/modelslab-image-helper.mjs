@@ -97,6 +97,21 @@ function isGptImage2Model(model) {
   return /^gpt[-_]?image[-_]?2/i.test(String(model ?? ""));
 }
 
+function isQwenImage2ProModel(model) {
+  return /^qwen[-_]?image[-_]?2(?:\.0)?[-_]?pro/i.test(String(model ?? ""));
+}
+
+function qwenEditModelId(model) {
+  const normalized = String(model ?? "").trim().toLowerCase().replace(/_/g, "-");
+  if (normalized === "qwen-edit-2509") return "qwen-edit-2509";
+  if (normalized === "qwen-edit" || normalized === "qwen-edit-2511") return "qwen-edit-2511";
+  return null;
+}
+
+function isQwenEditModel(model) {
+  return Boolean(qwenEditModelId(model));
+}
+
 function gptImage2ModelForRequest(model, referenceCount) {
   if (!isGptImage2Model(model)) return model;
   if (referenceCount > 0) return "gpt-image-2-i2i";
@@ -113,6 +128,14 @@ function gptImage2OutputSize() {
   return supported.has(normalized) ? normalized : "2048x1152";
 }
 
+function qwenImage2ProModelForRequest(referenceCount) {
+  return referenceCount > 0 ? "qwen-image-2.0-pro-i2i" : "qwen-image-2.0-pro-t2i";
+}
+
+function qwenImage2ProOutputSize(referenceCount) {
+  return referenceCount > 0 ? "1920*1080" : "1664*928";
+}
+
 export function modelslabRequestSettings({
   model = process.env.ANIFACTORY_REFERENCE_MODEL || process.env.ANIFACTORY_IMAGE_MODEL || "flux-klein",
   referenceCount = 0,
@@ -126,6 +149,37 @@ export function modelslabRequestSettings({
       endpoint: normalizedReferenceCount ? "/api/v7/images/image-to-image" : "/api/v7/images/text-to-image",
       model_id: gptImage2ModelForRequest(model, normalizedReferenceCount),
       size: gptImage2OutputSize(),
+      requested_width: requestedWidth,
+      requested_height: requestedHeight,
+      samples: 1,
+      enhance_prompt: false,
+      guidance_scale: null,
+      strength: null,
+      init_image_count: normalizedReferenceCount,
+      seed: null,
+    };
+  }
+  if (isQwenImage2ProModel(model)) {
+    return {
+      endpoint: normalizedReferenceCount ? "/api/v7/images/image-to-image" : "/api/v7/images/text-to-image",
+      model_id: qwenImage2ProModelForRequest(normalizedReferenceCount),
+      size: qwenImage2ProOutputSize(normalizedReferenceCount),
+      requested_width: requestedWidth,
+      requested_height: requestedHeight,
+      samples: 1,
+      enhance_prompt: false,
+      guidance_scale: null,
+      strength: null,
+      init_image_count: normalizedReferenceCount,
+      seed: null,
+    };
+  }
+  if (isQwenEditModel(model)) {
+    const selectedModel = qwenEditModelId(model);
+    return {
+      endpoint: "/api/v6/image_editing/qwen_edit",
+      fetch_endpoint: "/api/v6/image_editing/fetch",
+      model_id: selectedModel,
       requested_width: requestedWidth,
       requested_height: requestedHeight,
       samples: 1,
@@ -181,6 +235,20 @@ function estimatedModelslabCost(model) {
       cost_confidence: "dashboard_confirmed",
     };
   }
+  if (isQwenImage2ProModel(normalized)) {
+    return {
+      estimated_cost_usd: 0.075,
+      cost_basis: "modelslab_catalog_model_price_per_image_2026-08-05_allow_unlimited",
+      cost_confidence: "dashboard_confirmed",
+    };
+  }
+  if (isQwenEditModel(normalized)) {
+    return {
+      estimated_cost_usd: 0,
+      cost_basis: "modelslab_free_unlimited_qwen_edit_plan",
+      cost_confidence: "operator_plan_confirmed",
+    };
+  }
   if (normalized === "flux-klein" || normalized === "midjourney" || normalized.includes("diffusion") || normalized.includes("flux")) {
     return {
       estimated_cost_usd: 0.0047,
@@ -212,6 +280,22 @@ async function download(urls, outputPath) {
     await sleep(2500 * round);
   }
   throw lastError ?? new Error(`Could not download ModelsLab output for ${outputPath}`);
+}
+
+async function assertNonBlankOutput(outputPath) {
+  const stats = await sharp(outputPath).stats();
+  const rgb = stats.channels.slice(0, 3);
+  const mean = rgb.reduce((sum, channel) => sum + Number(channel.mean ?? 0), 0) / Math.max(1, rgb.length);
+  const stdev = rgb.reduce((sum, channel) => sum + Number(channel.stdev ?? 0), 0) / Math.max(1, rgb.length);
+  if (mean <= 0.5 && stdev <= 0.5) {
+    const rejectedPath = `${outputPath}.rejected-blank-${Date.now()}.png`;
+    await fs.rename(outputPath, rejectedPath);
+    throw new Error(
+      `ModelsLab returned a structurally blank raster for ${outputPath} ` +
+      `(mean=${mean.toFixed(3)}, stdev=${stdev.toFixed(3)}); preserved at ${rejectedPath}.`,
+    );
+  }
+  return { mean, stdev };
 }
 
 async function assertLandscapeOutput(outputPath, requestedWidth, requestedHeight) {
@@ -339,7 +423,71 @@ export async function generateModelslabImage({
     height: requestedHeight,
     enhancePrompt,
   });
-  if (isGptImage2Model(model)) {
+  if (isQwenEditModel(model)) {
+    const selectedModel = qwenEditModelId(model);
+    if (!referenceUrls.length) {
+      throw new Error(`${selectedModel} requires at least one approved conditioning image.`);
+    }
+    const submittedPrompt = prepareGptImage2Prompt(prompt);
+    const payload = {
+      model_id: selectedModel,
+      prompt: submittedPrompt.prompt,
+      init_image: referenceUrls,
+      safety_checker: true,
+      base64: false,
+      webhook: null,
+      track_id: `anifactory-${path.basename(outputPath, path.extname(outputPath))}`,
+    };
+    const endpoint = requestSettings.endpoint;
+    const initial = await postModelslabJson(endpoint, payload, `${selectedModel} image`, 2, resolvedAccount);
+    const resolved = await resolveModelslabImage(
+      initial,
+      requestSettings.fetch_endpoint,
+      `${selectedModel} image`,
+      resolvedAccount,
+    );
+    const imageUrl = await download(modelslabOutputs(resolved), outputPath);
+    const rasterSignal = await assertNonBlankOutput(outputPath);
+    const nativeGeometry = await imageGeometry(outputPath);
+    const requestedAspect = requestedWidth / requestedHeight;
+    const nativeAspectMatch = nativeGeometry.width > nativeGeometry.height
+      && Math.abs(nativeGeometry.aspect - requestedAspect) <= 0.08;
+    const landscapeFitApplied = nativeAspectMatch
+      ? false
+      : await fitOutputToRequestedLandscape(outputPath, requestedWidth, requestedHeight);
+    const actualGeometry = await assertLandscapeOutput(outputPath, requestedWidth, requestedHeight);
+    return {
+      downloaded_path: outputPath,
+      image_url: imageUrl,
+      requested_width: requestedWidth,
+      requested_height: requestedHeight,
+      ...actualGeometry,
+      modelslab_output_dir: outputDir,
+      modelslab_elapsed_ms: Date.now() - startedAtMs,
+      modelslab_endpoint: endpoint,
+      modelslab_reference_count: referenceUrls.length,
+      modelslab_request_id: initial.id ?? resolved.id ?? null,
+      modelslab_model_id: selectedModel,
+      modelslab_native_width: nativeGeometry.width,
+      modelslab_native_height: nativeGeometry.height,
+      modelslab_native_aspect: nativeGeometry.aspect,
+      modelslab_native_landscape: nativeGeometry.width > nativeGeometry.height,
+      modelslab_native_aspect_match: nativeAspectMatch,
+      modelslab_landscape_fit_applied: landscapeFitApplied,
+      modelslab_raster_mean: rasterSignal.mean,
+      modelslab_raster_stdev: rasterSignal.stdev,
+      modelslab_submitted_prompt: submittedPrompt.prompt,
+      modelslab_prompt_compacted: submittedPrompt.compacted,
+      modelslab_original_prompt_length: submittedPrompt.original_length,
+      modelslab_submitted_prompt_length: submittedPrompt.submitted_length,
+      modelslab_request_settings: requestSettings,
+      modelslab_response_meta: resolved.meta ?? initial.meta ?? null,
+      modelslab_account: publicAccount,
+      ...estimatedModelslabCost(selectedModel),
+    };
+  }
+  if (isGptImage2Model(model) || isQwenImage2ProModel(model)) {
+    const gptImageRoute = isGptImage2Model(model);
     const selectedModel = requestSettings.model_id;
     const endpoint = requestSettings.endpoint;
     const submittedPrompt = prepareGptImage2Prompt(prompt);
@@ -353,15 +501,16 @@ export async function generateModelslabImage({
     const initial = await postModelslabJson(endpoint, payload, `${selectedModel} image`, 2, resolvedAccount);
     const resolved = await resolveModelslabImage(initial, "/api/v7/images/fetch", `${selectedModel} image`, resolvedAccount);
     const imageUrl = await download(modelslabOutputs(resolved), outputPath);
+    const rasterSignal = await assertNonBlankOutput(outputPath);
     const nativeGeometry = await imageGeometry(outputPath);
     const requestedAspect = requestedWidth / requestedHeight;
     const nativeLandscape = nativeGeometry.width > nativeGeometry.height;
     const nativeAspectMatch = Math.abs(nativeGeometry.aspect - requestedAspect) <= 0.08;
-    if (!nativeLandscape && !gptImage2AllowSquareFallback) {
+    if (!nativeLandscape && !(gptImageRoute && gptImage2AllowSquareFallback)) {
       throw new Error(
-        `GPT Image 2 returned square or portrait output ${nativeGeometry.width}x${nativeGeometry.height} ` +
+        `${selectedModel} returned square or portrait output ${nativeGeometry.width}x${nativeGeometry.height} ` +
         `for requested provider size ${payload.size}. Retry native landscape; set ` +
-        `ANIFACTORY_MODELSLAB_GPT_IMAGE2_ALLOW_SQUARE_FALLBACK=true only after a documented landscape failure.`,
+        `ANIFACTORY_MODELSLAB_GPT_IMAGE2_ALLOW_SQUARE_FALLBACK=true only for a documented GPT Image 2 landscape failure.`,
       );
     }
     const landscape_fit_applied = nativeAspectMatch
@@ -387,7 +536,9 @@ export async function generateModelslabImage({
       modelslab_native_landscape: nativeLandscape,
       modelslab_native_aspect_match: nativeAspectMatch,
       modelslab_landscape_fit_applied: landscape_fit_applied,
-      modelslab_square_fallback_allowed: gptImage2AllowSquareFallback,
+      modelslab_square_fallback_allowed: gptImageRoute && gptImage2AllowSquareFallback,
+      modelslab_raster_mean: rasterSignal.mean,
+      modelslab_raster_stdev: rasterSignal.stdev,
       modelslab_submitted_prompt: submittedPrompt.prompt,
       modelslab_prompt_compacted: submittedPrompt.compacted,
       modelslab_original_prompt_length: submittedPrompt.original_length,
@@ -423,6 +574,7 @@ export async function generateModelslabImage({
   const initial = await postModelslabJson(endpoint, payload, `${model} image`, 2, resolvedAccount);
   const resolved = await resolveModelslabImage(initial, "/api/v6/images/fetch", `${model} image`, resolvedAccount);
   const imageUrl = await download(modelslabOutputs(resolved), outputPath);
+  const rasterSignal = await assertNonBlankOutput(outputPath);
   const actualGeometry = await assertLandscapeOutput(outputPath, requestedWidth, requestedHeight);
   return {
     downloaded_path: outputPath,
@@ -436,6 +588,8 @@ export async function generateModelslabImage({
     modelslab_reference_count: referenceUrls.length,
     modelslab_request_id: initial.id ?? resolved.id ?? null,
     modelslab_model_id: model,
+    modelslab_raster_mean: rasterSignal.mean,
+    modelslab_raster_stdev: rasterSignal.stdev,
     modelslab_submitted_prompt: String(prompt ?? ""),
     modelslab_prompt_compacted: false,
     modelslab_original_prompt_length: String(prompt ?? "").length,

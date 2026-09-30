@@ -58,7 +58,7 @@ function riskAndCandidateCount(intent, prompt) {
   const denseCast = (prompt.shot_manifest?.visible_characters ?? []).length >= 3;
   return {
     risk: highRisk || denseCast ? "high" : ["dialogue_pair", "ui_or_screen"].includes(intent.shot_class) ? "medium" : "low",
-    candidate_count: highRisk || denseCast ? 3 : ["dialogue_pair", "ui_or_screen"].includes(intent.shot_class) ? 2 : 1,
+    candidate_count: 1,
   };
 }
 

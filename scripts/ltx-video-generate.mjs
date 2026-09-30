@@ -388,7 +388,10 @@ async function main() {
       motion_prompt: row.motion_prompt,
       motion_prompt_sha256: sha256(row.motion_prompt),
       negative_prompt: row.negative_prompt,
-      candidate_count: row.candidate_count ?? 1,
+      // Goldflow production permits one creative LTX submission per selected
+      // motion moment. Risk classification is advisory and must not multiply
+      // provider submissions.
+      candidate_count: 1,
     }));
     plan = {
       schema: "goldflow_ltx23_video_plan_v1",

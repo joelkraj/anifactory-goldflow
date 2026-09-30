@@ -80,6 +80,138 @@ function episodeDirectory() {
   );
 }
 
+function channelDirectoryForEpisode(episodeDir, identity) {
+  const resolved = path.resolve(episodeDir);
+  const parts = resolved.split(path.sep);
+  const channelsIndex = parts.lastIndexOf("channels");
+  const channel = clean(identity?.channel);
+  if (channelsIndex >= 0 && parts[channelsIndex + 1] && (!channel || parts[channelsIndex + 1] === channel)) {
+    return path.join(path.sep, ...parts.slice(1, channelsIndex + 2));
+  }
+  // Isolated fixtures and diagnostics must never write into the real data root.
+  return resolved;
+}
+
+async function findFilesRecursive(rootDir, predicate) {
+  const matches = [];
+  const pending = [rootDir];
+  while (pending.length > 0) {
+    const current = pending.pop();
+    const entries = await fs.readdir(current, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      const entryPath = path.join(current, entry.name);
+      if (entry.isDirectory()) pending.push(entryPath);
+      else if (entry.isFile() && predicate(entry.name, entryPath)) matches.push(entryPath);
+    }
+  }
+  return matches.sort();
+}
+
+function scheduleDateKey(scheduleAt) {
+  const value = clean(scheduleAt);
+  return /^\d{4}-\d{2}-\d{2}/.test(value) ? value.slice(0, 10) : null;
+}
+
+async function rebuildChannelUploadLedger(channelDir, channelOverride = null) {
+  const weeklyRunsDir = path.join(channelDir, "weekly_runs");
+  const scanRoot = await fs.stat(weeklyRunsDir)
+    .then((stat) => stat.isDirectory() ? weeklyRunsDir : channelDir)
+    .catch(() => channelDir);
+  const receiptPaths = await findFilesRecursive(
+    scanRoot,
+    (name) => /^youtube_upload_receipt_.+\.json$/.test(name),
+  );
+  const entries = [];
+  for (const receiptPath of receiptPaths) {
+    const receipt = await readJson(receiptPath);
+    if (!receipt || receipt.schema !== YOUTUBE_UPLOAD_RECEIPT_SCHEMA || receipt.status !== "passed") continue;
+    const episodeDir = path.dirname(receiptPath);
+    const identity = await readJson(path.join(episodeDir, "run_identity.json"));
+    const episode = receipt.episode ?? identity?.episode ?? path.basename(episodeDir);
+    const manifestPath = path.join(episodeDir, `youtube_publish_manifest_${episode}.json`);
+    const manifest = await readJson(manifestPath);
+    entries.push({
+      channel: clean(identity?.channel) || clean(manifest?.channel) || clean(channelOverride) || path.basename(channelDir),
+      series: clean(identity?.series) || null,
+      week: clean(identity?.week) || null,
+      episode,
+      episode_dir: episodeDir,
+      video_id: clean(receipt.video_id),
+      watch_url: clean(receipt.watch_url),
+      studio_url: clean(receipt.studio_url) || null,
+      title: clean(manifest?.title) || null,
+      visibility: clean(receipt.visibility),
+      initial_visibility: clean(receipt.initial_visibility),
+      schedule_at: clean(receipt.schedule_at) || null,
+      schedule_date: scheduleDateKey(receipt.schedule_at),
+      recorded_at: clean(receipt.recorded_at),
+      recorded_by: clean(receipt.recorded_by),
+      video_sha256: clean(manifest?.video?.sha256) || null,
+      thumbnail_sha256: clean(manifest?.thumbnail?.sha256) || null,
+      manifest_sha256: clean(receipt.manifest_sha256) || null,
+      receipt_path: receiptPath,
+      receipt_sha256: await sha256File(receiptPath),
+    });
+  }
+  const scheduleChangePaths = await findFilesRecursive(
+    scanRoot,
+    (name) => /^youtube_schedule_change_receipt_.+\.json$/.test(name),
+  );
+  const latestScheduleChangeByVideo = new Map();
+  for (const scheduleChangePath of scheduleChangePaths) {
+    const change = await readJson(scheduleChangePath);
+    if (change?.schema !== "goldflow_youtube_schedule_change_receipt_v1" || change?.status !== "passed" || change?.verified !== true) continue;
+    const videoId = clean(change.video_id);
+    if (!videoId || !clean(change.schedule_at)) continue;
+    const previous = latestScheduleChangeByVideo.get(videoId);
+    if (!previous || clean(previous.change.recorded_at) < clean(change.recorded_at)) {
+      latestScheduleChangeByVideo.set(videoId, { change, scheduleChangePath });
+    }
+  }
+  for (const entry of entries) {
+    const latest = latestScheduleChangeByVideo.get(entry.video_id);
+    if (!latest) continue;
+    entry.original_schedule_at = entry.schedule_at;
+    entry.visibility = "scheduled";
+    entry.schedule_at = clean(latest.change.schedule_at);
+    entry.schedule_date = scheduleDateKey(entry.schedule_at);
+    entry.schedule_change_receipt_path = latest.scheduleChangePath;
+    entry.schedule_change_receipt_sha256 = await sha256File(latest.scheduleChangePath);
+  }
+  entries.sort((a, b) => {
+    const aTime = a.schedule_at || a.recorded_at || "";
+    const bTime = b.schedule_at || b.recorded_at || "";
+    return aTime.localeCompare(bTime) || a.video_id.localeCompare(b.video_id);
+  });
+  const scheduledByDate = new Map();
+  for (const entry of entries) {
+    if (entry.visibility !== "scheduled" || !entry.schedule_date) continue;
+    const sameDay = scheduledByDate.get(entry.schedule_date) ?? [];
+    sameDay.push(entry);
+    scheduledByDate.set(entry.schedule_date, sameDay);
+  }
+  const scheduleConflicts = [...scheduledByDate.entries()]
+    .filter(([, sameDay]) => sameDay.length > 1)
+    .map(([date, sameDay]) => ({
+      date,
+      video_ids: sameDay.map((entry) => entry.video_id),
+      schedule_times: sameDay.map((entry) => entry.schedule_at),
+    }));
+  const ledger = {
+    schema: "goldflow_youtube_upload_ledger_v1",
+    status: "passed",
+    channel: clean(channelOverride) || entries[0]?.channel || path.basename(channelDir),
+    updated_at: new Date().toISOString(),
+    channel_dir: channelDir,
+    entry_count: entries.length,
+    schedule_conflicts: scheduleConflicts,
+    entries,
+  };
+  const ledgerPath = path.join(channelDir, "youtube_upload_ledger.json");
+  await writeJson(ledgerPath, ledger);
+  return { ledgerPath, ledger };
+}
+
 async function episodeContext() {
   const episodeDir = episodeDirectory();
   const identityPath = path.join(episodeDir, "run_identity.json");
@@ -237,7 +369,10 @@ async function prepareManifest() {
       text_sha256: youtubeTextSha256(inputs.spec.pinned_comment?.text),
       betrayal_choice: clean(inputs.spec.pinned_comment?.betrayal_choice),
     },
-    publish_settings: inputs.spec.publish_settings,
+    publish_settings: {
+      ...inputs.spec.publish_settings,
+      automatic_chapters: inputs.spec.publish_settings?.automatic_chapters ?? false,
+    },
     studio_handoff: {
       url: "https://studio.youtube.com/",
       upload_private_first: true,
@@ -259,7 +394,7 @@ async function prepareManifest() {
 }
 
 async function recordUpload() {
-  const { episodeDir, episode } = await episodeContext();
+  const { episodeDir, identity, episode } = await episodeContext();
   const manifestPath = path.join(episodeDir, `youtube_publish_manifest_${episode}.json`);
   const manifest = await readJson(manifestPath);
   if (!manifest || manifest.schema !== YOUTUBE_PUBLISH_MANIFEST_SCHEMA || manifest.status !== "passed") {
@@ -322,12 +457,30 @@ async function recordUpload() {
   }
   receipt.blockers = [];
   await writeJson(receiptPath, receipt);
+  const channelDir = channelDirectoryForEpisode(episodeDir, identity);
+  const { ledgerPath, ledger } = await rebuildChannelUploadLedger(channelDir, identity.channel);
   console.log(JSON.stringify({
     status: receipt.status,
     receipt_path: receiptPath,
+    channel_upload_ledger_path: ledgerPath,
+    channel_upload_ledger_entries: ledger.entry_count,
+    schedule_conflicts: ledger.schedule_conflicts,
     video_id: receipt.video_id,
     visibility: receipt.visibility,
     blockers: receipt.blockers,
+  }, null, 2));
+}
+
+async function rebuildUploadLedger() {
+  requiredFlag("channel", flags.channel);
+  const channelDir = path.join(dataRoot, "channels", clean(flags.channel));
+  const { ledgerPath, ledger } = await rebuildChannelUploadLedger(channelDir, clean(flags.channel));
+  console.log(JSON.stringify({
+    status: ledger.status,
+    ledger_path: ledgerPath,
+    channel: ledger.channel,
+    entry_count: ledger.entry_count,
+    schedule_conflicts: ledger.schedule_conflicts,
   }, null, 2));
 }
 
@@ -404,6 +557,7 @@ async function main() {
   if (action === "approve-packaging") return approvePackaging();
   if (action === "prepare") return prepareManifest();
   if (action === "record-upload") return recordUpload();
+  if (action === "rebuild-ledger") return rebuildUploadLedger();
   if (action === "record-comment") return recordComment();
   throw new Error(`Unknown YouTube publishing action: ${action || "missing"}.`);
 }

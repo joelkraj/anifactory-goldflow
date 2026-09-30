@@ -446,6 +446,7 @@ The wavefront may also prebuild motion clips for accepted cuts whose authored in
 26. YouTube Studio publishing.
    - Run `goldflow youtube prepare` to bind the approved package, final thumbnail, final QA, and final video into `youtube_publish_manifest_<episode>.json`.
    - Use the `youtube-studio-publish` browser skill. Verify the active YouTube channel before choosing a file. Upload the exact manifest video as private first, set the exact title, description, thumbnail, audience, monetization, comments, and checks, then stop before public or scheduled release unless the operator has explicitly approved that action.
+   - Leave manual chapter blocks out of recap descriptions unless the operator explicitly requests them. Disable YouTube automatic chapters by default so the longform story keeps its intended pacing and does not gain synthetic exit points.
    - After the Studio result is visible, write the hash-bound receipt with `goldflow youtube record-upload`. Non-private visibility requires a named publish approver.
    - Post and pin the exact manifest comment only after a separate explicit confirmation, then write `youtube_pinned_comment_receipt_<episode>.json` with `goldflow youtube record-comment`.
    - Never store cookies, passwords, API keys, or browser session data in production artifacts.

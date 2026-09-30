@@ -151,6 +151,7 @@ function validSpec(now = new Date()) {
       made_for_kids: false,
       age_restricted: false,
       altered_content: false,
+      automatic_chapters: false,
       comments: "on",
     },
   };
@@ -435,6 +436,9 @@ export async function runYoutubePublishContractTests() {
       "--recorded-by", "codex-agent",
     ], { cwd: repoRoot, maxBuffer: 1024 * 1024 * 4 });
     assert.equal((await youtubeUploadReceiptComplete(cliEpisodeDir, episode)).done, true);
+    const isolatedLedger = await readJsonForTest(path.join(cliEpisodeDir, "youtube_upload_ledger.json"));
+    assert.equal(isolatedLedger.schema, "goldflow_youtube_upload_ledger_v1");
+    assert.equal(isolatedLedger.entry_count, 1);
 
     await execFileAsync(process.execPath, [
       path.join(repoRoot, "scripts", "youtube-publish.mjs"),

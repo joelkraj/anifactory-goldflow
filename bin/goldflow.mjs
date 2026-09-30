@@ -350,6 +350,8 @@ if (command === "help" || command === "--help" || command === "-h") {
   run("youtube-publish.mjs", ["prepare", ...flags]);
 } else if (command === "youtube" && subcommand === "record-upload") {
   run("youtube-publish.mjs", ["record-upload", ...flags]);
+} else if (command === "youtube" && subcommand === "rebuild-ledger") {
+  run("youtube-publish.mjs", ["rebuild-ledger", ...flags]);
 } else if (command === "youtube" && subcommand === "record-comment") {
   run("youtube-publish.mjs", ["record-comment", ...flags]);
 } else if (command === "analytics" && subcommand === "ingest") {

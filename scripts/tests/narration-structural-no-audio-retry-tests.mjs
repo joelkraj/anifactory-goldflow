@@ -11,7 +11,7 @@ import {
 import { canonicalQwenBatchSha256 } from "../lib/qwen-liam-batch-contract.mjs";
 import { narrationTtsRetryReportPolicy } from "../lib/narration-tts-policy.mjs";
 import { validateStructuralNoAudioRetryEvidence } from "../lib/tts-structural-no-audio-retry.mjs";
-import { projectVerifiedStructuralRecoveryReport, providerNeutralRetryReportFieldsForTests, verifiedStructuralRecoveryFromManifest } from "../lib/narration-structural-finalizer-provenance.mjs";
+import { projectVerifiedStructuralRecoveryReport, providerNeutralRetryReportFieldsForTests, structuralProjectionManifestForReport, verifiedStructuralRecoveryFromManifest } from "../lib/narration-structural-finalizer-provenance.mjs";
 import {
   narrationStructuralNoAudioRetryReportValidForTests,
   structuralNoAudioEvidenceConsumedForTests,
@@ -364,6 +364,46 @@ try {
     manifest, manifestFileSha256: manifestHash, structuralRecovery: verified,
   });
   assert.equal(await narrationStructuralNoAudioRetryReportValidForTests(passingReport, hash("4")), true);
+  const derivedPath = path.join(temp, "assets/audio/narration_tts/exact_boundary_repairs/fixture/provider-output-manifest.json");
+  await fs.mkdir(path.dirname(derivedPath), { recursive: true });
+  const derived = structuredClone(manifest);
+  derived.units[0] = { ...derived.units[0], attempt: 2,
+    audio_sha256: hash("8"), synthesis_identity_sha256: hash("9"),
+    synthesis_mode: "exact_sentence_boundary_composite_v1",
+    recovery_provenance: { schema: "goldflow_tts_exact_boundary_repair_provenance_v1" } };
+  derived.repair_history = [{ mode: "exact_sentence_boundary_composite_v1" }];
+  const derivedBytes = JSON.stringify(derived);
+  await fs.writeFile(derivedPath, derivedBytes);
+  const derivedHash = createHash("sha256").update(derivedBytes).digest("hex");
+  const derivedReport = { ...passingReport,
+    provider_output_manifest_path: derivedPath,
+    provider_output_manifest_sha256: derivedHash,
+    results: derived.units.map((row) => ({ ...row })) };
+  const selected = await structuralProjectionManifestForReport({
+    episodeDir: temp, report: derivedReport,
+    rootManifestPath: manifestPath, rootManifest: manifest,
+  });
+  assert.equal(selected.manifestPath, derivedPath);
+  assert.equal(projectVerifiedStructuralRecoveryReport({
+    report: derivedReport, manifest: selected.manifest,
+    manifestFileSha256: derivedHash, structuralRecovery: verified,
+  }).provider_output_manifest_sha256, derivedHash);
+  assert.equal((await structuralProjectionManifestForReport({
+    episodeDir: temp, report: passingReport,
+    rootManifestPath: manifestPath, rootManifest: manifest,
+  })).manifestPath, manifestPath);
+  await assert.rejects(structuralProjectionManifestForReport({
+    episodeDir: temp, report: { ...derivedReport, provider_output_manifest_sha256: hash("0") },
+    rootManifestPath: manifestPath, rootManifest: manifest,
+  }), /hash-stale/u);
+  const changedStructural = structuredClone(derived);
+  changedStructural.units[1].audio_sha256 = hash("0");
+  await fs.writeFile(derivedPath, JSON.stringify(changedStructural));
+  await assert.rejects(structuralProjectionManifestForReport({
+    episodeDir: temp, report: { ...derivedReport, provider_output_manifest_sha256:
+      createHash("sha256").update(JSON.stringify(changedStructural)).digest("hex") },
+    rootManifestPath: manifestPath, rootManifest: manifest,
+  }), /changed structural retry selection/u);
   assert.throws(() => projectVerifiedStructuralRecoveryReport({
     report: { ...providerNeutralBlocked, provider_output_manifest_sha256: hash("0") },
     manifest, manifestFileSha256: manifestHash, structuralRecovery: verified,

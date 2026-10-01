@@ -45,7 +45,7 @@ import {
 import { loadNarrationSourceStructure } from "./lib/narration-source-structure.mjs";
 import { loadLowMarginDisposition } from "./lib/narration-low-margin-disposition.mjs";
 import { loadAsrOrthographyReview } from "./lib/narration-asr-orthography-review.mjs";
-import { projectVerifiedStructuralRecoveryReport, verifiedStructuralRecoveryFromManifest } from "./lib/narration-structural-finalizer-provenance.mjs";
+import { projectVerifiedStructuralRecoveryReport, structuralProjectionManifestForReport, verifiedStructuralRecoveryFromManifest } from "./lib/narration-structural-finalizer-provenance.mjs";
 import { validateConfirmedRetryEvidenceForTests } from "./narration-tts-episode.mjs";
 import { loadPronunciationRecoveryState } from "./lib/narration-pronunciation-episode.mjs";
 import {
@@ -3895,11 +3895,14 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
   }
   if (policy.primary?.provider === "qwen_local") {
     try {
-      const manifestPath = path.join(episodeDir,
+      const rootManifestPath = path.join(episodeDir,
         `narration_provider_output_manifest_${episode}.json`);
-      const manifest = await readJson(manifestPath, null);
-      if ((manifest?.units ?? []).some((row) =>
+      const rootManifest = await readJson(rootManifestPath, null);
+      if ((rootManifest?.units ?? []).some((row) =>
         row?.recovery_provenance?.evidence_basis === "reviewed_structural_no_audio")) {
+        const { manifestPath, manifest } = await structuralProjectionManifestForReport({
+          episodeDir, report: ttsReport, rootManifestPath, rootManifest,
+        });
         const planPath = path.join(episodeDir, "narration_generation_plan.json");
         const plan = await readJson(planPath, null);
         const manifestFileSha256 = await fileSha256(manifestPath);

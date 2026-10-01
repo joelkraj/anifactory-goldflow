@@ -10,6 +10,44 @@ const inside = (root, target) => path.isAbsolute(String(target ?? ""))
 const equal = (left, right) => canonicalQwenBatchSha256(left) === canonicalQwenBatchSha256(right);
 const readJson = async (target) => JSON.parse(await fs.readFile(target, "utf8"));
 
+// A later exact-boundary composite may finalize into an immutable derived
+// manifest. Project structural retry metadata against the manifest actually
+// bound to the current report, while retaining the episode-root manifest for
+// an unfinished exact-unit retake whose old report hash no longer matches it.
+export async function structuralProjectionManifestForReport({
+  episodeDir, report, rootManifestPath, rootManifest,
+} = {}) {
+  const reportPath = report?.provider_output_manifest_path;
+  if (!reportPath || path.resolve(reportPath) === path.resolve(rootManifestPath)) {
+    return { manifestPath: rootManifestPath, manifest: rootManifest };
+  }
+  if (!inside(episodeDir, reportPath)
+    || await sha256File(reportPath).catch(() => null)
+      !== report.provider_output_manifest_sha256) {
+    throw new Error("Report-bound derived structural manifest is absent or hash-stale.");
+  }
+  const derived = await readJson(reportPath);
+  if (derived?.status !== "passed" || derived.provider !== "qwen_local"
+    || !derived.repair_history?.some((row) =>
+      row.mode === "exact_sentence_boundary_composite_v1")) {
+    throw new Error("Report-bound structural manifest lacks exact-boundary lineage.");
+  }
+  const structural = (rootManifest?.units ?? []).filter((row) =>
+    row?.recovery_provenance?.evidence_basis === "reviewed_structural_no_audio");
+  const derivedById = new Map((derived.units ?? []).map((row) => [row.unit_id, row]));
+  if (structural.length !== 1 || derivedById.size !== derived.units.length
+    || derived.units.length !== rootManifest.units.length
+    || structural.some((row) => {
+      const selected = derivedById.get(row.unit_id);
+      return !selected || ["audio_sha256", "synthesis_identity_sha256",
+        "spoken_text_sha256", "recovery_provenance"].some((key) =>
+        !equal(selected[key], row[key]));
+    })) {
+    throw new Error("Derived exact-boundary manifest changed structural retry selection.");
+  }
+  return { manifestPath: reportPath, manifest: derived };
+}
+
 // A provider-neutral finalizer can replace the Qwen blocked report after a
 // one-unit token-limit recovery. Rebuild only its omitted report metadata from
 // the passed manifest and the immutable, hash-named first-attempt archives.

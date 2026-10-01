@@ -66,12 +66,13 @@ export function validateBoundaryRepairScopeForTests({ plan, manifest, delivery, 
   const unitById = new Map(units.map((row) => [row.unit_id, row]));
   const manifestById = new Map((manifest?.units ?? []).map((row) => [row.unit_id, row]));
   const deliveryById = new Map((delivery?.units ?? []).map((row) => [row.unit_id, row]));
-  const fullStreamIds = new Set((fullStream?.blockers ?? [])
+  const blockedFullStream = fullStream?.status === "blocked" ? fullStream : null;
+  const fullStreamIds = new Set((blockedFullStream?.blockers ?? [])
     .filter((row) => row.severity === "blocker" && row.unit_id)
     .map((row) => row.unit_id));
   if (spec?.schema !== "goldflow_tts_exact_boundary_repair_spec_v1"
     || manifest?.status !== "passed"
-    || (delivery?.status !== "blocked" && (fullStream?.status !== "blocked" || !fullStreamIds.size))
+    || (delivery?.status !== "blocked" && !fullStreamIds.size)
     || !Array.isArray(spec.units) || spec.units.length === 0) {
     throw new Error("Repair requires a blocked unit-delivery report and a valid exact spec.");
   }
@@ -145,13 +146,16 @@ export async function main(parts = process.argv.slice(2)) {
   }
   const deliveryPath = path.join(episodeDir, `narration_unit_delivery_qa_${episode}.json`);
   const fullStreamPath = path.join(episodeDir, `narration_full_stream_qa_${episode}.json`);
-  const [plan, identity, manifest, delivery, fullStream, spec] = await Promise.all([
+  const [plan, identity, manifest, delivery, fullStreamCandidate, spec] = await Promise.all([
     json(planPath), json(identityPath), json(manifestPath), json(deliveryPath),
     fs.readFile(fullStreamPath, "utf8").then(JSON.parse).catch((error) => {
       if (error?.code === "ENOENT") return null;
       throw error;
     }), json(specPath),
   ]);
+  // A prior unit-QA attempt may leave a full-stream placeholder with stale
+  // blockers. Only an actually blocked full-stream result is repair evidence.
+  const fullStream = fullStreamCandidate?.status === "blocked" ? fullStreamCandidate : null;
   if (identity.tts_provider !== "qwen_local"
     || manifest.provider !== "qwen_local"
     || report.status !== "blocked"

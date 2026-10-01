@@ -27,6 +27,14 @@ const spec = { schema: "goldflow_tts_exact_boundary_repair_spec_v1", units: [
 assert.deepEqual(validateBoundaryRepairScopeForTests({ plan, manifest, delivery, spec }), {
   selected: ["unit-1"], orthographic: ["unit-2"],
 });
+const unitOnlyDelivery = { status: "blocked", units: delivery.units.map((row) => row.unit_id === "unit-2"
+  ? { ...row, decision: { status: "passed", blockers: [] } } : row) };
+assert.deepEqual(validateBoundaryRepairScopeForTests({ plan, manifest, delivery: unitOnlyDelivery,
+  fullStream: { status: "not_run_due_to_unit_blockers", blockers: [{
+    severity: "blocker", code: "stale_prior_attempt", unit_id: "unit-2",
+  }] }, spec }), {
+  selected: ["unit-1"], orthographic: [],
+});
 const fullStreamDelivery = { status: "passed", units: delivery.units.map((row) => ({
   ...row, decision: { status: "passed", blockers: [] },
 })) };

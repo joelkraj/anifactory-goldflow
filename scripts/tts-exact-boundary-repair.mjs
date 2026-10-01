@@ -262,6 +262,31 @@ export function validateSubsetBoundaryFinalizationForTests({
   return { preserved_blocked_unit_count: preservedBlockedUnitIds.length };
 }
 
+export function selectBoundaryRepairFullStreamForTests({ candidate, report, spec,
+  currentManifestSha256, candidateFileSha256 } = {}) {
+  if (candidate?.status !== "blocked") return { current: null, historical: null };
+  if (candidate.provider_output_manifest_file_sha256 === currentManifestSha256) {
+    if (report?.full_stream_qa_status !== "blocked") {
+      throw new Error("Current full-stream repair evidence conflicts with the blocked report.");
+    }
+    return { current: candidate, historical: null };
+  }
+  // A replacement may fail selected-unit QA before a new stitch is built. In
+  // that case the older blocked full-stream report remains on disk, but it
+  // cannot supply targets or contextual-ASR authority for this new manifest.
+  if (spec?.schema !== "goldflow_tts_exact_boundary_repair_spec_v2"
+    || report?.status !== "blocked"
+    || report?.unit_qa_status !== "blocked"
+    || report?.full_stream_qa_status !== "not_run_due_to_unit_blockers"
+    || candidate.source_script_hash !== report.source_script_hash
+    || spec.historical_full_stream_file_sha256 !== candidateFileSha256
+    || spec.contextual_asr_evidence_path
+    || (spec.full_stream_targets ?? []).length) {
+    throw new Error("Stale full-stream evidence cannot authorize unit-QA-first repair.");
+  }
+  return { current: null, historical: candidate };
+}
+
 export async function main(parts = process.argv.slice(2)) {
   const options = flags(parts);
   const episodeDir = path.resolve(options["episode-dir"] ?? "");
@@ -296,13 +321,19 @@ export async function main(parts = process.argv.slice(2)) {
       throw error;
     }), json(specPath),
   ]);
-  // A prior unit-QA attempt may leave a full-stream placeholder with stale
-  // blockers. Only an actually blocked full-stream result is repair evidence.
-  const fullStream = fullStreamCandidate?.status === "blocked" ? fullStreamCandidate : null;
+  const currentManifestSha256 = await fileHash(manifestPath);
+  const historicalCandidateSha256 = fullStreamCandidate?.status === "blocked"
+    ? await fileHash(fullStreamPath) : null;
+  const fullStreamSelection = selectBoundaryRepairFullStreamForTests({
+    candidate: fullStreamCandidate, report, spec,
+    currentManifestSha256, candidateFileSha256: historicalCandidateSha256,
+  });
+  const fullStream = fullStreamSelection.current;
+  const historicalFullStream = fullStreamSelection.historical;
   if (identity.tts_provider !== "qwen_local"
     || manifest.provider !== "qwen_local"
     || report.status !== "blocked"
-    || report.provider_output_manifest_sha256 !== await fileHash(manifestPath)
+    || report.provider_output_manifest_sha256 !== currentManifestSha256
     || manifest.manifest_sha256 !== narrationProviderOutputManifestSha256(manifest)) {
     throw new Error("Locked Qwen identity or prior report binding is stale.");
   }
@@ -354,6 +385,7 @@ export async function main(parts = process.argv.slice(2)) {
     prior_manifest_file_sha256: await fileHash(manifestPath),
     prior_delivery_file_sha256: await fileHash(deliveryPath),
     ...(fullStream ? { prior_full_stream_file_sha256: await fileHash(fullStreamPath) } : {}),
+    ...(historicalFullStream ? { historical_full_stream_file_sha256: historicalCandidateSha256 } : {}),
     ...(contextualAsr ? { contextual_asr_evidence_path: contextualPath,
       contextual_asr_evidence_sha256: contextualAsr.evidence_sha256,
       contextual_asr_finding_sha256: contextualAsr.target.finding_sha256 } : {}),
@@ -387,7 +419,7 @@ export async function main(parts = process.argv.slice(2)) {
   const repairDir = path.join(episodeDir, "assets/audio/narration_tts/exact_boundary_repairs", request.request_sha256);
   const requestPath = path.join(repairDir, "request.json");
   await writeNew(requestPath, `${JSON.stringify(request, null, 2)}\n`);
-  for (const [name, original] of [["prior_manifest.json", manifestPath], ["prior_delivery.json", deliveryPath], ["prior_report.json", reportPath], ...(fullStream ? [["prior_full_stream.json", fullStreamPath]] : [])]) {
+  for (const [name, original] of [["prior_manifest.json", manifestPath], ["prior_delivery.json", deliveryPath], ["prior_report.json", reportPath], ...(fullStream ? [["prior_full_stream.json", fullStreamPath]] : []), ...(historicalFullStream ? [["historical_full_stream.json", fullStreamPath]] : [])]) {
     await writeNew(path.join(repairDir, name), await fs.readFile(original));
   }
   if (options["dry-run"] === "true") {

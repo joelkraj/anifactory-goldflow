@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { validateBoundaryRepairScopeForTests,
-  validateSubsetBoundaryFinalizationForTests } from "../tts-exact-boundary-repair.mjs";
+  validateSubsetBoundaryFinalizationForTests,
+  selectBoundaryRepairFullStreamForTests } from "../tts-exact-boundary-repair.mjs";
 import { assertPartialRepairUnitBlockerHoldForTests } from "../narration-provider-output-finalize.mjs";
 
 const unit = { unit_id: "unit-1", spoken_text: "First sentence. Missing ending." };
@@ -109,6 +110,46 @@ assert.deepEqual(validateBoundaryRepairScopeForTests(subsetArgs), {
   selected: ["cutoff"], orthographic: [],
   preservedBlocked: ["retained-a", "retained-b"],
 });
+const staleFullStream = { status: "blocked", source_script_hash: subsetReport.source_script_hash,
+  provider_output_manifest_file_sha256: digest("prior-manifest-file") };
+const historicalSha256 = digest("historical-full-stream-file");
+const unitQaFirstSpec = { ...subsetSpec,
+  historical_full_stream_file_sha256: historicalSha256 };
+const selectedHistorical = selectBoundaryRepairFullStreamForTests({
+  candidate: staleFullStream, report: subsetReport, spec: unitQaFirstSpec,
+  currentManifestSha256: fileHashes.manifest, candidateFileSha256: historicalSha256,
+});
+assert.deepEqual(selectedHistorical, { current: null, historical: staleFullStream });
+assert.deepEqual(validateBoundaryRepairScopeForTests({ ...subsetArgs,
+  fullStream: selectedHistorical.current, spec: unitQaFirstSpec }), {
+  selected: ["cutoff"], orthographic: [],
+  preservedBlocked: ["retained-a", "retained-b"],
+});
+for (const change of [
+  { spec: { ...unitQaFirstSpec, historical_full_stream_file_sha256: digest("wrong") } },
+  { spec: { ...unitQaFirstSpec, schema: "goldflow_tts_exact_boundary_repair_spec_v1" } },
+  { spec: { ...unitQaFirstSpec, contextual_asr_evidence_path: "/stale.json" } },
+  { spec: { ...unitQaFirstSpec, full_stream_targets: [{ finding_sha256: digest("old") }] } },
+  { report: { ...subsetReport, unit_qa_status: "passed" } },
+  { report: { ...subsetReport, full_stream_qa_status: "blocked" } },
+  { candidate: { ...staleFullStream, source_script_hash: digest("wrong-source") } },
+]) {
+  assert.throws(() => selectBoundaryRepairFullStreamForTests({
+    candidate: staleFullStream, report: subsetReport, spec: unitQaFirstSpec,
+    currentManifestSha256: fileHashes.manifest, candidateFileSha256: historicalSha256,
+    ...change,
+  }), /Stale full-stream evidence/);
+}
+assert.deepEqual(selectBoundaryRepairFullStreamForTests({
+  candidate: { ...staleFullStream, provider_output_manifest_file_sha256: fileHashes.manifest },
+  report: { ...subsetReport, full_stream_qa_status: "blocked" }, spec: subsetSpec,
+  currentManifestSha256: fileHashes.manifest, candidateFileSha256: historicalSha256,
+}).current.provider_output_manifest_file_sha256, fileHashes.manifest);
+assert.throws(() => selectBoundaryRepairFullStreamForTests({
+  candidate: { ...staleFullStream, provider_output_manifest_file_sha256: fileHashes.manifest },
+  report: subsetReport, spec: subsetSpec,
+  currentManifestSha256: fileHashes.manifest, candidateFileSha256: historicalSha256,
+}), /conflicts with the blocked report/);
 for (const mutate of [
   (spec) => { spec.preserved_blocked_unit_ids.pop(); },
   (spec) => { spec.blocked_unit_ids.pop(); },

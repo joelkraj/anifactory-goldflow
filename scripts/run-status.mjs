@@ -46,6 +46,7 @@ import { loadNarrationSourceStructure } from "./lib/narration-source-structure.m
 import { loadLowMarginDisposition } from "./lib/narration-low-margin-disposition.mjs";
 import { loadAsrOrthographyReview } from "./lib/narration-asr-orthography-review.mjs";
 import { projectVerifiedStructuralRecoveryReport, verifiedStructuralRecoveryFromManifest } from "./lib/narration-structural-finalizer-provenance.mjs";
+import { validateConfirmedRetryEvidenceForTests } from "./narration-tts-episode.mjs";
 import {
   NARRATION_CROSS_LEVEL_ASR_POLICY_VERSION,
   crossLevelArticleFusionCandidate,
@@ -3173,6 +3174,150 @@ export async function narrationStructuralNoAudioRetryReportValidForTests(ttsRepo
     && await fileSha256(providerUnit.audio_path) === result.audio_sha256);
 }
 
+// After an exact ASR delivery retake, the new passed provider manifest is
+// written before no-synthesis finalization. The old blocked narration report
+// remains valid for the immutable pre-retry WAVs, but binds the predecessor
+// manifest. Admit only that exact completed cohort to the guarded finalizer.
+export async function completedExactDeliveryRetakeFinalizationForTests({
+  episodeDir, episode, ttsReport, ttsReportPath, manifest, manifestPath,
+  plan, planFileSha256, qualityContract, policy, currentScriptHash,
+} = {}) {
+  const insideEpisode = (target) => path.isAbsolute(String(target ?? ""))
+    && path.resolve(target).startsWith(`${path.resolve(episodeDir)}${path.sep}`);
+  const manifestFileSha256 = await fileSha256(manifestPath);
+  if (ttsReport?.status !== "blocked" || manifest?.status !== "passed"
+    || policy?.primary?.provider !== "qwen_local"
+    || !insideEpisode(manifestPath)
+    || ttsReport.provider_output_manifest_path !== manifestPath
+    || ttsReport.provider_output_manifest_sha256 === manifestFileSha256
+    || ttsReport.source_script_hash !== currentScriptHash
+    || plan?.source_script_hash !== currentScriptHash
+    || ttsReport.narration_generation_plan_sha256 !== plan?.plan_sha256
+    || ttsReport.narration_generation_plan_file_sha256 !== planFileSha256) {
+    throw new Error("Completed exact delivery retake lacks the blocked predecessor and current plan bindings.");
+  }
+  const retryEvidencePath = path.join(episodeDir,
+    `narration_confirmed_retry_evidence_${episode}.json`);
+  const retryEvidence = await readJson(retryEvidencePath, null);
+  const retryEvidenceSha256 = await fileSha256(retryEvidencePath);
+  const priorReportPath = retryEvidence?.pre_retry_narration_report_path;
+  const priorReportSha256 = await fileSha256(ttsReportPath);
+  if (!insideEpisode(priorReportPath)
+    || path.resolve(priorReportPath) === path.resolve(ttsReportPath)
+    || await fileSha256(priorReportPath) !== priorReportSha256
+    || retryEvidence?.pre_retry_narration_report_sha256 !== priorReportSha256
+    || retryEvidence?.evidence_basis !== "reviewed_automated_delivery_qa") {
+    throw new Error("Completed exact delivery retake has no immutable current-report-bound evidence.");
+  }
+  const requestedIds = (retryEvidence.confirmed_units ?? []).map((row) => String(row.unit_id));
+  const priorResults = ttsReport.results ?? [];
+  const manifestUnits = manifest.units ?? [];
+  const expectedUnits = narrationPlanUnitsForStatus(plan);
+  const requested = new Set(requestedIds);
+  const priorById = new Map(priorResults.map((row) => [row.unit_id, row]));
+  const currentById = new Map(manifestUnits.map((row) => [row.unit_id, row]));
+  if (!requested.size || requested.size !== requestedIds.length
+    || priorById.size !== expectedUnits.length || currentById.size !== expectedUnits.length
+    || priorResults.length !== expectedUnits.length || manifestUnits.length !== expectedUnits.length
+    || validateNarrationProviderOutputManifest(manifest, expectedUnits, {
+      generationPlanSha256: plan.plan_sha256,
+      generationPlanFileSha256: planFileSha256,
+      qualityContractSha256: qualityContract.contract_sha256,
+      provider: policy.primary.provider,
+      voiceId: policy.primary.voice_id,
+      voiceSha256: policy.primary.voice_sha256,
+    }).status !== "passed") {
+    throw new Error("Completed exact delivery retake has missing, duplicate, or stale provider units.");
+  }
+  validateConfirmedRetryEvidenceForTests({
+    evidence: retryEvidence, requestedUnitIds: requestedIds,
+    planSha256: plan.plan_sha256, priorReport: ttsReport,
+    priorReportSha256, currentCandidates: priorResults,
+    sourceScriptSha256: currentScriptHash, planFileSha256,
+  });
+  const evidenceById = new Map(retryEvidence.confirmed_units.map((row) => [row.unit_id, row]));
+  const runnerPaths = new Set();
+  for (const unit of expectedUnits) {
+    const old = priorById.get(unit.unit_id);
+    const current = currentById.get(unit.unit_id);
+    if (!old || !current || current.spoken_text_sha256 !== unit.spoken_text_sha256
+      || !insideEpisode(current.audio_path)
+      || await fileSha256(current.audio_path) !== current.audio_sha256) {
+      throw new Error(`Completed exact delivery retake has a stale selected WAV: ${unit.unit_id}.`);
+    }
+    if (!requested.has(unit.unit_id)) {
+      if (Number(current.attempt) !== Number(old.attempt)
+        || current.audio_path !== old.audio_path
+        || current.audio_sha256 !== old.audio_sha256
+        || current.synthesis_identity_sha256 !== old.synthesis_identity_sha256) {
+        throw new Error(`Completed exact delivery retake changed a preserved WAV: ${unit.unit_id}.`);
+      }
+      continue;
+    }
+    const reviewed = evidenceById.get(unit.unit_id);
+    const recovery = current.recovery_provenance;
+    if (Number(current.attempt) !== 2 || current.status !== "accepted"
+      || recovery?.evidence_basis !== "reviewed_automated_delivery_qa"
+      || recovery.human_listening_performed !== false
+      || recovery.unit_id !== unit.unit_id
+      || recovery.origin_audio_sha256 !== reviewed.audio_sha256
+      || recovery.origin_synthesis_identity_sha256 !== reviewed.synthesis_identity_sha256
+      || recovery.confirmed_evidence_path !== retryEvidencePath
+      || recovery.confirmed_evidence_sha256 !== retryEvidenceSha256
+      || !insideEpisode(current.runner_report_path)
+      || !current.runner_report_sha256) {
+      throw new Error(`Completed exact delivery retake lacks exact recovery provenance: ${unit.unit_id}.`);
+    }
+    runnerPaths.add(current.runner_report_path);
+  }
+  if (runnerPaths.size !== 1) {
+    throw new Error("Completed exact delivery retake does not have one scoped runner.");
+  }
+  const [runnerPath] = runnerPaths;
+  const runnerSha256 = await fileSha256(runnerPath);
+  const indexedRuns = (manifest.provider_execution?.synthesis_runs ?? [])
+    .filter((row) => row.report_path === runnerPath
+      && row.report_sha256 === runnerSha256 && Number(row.attempt) === 2);
+  if (indexedRuns.length !== 1) {
+    throw new Error("Completed exact delivery retake runner is absent or duplicated in the manifest inventory.");
+  }
+  const runner = await readJson(runnerPath, null);
+  const results = runner?.results ?? [];
+  const runnerById = new Map(results.map((row) => [row.unit_id, row]));
+  if (runner?.status !== "passed" || results.length !== requested.size
+    || runnerById.size !== requested.size
+    || !results.every((row) => requested.has(row.unit_id))) {
+    throw new Error("Completed exact delivery retake runner scope differs from the reviewed IDs.");
+  }
+  for (const unitId of requested) {
+    const current = currentById.get(unitId);
+    const row = runnerById.get(unitId);
+    if (current.runner_report_sha256 !== runnerSha256
+      || row?.status !== "generated" || Number(row.attempt) !== 2
+      || row.output_path !== current.audio_path
+      || row.output_sha256 !== current.audio_sha256
+      || row.synthesis_identity_sha256 !== current.synthesis_identity_sha256
+      || row.spoken_text_sha256 !== current.spoken_text_sha256
+      || row.token_limit_reached !== false) {
+      throw new Error(`Completed exact delivery retake runner differs from selected unit ${unitId}.`);
+    }
+  }
+  const orthographyPath = path.join(episodeDir,
+    `narration_asr_orthography_review_${episode}.json`);
+  if (await exists(orthographyPath)) {
+    const review = await loadAsrOrthographyReview({ episodeDir, episode, plan,
+      identityFileSha256: await fileSha256(path.join(episodeDir, "run_identity.json")),
+      sourceScriptSha256: currentScriptHash, planFileSha256,
+      qualityContractSha256: qualityContract.contract_sha256,
+      currentManifest: manifest });
+    if (ttsReport.asr_orthography_review?.evidence_sha256 !== review?.evidence_sha256) {
+      throw new Error("Completed exact delivery retake changed the applied orthography review.");
+    }
+  }
+  return { manifestPath, retainedUnitCount: expectedUnits.length - requested.size,
+    repairedUnitIds: requestedIds };
+}
+
 export function structuralNoAudioEvidenceConsumedForTests({
   ttsReport, evidence, evidencePath, evidenceSha256,
 }) {
@@ -3552,6 +3697,19 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
           planFileSha256: await fileSha256(planPath),
           sourceScriptSha256: currentScriptHash,
         });
+        if (ttsReport.status === "blocked"
+          && ttsReport.provider_output_manifest_sha256 !== manifestFileSha256) {
+          const exactRetake = await completedExactDeliveryRetakeFinalizationForTests({
+            episodeDir, episode, ttsReport, ttsReportPath,
+            manifest, manifestPath, plan,
+            planFileSha256: await fileSha256(planPath),
+            qualityContract: narrationQualityContract,
+            policy, currentScriptHash,
+          });
+          return { done: false, state: "blocked",
+            evidence: `Completed exact ASR delivery retake preserves ${exactRetake.retainedUnitCount} selected WAVs and has ${exactRetake.repairedUnitIds.length} hash-verified attempt-two WAVs; structural archives remain valid. Finalize the current manifest without synthesis`,
+            next_command_shape: `node bin/goldflow.mjs tts finalize-provider --episode-dir ${episodeDir} --manifest ${manifestPath}` };
+        }
         ttsReport = projectVerifiedStructuralRecoveryReport({
           report: ttsReport, manifest, manifestFileSha256,
           structuralRecovery, qualityContract: narrationQualityContract,

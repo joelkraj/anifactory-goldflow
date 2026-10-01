@@ -11,7 +11,10 @@ import {
 import { canonicalQwenBatchSha256 } from "../lib/qwen-liam-batch-contract.mjs";
 import { narrationTtsRetryReportPolicy } from "../lib/narration-tts-policy.mjs";
 import { validateStructuralNoAudioRetryEvidence } from "../lib/tts-structural-no-audio-retry.mjs";
-import { narrationStructuralNoAudioRetryReportValidForTests } from "../run-status.mjs";
+import {
+  narrationStructuralNoAudioRetryReportValidForTests,
+  structuralNoAudioEvidenceConsumedForTests,
+} from "../run-status.mjs";
 
 const hash = (letter) => letter.repeat(64);
 const [kept, failed] = [
@@ -161,6 +164,29 @@ const provenance = exactUnitRecoveryProvenanceForTests({
 assert.deepEqual(provenance.trigger_codes, ["tts_batch_token_limit_reached"]);
 assert.equal(provenance.origin_audio_sha256, null);
 assert.equal(provenance.human_listening_performed, false);
+const consumedArgs = {
+  ttsReport: { ...priorReport, results: [retained, {
+    unit_id: failed.unit_id, attempt: 2, audio_sha256: hash("0"),
+    spoken_text_sha256: failed.spoken_text_sha256,
+    recovery_provenance: provenance,
+  }] },
+  evidence, evidencePath: "/fixture/review.json", evidenceSha256: hash("9"),
+};
+assert.equal(structuralNoAudioEvidenceConsumedForTests({
+  ...consumedArgs, ttsReport: priorReport,
+}), false);
+assert.equal(structuralNoAudioEvidenceConsumedForTests(consumedArgs), true);
+for (const change of [
+  (copy) => { copy.ttsReport.results[1].attempt = 1; },
+  (copy) => { copy.ttsReport.results[1].recovery_provenance.origin_audio_sha256 = hash("1"); },
+  (copy) => { copy.ttsReport.results[1].recovery_provenance.confirmed_evidence_sha256 = hash("1"); },
+  (copy) => { copy.ttsReport.results[1].recovery_provenance.trigger_codes = ["other"]; },
+  (copy) => { copy.ttsReport.results[1].recovery_provenance.evidence_basis = "other"; },
+]) {
+  const copy = structuredClone(consumedArgs);
+  change(copy);
+  assert.throws(() => structuralNoAudioEvidenceConsumedForTests(copy));
+}
 const retryPolicy = narrationTtsRetryReportPolicy({ recoveryProvenances: [provenance] });
 assert.equal(retryPolicy.retry_only_confirmed_skip_truncation_or_stutter, false);
 assert.equal(retryPolicy.reviewed_structural_no_audio_repairs[0].unit_id, failed.unit_id);

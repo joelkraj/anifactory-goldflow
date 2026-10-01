@@ -3167,6 +3167,36 @@ export async function narrationStructuralNoAudioRetryReportValidForTests(ttsRepo
     && await fileSha256(providerUnit.audio_path) === result.audio_sha256);
 }
 
+export function structuralNoAudioEvidenceConsumedForTests({
+  ttsReport, evidence, evidencePath, evidenceSha256,
+}) {
+  const reviewed = evidence?.confirmed_units;
+  const unitId = reviewed?.[0]?.unit_id;
+  const matches = (ttsReport?.results ?? []).filter((row) => row.unit_id === unitId);
+  if (!matches.length) return false;
+  const result = matches[0];
+  const recovery = result.recovery_provenance;
+  if (evidence?.schema !== "goldflow_qwen_structural_no_audio_retry_evidence_v1"
+    || evidence.evidence_basis !== "reviewed_structural_no_audio"
+    || reviewed.length !== 1 || matches.length !== 1
+    || Number(result.attempt) !== 2
+    || !/^[a-f0-9]{64}$/u.test(String(result.audio_sha256 ?? ""))
+    || result.spoken_text_sha256 !== reviewed[0].spoken_text_sha256
+    || recovery?.schema !== "goldflow_qwen_exact_unit_recovery_provenance_v1"
+    || recovery.unit_id !== unitId
+    || recovery.evidence_basis !== "reviewed_structural_no_audio"
+    || recovery.human_listening_performed !== false
+    || recovery.origin_audio_sha256 !== null
+    || recovery.origin_synthesis_identity_sha256 !== reviewed[0].synthesis_identity_sha256
+    || recovery.confirmed_evidence_path !== evidencePath
+    || recovery.confirmed_evidence_sha256 !== evidenceSha256
+    || canonicalQwenBatchSha256(recovery.trigger_codes)
+      !== canonicalQwenBatchSha256(["tts_batch_token_limit_reached"])) {
+    throw new Error("Selected token-limit unit lacks exact consumed structural-retry provenance.");
+  }
+  return true;
+}
+
 export async function narrationHeardPronunciationRetryReportValidForTests(ttsReport, currentScriptHash) {
   const results = ttsReport?.results ?? [];
   const expectedPolicy = narrationTtsRetryReportPolicy({
@@ -3546,38 +3576,50 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
         try {
           const evidence = await readJson(structuralEvidencePath, null);
           const unitId = evidence?.confirmed_units?.[0]?.unit_id;
-          const planPath = path.join(episodeDir, "narration_generation_plan.json");
-          const unitQaPath = path.join(episodeDir,
-            `narration_tts_unit_qa_${episode}.json`);
-          const [plan, unitQa] = await Promise.all([
-            readJson(planPath, null), readJson(unitQaPath, null),
-          ]);
-          const candidate = (unitQa?.candidates ?? []).find((row) => (
-            String(row?.unit_id) === String(unitId)
-          ));
-          const runnerPath = candidate?.runner_report_path;
-          if (!runnerPath || !path.isAbsolute(runnerPath)
-            || !path.resolve(runnerPath).startsWith(`${path.resolve(episodeDir)}${path.sep}`)) {
-            throw new Error("Original runner report path is absent or outside the episode.");
-          }
-          const runnerReport = await readJson(runnerPath, null);
-          validateStructuralNoAudioRetryEvidence({
-            evidence, requestedUnitIds: [unitId],
-            sourceScriptSha256: currentScriptHash,
-            planSha256: plan?.plan_sha256 ?? null,
-            planFileSha256: await fileSha256(planPath),
-            priorReport: ttsReport,
-            priorReportSha256: await fileSha256(ttsReportPath),
-            priorUnitQa: unitQa,
-            priorUnitQaSha256: await fileSha256(unitQaPath),
-            runnerReport,
-            runnerReportSha256: await fileSha256(runnerPath),
-            units: narrationPlanUnitsForStatus(plan),
-            batchPlan: plan?.qwen_liam_batch_plan,
+          const consumed = structuralNoAudioEvidenceConsumedForTests({
+            ttsReport, evidence, evidencePath: structuralEvidencePath,
+            evidenceSha256: await fileSha256(structuralEvidencePath),
           });
-          return { done: false, state: "blocked",
-            evidence: `Reviewed token-limit no-audio failure authorizes one exact-unit Qwen retry for ${unitId}; all accepted WAVs remain immutable`,
-            next_command_shape: `node bin/goldflow.mjs tts narrate --episode-dir ${episodeDir} --confirmed-retry-unit-ids ${unitId} --confirmed-retry-evidence ${structuralEvidencePath}` };
+          if (consumed) {
+            if (!await narrationStructuralNoAudioRetryReportValidForTests(
+              ttsReport, currentScriptHash,
+            )) {
+              throw new Error("Consumed token-limit retry does not validate against its archived predecessor and selected WAV.");
+            }
+          } else {
+            const planPath = path.join(episodeDir, "narration_generation_plan.json");
+            const unitQaPath = path.join(episodeDir,
+              `narration_tts_unit_qa_${episode}.json`);
+            const [plan, unitQa] = await Promise.all([
+              readJson(planPath, null), readJson(unitQaPath, null),
+            ]);
+            const candidate = (unitQa?.candidates ?? []).find((row) => (
+              String(row?.unit_id) === String(unitId)
+            ));
+            const runnerPath = candidate?.runner_report_path;
+            if (!runnerPath || !path.isAbsolute(runnerPath)
+              || !path.resolve(runnerPath).startsWith(`${path.resolve(episodeDir)}${path.sep}`)) {
+              throw new Error("Original runner report path is absent or outside the episode.");
+            }
+            const runnerReport = await readJson(runnerPath, null);
+            validateStructuralNoAudioRetryEvidence({
+              evidence, requestedUnitIds: [unitId],
+              sourceScriptSha256: currentScriptHash,
+              planSha256: plan?.plan_sha256 ?? null,
+              planFileSha256: await fileSha256(planPath),
+              priorReport: ttsReport,
+              priorReportSha256: await fileSha256(ttsReportPath),
+              priorUnitQa: unitQa,
+              priorUnitQaSha256: await fileSha256(unitQaPath),
+              runnerReport,
+              runnerReportSha256: await fileSha256(runnerPath),
+              units: narrationPlanUnitsForStatus(plan),
+              batchPlan: plan?.qwen_liam_batch_plan,
+            });
+            return { done: false, state: "blocked",
+              evidence: `Reviewed token-limit no-audio failure authorizes one exact-unit Qwen retry for ${unitId}; all accepted WAVs remain immutable`,
+              next_command_shape: `node bin/goldflow.mjs tts narrate --episode-dir ${episodeDir} --confirmed-retry-unit-ids ${unitId} --confirmed-retry-evidence ${structuralEvidencePath}` };
+          }
         } catch (error) {
           return { done: false, state: "blocked",
             evidence: `Structural no-audio retry evidence is stale or invalid: ${error.message}`,

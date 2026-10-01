@@ -6,9 +6,12 @@ import path from "node:path";
 import {
   APPEND_ONLY_TAIL_SCHEMA, appendOnlySilentTailForTests,
   appendOnlyTailGuardAdmission, pcm16MonoWavFactsForTests,
-  validateAppendOnlyTailScopeForTests, verifyAppendOnlyTailSelection,
+  validateAppendOnlyTailScopeForTests, verifyAppendOnlyTailLineage,
+  verifyAppendOnlyTailSelection,
 } from "../lib/narration-append-only-tail.mjs";
-import { narrationSynthesisIdentitySha256 } from "../lib/narration-provider-adapter.mjs";
+import { narrationProviderOutputManifestSha256,
+  narrationSynthesisIdentitySha256 } from "../lib/narration-provider-adapter.mjs";
+import { canonicalQwenBatchSha256 } from "../lib/qwen-liam-batch-contract.mjs";
 
 const sha = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const ep = "/tmp/goldflow-append-tail-test";
@@ -34,6 +37,9 @@ function fixture() {
     deliverySha = sha("delivery"), manifestSha = sha("manifest");
   const audioPath = `${ep}/edge.wav`;
   const selected = { unit_id: selectedId, status: "accepted",
+    provider: "qwen_local", model_id: "fixture-model", model_revision: "fixture-revision",
+    voice_id: "fixture-voice", voice_sha256: sha("fixture voice"),
+    voice_continuity_contract: "fixture_owned_clone",
     audio_path: audioPath, audio_sha256: audio,
     synthesis_identity_sha256: sha("source identity"),
     token_limit_reached: false, attempt: 1,
@@ -210,6 +216,47 @@ try {
   await verifyAppendOnlyTailSelection({ episodeDir: dir, report: f.report,
     manifest: candidate, plan: f.plan,
     expectedManifestPath: path.join(parent, "provider-output-manifest.json") });
+  const tailManifest = { ...candidate, status: "passed" };
+  tailManifest.manifest_sha256 = narrationProviderOutputManifestSha256(tailManifest);
+  const tailPath = path.join(parent, "provider-output-manifest.json");
+  const tailBytes = Buffer.from(`${JSON.stringify(tailManifest, null, 2)}\n`);
+  await fs.writeFile(tailPath, tailBytes);
+  const requestPayload = { prior_manifest_path: tailPath,
+    prior_manifest_sha256: tailManifest.manifest_sha256,
+    prior_manifest_file_sha256: sha(tailBytes),
+    units: [{ unit_id: heldId }] };
+  const boundaryHash = canonicalQwenBatchSha256(requestPayload);
+  const boundaryDir = path.join(dir, "assets/audio/narration_tts/exact_boundary_repairs",
+    boundaryHash);
+  await fs.mkdir(boundaryDir, { recursive: true });
+  await fs.writeFile(path.join(boundaryDir, "request.json"),
+    `${JSON.stringify({ ...requestPayload, request_sha256: boundaryHash }, null, 2)}\n`);
+  const boundaryRecord = { mode: "exact_sentence_boundary_composite_v1",
+    prior_manifest_sha256: tailManifest.manifest_sha256,
+    request_sha256: boundaryHash };
+  const descendant = { ...tailManifest,
+    units: [tailManifest.units[0], { ...tailManifest.units[1],
+      audio_sha256: sha("new held audio") }],
+    repair_history: [...tailManifest.repair_history, boundaryRecord] };
+  descendant.manifest_sha256 = narrationProviderOutputManifestSha256(descendant);
+  const descendantPath = path.join(boundaryDir, "provider-output-manifest.json");
+  let descendantBytes = Buffer.from(`${JSON.stringify(descendant, null, 2)}\n`);
+  await fs.writeFile(descendantPath, descendantBytes);
+  const descendantReport = { ...f.report,
+    provider_output_manifest_sha256: sha(descendantBytes) };
+  assert.deepEqual((await verifyAppendOnlyTailLineage({ episodeDir: dir,
+    report: descendantReport, manifest: descendant, plan: f.plan,
+    expectedManifestPath: descendantPath })).repaired_unit_ids, [selectedId]);
+  const corrupted = structuredClone(descendant);
+  corrupted.units[0].audio_sha256 = sha("changed tail audio");
+  corrupted.manifest_sha256 = narrationProviderOutputManifestSha256(corrupted);
+  descendantBytes = Buffer.from(`${JSON.stringify(corrupted, null, 2)}\n`);
+  await fs.writeFile(descendantPath, descendantBytes);
+  await assert.rejects(verifyAppendOnlyTailLineage({ episodeDir: dir,
+    report: { ...descendantReport,
+      provider_output_manifest_sha256: sha(descendantBytes) },
+    manifest: corrupted, plan: f.plan, expectedManifestPath: descendantPath }),
+  /changed unrequested/);
   candidate.units[1].audio_sha256 = sha("tampered");
   await assert.rejects(verifyAppendOnlyTailSelection({ episodeDir: dir,
     report: f.report, manifest: candidate, plan: f.plan }));

@@ -3,7 +3,11 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { transcriptQaForTests } from "../modelslab-qwen-episode-audio.mjs";
-import { narrationSynthesisIdentitySha256 } from "./narration-provider-adapter.mjs";
+import {
+  narrationProviderOutputManifestSha256,
+  narrationSynthesisIdentitySha256,
+} from "./narration-provider-adapter.mjs";
+import { canonicalQwenBatchSha256 } from "./qwen-liam-batch-contract.mjs";
 
 export const APPEND_ONLY_TAIL_SCHEMA = "goldflow_narration_append_only_tail_evidence_v1";
 export const APPEND_ONLY_TAIL_MODE = "exact_append_only_silence_tail_v1";
@@ -332,4 +336,84 @@ export async function verifyAppendOnlyTailSelection({ episodeDir, report,
   }
   return { repaired_unit_ids: [...repaired.keys()], prior_manifest_file_sha256:
     record.prior_manifest_file_sha256 };
+}
+
+// A later exact-boundary repair may replace other units while retaining the
+// immutable tail-completion ancestor. Verify that ancestor with the original
+// sample-exact checker, then walk only hash-bound boundary descendants.
+export async function verifyAppendOnlyTailLineage({ episodeDir, report,
+  manifest, plan, expectedManifestPath } = {}) {
+  const history = manifest?.repair_history ?? [];
+  const tailRows = history.filter((row) => row?.mode === APPEND_ONLY_TAIL_MODE);
+  if (tailRows.length === 0) return null;
+  if (tailRows.length !== 1 || !inside(episodeDir, expectedManifestPath)) {
+    throw new Error("Append-only tail lineage has ambiguous or escaped provenance.");
+  }
+  const tailPath = tailRows[0].output_manifest_path;
+  if (!inside(episodeDir, tailPath)) {
+    throw new Error("Append-only tail ancestor escaped the episode.");
+  }
+  const tailBytes = await fs.readFile(tailPath);
+  const tailManifest = JSON.parse(tailBytes);
+  if (tailManifest?.status !== "passed"
+    || tailManifest.manifest_sha256
+      !== narrationProviderOutputManifestSha256(tailManifest)) {
+    throw new Error("Append-only tail ancestor manifest is invalid.");
+  }
+  const verified = await verifyAppendOnlyTailSelection({ episodeDir, report,
+    manifest: tailManifest, plan, expectedManifestPath: tailPath });
+  const prefix = tailManifest.repair_history ?? [];
+  if (history.length < prefix.length || !same(history.slice(0, prefix.length), prefix)) {
+    throw new Error("Append-only tail ancestor history is not preserved.");
+  }
+  let previous = tailManifest;
+  let previousPath = tailPath;
+  let previousBytes = tailBytes;
+  for (const record of history.slice(prefix.length)) {
+    if (record?.mode !== "exact_sentence_boundary_composite_v1"
+      || !/^[a-f0-9]{64}$/u.test(String(record.request_sha256 ?? ""))
+      || record.prior_manifest_sha256 !== previous.manifest_sha256) {
+      throw new Error("Append-only tail descendant is not an exact boundary repair.");
+    }
+    const dir = path.join(episodeDir, "assets/audio/narration_tts/exact_boundary_repairs",
+      record.request_sha256);
+    const requestPath = path.join(dir, "request.json");
+    const outputPath = path.join(dir, "provider-output-manifest.json");
+    const request = JSON.parse(await fs.readFile(requestPath));
+    const { request_sha256: requestHash, ...requestPayload } = request;
+    const outputBytes = await fs.readFile(outputPath);
+    const output = JSON.parse(outputBytes);
+    const requested = new Set((request.units ?? []).map((row) => row.unit_id));
+    if (requestHash !== record.request_sha256
+      || canonicalQwenBatchSha256(requestPayload) !== requestHash
+      || request.prior_manifest_path !== previousPath
+      || request.prior_manifest_sha256 !== previous.manifest_sha256
+      || request.prior_manifest_file_sha256 !== sha(previousBytes)
+      || !Array.isArray(request.units) || !request.units.length
+      || requested.size !== request.units.length
+      || output?.status !== "passed"
+      || output.manifest_sha256 !== narrationProviderOutputManifestSha256(output)
+      || !same(output.repair_history, [...(previous.repair_history ?? []), record])
+      || !same(output.units?.map((row) => row.unit_id),
+        previous.units?.map((row) => row.unit_id))) {
+      throw new Error("Append-only tail descendant request or manifest is hash-stale.");
+    }
+    const outputById = new Map(output.units.map((row) => [row.unit_id, row]));
+    for (const old of previous.units) {
+      if (!requested.has(old.unit_id) && !same(outputById.get(old.unit_id), old)) {
+        throw new Error(`Append-only tail descendant changed unrequested ${old.unit_id}.`);
+      }
+    }
+    previous = output;
+    previousPath = outputPath;
+    previousBytes = outputBytes;
+  }
+  const currentBytes = await fs.readFile(expectedManifestPath);
+  if (path.resolve(expectedManifestPath) !== path.resolve(previousPath)
+    || !same(manifest, previous)
+    || !same(JSON.parse(currentBytes), previous)
+    || report?.provider_output_manifest_sha256 !== sha(currentBytes)) {
+    throw new Error("Append-only tail descendant is not the current report-bound manifest.");
+  }
+  return verified;
 }

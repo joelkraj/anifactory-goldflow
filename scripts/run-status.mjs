@@ -47,7 +47,8 @@ import { loadLowMarginDisposition } from "./lib/narration-low-margin-disposition
 import { loadAsrOrthographyReview } from "./lib/narration-asr-orthography-review.mjs";
 import {
   APPEND_ONLY_TAIL_MODE, pcm16MonoWavFactsForTests,
-  validateAppendOnlyTailScopeForTests, verifyAppendOnlyTailSelection,
+  validateAppendOnlyTailScopeForTests, verifyAppendOnlyTailLineage,
+  verifyAppendOnlyTailSelection,
 } from "./lib/narration-append-only-tail.mjs";
 import { projectVerifiedStructuralRecoveryReport, structuralProjectionManifestForReport, verifiedStructuralRecoveryFromManifest } from "./lib/narration-structural-finalizer-provenance.mjs";
 import { validateConfirmedRetryEvidenceForTests } from "./narration-tts-episode.mjs";
@@ -2687,7 +2688,7 @@ async function synthesizedNarrationArtifactsComplete({
               !== ttsReport.provider_output_manifest_sha256) {
               throw new Error("report-bound tail manifest is missing or hash-stale");
             }
-            verifiedAppendOnlyTail = await verifyAppendOnlyTailSelection({
+            verifiedAppendOnlyTail = await verifyAppendOnlyTailLineage({
               episodeDir, report: ttsReport, manifest, plan,
               expectedManifestPath: manifestPath,
             });
@@ -3672,7 +3673,7 @@ async function appendOnlyTailCompletionStatus({
     ]);
     if ((manifest?.repair_history ?? []).some((row) =>
       row?.mode === APPEND_ONLY_TAIL_MODE)) {
-      await verifyAppendOnlyTailSelection({
+      await verifyAppendOnlyTailLineage({
         episodeDir, report: ttsReport, manifest, plan,
         expectedManifestPath: manifestPath,
       });

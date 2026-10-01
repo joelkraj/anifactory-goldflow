@@ -25,6 +25,15 @@ const canonical = (value) => Array.isArray(value) ? value.map(canonical)
     ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(value[key])]))
     : value;
 const canonicalHash = (value) => hash(JSON.stringify(canonical(value)));
+const sameIds = (left, right) => Array.isArray(left) && Array.isArray(right)
+  && left.length === right.length
+  && new Set(left).size === left.length
+  && new Set(right).size === right.length
+  && [...left].sort().join("\n") === [...right].sort().join("\n");
+const sameCodes = sameIds;
+const blockerKeys = (rows) => (rows ?? [])
+  .filter((row) => row?.unit_id && row?.code)
+  .map((row) => `${row.unit_id}|${row.code}`);
 
 function flags(parts) {
   const result = {};
@@ -61,7 +70,8 @@ async function run(command, args, { cwd = DIR } = {}) {
   });
 }
 
-export function validateBoundaryRepairScopeForTests({ plan, manifest, delivery, fullStream = null, spec }) {
+export function validateBoundaryRepairScopeForTests({ plan, manifest, delivery,
+  fullStream = null, report = null, spec, fileHashes = {} }) {
   const units = plan?.units ?? [];
   const unitById = new Map(units.map((row) => [row.unit_id, row]));
   const manifestById = new Map((manifest?.units ?? []).map((row) => [row.unit_id, row]));
@@ -70,11 +80,40 @@ export function validateBoundaryRepairScopeForTests({ plan, manifest, delivery, 
   const fullStreamIds = new Set((blockedFullStream?.blockers ?? [])
     .filter((row) => row.severity === "blocker" && row.unit_id)
     .map((row) => row.unit_id));
-  if (spec?.schema !== "goldflow_tts_exact_boundary_repair_spec_v1"
+  const subset = spec?.schema === "goldflow_tts_exact_boundary_repair_spec_v2";
+  if (!["goldflow_tts_exact_boundary_repair_spec_v1",
+    "goldflow_tts_exact_boundary_repair_spec_v2"].includes(spec?.schema)
     || manifest?.status !== "passed"
     || (delivery?.status !== "blocked" && !fullStreamIds.size)
     || !Array.isArray(spec.units) || spec.units.length === 0) {
     throw new Error("Repair requires a blocked unit-delivery report and a valid exact spec.");
+  }
+  const blockedIds = [...new Set((delivery?.units ?? [])
+    .filter((row) => row.decision?.status === "blocked")
+    .map((row) => row.unit_id))];
+  const qaBlockers = (delivery?.units ?? []).flatMap((row) =>
+    (row.decision?.blockers ?? []).map((blocker) => ({
+      unit_id: row.unit_id, code: blocker.code,
+    })));
+  if (subset && (blockedFullStream
+    || report?.status !== "blocked"
+    || report?.unit_qa_status !== "blocked"
+    || report?.full_stream_qa_status !== "not_run_due_to_unit_blockers"
+    || !Array.isArray(spec.blocked_unit_ids)
+    || !Array.isArray(spec.preserved_blocked_unit_ids)
+    || !sameIds(spec.blocked_unit_ids, blockedIds)
+    || !sameIds(spec.blocked_unit_ids, [...new Set((report.blockers ?? [])
+      .map((row) => row.unit_id))])
+    || !sameIds(blockerKeys(qaBlockers), blockerKeys(delivery.blockers))
+    || !sameIds(blockerKeys(qaBlockers), blockerKeys(report.blockers))
+    || spec.source_script_sha256 !== report.source_script_hash
+    || spec.narration_generation_plan_sha256 !== plan.plan_sha256
+    || spec.narration_generation_plan_file_sha256 !== fileHashes.plan
+    || spec.prior_report_file_sha256 !== fileHashes.report
+    || spec.prior_delivery_file_sha256 !== fileHashes.delivery
+    || spec.prior_manifest_file_sha256 !== fileHashes.manifest
+    || report.provider_output_manifest_sha256 !== fileHashes.manifest)) {
+    throw new Error("Subset boundary repair lacks exact blocked-report and manifest bindings.");
   }
   const selected = new Set();
   for (const entry of spec.units) {
@@ -87,13 +126,24 @@ export function validateBoundaryRepairScopeForTests({ plan, manifest, delivery, 
       || entry.fragments.some((part) => typeof part !== "string" || !part.trim())
       || entry.fragments.join(" ") !== unit.spoken_text
       || output.audio_sha256 !== qa.audio_sha256
-      || (!qa.decision.blockers?.length && !fullStreamIds.has(entry.unit_id))) {
+      || (!qa.decision.blockers?.length && !fullStreamIds.has(entry.unit_id))
+      || subset && (entry.spoken_text_sha256 !== unit.spoken_text_sha256
+        || !sameCodes(entry.reviewed_blocker_codes,
+          qa.decision.blockers.map((row) => row.code))
+        || String(entry.review_reason ?? "").trim().length < 35)) {
       throw new Error(`Exact-boundary repair scope is not current: ${entry.unit_id}`);
     }
     selected.add(entry.unit_id);
   }
   const otherBlocked = (delivery?.units ?? []).filter((row) =>
     row.decision?.status === "blocked" && !selected.has(row.unit_id));
+  if (subset) {
+    const preservedBlocked = otherBlocked.map((row) => row.unit_id);
+    if (!sameIds(spec.preserved_blocked_unit_ids, preservedBlocked)) {
+      throw new Error("Subset boundary repair does not preserve every unselected blocker.");
+    }
+    return { selected: [...selected], orthographic: [], preservedBlocked };
+  }
   for (const unitId of fullStreamIds) {
     if (!selected.has(unitId)) throw new Error(`Unrepaired full-stream blocker remains: ${unitId}`);
   }
@@ -117,6 +167,59 @@ export function validateBoundaryRepairScopeForTests({ plan, manifest, delivery, 
     }
   }
   return { selected: [...selected], orthographic: otherBlocked.map((row) => row.unit_id) };
+}
+
+export function validateSubsetBoundaryFinalizationForTests({
+  priorManifest, derivedManifest, priorDelivery, finalDelivery, priorReport, finalReport,
+  repairedUnitIds, preservedBlockedUnitIds,
+} = {}) {
+  const repaired = new Set(repairedUnitIds ?? []);
+  const priorById = new Map((priorManifest?.units ?? []).map((row) => [row.unit_id, row]));
+  const finalById = new Map((derivedManifest?.units ?? []).map((row) => [row.unit_id, row]));
+  const oldQaById = new Map((priorDelivery?.units ?? []).map((row) => [row.unit_id, row]));
+  const newQaById = new Map((finalDelivery?.units ?? []).map((row) => [row.unit_id, row]));
+  const oldResultById = new Map((priorReport?.results ?? []).map((row) => [row.unit_id, row]));
+  const newResultById = new Map((finalReport?.results ?? []).map((row) => [row.unit_id, row]));
+  if (!sameIds([...priorById.keys()], [...finalById.keys()])
+    || !sameIds([...oldQaById.keys()], [...newQaById.keys()])
+    || !sameIds([...oldResultById.keys()], [...newResultById.keys()])
+    || !sameIds([...priorById.keys()], [...oldResultById.keys()])
+    || !sameIds([...priorById.keys()], [...oldQaById.keys()])
+    || !sameIds(preservedBlockedUnitIds, (priorDelivery?.units ?? [])
+      .filter((row) => row.decision?.status === "blocked" && !repaired.has(row.unit_id))
+      .map((row) => row.unit_id))
+    || !sameIds(blockerKeys(finalDelivery?.blockers), blockerKeys(finalReport?.blockers))
+    || finalReport?.provider_output_manifest_sha256 !== hash(JSON.stringify(derivedManifest,
+      null, 2) + "\n")
+    || finalReport?.selected_unit_count !== priorById.size) {
+    throw new Error("Subset boundary finalization changed scope or manifest binding.");
+  }
+  for (const id of priorById.keys()) {
+    if (repaired.has(id)) continue;
+    const old = priorById.get(id);
+    const current = finalById.get(id);
+    const oldQa = oldQaById.get(id);
+    const newQa = newQaById.get(id);
+    const oldResult = oldResultById.get(id);
+    const newResult = newResultById.get(id);
+    if (JSON.stringify(old) !== JSON.stringify(current)
+      || oldQa?.audio_sha256 !== newQa?.audio_sha256
+      || oldQa?.audio_path !== newQa?.audio_path
+      || oldResult?.audio_path !== newResult?.audio_path
+      || oldResult?.audio_sha256 !== newResult?.audio_sha256
+      || oldResult?.attempt !== newResult?.attempt
+      || oldQa?.decision?.status !== newQa?.decision?.status
+      || !sameCodes((oldQa?.decision?.blockers ?? []).map((row) => row.code),
+        (newQa?.decision?.blockers ?? []).map((row) => row.code))) {
+      throw new Error(`Subset boundary finalization changed an unrequested unit: ${id}.`);
+    }
+  }
+  if (preservedBlockedUnitIds.length
+    && (finalReport?.status !== "blocked" || finalDelivery?.status !== "blocked"
+      || finalReport.full_stream_qa_status !== "not_run_due_to_unit_blockers")) {
+    throw new Error("Subset boundary finalization ran full-stream QA while blockers remained.");
+  }
+  return { preserved_blocked_unit_count: preservedBlockedUnitIds.length };
 }
 
 export async function main(parts = process.argv.slice(2)) {
@@ -176,7 +279,10 @@ export async function main(parts = process.argv.slice(2)) {
     || report.full_stream_qa_path !== fullStreamPath)) {
     throw new Error("Full-stream blocker evidence is stale.");
   }
-  const scope = validateBoundaryRepairScopeForTests({ plan, manifest, delivery, fullStream, spec });
+  const scope = validateBoundaryRepairScopeForTests({ plan, manifest, delivery,
+    fullStream, report, spec,
+    fileHashes: { plan: await fileHash(planPath), report: await fileHash(reportPath),
+      delivery: await fileHash(deliveryPath), manifest: await fileHash(manifestPath) } });
   const unitById = new Map(plan.units.map((row) => [row.unit_id, row]));
   const priorById = new Map(manifest.units.map((row) => [row.unit_id, row]));
   for (const row of manifest.units) {
@@ -214,6 +320,9 @@ export async function main(parts = process.argv.slice(2)) {
       fragments: entry.fragments,
     })),
     orthographic_equivalence_unit_ids: scope.orthographic,
+    ...(spec.schema === "goldflow_tts_exact_boundary_repair_spec_v2"
+      ? { repair_scope_schema: spec.schema,
+        preserved_blocked_unit_ids: scope.preservedBlocked } : {}),
   };
   request.request_sha256 = canonicalHash(request);
   const repairDir = path.join(episodeDir, "assets/audio/narration_tts/exact_boundary_repairs", request.request_sha256);
@@ -225,7 +334,8 @@ export async function main(parts = process.argv.slice(2)) {
   if (options["dry-run"] === "true") {
     process.stdout.write(`${JSON.stringify({ status: "validated_no_synthesis", request_path: requestPath,
       repair_dir: repairDir, repaired_unit_ids: scope.selected,
-      orthographic_equivalence_unit_ids: scope.orthographic })}\n`);
+      orthographic_equivalence_unit_ids: scope.orthographic,
+      preserved_blocked_unit_ids: scope.preservedBlocked ?? [] })}\n`);
     return;
   }
   await run(PYTHON, [path.join(DIR, "tts-exact-boundary-repair.py"), "--request", requestPath, "--output-dir", repairDir]);
@@ -314,10 +424,32 @@ export async function main(parts = process.argv.slice(2)) {
   const nextManifestPath = path.join(repairDir, "provider-output-manifest.json");
   await writeNew(nextManifestPath, `${JSON.stringify(next, null, 2)}\n`);
   const { finalizeNarrationProviderOutput } = await import("./narration-provider-output-finalize.mjs");
-  await finalizeNarrationProviderOutput(["--episode-dir", episodeDir,
-    "--plan", planPath, "--manifest", nextManifestPath]);
+  let finalizationError = null;
+  try {
+    await finalizeNarrationProviderOutput(["--episode-dir", episodeDir,
+      "--plan", planPath, "--manifest", nextManifestPath,
+      ...(scope.preservedBlocked?.length ? ["--require-unit-blockers", "true"] : [])]);
+  } catch (error) {
+    finalizationError = error;
+  }
+  if (spec.schema === "goldflow_tts_exact_boundary_repair_spec_v2") {
+    if (finalizationError
+      && !/^Provider-neutral delivery QA blocked \d+ unit\(s\)\.$/u.test(
+        String(finalizationError.message))) throw finalizationError;
+    const [finalDelivery, finalReport] = await Promise.all([
+      json(deliveryPath), json(reportPath),
+    ]);
+    validateSubsetBoundaryFinalizationForTests({
+      priorManifest: manifest, derivedManifest: next,
+      priorDelivery: delivery, finalDelivery, priorReport: report, finalReport,
+      repairedUnitIds: scope.selected,
+      preservedBlockedUnitIds: scope.preservedBlocked,
+    });
+  }
+  if (finalizationError) throw finalizationError;
   process.stdout.write(`${JSON.stringify({ status: "passed", repair_dir: repairDir,
     repaired_unit_ids: scope.selected, orthographic_equivalence_unit_ids: scope.orthographic,
+    preserved_blocked_unit_ids: scope.preservedBlocked ?? [],
     manifest_path: nextManifestPath })}\n`);
 }
 

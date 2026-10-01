@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
-import { validateBoundaryRepairScopeForTests } from "../tts-exact-boundary-repair.mjs";
+import { createHash } from "node:crypto";
+import { validateBoundaryRepairScopeForTests,
+  validateSubsetBoundaryFinalizationForTests } from "../tts-exact-boundary-repair.mjs";
+import { assertPartialRepairUnitBlockerHoldForTests } from "../narration-provider-output-finalize.mjs";
 
 const unit = { unit_id: "unit-1", spoken_text: "First sentence. Missing ending." };
 const comparatorOnly = { unit_id: "unit-2", spoken_text: "He is all right." };
@@ -59,5 +62,122 @@ assert.throws(() => validateBoundaryRepairScopeForTests({ plan, manifest, delive
 assert.throws(() => validateBoundaryRepairScopeForTests({ plan, manifest, delivery, spec: {
   ...spec, units: [spec.units[0], spec.units[0]],
 } }), /scope is not current/);
+
+const digest = (text) => createHash("sha256").update(text).digest("hex");
+const subsetPlan = { plan_sha256: digest("plan"), units: [
+  { unit_id: "cutoff", spoken_text: "He was twenty, two years older.",
+    spoken_text_sha256: digest("He was twenty, two years older.") },
+  { unit_id: "retained-a", spoken_text: "Beren arrived.",
+    spoken_text_sha256: digest("Beren arrived.") },
+  { unit_id: "retained-b", spoken_text: "Every one.",
+    spoken_text_sha256: digest("Every one.") },
+] };
+const subsetManifest = { status: "passed", units: subsetPlan.units.map((row) => ({
+  unit_id: row.unit_id, audio_sha256: digest(row.unit_id),
+})) };
+const subsetDelivery = { status: "blocked", units: subsetPlan.units.map((row) => ({
+  unit_id: row.unit_id, audio_sha256: digest(row.unit_id),
+  decision: { status: "blocked", blockers: [{ code:
+    row.unit_id === "cutoff" ? "narration_confirmed_word_omission"
+      : "narration_confirmed_opening_token_mismatch" }] },
+})) };
+subsetDelivery.blockers = subsetDelivery.units.flatMap((row) =>
+  row.decision.blockers.map((blocker) => ({ unit_id: row.unit_id, code: blocker.code })));
+const fileHashes = { plan: digest("plan-file"), report: digest("report-file"),
+  delivery: digest("delivery-file"), manifest: digest("manifest-file") };
+const subsetReport = { status: "blocked", unit_qa_status: "blocked",
+  full_stream_qa_status: "not_run_due_to_unit_blockers",
+  source_script_hash: digest("source"),
+  blockers: structuredClone(subsetDelivery.blockers),
+  provider_output_manifest_sha256: fileHashes.manifest };
+const subsetSpec = {
+  schema: "goldflow_tts_exact_boundary_repair_spec_v2",
+  source_script_sha256: subsetReport.source_script_hash,
+  narration_generation_plan_sha256: subsetPlan.plan_sha256,
+  narration_generation_plan_file_sha256: fileHashes.plan,
+  prior_report_file_sha256: fileHashes.report,
+  prior_delivery_file_sha256: fileHashes.delivery,
+  prior_manifest_file_sha256: fileHashes.manifest,
+  blocked_unit_ids: ["cutoff", "retained-a", "retained-b"],
+  preserved_blocked_unit_ids: ["retained-a", "retained-b"],
+  units: [{ unit_id: "cutoff", spoken_text_sha256: subsetPlan.units[0].spoken_text_sha256,
+    reviewed_blocker_codes: ["narration_confirmed_word_omission"],
+    review_reason: "Both retained ASR passes omit the protected age statement at this exact boundary.",
+    fragments: ["He was twenty,", "two years older."] }],
+};
+const subsetArgs = { plan: subsetPlan, manifest: subsetManifest,
+  delivery: subsetDelivery, report: subsetReport, spec: subsetSpec, fileHashes };
+assert.deepEqual(validateBoundaryRepairScopeForTests(subsetArgs), {
+  selected: ["cutoff"], orthographic: [],
+  preservedBlocked: ["retained-a", "retained-b"],
+});
+for (const mutate of [
+  (spec) => { spec.preserved_blocked_unit_ids.pop(); },
+  (spec) => { spec.blocked_unit_ids.pop(); },
+  (spec) => { spec.prior_report_file_sha256 = digest("other"); },
+  (spec) => { spec.units[0].reviewed_blocker_codes = ["narration_final_word_missing"]; },
+  (spec) => { spec.units[0].fragments[1] = "two years younger."; },
+  (spec) => { spec.units[0].review_reason = "short"; },
+]) {
+  const changed = structuredClone(subsetSpec);
+  mutate(changed);
+  assert.throws(() => validateBoundaryRepairScopeForTests({ ...subsetArgs, spec: changed }));
+}
+for (const changed of [
+  { report: { ...subsetReport, blockers: subsetReport.blockers.slice(1) } },
+  { delivery: { ...subsetDelivery, blockers: subsetDelivery.blockers.slice(1) } },
+  { report: { ...subsetReport, blockers: [...subsetReport.blockers,
+    { unit_id: "retained-a", code: "invented_blocker" }] } },
+]) {
+  assert.throws(() => validateBoundaryRepairScopeForTests({ ...subsetArgs, ...changed }),
+    /blocked-report and manifest bindings/);
+}
+
+const derivedManifest = structuredClone(subsetManifest);
+derivedManifest.units[0].audio_sha256 = digest("repaired-cutoff");
+const finalDelivery = structuredClone(subsetDelivery);
+finalDelivery.units[0].audio_sha256 = digest("repaired-cutoff");
+finalDelivery.units[0].decision = { status: "passed", blockers: [] };
+finalDelivery.blockers = finalDelivery.blockers.filter((row) => row.unit_id !== "cutoff");
+const priorResults = subsetManifest.units.map((row, index) => ({
+  unit_id: row.unit_id, audio_path: `/audio/${row.unit_id}.wav`,
+  audio_sha256: row.audio_sha256, attempt: index + 1,
+}));
+const priorReport = { ...subsetReport, results: priorResults };
+const finalReport = { status: "blocked", selected_unit_count: 3,
+  full_stream_qa_status: "not_run_due_to_unit_blockers",
+  provider_output_manifest_sha256: digest(JSON.stringify(derivedManifest, null, 2) + "\n"),
+  blockers: structuredClone(finalDelivery.blockers),
+  results: structuredClone(priorResults) };
+finalReport.results[0].audio_sha256 = digest("repaired-cutoff");
+const finalizationArgs = { priorManifest: subsetManifest, derivedManifest,
+  priorDelivery: subsetDelivery, finalDelivery, priorReport, finalReport,
+  repairedUnitIds: ["cutoff"],
+  preservedBlockedUnitIds: ["retained-a", "retained-b"] };
+assert.deepEqual(validateSubsetBoundaryFinalizationForTests(finalizationArgs), {
+  preserved_blocked_unit_count: 2,
+});
+for (const mutate of [
+  (input) => { input.derivedManifest.units[1].audio_sha256 = digest("wrong"); },
+  (input) => { input.finalDelivery.units[1].decision.blockers = []; },
+  (input) => { input.finalDelivery.units[2].decision.status = "passed"; },
+  (input) => { input.finalReport.results[1].attempt = 3; },
+  (input) => { input.finalReport.blockers.pop(); },
+  (input) => { input.finalReport.full_stream_qa_status = "passed"; },
+  (input) => { input.preservedBlockedUnitIds.pop(); },
+]) {
+  const changed = structuredClone(finalizationArgs);
+  mutate(changed);
+  assert.throws(() => validateSubsetBoundaryFinalizationForTests(changed));
+}
+assert.throws(() => assertPartialRepairUnitBlockerHoldForTests({
+  requireUnitBlockers: true, blockers: [],
+}), /full-stream QA held/);
+assert.doesNotThrow(() => assertPartialRepairUnitBlockerHoldForTests({
+  requireUnitBlockers: true, blockers: [{ unit_id: "retained-a" }],
+}));
+assert.doesNotThrow(() => assertPartialRepairUnitBlockerHoldForTests({
+  requireUnitBlockers: false, blockers: [],
+}));
 
 console.log("exact-boundary TTS repair scope tests passed");

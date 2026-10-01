@@ -51,6 +51,10 @@ export async function exactBoundaryRepairResumeCandidate({
     const reportPath = path.resolve(ttsReport?.provider_output_manifest_path ?? "");
     const reportUsesPrior = reportPath === requestPriorManifestPath;
     const reportUsesDerived = reportPath === derivedPath;
+    const preservedBlockedIds = request.repair_scope_schema
+      === "goldflow_tts_exact_boundary_repair_spec_v2"
+      ? request.preserved_blocked_unit_ids : [];
+    const reportBlockedIds = [...new Set(reportBlockers.map((row) => row.unit_id))];
     if (!hex(path.basename(repairDir))
       || !within(episodeDir, repairDir)
       || request.schema !== "goldflow_tts_exact_boundary_repair_request_v1"
@@ -97,9 +101,14 @@ export async function exactBoundaryRepairResumeCandidate({
       || unitDelivery?.status !== "blocked"
       || reportBlockers.length === 0
       || JSON.stringify(blockKeys(reportBlockers)) !== JSON.stringify(blockKeys(deliveryBlockers))
+      || request.repair_scope_schema === "goldflow_tts_exact_boundary_repair_spec_v2"
+        && (!sameIds(preservedBlockedIds, reportBlockedIds.filter(
+          (id) => !requestIds.includes(id)))
+          || !sameIds(request.orthographic_equivalence_unit_ids, []))
       || !reportBlockers.every((row) => row.unit_id
         && (requestIds.includes(row.unit_id)
-          || request.orthographic_equivalence_unit_ids?.includes(row.unit_id)))
+          || request.orthographic_equivalence_unit_ids?.includes(row.unit_id)
+          || preservedBlockedIds?.includes(row.unit_id)))
       || !reportUsesPrior && !reportUsesDerived
       || reportUsesDerived && unitDelivery.transcript_comparison_version === currentComparisonVersion
       || ttsReport.provider_output_manifest_sha256 !== await fileHash(reportPath)

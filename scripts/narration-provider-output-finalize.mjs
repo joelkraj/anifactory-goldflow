@@ -1320,6 +1320,12 @@ async function encodeM4a(inputPath, outputPath) {
   return sha256File(outputPath);
 }
 
+export function assertPartialRepairUnitBlockerHoldForTests({ requireUnitBlockers, blockers }) {
+  if (requireUnitBlockers && (!Array.isArray(blockers) || blockers.length === 0)) {
+    throw new Error("Partial exact-boundary repair unexpectedly cleared all unit blockers; full-stream QA held.");
+  }
+}
+
 export async function finalizeNarrationProviderOutput(
   argv = process.argv.slice(2),
   { phaseContext = null } = {},
@@ -1328,6 +1334,7 @@ export async function finalizeNarrationProviderOutput(
   if (!flags["episode-dir"]) throw new Error("--episode-dir is required.");
   if (phaseContext) validateOpeningFinalizationFlags(flags);
   const workflowBypass = boolFlag(flags["workflow-bypass"]);
+  const requireUnitBlockers = boolFlag(flags["require-unit-blockers"]);
   const acceptAsrDeliveryBlockers = boolFlag(
     flags["accept-asr-delivery-blockers"],
   );
@@ -2271,6 +2278,7 @@ export async function finalizeNarrationProviderOutput(
     selected_blockers: selectedBlockers,
     selected_units: selectedUnits,
   };
+  assertPartialRepairUnitBlockerHoldForTests({ requireUnitBlockers, blockers });
   await Promise.all([
     atomicWriteJson(unitDeliveryPath, unitDeliveryArtifact),
     atomicWriteJson(unitQaPath, unitQaArtifact),

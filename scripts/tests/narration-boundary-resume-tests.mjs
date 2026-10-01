@@ -232,6 +232,76 @@ try {
   await write(secondCompositePath, "tampered second composite");
   assert.equal(await exactBoundaryRepairResumeCandidate(secondArgs), null);
 
+  // A v2 partial repair may leave a different, explicit blocker in place.
+  // The untouched selected WAV and its report/QA blocker must remain bound.
+  const subsetRequest = { ...request,
+    repair_scope_schema: "goldflow_tts_exact_boundary_repair_spec_v2",
+    preserved_blocked_unit_ids: ["retained"],
+    orthographic_equivalence_unit_ids: [] };
+  delete subsetRequest.request_sha256;
+  subsetRequest.request_sha256 = canonicalQwenBatchSha256(subsetRequest);
+  const subsetDir = path.join(episodeDir, "assets/audio/narration_tts/exact_boundary_repairs",
+    subsetRequest.request_sha256);
+  await fs.cp(repairDir, subsetDir, { recursive: true });
+  const subsetRequestPath = path.join(subsetDir, "request.json");
+  const subsetResultPath = path.join(subsetDir, "repair-result.json");
+  const subsetCompositePath = path.join(subsetDir, "composites", "repaired.wav");
+  await write(subsetRequestPath, subsetRequest);
+  const subsetFragments = [];
+  for (const fragment of result.units[0].fragments) {
+    const audioPath = fragment.audio_path.replace(repairDir, subsetDir);
+    const sidecarPath = fragment.sidecar_path.replace(repairDir, subsetDir);
+    await write(sidecarPath, { request_sha256: subsetRequest.request_sha256,
+      audio_path: audioPath, audio_sha256: await fileHash(audioPath),
+      text_sha256: fragment.text_sha256 });
+    subsetFragments.push({ ...fragment, audio_path: audioPath,
+      sidecar_path: sidecarPath, sidecar_sha256: await fileHash(sidecarPath) });
+  }
+  const subsetResult = { ...result,
+    request_sha256: subsetRequest.request_sha256,
+    request_path: subsetRequestPath,
+    request_file_sha256: await fileHash(subsetRequestPath),
+    units: [{ ...result.units[0], audio_path: subsetCompositePath,
+      fragments: subsetFragments }] };
+  await write(subsetResultPath, subsetResult);
+  const subsetSynthesis = { ...synthesis,
+    request_sha256: subsetRequest.request_sha256 };
+  const subsetDerived = structuredClone(derived);
+  Object.assign(subsetDerived.units[0], {
+    audio_path: subsetCompositePath,
+    recovery_provenance: { ...subsetDerived.units[0].recovery_provenance,
+      request_path: subsetRequestPath,
+      request_sha256: subsetRequest.request_sha256,
+      result_path: subsetResultPath,
+      result_sha256: await fileHash(subsetResultPath) },
+    synthesis_identity: subsetSynthesis,
+    synthesis_identity_sha256: narrationSynthesisIdentitySha256(subsetSynthesis),
+  });
+  subsetDerived.provider_execution.exact_boundary_repair = {
+    request_sha256: subsetRequest.request_sha256,
+    result_sha256: await fileHash(subsetResultPath),
+    repaired_unit_ids: ["repaired"], preserved_unit_count: 1,
+  };
+  subsetDerived.repair_history[0].request_sha256 = subsetRequest.request_sha256;
+  delete subsetDerived.manifest_sha256;
+  subsetDerived.manifest_sha256 = narrationProviderOutputManifestSha256(subsetDerived);
+  const subsetDerivedPath = path.join(subsetDir, "provider-output-manifest.json");
+  await write(subsetDerivedPath, subsetDerived);
+  const retainedBlocker = { unit_id: "retained", code: "narration_confirmed_word_omission" };
+  const subsetTtsReport = { ...ttsReport,
+    blockers: [blocker, retainedBlocker],
+    results: [ttsReport.results[0], { unit_id: "retained",
+      audio_path: retainedAudio, audio_sha256: retained.audio_sha256 }] };
+  const subsetDelivery = { ...unitDelivery, blockers: [blocker, retainedBlocker] };
+  const subsetArgs = { ...args, repairDir: subsetDir,
+    ttsReport: subsetTtsReport, unitDelivery: subsetDelivery };
+  assert.equal((await exactBoundaryRepairResumeCandidate(subsetArgs))?.manifestPath,
+    subsetDerivedPath);
+  assert.equal(await exactBoundaryRepairResumeCandidate({ ...subsetArgs,
+    ttsReport: { ...subsetTtsReport, blockers: [blocker] } }), null);
+  assert.equal(await exactBoundaryRepairResumeCandidate({ ...subsetArgs,
+    unitDelivery: { ...subsetDelivery, blockers: [blocker] } }), null);
+
   await write(compositePath, "tampered composite");
   assert.equal(await exactBoundaryRepairResumeCandidate(args), null);
   await write(compositePath, "composite audio");

@@ -173,6 +173,12 @@ def main():
         "completed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
     result_path = output_dir / "repair-result.json"
+    if result_path.exists():
+        # A resumed exact request must retain the original immutable receipt.
+        # The timestamp is an observation of that completed attempt, not a
+        # value to regenerate on every status-led retry.
+        previous = json.loads(result_path.read_text())
+        result["completed_at"] = previous.get("completed_at")
     write_new(result_path, (json.dumps(result, indent=2, ensure_ascii=False) + "\n").encode())
     print(json.dumps({"status": "candidate_pending_user_listening", "result_path": str(result_path),
                       "result_sha256": file_digest(result_path),

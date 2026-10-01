@@ -3945,8 +3945,14 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
     }
     try {
       const planPath = path.join(episodeDir, "narration_generation_plan.json");
-      const manifestPath = path.join(episodeDir,
+      const rootManifestPath = path.join(episodeDir,
         `narration_provider_output_manifest_${episode}.json`);
+      const manifestPath = ttsReport.provider_output_manifest_path ?? rootManifestPath;
+      if (!path.isAbsolute(manifestPath)
+        || !path.resolve(manifestPath).startsWith(`${path.resolve(episodeDir)}${path.sep}`)
+        || await fileSha256(manifestPath) !== ttsReport.provider_output_manifest_sha256) {
+        throw new Error("Narration report-bound provider manifest is missing or hash-stale");
+      }
       const [plan, currentManifest] = await Promise.all([
         readJson(planPath, null), readJson(manifestPath, null),
       ]);
@@ -3972,7 +3978,7 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
         }
         return { done: false, state: "blocked",
           evidence: `Reviewed exact ASR orthography for ${review.unit_ids.length} retained units needs no-synthesis re-adjudication`,
-          next_command_shape: `node bin/goldflow.mjs tts finalize-provider --episode-dir ${episodeDir} --asr-orthography-evidence ${review.evidence_path}` };
+          next_command_shape: `node bin/goldflow.mjs tts finalize-provider --episode-dir ${episodeDir}${manifestPath === rootManifestPath ? "" : ` --manifest ${manifestPath}`} --asr-orthography-evidence ${review.evidence_path}` };
       }
     } catch (error) {
       return { done: false, state: "blocked",

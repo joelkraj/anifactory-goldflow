@@ -7,12 +7,14 @@ import { canonicalQwenBatchSha256 } from "../lib/qwen-liam-batch-contract.mjs";
 import {
   NARRATION_ASR_ORTHOGRAPHY_AMENDMENT_SCHEMA,
   NARRATION_ASR_ORTHOGRAPHY_EXTENSION_SCHEMA,
+  NARRATION_ASR_ORTHOGRAPHY_EXTENSION_V2_SCHEMA,
   NARRATION_ASR_ORTHOGRAPHY_SCHEMA,
   applyAsrOrthographyReviewForTests,
   asrOrthographyGuardAdmission,
   loadAsrOrthographyReview,
   validateAsrOrthographyAmendmentForTests,
   validateAsrOrthographyExtensionForTests,
+  validateAsrOrthographyExtensionV2ForTests,
   validateAsrOrthographyReviewForTests,
 } from "../lib/narration-asr-orthography-review.mjs";
 
@@ -278,6 +280,156 @@ for (const secondTake of [false, true]) {
 }
 assert.deepEqual(validateAsrOrthographyExtensionForTests(
   extensionFixture({ possessive: true })).unit_ids, ["unit-2"]);
+
+function secondExtensionFixture() {
+  const base = extensionFixture();
+  const predecessor = { evidence_path: `${root}/narration_asr_orthography_extension_ep_01.json`,
+    evidence_sha256: sha("first-extension"), rows_by_id: new Map([["unit-1", {}], ["unit-2", {}]]) };
+  base.priorReport.asr_orthography_review.evidence_sha256 = predecessor.evidence_sha256;
+  const cases = [
+    { id: "unit-names", intended: "Beren nodded. Sera agreed.",
+      primary: "Baron nodded. Sarah agreed.",
+      confirmation: "Barron nodded. Sarah agreed.",
+      codes: ["narration_confirmed_opening_token_mismatch"],
+      spans: [
+        { position: "opening", relation: "reviewed_dual_asr_proper_name_spelling",
+          expected_phrase: "Beren", primary_observed_phrase: "Baron",
+          confirmation_observed_phrase: "Barron" },
+        { position: "interior", relation: "reviewed_dual_asr_proper_name_spelling",
+          expected_phrase: "Sera", primary_observed_phrase: "Sarah",
+          confirmation_observed_phrase: "Sarah" },
+      ] },
+    { id: "unit-homophone", intended: "Think, or know?",
+      primary: "Think or no?", confirmation: "Think or no?",
+      codes: ["narration_confirmed_final_token_mismatch"],
+      spans: [{ position: "final", relation: "reviewed_homophone_spelling",
+        expected_phrase: "know", primary_observed_phrase: "no",
+        confirmation_observed_phrase: "no" }] },
+    { id: "unit-spacing", intended: "Every one.",
+      primary: "Everyone.", confirmation: "Everyone.",
+      codes: ["narration_confirmed_tts_transcript_protected_value_mismatch",
+        "narration_confirmed_word_omission", "narration_confirmed_final_token_mismatch"],
+      spans: [{ position: "final", relation: "spacing_join",
+        expected_phrase: "Every one", primary_observed_phrase: "Everyone",
+        confirmation_observed_phrase: "Everyone" }] },
+    { id: "unit-context",
+      intended: "The mining company paid the full twenty thousand. Orrin bought the shell for another nine. After expenses, I rested.",
+      primary: "The mining company paid the full $20,000. Oren bought the shell for another $9,000. After expenses, I rested.",
+      confirmation: "The mining company paid the full $20,000. Oren bought the shell for another $9,000. After expenses, I rested.",
+      codes: ["narration_confirmed_tts_transcript_protected_value_mismatch"],
+      spans: [
+        { position: "interior", relation: "reviewed_dual_asr_proper_name_spelling",
+          expected_phrase: "Orrin", primary_observed_phrase: "Oren",
+          confirmation_observed_phrase: "Oren" },
+        { position: "interior", relation: "reviewed_fragment_context_value_expansion",
+          expected_phrase: "nine", primary_observed_phrase: "$9,000",
+          confirmation_observed_phrase: "$9,000" },
+      ] },
+  ];
+  const rows = [];
+  const fragmentContextDiagnostics = {};
+  for (const item of cases) {
+    const audioSha = sha(item.id);
+    const output = { unit_id: item.id, status: "accepted", attempt: 1,
+      audio_path: `${root}/${item.id}.wav`, audio_sha256: audioSha,
+      synthesis_identity_sha256: sha(`${item.id}-identity`) };
+    if (item.id === "unit-context") {
+      output.recovery_provenance = { request_path: `${root}/request.json`,
+        result_path: `${root}/repair-result.json` };
+      output.synthesis_identity = { fragments: [null, {
+        text_sha256: sha("Orrin bought the shell for another nine."),
+        audio_sha256: sha("context-fragment-audio"),
+        sidecar_sha256: sha("context-fragment-sidecar") }] };
+    }
+    base.priorReport.results.push({ ...output });
+    base.priorReport.blockers.push(...item.codes.map((code) => ({ unit_id: item.id, code })));
+    base.priorDelivery.units.push({ unit_id: item.id, audio_sha256: audioSha,
+      intended_text_sha256: sha(item.intended), intended_text: item.intended,
+      primary_recognized_text: item.primary, confirmation_recognized_text: item.confirmation,
+      edge_alignment: { status: "passed" },
+      decision: { status: "blocked", blockers: item.codes.map((code) => ({ code })) } });
+    base.priorManifest.units.push({ ...output });
+    base.currentManifest.units.push({ ...output });
+    base.plan.units.push({ unit_id: item.id, spoken_text: item.intended,
+      spoken_text_sha256: sha(item.intended) });
+    base.actualAudioHashes[item.id] = audioSha;
+    rows.push({ unit_id: item.id, selected_attempt: 1,
+      audio_path: output.audio_path, audio_sha256: audioSha,
+      synthesis_identity_sha256: output.synthesis_identity_sha256,
+      intended_text_sha256: sha(item.intended), intended_text: item.intended,
+      primary_recognized_text: item.primary,
+      confirmation_recognized_text: item.confirmation,
+      reviewed_blocker_codes: item.codes, spans: item.spans,
+      ...(item.id === "unit-context" ? {
+        fragment_context_evidence_path: `${root}/fragment-diagnostic.json`,
+        fragment_context_evidence_sha256: sha("fragment-diagnostic") } : {}),
+      review_note: "Both retained ASR passes match every other source word after the reviewed exact spans." });
+    if (item.id === "unit-context") {
+      fragmentContextDiagnostics[item.id] = {
+        path: `${root}/fragment-diagnostic.json`, sha256: sha("fragment-diagnostic"),
+        diagnostic: {
+          schema: "goldflow_narration_fragment_context_asr_diagnostic_v1",
+          status: "observed", human_listening_performed: false,
+          diagnostic_origin: "read_only_local_faster_whisper_dual_asr",
+          unit_id: item.id, fragment_index: 1,
+          source_text: "Orrin bought the shell for another nine.",
+          source_text_sha256: sha("Orrin bought the shell for another nine."),
+          source_script_sha256: source,
+          narration_generation_plan_sha256: planSha,
+          composite_manifest_sha256: manifestFile,
+          fragment_audio_sha256: sha("context-fragment-audio"),
+          fragment_sidecar_sha256: sha("context-fragment-sidecar"),
+          repair_request_path: `${root}/request.json`,
+          repair_result_path: `${root}/repair-result.json`,
+          small: { contract: { model: "small.en" }, duration_sec: 2.48,
+            recognized_text: "Oren bought the shell for another 9." },
+          medium: { contract: { model: "medium" }, duration_sec: 2.48,
+            recognized_text: "Oren bought the shell for another nine." },
+        },
+      };
+    }
+  }
+  base.evidence = { ...base.evidence,
+    schema: NARRATION_ASR_ORTHOGRAPHY_EXTENSION_V2_SCHEMA,
+    predecessor_evidence_path: predecessor.evidence_path,
+    predecessor_evidence_sha256: predecessor.evidence_sha256,
+    unit_count: rows.length, units: rows };
+  return { ...base, predecessor, fragmentContextDiagnostics };
+}
+{
+  const input = secondExtensionFixture();
+  const validated = validateAsrOrthographyExtensionV2ForTests(input);
+  assert.deepEqual(validated.unit_ids,
+    ["unit-names", "unit-homophone", "unit-spacing", "unit-context"]);
+  const spacing = input.evidence.units[2];
+  const applied = applyAsrOrthographyReviewForTests({ status: "blocked",
+    blockers: spacing.reviewed_blocker_codes.map((code) => ({ code })), warnings: [] },
+  spacing, sha("second-extension"));
+  assert.equal(applied.status, "passed_with_warnings");
+  assert.deepEqual(applied.blockers, []);
+  assert.deepEqual(applied.warnings.at(-1).original_blocker_codes,
+    spacing.reviewed_blocker_codes);
+}
+for (const mutate of [
+  (input) => { input.evidence.predecessor_evidence_sha256 = sha("wrong"); },
+  (input) => { input.currentManifest.units[2].audio_sha256 = sha("changed"); },
+  (input) => { input.evidence.units[0].spans[0].primary_observed_phrase = "Farron"; },
+  (input) => { input.evidence.units[0].primary_recognized_text = "Baron nodded. Sarah agreed twice.";
+    input.priorDelivery.units[2].primary_recognized_text = input.evidence.units[0].primary_recognized_text; },
+  (input) => { input.evidence.units[1].spans[0].primary_observed_phrase = "none"; },
+  (input) => { input.evidence.units[2].spans[0].expected_phrase = "Every two"; },
+  (input) => { input.priorDelivery.units[2].edge_alignment.status = "blocked"; },
+  (input) => { input.priorReport.blockers.push({ unit_id: "unit-homophone",
+    code: "narration_unsettled_raw_audio_edge" }); },
+  (input) => { input.fragmentContextDiagnostics["unit-context"].diagnostic.small.recognized_text =
+    "Oren bought the shell for another nine thousand."; },
+  (input) => { input.fragmentContextDiagnostics["unit-context"].diagnostic.fragment_audio_sha256 =
+    sha("wrong-fragment"); },
+]) {
+  const input = secondExtensionFixture();
+  mutate(input);
+  assert.throws(() => validateAsrOrthographyExtensionV2ForTests(input));
+}
 for (const mutate of [
   (input) => { input.evidence.predecessor_evidence_sha256 = sha("other"); },
   (input) => { input.evidence.units[0].confirmation_observed_phrase = "Then"; },
@@ -334,6 +486,15 @@ assert.equal(asrOrthographyGuardAdmission({ ...status, current_stage: "voice_pla
 assert.equal(asrOrthographyGuardAdmission({ ...status, next_command_shape: "tts narrate" }, "tts", "finalize-provider", flags).allowed, false);
 assert.equal(asrOrthographyGuardAdmission(status, "tts", "finalize-provider", { ...flags, force: "true" }).allowed, false);
 assert.equal(asrOrthographyGuardAdmission(status, "tts", "narrate", flags).applicable, false);
+const derivedManifest = `${root}/derived-provider-manifest.json`;
+const derivedFlags = { ...flags, manifest: derivedManifest };
+const derivedCommand = `node bin/goldflow.mjs tts finalize-provider --episode-dir ${root} --manifest ${derivedManifest} --asr-orthography-evidence ${evidencePath}`;
+assert.equal(asrOrthographyGuardAdmission({ ...status,
+  next_command_shape: derivedCommand }, "tts", "finalize-provider", derivedFlags).allowed, true);
+assert.equal(asrOrthographyGuardAdmission(status, "tts", "finalize-provider", derivedFlags).allowed, false);
+assert.equal(asrOrthographyGuardAdmission({ ...status,
+  next_command_shape: derivedCommand }, "tts", "finalize-provider",
+{ ...derivedFlags, "workflow-bypass": "true" }).allowed, false);
 
 const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-orthography-"));
 try {
@@ -485,6 +646,82 @@ try {
   assert.deepEqual(loaded.unit_ids, ["unit-1", "unit-2"]);
   assert.equal(loaded.evidence_path, extensionPath);
   assert.equal(loaded.provenance.human_listening_performed, false);
+  const v2UnitId = "unit-3";
+  const v2Text = "Beren nodded. Sera agreed.";
+  const v2Primary = "Baron nodded. Sarah agreed.";
+  const v2Confirmation = "Barron nodded. Sarah agreed.";
+  const v2AudioPath = path.join(extensionDir, `${v2UnitId}.wav`);
+  await fs.writeFile(v2AudioPath, "second-extension-audio");
+  const v2Output = { unit_id: v2UnitId, status: "accepted", attempt: 1,
+    audio_path: v2AudioPath, audio_sha256: sha("second-extension-audio"),
+    synthesis_identity_sha256: sha("second-extension-synthesis") };
+  const v2Manifest = { status: "passed",
+    units: [...input.currentManifest.units, v2Output] };
+  const v2Delivery = structuredClone(input.priorDelivery);
+  v2Delivery.units.push({ unit_id: v2UnitId, audio_sha256: v2Output.audio_sha256,
+    intended_text: v2Text, intended_text_sha256: sha(v2Text),
+    primary_recognized_text: v2Primary,
+    confirmation_recognized_text: v2Confirmation,
+    edge_alignment: { status: "passed" },
+    decision: { status: "blocked", blockers: [
+      { code: "narration_confirmed_opening_token_mismatch" }] } });
+  const v2Report = structuredClone(input.priorReport);
+  v2Report.asr_orthography_review = { evidence_sha256: sha(JSON.stringify(input.evidence)) };
+  v2Report.results.push({ ...v2Output });
+  v2Report.blockers.push({ unit_id: v2UnitId,
+    code: "narration_confirmed_opening_token_mismatch" });
+  const v2Plan = structuredClone(input.plan);
+  v2Plan.units.push({ unit_id: v2UnitId, spoken_text: v2Text,
+    spoken_text_sha256: sha(v2Text) });
+  const v2SnapshotDir = path.join(extensionDir, "extension-v2-snapshots");
+  await fs.mkdir(v2SnapshotDir);
+  const v2Evidence = { ...input.evidence,
+    schema: NARRATION_ASR_ORTHOGRAPHY_EXTENSION_V2_SCHEMA,
+    predecessor_evidence_path: extensionPath,
+    predecessor_evidence_sha256: sha(JSON.stringify(input.evidence)),
+    unit_count: 1,
+    units: [{ unit_id: v2UnitId, selected_attempt: 1,
+      audio_path: v2AudioPath, audio_sha256: v2Output.audio_sha256,
+      synthesis_identity_sha256: v2Output.synthesis_identity_sha256,
+      intended_text: v2Text, intended_text_sha256: sha(v2Text),
+      primary_recognized_text: v2Primary,
+      confirmation_recognized_text: v2Confirmation,
+      reviewed_blocker_codes: ["narration_confirmed_opening_token_mismatch"],
+      spans: [
+        { position: "opening", relation: "reviewed_dual_asr_proper_name_spelling",
+          expected_phrase: "Beren", primary_observed_phrase: "Baron",
+          confirmation_observed_phrase: "Barron" },
+        { position: "interior", relation: "reviewed_dual_asr_proper_name_spelling",
+          expected_phrase: "Sera", primary_observed_phrase: "Sarah",
+          confirmation_observed_phrase: "Sarah" },
+      ], review_note: "Both retained ASR passes match every other locked word after the two name spellings." }] };
+  for (const [name, value] of [
+    ["provider_manifest", v2Manifest], ["unit_delivery_qa", v2Delivery],
+  ]) {
+    const target = path.join(v2SnapshotDir, `${name}.json`);
+    await fs.writeFile(target, JSON.stringify(value));
+    v2Evidence[`pre_review_${name}_path`] = target;
+    v2Evidence[`pre_review_${name}_sha256`] = sha(JSON.stringify(value));
+  }
+  v2Report.provider_output_manifest_sha256 =
+    v2Evidence.pre_review_provider_manifest_sha256;
+  const v2ReportPath = path.join(v2SnapshotDir, "narration_report.json");
+  await fs.writeFile(v2ReportPath, JSON.stringify(v2Report));
+  v2Evidence.pre_review_narration_report_path = v2ReportPath;
+  v2Evidence.pre_review_narration_report_sha256 = sha(JSON.stringify(v2Report));
+  const v2Path = path.join(extensionDir,
+    `narration_asr_orthography_extension_${episode}_v2.json`);
+  await fs.writeFile(v2Path, JSON.stringify(v2Evidence));
+  const loadedV2 = await loadAsrOrthographyReview({ ...request,
+    plan: v2Plan, currentManifest: v2Manifest });
+  assert.deepEqual(loadedV2.unit_ids, ["unit-1", "unit-2", v2UnitId]);
+  assert.equal(loadedV2.evidence_path, v2Path);
+  assert.equal(loadedV2.pre_review_provider_manifest_sha256,
+    sha(JSON.stringify(v2Manifest)));
+  await fs.writeFile(v2AudioPath, "changed-audio");
+  await assert.rejects(() => loadAsrOrthographyReview({ ...request,
+    plan: v2Plan, currentManifest: v2Manifest }), /stale|non-exact/);
+  await fs.writeFile(v2AudioPath, "second-extension-audio");
   await fs.writeFile(input.evidence.units[0].audio_path, "changed-audio");
   await assert.rejects(() => loadAsrOrthographyReview(request),
     /stale|non-exact/);

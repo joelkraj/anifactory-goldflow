@@ -14,6 +14,8 @@ export const NARRATION_ASR_ORTHOGRAPHY_AMENDMENT_SCHEMA =
   "goldflow_narration_asr_orthography_amendment_v1";
 export const NARRATION_ASR_ORTHOGRAPHY_EXTENSION_SCHEMA =
   "goldflow_narration_asr_orthography_extension_v1";
+export const NARRATION_ASR_ORTHOGRAPHY_EXTENSION_V2_SCHEMA =
+  "goldflow_narration_asr_orthography_extension_v2";
 
 const hex = (value) => /^[a-f0-9]{64}$/u.test(String(value ?? ""));
 const sha256 = (value) => createHash("sha256").update(String(value)).digest("hex");
@@ -103,6 +105,270 @@ function replaceUniqueWholePhrase(text, observedPhrase, expectedPhrase, position
   if (lower(text.slice(first.start, last.end).replace(/\s+/gu, " "))
     !== lower(observedPhrase)) return null;
   return text.slice(0, first.start) + expectedPhrase + text.slice(last.end);
+}
+
+// The second extension permits two independently reviewed name spellings in
+// one unit, or one exact homophone/word-boundary interpretation. The complete
+// transcript must match after those named spans alone are replaced.
+function replaceUniqueReviewedSpan(text, observedPhrase, expectedPhrase, position) {
+  const source = words(text);
+  const observed = words(observedPhrase);
+  if (!source.length || !observed.length || observed.length > 2) return null;
+  const token = (value) => lower(value).replace(/’/gu, "'");
+  const matches = [];
+  for (let index = 0; index <= source.length - observed.length; index += 1) {
+    if (source.slice(index, index + observed.length).every((word, offset) =>
+      token(word.text) === token(observed[offset].text))) matches.push(index);
+  }
+  if (matches.length !== 1) return null;
+  const index = matches[0];
+  if (position === "opening" && index !== 0) return null;
+  if (position === "final" && index + observed.length !== source.length) return null;
+  if (position === "interior" && (index === 0 || index + observed.length === source.length)) {
+    return null;
+  }
+  if (!["opening", "interior", "final"].includes(position)) return null;
+  const first = source[index], last = source[index + observed.length - 1];
+  return text.slice(0, first.start) + expectedPhrase + text.slice(last.end);
+}
+
+function validReviewedSpan(span) {
+  const expected = String(span?.expected_phrase ?? "");
+  const primary = String(span?.primary_observed_phrase ?? "");
+  const confirmation = String(span?.confirmation_observed_phrase ?? "");
+  const relation = span?.relation;
+  const expectedWords = words(expected);
+  const variants = [primary, confirmation];
+  if (!expectedWords.length || variants.some((value) => !value || lower(value) === lower(expected))) {
+    return false;
+  }
+  if (relation === "reviewed_dual_asr_proper_name_spelling") {
+    const expectedPossessive = /['’]s$/u.test(expected);
+    const expectedName = expected.replace(/['’]s$/u, "");
+    return expectedWords.length === 1 && /^[\p{Lu}][\p{L}]+(?:['’]s)?$/u.test(expected)
+      && variants.every((spelling) => {
+        const name = spelling.replace(/['’]s$/u, "");
+        return words(spelling).length === 1
+          && /^[\p{Lu}][\p{L}]+(?:['’]s)?$/u.test(spelling)
+          && /['’]s$/u.test(spelling) === expectedPossessive
+          && soundex(expectedName) === soundex(name)
+          && editDistance(lower(expectedName), lower(name)) <= 3;
+      });
+  }
+  if (relation === "reviewed_homophone_spelling") {
+    // A closed language pair avoids interpreting arbitrary lexical differences
+    // as homophones merely because an editor named them that way.
+    const allowed = new Set(["know|no", "no|know"]);
+    return expectedWords.length === 1 && variants.every((spelling) =>
+      words(spelling).length === 1
+      && allowed.has(`${lower(expected)}|${lower(spelling)}`));
+  }
+  if (relation === "spacing_join") {
+    return expectedWords.length === 2 && variants.every((spelling) =>
+      words(spelling).length === 1
+      && lower(expectedWords.map((word) => word.text).join("")) === lower(spelling));
+  }
+  if (relation === "reviewed_fragment_context_value_expansion") {
+    const smallNumberWords = { one: 1, two: 2, three: 3, four: 4,
+      five: 5, six: 6, seven: 7, eight: 8, nine: 9 };
+    const number = smallNumberWords[lower(expected)];
+    return expectedWords.length === 1 && number != null
+      && variants.every((spelling) => spelling === `$${number},000`);
+  }
+  return false;
+}
+
+function fragmentContextDiagnosticMatches({ diagnostic, row, oldOutput,
+  expected, nameSpan, valueSpan }) {
+  const fragment = oldOutput?.synthesis_identity?.fragments?.[diagnostic?.fragment_index];
+  const check = (recognized, observedName) => {
+    const normalized = replaceUniqueReviewedSpan(recognized, observedName,
+      nameSpan.expected_phrase, "opening");
+    if (normalized == null) return false;
+    const qa = transcriptQaForTests(diagnostic.source_text, normalized,
+      { blockAnySubstitution: false });
+    return qa.deletions === 0 && qa.insertions === 0 && qa.substitutions === 0
+      && qa.first_token_ok === true && qa.last_token_ok === true;
+  };
+  return diagnostic?.schema === "goldflow_narration_fragment_context_asr_diagnostic_v1"
+    && diagnostic.status === "observed"
+    && diagnostic.human_listening_performed === false
+    && diagnostic.diagnostic_origin === "read_only_local_faster_whisper_dual_asr"
+    && diagnostic.unit_id === row.unit_id
+    && diagnostic.source_script_sha256 === expected.sourceScriptSha256
+    && diagnostic.narration_generation_plan_sha256 === expected.planSha256
+    && Number.isInteger(diagnostic.fragment_index)
+    && diagnostic.fragment_index >= 0
+    && diagnostic.source_text_sha256 === sha256(diagnostic.source_text)
+    && words(diagnostic.source_text).at(-1)?.text.toLowerCase()
+      === lower(valueSpan.expected_phrase)
+    && diagnostic.composite_manifest_sha256 === expected.priorManifestFileSha256
+    && diagnostic.fragment_audio_sha256 === fragment?.audio_sha256
+    && diagnostic.fragment_sidecar_sha256 === fragment?.sidecar_sha256
+    && diagnostic.source_text_sha256 === fragment?.text_sha256
+    && diagnostic.repair_request_path === oldOutput.recovery_provenance?.request_path
+    && diagnostic.repair_result_path === oldOutput.recovery_provenance?.result_path
+    && diagnostic.small?.contract?.model === "small.en"
+    && diagnostic.medium?.contract?.model === "medium"
+    && Number(diagnostic.small?.duration_sec) > 0
+    && Math.abs(Number(diagnostic.small.duration_sec)
+      - Number(diagnostic.medium?.duration_sec)) < 0.05
+    && check(diagnostic.small.recognized_text, nameSpan.primary_observed_phrase)
+    && check(diagnostic.medium.recognized_text,
+      nameSpan.confirmation_observed_phrase);
+}
+
+export function validateAsrOrthographyExtensionV2ForTests({
+  evidence, predecessor, priorReport, priorDelivery, priorManifest,
+  currentManifest, plan, expected, actualAudioHashes = {},
+  fragmentContextDiagnostics = {},
+} = {}) {
+  if (evidence?.schema !== NARRATION_ASR_ORTHOGRAPHY_EXTENSION_V2_SCHEMA
+    || evidence.status !== "reviewed" || evidence.reviewer_kind !== "editorial_text_review"
+    || evidence.human_listening_performed !== false
+    || evidence.authorization_origin !== "user_authorized_autonomous_asr_qa"
+    || !String(evidence.reviewer ?? "").trim()
+    || !Number.isFinite(Date.parse(evidence.reviewed_at))
+    || String(evidence.note ?? "").trim().length < 40
+    || evidence.predecessor_evidence_path !== predecessor?.evidence_path
+    || evidence.predecessor_evidence_sha256 !== predecessor?.evidence_sha256
+    || evidence.source_script_sha256 !== expected.sourceScriptSha256
+    || evidence.run_identity_file_sha256 !== expected.identityFileSha256
+    || evidence.narration_generation_plan_sha256 !== expected.planSha256
+    || evidence.narration_generation_plan_file_sha256 !== expected.planFileSha256
+    || evidence.narration_quality_contract_sha256 !== expected.qualityContractSha256
+    || evidence.pre_review_narration_report_sha256 !== expected.priorReportFileSha256
+    || evidence.pre_review_unit_delivery_qa_sha256 !== expected.priorDeliveryFileSha256
+    || evidence.pre_review_provider_manifest_sha256 !== expected.priorManifestFileSha256
+    || priorReport?.schema !== "goldflow_narration_tts_report_v1"
+    || priorReport.status !== "blocked"
+    || priorDelivery?.schema !== "goldflow_narration_unit_delivery_qa_v2"
+    || priorDelivery.status !== "blocked"
+    || priorManifest?.status !== "passed" || currentManifest?.status !== "passed"
+    || priorReport.source_script_hash !== expected.sourceScriptSha256
+    || priorReport.narration_generation_plan_sha256 !== expected.planSha256
+    || priorReport.narration_generation_plan_file_sha256 !== expected.planFileSha256
+    || priorReport.provider_output_manifest_sha256 !== expected.priorManifestFileSha256
+    || priorReport.asr_orthography_review?.evidence_sha256 !== predecessor.evidence_sha256
+    || priorDelivery.source_script_hash !== expected.sourceScriptSha256
+    || priorDelivery.narration_generation_plan_sha256 !== expected.planSha256
+    || priorDelivery.narration_generation_plan_file_sha256 !== expected.planFileSha256
+    || priorDelivery.quality_contract_sha256 !== expected.qualityContractSha256
+    || plan?.plan_sha256 !== expected.planSha256
+    || !Array.isArray(evidence.units) || evidence.units.length === 0
+    || evidence.unit_count !== evidence.units.length) {
+    throw new Error("ASR orthography extension v2 lacks exact predecessor, source, plan, or snapshot bindings.");
+  }
+  const priorResults = new Map((priorReport.results ?? []).map((row) => [row.unit_id, row]));
+  const priorQa = new Map((priorDelivery.units ?? []).map((row) => [row.unit_id, row]));
+  const priorOutputs = new Map((priorManifest.units ?? []).map((row) => [row.unit_id, row]));
+  const currentOutputs = new Map((currentManifest.units ?? []).map((row) => [row.unit_id, row]));
+  const planUnits = new Map((plan.units ?? []).map((row) => [row.unit_id, row]));
+  const seen = new Set();
+  for (const row of evidence.units) {
+    const id = String(row?.unit_id ?? "");
+    const oldResult = priorResults.get(id), oldQa = priorQa.get(id);
+    const oldOutput = priorOutputs.get(id), current = currentOutputs.get(id);
+    const unit = planUnits.get(id);
+    const blockerCodes = (oldQa?.decision?.blockers ?? []).map((finding) => finding.code);
+    const reportCodes = (priorReport.blockers ?? []).filter((finding) => finding.unit_id === id)
+      .map((finding) => finding.code);
+    const spans = row?.spans;
+    const nameOnly = Array.isArray(spans) && spans.every((span) =>
+      span.relation === "reviewed_dual_asr_proper_name_spelling");
+    const homophoneOnly = Array.isArray(spans) && spans.length === 1
+      && spans[0].relation === "reviewed_homophone_spelling";
+    const spacingOnly = Array.isArray(spans) && spans.length === 1
+      && spans[0].relation === "spacing_join";
+    const fragmentContext = Array.isArray(spans) && spans.length === 2
+      && spans[0].relation === "reviewed_dual_asr_proper_name_spelling"
+      && spans[1].relation === "reviewed_fragment_context_value_expansion";
+    const requiredCodes = nameOnly ? ["narration_confirmed_opening_token_mismatch"]
+      : homophoneOnly ? ["narration_confirmed_final_token_mismatch"]
+        : spacingOnly ? ["narration_confirmed_tts_transcript_protected_value_mismatch",
+          "narration_confirmed_word_omission", "narration_confirmed_final_token_mismatch"]
+          : fragmentContext ? ["narration_confirmed_tts_transcript_protected_value_mismatch"] : [];
+    if (!id || seen.has(id) || predecessor.rows_by_id.has(id)
+      || !oldResult || !oldQa || !oldOutput || !current || !unit
+      || !Array.isArray(spans) || spans.length < 1 || spans.length > 2
+      || ![nameOnly, homophoneOnly, spacingOnly, fragmentContext].some(Boolean)
+      || !exactCodes(blockerCodes, requiredCodes)
+      || !exactCodes(reportCodes, requiredCodes)
+      || !exactCodes(row.reviewed_blocker_codes ?? [], requiredCodes)
+      || oldQa.edge_alignment?.status !== "passed"
+      || ![1, 2].includes(Number(row.selected_attempt))
+      || Number(oldResult.attempt) !== row.selected_attempt
+      || Number(oldOutput.attempt) !== row.selected_attempt
+      || Number(current.attempt) !== row.selected_attempt
+      || oldOutput.status !== "accepted" || current.status !== "accepted"
+      || row.audio_path !== oldOutput.audio_path || row.audio_path !== current.audio_path
+      || row.audio_sha256 !== oldOutput.audio_sha256
+      || row.audio_sha256 !== current.audio_sha256
+      || row.audio_sha256 !== oldResult.audio_sha256
+      || row.audio_sha256 !== oldQa.audio_sha256
+      || actualAudioHashes[id] !== row.audio_sha256
+      || row.synthesis_identity_sha256 !== oldOutput.synthesis_identity_sha256
+      || row.synthesis_identity_sha256 !== current.synthesis_identity_sha256
+      || row.synthesis_identity_sha256 !== oldResult.synthesis_identity_sha256
+      || row.intended_text_sha256 !== unit.spoken_text_sha256
+      || row.intended_text_sha256 !== oldQa.intended_text_sha256
+      || row.intended_text !== unit.spoken_text || row.intended_text !== oldQa.intended_text
+      || row.primary_recognized_text !== oldQa.primary_recognized_text
+      || row.confirmation_recognized_text !== oldQa.confirmation_recognized_text
+      || String(row.review_note ?? "").trim().length < 25) {
+      throw new Error(`ASR orthography extension v2 has stale or non-exact unit evidence: ${id || "missing"}.`);
+    }
+    if (!spans.every(validReviewedSpan)
+      || !spans.some((span) => span.position === "opening") && nameOnly
+      || homophoneOnly && spans[0].position !== "final"
+      || spacingOnly && spans[0].position !== "final"
+      || fragmentContext && (spans[0].position !== "interior"
+        || spans[1].position !== "interior"
+        || row.fragment_context_evidence_path !== fragmentContextDiagnostics[id]?.path
+        || row.fragment_context_evidence_sha256 !== fragmentContextDiagnostics[id]?.sha256
+        || !fragmentContextDiagnosticMatches({
+          diagnostic: fragmentContextDiagnostics[id]?.diagnostic,
+          row, oldOutput, expected, nameSpan: spans[0], valueSpan: spans[1] }))) {
+      throw new Error(`ASR orthography extension v2 has unsupported reviewed spans: ${id}.`);
+    }
+    for (const span of spans) {
+      if (replaceUniqueReviewedSpan(row.intended_text, span.expected_phrase,
+        span.expected_phrase, span.position) == null) {
+        throw new Error(`ASR orthography extension v2 does not locate exact source span: ${id}.`);
+      }
+    }
+    for (const [recognized, key] of [[row.primary_recognized_text,
+      "primary_observed_phrase"], [row.confirmation_recognized_text,
+      "confirmation_observed_phrase"]]) {
+      let normalized = recognized;
+      for (const span of spans) {
+        normalized = replaceUniqueReviewedSpan(normalized, span[key],
+          span.expected_phrase, span.position);
+        if (normalized == null) break;
+      }
+      const qa = normalized == null ? null : transcriptQaForTests(row.intended_text,
+        normalized, { blockAnySubstitution: false });
+      if (!qa || qa.deletions !== 0 || qa.insertions !== 0 || qa.substitutions !== 0
+        || qa.first_token_ok !== true || qa.last_token_ok !== true) {
+        throw new Error(`ASR orthography extension v2 masks another transcript difference: ${id}.`);
+      }
+    }
+    if (row.selected_attempt === 2) {
+      const recovery = oldOutput.recovery_provenance;
+      if (recovery?.schema !== "goldflow_qwen_exact_unit_recovery_provenance_v1"
+        || recovery.evidence_basis !== "reviewed_automated_delivery_qa"
+        || recovery.human_listening_performed !== false
+        || recovery.unit_id !== id
+        || recovery.spoken_text_sha256 !== row.intended_text_sha256
+        || row.selected_recovery_provenance_sha256 !== canonicalQwenBatchSha256(recovery)
+        || canonicalQwenBatchSha256(current.recovery_provenance)
+          !== canonicalQwenBatchSha256(recovery)) {
+        throw new Error(`ASR orthography extension v2 has stale second-take provenance: ${id}.`);
+      }
+    }
+    seen.add(id);
+  }
+  return { unit_ids: [...seen], rows_by_id: new Map(evidence.units.map((row) => [row.unit_id, row])) };
 }
 
 export function validateAsrOrthographyAmendmentForTests({
@@ -485,10 +751,13 @@ export function validateAsrOrthographyExtensionForTests({
 
 export function applyAsrOrthographyReviewForTests(decision, row, evidenceSha256) {
   if (!row) return decision;
+  const secondExtension = Array.isArray(row.spans);
   const expectedCode = row.edge === "opening"
     ? "narration_confirmed_opening_token_mismatch"
     : "narration_confirmed_final_token_mismatch";
-  if (!hex(evidenceSha256) || !exactCodes((decision?.blockers ?? []).map((finding) => finding.code), [expectedCode])) {
+  const reviewedCodes = secondExtension ? row.reviewed_blocker_codes : [expectedCode];
+  if (!hex(evidenceSha256)
+    || !exactCodes((decision?.blockers ?? []).map((finding) => finding.code), reviewedCodes)) {
     throw new Error(`ASR orthography review cannot clear non-matching current blockers: ${row.unit_id}.`);
   }
   return {
@@ -498,7 +767,9 @@ export function applyAsrOrthographyReviewForTests(decision, row, evidenceSha256)
     warnings: [
       ...(decision.warnings ?? []),
       { severity: "warning", code: "narration_reviewed_asr_orthography_equivalence",
-        original_blocker_code: expectedCode, relation: row.relation,
+        ...(secondExtension ? { original_blocker_codes: reviewedCodes,
+          reviewed_spans: row.spans } : { original_blocker_code: expectedCode }),
+        relation: secondExtension ? NARRATION_ASR_ORTHOGRAPHY_EXTENSION_V2_SCHEMA : row.relation,
         expected_phrase: row.expected_phrase, observed_phrase: row.observed_phrase,
         ...(row.primary_observed_phrase ? { primary_observed_phrase: row.primary_observed_phrase,
           confirmation_observed_phrase: row.confirmation_observed_phrase } : {}),
@@ -507,7 +778,8 @@ export function applyAsrOrthographyReviewForTests(decision, row, evidenceSha256)
         human_listening_performed: false },
     ],
     asr_orthography_review: { evidence_sha256: evidenceSha256, unit_id: row.unit_id,
-      original_blocker_code: expectedCode },
+      ...(secondExtension ? { original_blocker_codes: reviewedCodes }
+        : { original_blocker_code: expectedCode }) },
   };
 }
 
@@ -639,6 +911,132 @@ async function loadBaseAsrOrthographyReview({ episodeDir, episode, plan,
       unit_ids: unitIds, human_listening_performed: false } };
 }
 
+async function loadAsrOrthographyExtensionV2(predecessor, args) {
+  const { episodeDir, episode, plan, currentManifest,
+    identityFileSha256, sourceScriptSha256, planFileSha256,
+    qualityContractSha256 } = args;
+  const evidencePath = path.join(episodeDir,
+    `narration_asr_orthography_extension_${episode}_v2.json`);
+  const evidence = await fs.readFile(evidencePath, "utf8").then(JSON.parse)
+    .catch((error) => { if (error?.code === "ENOENT") return null; throw error; });
+  if (!evidence) return predecessor;
+  if (!predecessor || predecessor.provenance?.schema !== NARRATION_ASR_ORTHOGRAPHY_EXTENSION_SCHEMA) {
+    throw new Error("ASR orthography extension v2 requires the immutable first extension.");
+  }
+  const names = ["narration_report", "unit_delivery_qa", "provider_manifest"];
+  const canonicalNames = {
+    narration_report: `narration_tts_report_${episode}.json`,
+    unit_delivery_qa: `narration_unit_delivery_qa_${episode}.json`,
+    provider_manifest: `narration_provider_output_manifest_${episode}.json`,
+  };
+  const snapshots = {};
+  for (const name of names) {
+    const target = evidence[`pre_review_${name}_path`];
+    const expectedSha256 = evidence[`pre_review_${name}_sha256`];
+    const metadata = inside(episodeDir, target)
+      ? await fs.lstat(target).catch(() => null) : null;
+    if (!inside(episodeDir, target)
+      || path.resolve(target) === path.join(path.resolve(episodeDir), canonicalNames[name])
+      || !metadata?.isFile() || metadata.nlink !== 1 || !hex(expectedSha256)
+      || await sha256File(target).catch(() => null) !== expectedSha256) {
+      throw new Error(`ASR orthography extension v2 snapshot is missing or hash-stale: ${name}.`);
+    }
+    snapshots[name] = JSON.parse(await fs.readFile(target, "utf8"));
+  }
+  const actualAudioHashes = {};
+  const fragmentContextDiagnostics = {};
+  for (const row of evidence.units ?? []) {
+    if (!inside(episodeDir, row.audio_path) || !hex(row.audio_sha256)) {
+      throw new Error("ASR orthography extension v2 audio path/hash is invalid.");
+    }
+    actualAudioHashes[row.unit_id] = await sha256File(row.audio_path).catch(() => null);
+    if (row.spans?.some((span) =>
+      span.relation === "reviewed_fragment_context_value_expansion")) {
+      const diagnosticPath = row.fragment_context_evidence_path;
+      const metadata = inside(episodeDir, diagnosticPath)
+        ? await fs.lstat(diagnosticPath).catch(() => null) : null;
+      if (!metadata?.isFile() || metadata.nlink !== 1
+        || !hex(row.fragment_context_evidence_sha256)
+        || await sha256File(diagnosticPath).catch(() => null)
+          !== row.fragment_context_evidence_sha256) {
+        throw new Error(`ASR fragment-context diagnostic is missing or hash-stale: ${row.unit_id}.`);
+      }
+      const diagnostic = JSON.parse(await fs.readFile(diagnosticPath, "utf8"));
+      const selections = [
+        [diagnostic.fragment_audio_path, diagnostic.fragment_audio_sha256],
+        [diagnostic.fragment_sidecar_path, diagnostic.fragment_sidecar_sha256],
+        [diagnostic.repair_request_path, diagnostic.repair_request_sha256],
+        [diagnostic.repair_result_path, diagnostic.repair_result_sha256],
+      ];
+      for (const [selectedPath, selectedSha256] of selections) {
+        if (!inside(episodeDir, selectedPath) || !hex(selectedSha256)
+          || await sha256File(selectedPath).catch(() => null) !== selectedSha256) {
+          throw new Error(`ASR fragment-context source is missing or hash-stale: ${row.unit_id}.`);
+        }
+      }
+      const sidecar = JSON.parse(await fs.readFile(diagnostic.fragment_sidecar_path, "utf8"));
+      const selected = (currentManifest?.units ?? []).find((item) => item.unit_id === row.unit_id);
+      if (sidecar?.schema !== "goldflow_tts_exact_boundary_fragment_v1"
+        || sidecar.unit_id !== row.unit_id
+        || sidecar.fragment_index !== diagnostic.fragment_index
+        || sidecar.text !== diagnostic.source_text
+        || sidecar.text_sha256 !== diagnostic.source_text_sha256
+        || sidecar.audio_path !== diagnostic.fragment_audio_path
+        || sidecar.audio_sha256 !== diagnostic.fragment_audio_sha256
+        || sidecar.request_sha256 !== selected?.recovery_provenance?.request_sha256
+        || selected?.runner_report_path !== diagnostic.repair_result_path
+        || selected?.runner_report_sha256 !== diagnostic.repair_result_sha256) {
+        throw new Error(`ASR fragment-context sidecar differs from selected composite: ${row.unit_id}.`);
+      }
+      fragmentContextDiagnostics[row.unit_id] = {
+        path: diagnosticPath, sha256: row.fragment_context_evidence_sha256,
+        diagnostic,
+      };
+    }
+    if (row.selected_attempt === 2) {
+      const selected = (currentManifest?.units ?? []).find((item) => item.unit_id === row.unit_id);
+      const recovery = selected?.recovery_provenance;
+      if (!inside(episodeDir, selected?.runner_report_path)
+        || !hex(selected?.runner_report_sha256)
+        || await sha256File(selected.runner_report_path).catch(() => null)
+          !== selected.runner_report_sha256
+        || !inside(episodeDir, recovery?.confirmed_evidence_path)
+        || !hex(recovery?.confirmed_evidence_sha256)
+        || await sha256File(recovery.confirmed_evidence_path).catch(() => null)
+          !== recovery.confirmed_evidence_sha256) {
+        throw new Error(`ASR orthography extension v2 second-take runner is stale: ${row.unit_id}.`);
+      }
+    }
+  }
+  const validated = validateAsrOrthographyExtensionV2ForTests({
+    evidence, predecessor,
+    priorReport: snapshots.narration_report,
+    priorDelivery: snapshots.unit_delivery_qa,
+    priorManifest: snapshots.provider_manifest,
+    currentManifest, plan,
+    expected: { sourceScriptSha256, identityFileSha256,
+      planSha256: plan.plan_sha256, planFileSha256, qualityContractSha256,
+      priorReportFileSha256: evidence.pre_review_narration_report_sha256,
+      priorDeliveryFileSha256: evidence.pre_review_unit_delivery_qa_sha256,
+      priorManifestFileSha256: evidence.pre_review_provider_manifest_sha256 },
+    actualAudioHashes, fragmentContextDiagnostics,
+  });
+  const evidenceSha256 = await sha256File(evidencePath);
+  const unitIds = [...predecessor.unit_ids, ...validated.unit_ids];
+  return { ...validated,
+    unit_ids: unitIds,
+    rows_by_id: new Map([...predecessor.rows_by_id, ...validated.rows_by_id]),
+    evidence_path: evidencePath, evidence_sha256: evidenceSha256,
+    pre_review_narration_report_sha256: evidence.pre_review_narration_report_sha256,
+    pre_review_unit_delivery_qa_sha256: evidence.pre_review_unit_delivery_qa_sha256,
+    pre_review_provider_manifest_sha256: evidence.pre_review_provider_manifest_sha256,
+    provenance: { schema: NARRATION_ASR_ORTHOGRAPHY_EXTENSION_V2_SCHEMA,
+      evidence_path: evidencePath, evidence_sha256: evidenceSha256,
+      predecessor_evidence_path: predecessor.evidence_path,
+      predecessor_evidence_sha256: predecessor.evidence_sha256,
+      unit_ids: unitIds, human_listening_performed: false } };
+}
+
 export async function loadAsrOrthographyReview(args = {}) {
   const predecessor = await loadBaseAsrOrthographyReview(args);
   const { episodeDir, episode, plan, currentManifest,
@@ -648,7 +1046,7 @@ export async function loadAsrOrthographyReview(args = {}) {
     `narration_asr_orthography_extension_${episode}.json`);
   const extension = await fs.readFile(extensionPath, "utf8").then(JSON.parse)
     .catch((error) => { if (error?.code === "ENOENT") return null; throw error; });
-  if (!extension) return predecessor;
+  if (!extension) return loadAsrOrthographyExtensionV2(predecessor, args);
   if (!predecessor) {
     throw new Error("ASR orthography extension has no immutable predecessor.");
   }
@@ -708,7 +1106,7 @@ export async function loadAsrOrthographyReview(args = {}) {
   });
   const extensionSha256 = await sha256File(extensionPath);
   const unitIds = [...predecessor.unit_ids, ...validated.unit_ids];
-  return { ...validated,
+  const firstExtension = { ...validated,
     unit_ids: unitIds,
     rows_by_id: new Map([...predecessor.rows_by_id, ...validated.rows_by_id]),
     evidence_path: extensionPath, evidence_sha256: extensionSha256,
@@ -720,18 +1118,21 @@ export async function loadAsrOrthographyReview(args = {}) {
       predecessor_evidence_path: predecessor.evidence_path,
       predecessor_evidence_sha256: predecessor.evidence_sha256,
       unit_ids: unitIds, human_listening_performed: false } };
+  return loadAsrOrthographyExtensionV2(firstExtension, args);
 }
 
 export function asrOrthographyGuardAdmission(status, command, subcommand, flags = {}) {
   const requested = command === "tts" && subcommand === "finalize-provider"
     && Boolean(flags["asr-orthography-evidence"]);
   if (!requested) return { applicable: false, allowed: false };
-  const expected = `node bin/goldflow.mjs tts finalize-provider --episode-dir ${status?.episode_dir} --asr-orthography-evidence ${flags["asr-orthography-evidence"]}`;
+  const manifest = flags.manifest ? ` --manifest ${flags.manifest}` : "";
+  const expected = `node bin/goldflow.mjs tts finalize-provider --episode-dir ${status?.episode_dir}${manifest} --asr-orthography-evidence ${flags["asr-orthography-evidence"]}`;
   const exactKeys = Object.keys(flags).sort().join(",");
   const allowed = status?.current_stage === "qwen_tts_stitch"
     && status?.current_stage_state === "blocked"
     && status?.next_command_shape === expected
-    && exactKeys === "asr-orthography-evidence,episode-dir";
+    && (exactKeys === "asr-orthography-evidence,episode-dir"
+      || exactKeys === "asr-orthography-evidence,episode-dir,manifest");
   return { applicable: true, allowed,
     reason: allowed ? null : "Only the exact status-directed orthography re-adjudication is allowed." };
 }

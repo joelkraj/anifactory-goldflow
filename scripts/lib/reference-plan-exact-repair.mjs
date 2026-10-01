@@ -10,6 +10,7 @@ const EXPECTED_HASH_KEYS = [
   "visual_reference_plan_sha256", "reference_inventory_ledger_sha256",
   "character_state_refs_sha256",
 ];
+const LOCATION_LEDGER_HASH_KEY = "location_contract_ledger_sha256";
 const REF_SET_FIELDS = new Set(["prompt_anchor", "state_delta"]);
 const STATE_SET_FIELDS = new Set(["prompt_anchor", "scene_prompt_anchor"]);
 
@@ -187,6 +188,76 @@ function patchStates(plan, patches) {
   return result;
 }
 
+function patchLocationContracts(ledger, beats, patches) {
+  if (patches === undefined) return [];
+  if (!Array.isArray(patches)) throw new Error("location_contract_patches must be an array.");
+  if (ledger.status !== "passed" || !Array.isArray(ledger.contracts) || !Array.isArray(ledger.scene_contracts)) {
+    throw new Error("A passed location contract ledger is required for exact location-contract repair.");
+  }
+  if (ledger.contract_count !== ledger.contracts.length) throw new Error("Location contract count is stale.");
+  const touchedScenes = new Set();
+  const changes = [];
+  for (const [index, patch] of patches.entries()) {
+    const name = `location_contract_patches[${index}]`;
+    keys(patch, ["scene_id", "beat_ids", "from_contract_id", "from_location", "to_contract_id", "to_location", "from_reason_remove", "to_reason_add"], name);
+    const sceneId = nonempty(patch.scene_id, `${name}.scene_id`);
+    if (touchedScenes.has(sceneId)) throw new Error(`Location contract for ${sceneId} is patched twice.`);
+    touchedScenes.add(sceneId);
+    const beatIds = ids(patch.beat_ids, `${name}.beat_ids`);
+    const fromId = nonempty(patch.from_contract_id, `${name}.from_contract_id`);
+    const toId = nonempty(patch.to_contract_id, `${name}.to_contract_id`);
+    if (fromId === toId) throw new Error(`${name} does not change the location contract.`);
+    nonempty(patch.from_location, `${name}.from_location`);
+    nonempty(patch.to_location, `${name}.to_location`);
+    nonempty(patch.from_reason_remove, `${name}.from_reason_remove`);
+    nonempty(patch.to_reason_add, `${name}.to_reason_add`);
+
+    const scene = uniqueRow(ledger.scene_contracts, "scene_id", sceneId, "Scene contract");
+    if (scene.location_contract_id !== fromId || scene.location !== patch.from_location) {
+      throw new Error(`${name} old scene contract does not match.`);
+    }
+    const from = uniqueRow(ledger.contracts, "location_contract_id", fromId, "Source location contract");
+    const to = uniqueRow(ledger.contracts, "location_contract_id", toId, "Target location contract");
+    if (ledger.contracts.some((contract) => contract !== from && contract !== to
+      && ((contract.scene_ids ?? []).includes(sceneId) || beatIds.some((beatId) => (contract.beat_ids ?? []).includes(beatId))))) {
+      throw new Error(`${name} scene or beats also appear in an unrelated location contract.`);
+    }
+    const sceneBeats = beats.filter((beat) => (beat.parent_scene_id ?? beat.scene_id) === sceneId);
+    if (sceneBeats.length !== beatIds.length
+      || sceneBeats.some((beat, beatIndex) => beat.visual_beat_id !== beatIds[beatIndex])) {
+      throw new Error(`${name}.beat_ids must name every current beat of ${sceneId} in order.`);
+    }
+    for (const beat of sceneBeats) {
+      if (beat.location_id !== toId || beat.location !== patch.to_location
+        || beat.local_location !== patch.to_location || beat.active_state_constraints?.location_id !== toId) {
+        throw new Error(`${name} beat ${beat.visual_beat_id} is not already in the reviewed target location.`);
+      }
+    }
+    if (!Array.isArray(from.scene_ids) || !from.scene_ids.includes(sceneId)
+      || !Array.isArray(to.scene_ids) || to.scene_ids.includes(sceneId)) {
+      throw new Error(`${name} contract scene scope does not match.`);
+    }
+    if (!Array.isArray(from.beat_ids) || !Array.isArray(to.beat_ids)
+      || beatIds.some((beatId) => !from.beat_ids.includes(beatId) || to.beat_ids.includes(beatId))) {
+      throw new Error(`${name} contract beat scope does not match.`);
+    }
+    if (!Array.isArray(from.reasons) || from.reasons.filter((reason) => reason === patch.from_reason_remove).length !== 1
+      || !Array.isArray(to.reasons) || to.reasons.includes(patch.to_reason_add)) {
+      throw new Error(`${name} exact contract reasons do not match.`);
+    }
+    from.scene_ids = from.scene_ids.filter((id) => id !== sceneId);
+    to.scene_ids.push(sceneId);
+    from.beat_ids = from.beat_ids.filter((id) => !beatIds.includes(id));
+    to.beat_ids.push(...beatIds);
+    from.reasons = from.reasons.filter((reason) => reason !== patch.from_reason_remove);
+    to.reasons.push(patch.to_reason_add);
+    scene.location_contract_id = toId;
+    scene.location = patch.to_location;
+    changes.push({ scene_id: sceneId, beat_ids: beatIds, from_contract_id: fromId, to_contract_id: toId });
+  }
+  return changes;
+}
+
 function timeline(beats) {
   return beats.filter((beat, index) => beat.location && (index === 0 || beat.location !== beats[index - 1]?.location))
     .map((beat) => ({
@@ -216,16 +287,26 @@ export function replayBeatLocationRepair(beforePlan, patches, updatedAt) {
 export async function repairReferencePlanExact({ episodeDir, spec, specPath, currentStage, now = new Date() }) {
   episodeDir = path.resolve(episodeDir);
   if (currentStage !== "reference_plan_approval") throw new Error(`Exact repair is allowed only at reference_plan_approval; current stage is ${currentStage}.`);
-  keys(spec, ["schema", "episode", "expected", "reviewer", "note", "beat_location_patches", "reference_patches", "state_ref_patches"], "repair spec");
+  keys(spec, ["schema", "episode", "expected", "reviewer", "note", "beat_location_patches", "reference_patches", "state_ref_patches", "location_contract_patches"], "repair spec");
   if (spec.schema !== SCHEMA) throw new Error(`Repair spec requires ${SCHEMA}.`);
   if (spec.episode !== path.basename(episodeDir)) throw new Error("Repair spec episode does not match episode directory.");
   nonempty(spec.reviewer, "reviewer");
   nonempty(spec.note, "note");
-  keys(spec.expected, EXPECTED_HASH_KEYS, "expected");
+  keys(spec.expected, [...EXPECTED_HASH_KEYS, LOCATION_LEDGER_HASH_KEY], "expected");
   for (const key of EXPECTED_HASH_KEYS) {
     if (!/^[a-f0-9]{64}$/.test(String(spec.expected[key] ?? ""))) throw new Error(`expected.${key} must be a SHA-256 hash.`);
   }
-  if (![spec.beat_location_patches, spec.reference_patches, spec.state_ref_patches].some((rows) => Array.isArray(rows) && rows.length)) {
+  const hasLocationPatches = Array.isArray(spec.location_contract_patches) && spec.location_contract_patches.length > 0;
+  if (spec.location_contract_patches !== undefined && !Array.isArray(spec.location_contract_patches)) {
+    throw new Error("location_contract_patches must be an array.");
+  }
+  if (!hasLocationPatches && Object.hasOwn(spec.expected, LOCATION_LEDGER_HASH_KEY)) {
+    throw new Error(`expected.${LOCATION_LEDGER_HASH_KEY} is allowed only with location_contract_patches.`);
+  }
+  if (hasLocationPatches && !/^[a-f0-9]{64}$/.test(String(spec.expected[LOCATION_LEDGER_HASH_KEY] ?? ""))) {
+    throw new Error(`expected.${LOCATION_LEDGER_HASH_KEY} must be a SHA-256 hash for location-contract repair.`);
+  }
+  if (![spec.beat_location_patches, spec.reference_patches, spec.state_ref_patches, spec.location_contract_patches].some((rows) => Array.isArray(rows) && rows.length)) {
     throw new Error("Repair spec has no exact patches.");
   }
   const names = {
@@ -235,6 +316,7 @@ export async function repairReferencePlanExact({ episodeDir, spec, specPath, cur
     reference_inventory_ledger_sha256: "reference_inventory_ledger.json",
     character_state_refs_sha256: "character_state_refs.json",
   };
+  if (hasLocationPatches) names[LOCATION_LEDGER_HASH_KEY] = "location_contract_ledger.json";
   const files = {};
   for (const [key, name] of Object.entries(names)) {
     const filePath = path.join(episodeDir, name);
@@ -246,6 +328,7 @@ export async function repairReferencePlanExact({ episodeDir, spec, specPath, cur
   const plan = structuredClone(files.visual_reference_plan_sha256.value);
   const inventory = structuredClone(files.reference_inventory_ledger_sha256.value);
   const states = structuredClone(files.character_state_refs_sha256.value);
+  const locationLedger = hasLocationPatches ? structuredClone(files[LOCATION_LEDGER_HASH_KEY].value) : null;
   if (beatPlan.status !== "passed" || beatApproval.status !== "approved" || plan.status !== "passed" || inventory.status !== "passed" || states.status !== "draft_needs_manual_review") {
     throw new Error("Beat plan, beat approval, reference plan, inventory, and character state projection must be in the pre-spend passed/draft states.");
   }
@@ -254,6 +337,9 @@ export async function repairReferencePlanExact({ episodeDir, spec, specPath, cur
   if (plan.source_hashes?.[files.visual_beat_plan_sha256.path] !== files.visual_beat_plan_sha256.sha256
     || plan.source_hashes?.[files.reference_inventory_ledger_sha256.path] !== files.reference_inventory_ledger_sha256.sha256) {
     throw new Error("Reference plan is not bound to the current beat plan and selected inventory.");
+  }
+  if (hasLocationPatches && plan.source_hashes?.[files[LOCATION_LEDGER_HASH_KEY].path] !== files[LOCATION_LEDGER_HASH_KEY].sha256) {
+    throw new Error("Reference plan is not bound to the current location contract ledger.");
   }
   if (states.source_hashes?.[files.visual_reference_plan_sha256.path] !== files.visual_reference_plan_sha256.sha256) throw new Error("Character-state projection is stale.");
   if (JSON.stringify(states.character_state_refs) !== JSON.stringify(plan.character_state_refs)) throw new Error("Character-state projection disagrees with reference plan.");
@@ -264,15 +350,18 @@ export async function repairReferencePlanExact({ episodeDir, spec, specPath, cur
   const beatChanges = patchBeatLocations(beatPlan.beats, spec.beat_location_patches);
   const refChanges = patchReferences(plan, inventory, spec.reference_patches);
   const stateChanges = patchStates(plan, spec.state_ref_patches);
+  const locationChanges = patchLocationContracts(locationLedger, beatPlan.beats, spec.location_contract_patches);
   if (groupingLockHash(beatPlan.beats) !== priorGrouping) throw new Error("Repair changed locked beat grouping.");
   if (beatChanges.length) beatPlan.location_timeline = timeline(beatPlan.beats);
   assertReferenceDirectorSelectionFidelity(plan);
   const updatedAt = now.toISOString();
   if (beatChanges.length) beatPlan.updated_at = updatedAt;
   if (refChanges.length) inventory.updated_at = updatedAt;
+  if (locationChanges.length) locationLedger.updated_at = updatedAt;
   const newBeatHash = beatChanges.length ? hash(jsonBytes(beatPlan)) : files.visual_beat_plan_sha256.sha256;
   if (beatChanges.length) plan.source_hashes[files.visual_beat_plan_sha256.path] = newBeatHash;
   if (refChanges.length) plan.source_hashes[files.reference_inventory_ledger_sha256.path] = hash(jsonBytes(inventory));
+  if (locationChanges.length) plan.source_hashes[files[LOCATION_LEDGER_HASH_KEY].path] = hash(jsonBytes(locationLedger));
   plan.updated_at = updatedAt;
   const newPlanHash = hash(jsonBytes(plan));
   states.character_state_refs = structuredClone(plan.character_state_refs);
@@ -286,6 +375,7 @@ export async function repairReferencePlanExact({ episodeDir, spec, specPath, cur
     "reference_inventory_ledger.json": refChanges.length ? jsonBytes(inventory) : files.reference_inventory_ledger_sha256.bytes,
     "visual_reference_plan.json": jsonBytes(plan),
     "character_state_refs.json": jsonBytes(states),
+    ...(locationChanges.length ? { "location_contract_ledger.json": jsonBytes(locationLedger) } : {}),
   };
   const receipt = {
     schema: "goldflow_reference_plan_exact_repair_receipt_v1",
@@ -302,6 +392,7 @@ export async function repairReferencePlanExact({ episodeDir, spec, specPath, cur
     beat_changes: beatChanges,
     reference_changes: refChanges,
     state_ref_changes: stateChanges,
+    location_contract_changes: locationChanges,
     grouping_lock_sha256: priorGrouping,
     provider_calls: 0,
     estimated_cost_usd: 0,
@@ -351,5 +442,5 @@ export async function repairReferencePlanExact({ episodeDir, spec, specPath, cur
     }), { flag: "wx" });
     throw error;
   }
-  return { status: "passed", receipt_path: receiptPath, beat_count: beatChanges.length, reference_count: refChanges.length, state_ref_count: stateChanges.length, visual_reference_plan_sha256: newPlanHash };
+  return { status: "passed", receipt_path: receiptPath, beat_count: beatChanges.length, reference_count: refChanges.length, state_ref_count: stateChanges.length, location_contract_count: locationChanges.length, visual_reference_plan_sha256: newPlanHash };
 }

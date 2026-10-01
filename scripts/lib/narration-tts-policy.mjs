@@ -172,13 +172,26 @@ export function narrationTtsRetryReportPolicy({
     evidence_sha256: row.confirmed_evidence_sha256,
     human_listening_performed: false,
   }));
+  const reviewedStructuralNoAudioRepairs = recoveryProvenances.filter((row) => (
+    row?.evidence_basis === "reviewed_structural_no_audio"
+      && row.human_listening_performed === false
+      && row.origin_audio_sha256 === null
+      && row.trigger_codes?.includes("tts_batch_token_limit_reached")
+  )).map((row) => ({
+    unit_id: row.unit_id, trigger_codes: row.trigger_codes,
+    origin_synthesis_identity_sha256: row.origin_synthesis_identity_sha256,
+    origin_runner_report_sha256: row.origin_runner_report_sha256,
+    evidence_path: row.confirmed_evidence_path,
+    evidence_sha256: row.confirmed_evidence_sha256,
+    human_listening_performed: false,
+  }));
   return {
     provider,
     same_voice_reference_required: true,
     exact_unit_only: true,
     maximum_creative_submissions_per_invocation: 1,
     maximum_attempts_per_unit_across_explicit_repair_invocations: 2,
-    retry_only_confirmed_skip_truncation_or_stutter: !pronunciationExceptions.length && !reviewedAutomatedRepairs.length && !operatorAsrExceptions.some((row) => (
+    retry_only_confirmed_skip_truncation_or_stutter: !pronunciationExceptions.length && !reviewedAutomatedRepairs.length && !reviewedStructuralNoAudioRepairs.length && !operatorAsrExceptions.some((row) => (
       row.trigger_codes?.includes("operator_authorized_asr_consensus_unexpected_words")
     )),
     ...(operatorAsrExceptions.length
@@ -187,6 +200,8 @@ export function narrationTtsRetryReportPolicy({
       ? { operator_confirmed_pronunciation_exceptions: pronunciationExceptions } : {}),
     ...(reviewedAutomatedRepairs.length
       ? { reviewed_automated_delivery_repairs: reviewedAutomatedRepairs } : {}),
+    ...(reviewedStructuralNoAudioRepairs.length
+      ? { reviewed_structural_no_audio_repairs: reviewedStructuralNoAudioRepairs } : {}),
     automatic_retry_limited_to_failed_empty_or_objectively_truncated_audio: false,
     other_acoustic_or_voice_identity_blockers_require_review: true,
     uncertain_asr_findings_are_warning_only: true,

@@ -95,6 +95,7 @@ import { semanticFailedRecoveryScope } from "./lib/semantic-planner-recovery.mjs
 import { readVisualBeatRecoveryScope } from "./lib/visual-beat-recovery.mjs";
 import { readVisualPromptRecoveryScope, visualPromptRecoveryAdmission } from "./lib/visual-prompt-recovery.mjs";
 import { hasTtsTerminalPunctuation } from "./lib/tts-text-boundaries.mjs";
+import { validateStructuralNoAudioRetryEvidence } from "./lib/tts-structural-no-audio-retry.mjs";
 import {
   ttsSpokenTextAuditMatches,
   ttsSpokenTextAuditSha256,
@@ -3065,6 +3066,83 @@ async function reviewedAutomatedDeliveryRetryReportValid(ttsReport, currentScrip
   return true;
 }
 
+export async function narrationStructuralNoAudioRetryReportValidForTests(ttsReport, currentScriptHash) {
+  const results = ttsReport?.results ?? [];
+  const expectedPolicy = narrationTtsRetryReportPolicy({
+    recoveryProvenances: results.map((row) => row.recovery_provenance),
+  });
+  const expected = expectedPolicy.reviewed_structural_no_audio_repairs ?? [];
+  const hashValid = (value) => /^[a-f0-9]{64}$/u.test(String(value ?? ""));
+  if (expected.length !== 1
+    || canonicalQwenBatchSha256(expected)
+      !== canonicalQwenBatchSha256(ttsReport.retry_policy?.reviewed_structural_no_audio_repairs ?? [])
+    || ttsReport.retry_policy?.retry_only_confirmed_skip_truncation_or_stutter !== false
+    || ttsReport.source_script_hash !== currentScriptHash) return false;
+  const unitId = expected[0].unit_id;
+  const result = results.find((row) => row.unit_id === unitId);
+  const recovery = result?.recovery_provenance;
+  const scope = ttsReport.recovery_scope;
+  const priorReportPath = scope?.pre_retry_narration_report_archive_path;
+  const priorQaPath = scope?.pre_retry_unit_qa_archive_path;
+  const planPath = ttsReport.narration_generation_plan_path;
+  const manifestPath = ttsReport.provider_output_manifest_path;
+  const episodeRoot = planPath ? path.resolve(path.dirname(planPath)) : null;
+  const withinEpisode = (filePath) => Boolean(episodeRoot
+    && path.isAbsolute(String(filePath ?? ""))
+    && path.resolve(filePath).startsWith(`${episodeRoot}${path.sep}`));
+  if (!result || results.filter((row) => row.unit_id === unitId).length !== 1
+    || Number(result.attempt) !== 2 || !hashValid(result.audio_sha256)
+    || recovery?.schema !== "goldflow_qwen_exact_unit_recovery_provenance_v1"
+    || recovery.evidence_basis !== "reviewed_structural_no_audio"
+    || recovery.human_listening_performed !== false
+    || recovery.origin_audio_sha256 !== null
+    || recovery.recovery_mode !== QWEN_LIAM_EXACT_UNIT_RECOVERY_MODE
+    || canonicalQwenBatchSha256(recovery.trigger_codes)
+      !== canonicalQwenBatchSha256(["tts_batch_token_limit_reached"])
+    || !withinEpisode(priorReportPath) || !withinEpisode(priorQaPath)
+    || !planPath || !withinEpisode(manifestPath)
+    || !hashValid(scope.pre_retry_narration_report_sha256)
+    || !hashValid(scope.pre_retry_unit_qa_sha256)
+    || !hashValid(ttsReport.narration_generation_plan_file_sha256)
+    || await fileSha256(priorReportPath) !== scope.pre_retry_narration_report_sha256
+    || await fileSha256(priorQaPath) !== scope.pre_retry_unit_qa_sha256
+    || await fileSha256(planPath) !== ttsReport.narration_generation_plan_file_sha256
+    || await fileSha256(manifestPath) !== ttsReport.provider_output_manifest_sha256
+    || !recovery.confirmed_evidence_path
+    || await fileSha256(recovery.confirmed_evidence_path) !== recovery.confirmed_evidence_sha256) return false;
+  const [priorReport, priorUnitQa, plan, manifest, evidence] = await Promise.all([
+    readJson(priorReportPath, null), readJson(priorQaPath, null),
+    readJson(planPath, null), readJson(manifestPath, null),
+    readJson(recovery.confirmed_evidence_path, null),
+  ]);
+  const oldCandidate = (priorUnitQa?.candidates ?? []).find((row) => row.unit_id === unitId);
+  const runnerPath = oldCandidate?.runner_report_path;
+  if (!withinEpisode(runnerPath)) return false;
+  const runnerReport = await readJson(runnerPath, null);
+  try {
+    validateStructuralNoAudioRetryEvidence({
+      evidence, requestedUnitIds: [unitId], sourceScriptSha256: currentScriptHash,
+      planSha256: plan?.plan_sha256, planFileSha256: ttsReport.narration_generation_plan_file_sha256,
+      priorReport, priorReportSha256: scope.pre_retry_narration_report_sha256,
+      priorUnitQa, priorUnitQaSha256: scope.pre_retry_unit_qa_sha256,
+      runnerReport, runnerReportSha256: await fileSha256(runnerPath),
+      units: narrationPlanUnitsForStatus(plan), batchPlan: plan?.qwen_liam_batch_plan,
+    });
+  } catch {
+    return false;
+  }
+  const providerUnit = (manifest?.units ?? []).find((row) => row.unit_id === unitId);
+  return Boolean(providerUnit
+    && (manifest.units ?? []).filter((row) => row.unit_id === unitId).length === 1
+    && providerUnit.audio_path
+    && providerUnit.audio_sha256 === result.audio_sha256
+    && providerUnit.synthesis_identity_sha256 === result.synthesis_identity_sha256
+    && providerUnit.spoken_text_sha256 === result.spoken_text_sha256
+    && canonicalQwenBatchSha256(providerUnit.recovery_provenance ?? null)
+      === canonicalQwenBatchSha256(recovery)
+    && await fileSha256(providerUnit.audio_path) === result.audio_sha256);
+}
+
 export async function narrationHeardPronunciationRetryReportValidForTests(ttsReport, currentScriptHash) {
   const results = ttsReport?.results ?? [];
   const expectedPolicy = narrationTtsRetryReportPolicy({
@@ -3380,6 +3458,52 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
     return { done: false, evidence: `narration_tts_report_${episode}.json missing` };
   }
   if (!statusPassed(ttsReport.status)) {
+    if (ttsReport.status === "blocked" && policy.primary.provider === "qwen_local") {
+      const structuralEvidencePath = path.join(episodeDir,
+        `narration_structural_no_audio_retry_evidence_${episode}.json`);
+      if (await exists(structuralEvidencePath)) {
+        try {
+          const evidence = await readJson(structuralEvidencePath, null);
+          const unitId = evidence?.confirmed_units?.[0]?.unit_id;
+          const planPath = path.join(episodeDir, "narration_generation_plan.json");
+          const unitQaPath = path.join(episodeDir,
+            `narration_tts_unit_qa_${episode}.json`);
+          const [plan, unitQa] = await Promise.all([
+            readJson(planPath, null), readJson(unitQaPath, null),
+          ]);
+          const candidate = (unitQa?.candidates ?? []).find((row) => (
+            String(row?.unit_id) === String(unitId)
+          ));
+          const runnerPath = candidate?.runner_report_path;
+          if (!runnerPath || !path.isAbsolute(runnerPath)
+            || !path.resolve(runnerPath).startsWith(`${path.resolve(episodeDir)}${path.sep}`)) {
+            throw new Error("Original runner report path is absent or outside the episode.");
+          }
+          const runnerReport = await readJson(runnerPath, null);
+          validateStructuralNoAudioRetryEvidence({
+            evidence, requestedUnitIds: [unitId],
+            sourceScriptSha256: currentScriptHash,
+            planSha256: plan?.plan_sha256 ?? null,
+            planFileSha256: await fileSha256(planPath),
+            priorReport: ttsReport,
+            priorReportSha256: await fileSha256(ttsReportPath),
+            priorUnitQa: unitQa,
+            priorUnitQaSha256: await fileSha256(unitQaPath),
+            runnerReport,
+            runnerReportSha256: await fileSha256(runnerPath),
+            units: narrationPlanUnitsForStatus(plan),
+            batchPlan: plan?.qwen_liam_batch_plan,
+          });
+          return { done: false, state: "blocked",
+            evidence: `Reviewed token-limit no-audio failure authorizes one exact-unit Qwen retry for ${unitId}; all accepted WAVs remain immutable`,
+            next_command_shape: `node bin/goldflow.mjs tts narrate --episode-dir ${episodeDir} --confirmed-retry-unit-ids ${unitId} --confirmed-retry-evidence ${structuralEvidencePath}` };
+        } catch (error) {
+          return { done: false, state: "blocked",
+            evidence: `Structural no-audio retry evidence is stale or invalid: ${error.message}`,
+            next_command_shape: "Operator hold: correct the exact hash-bound structural retry evidence; do not rerun narration." };
+        }
+      }
+    }
     // A changed transcript comparator can clear a blocked ASR spelling while
     // retaining every immutable provider WAV. Route only a hash-verified,
     // comparison-sensitive blocked report to the guarded finalizer.
@@ -3891,11 +4015,15 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
     const hasReviewedAutomatedRetry = (ttsReport.results ?? []).some((row) => (
       row.recovery_provenance?.evidence_basis === "reviewed_automated_delivery_qa"
     )) || (ttsReport.retry_policy?.reviewed_automated_delivery_repairs?.length ?? 0) > 0;
-    const exactRetryTypePolicyPassed = hasOperatorAsrRetry || hasHeardPronunciationRetry || hasReviewedAutomatedRetry
+    const hasReviewedStructuralRetry = (ttsReport.results ?? []).some((row) => (
+      row.recovery_provenance?.evidence_basis === "reviewed_structural_no_audio"
+    )) || (ttsReport.retry_policy?.reviewed_structural_no_audio_repairs?.length ?? 0) > 0;
+    const exactRetryTypePolicyPassed = hasOperatorAsrRetry || hasHeardPronunciationRetry || hasReviewedAutomatedRetry || hasReviewedStructuralRetry
       ? narrationQualityContract
         && (!hasOperatorAsrRetry || await narrationOperatorAsrRetryReportValidForTests(ttsReport, currentScriptHash))
         && (!hasHeardPronunciationRetry || await narrationHeardPronunciationRetryReportValidForTests(ttsReport, currentScriptHash))
         && (!hasReviewedAutomatedRetry || await reviewedAutomatedDeliveryRetryReportValid(ttsReport, currentScriptHash))
+        && (!hasReviewedStructuralRetry || await narrationStructuralNoAudioRetryReportValidForTests(ttsReport, currentScriptHash))
       : ttsReport.retry_policy?.retry_only_confirmed_skip_truncation_or_stutter === true;
     if (ttsReport.retry_policy?.uncertain_asr_findings_are_warning_only !== true
       || !exactRetryTypePolicyPassed

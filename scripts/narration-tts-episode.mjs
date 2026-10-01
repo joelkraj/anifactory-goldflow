@@ -41,6 +41,7 @@ import {
   validateQwenLiamBatchPlan,
 } from "./lib/qwen-liam-batch-contract.mjs";
 import { hasTtsTerminalPunctuation } from "./lib/tts-text-boundaries.mjs";
+import { validateStructuralNoAudioRetryEvidence } from "./lib/tts-structural-no-audio-retry.mjs";
 import {
   validateNarrationPerformanceBakeoffApproval,
 } from "./lib/narration-performance-contract.mjs";
@@ -108,6 +109,19 @@ function parseFlags(parts) {
 
 function boolFlag(value) {
   return /^(?:1|true|yes|on)$/i.test(String(value ?? ""));
+}
+
+async function preserveStructuralPredecessor(buffer, archivePath, expectedSha256) {
+  await fs.mkdir(path.dirname(archivePath), { recursive: true });
+  try {
+    await fs.writeFile(archivePath, buffer, { flag: "wx" });
+  } catch (error) {
+    if (error?.code !== "EEXIST") throw error;
+  }
+  if (await sha256File(archivePath) !== expectedSha256) {
+    throw new Error(`Structural retry predecessor archive is stale: ${archivePath}`);
+  }
+  return archivePath;
 }
 
 export function recoveryScopeForTests(rawUnitIds, units) {
@@ -197,7 +211,7 @@ export function preservedTtsSelectionsForTests({
     const result = reportResults.get(unitId);
     const selectedQa = selectedQaRows.get(unitId);
     if (!result && !selectedQa) {
-      if (requireAllUnrequested) {
+      if (requireAllUnrequested && !requestedRetryOrigin) {
         findings.push({
           code: "preserved_tts_selection_missing_or_stale",
           unit_id: unitId,
@@ -467,7 +481,8 @@ export function exactUnitRecoveryProvenanceForTests({
         .map((finding) => finding.code)
       ?? [],
   )].map(String).sort();
-  const triggerCodes = confirmedDefect
+  const structuralNoAudio = confirmedEvidenceBasis === "reviewed_structural_no_audio";
+  const triggerCodes = confirmedDefect && !structuralNoAudio
     ? [`${confirmedEvidenceBasis === "operator_authorized_asr_consensus"
       ? "operator_authorized_asr_consensus" : confirmedEvidenceBasis === "reviewed_automated_delivery_qa"
         ? "reviewed_automated_delivery_qa" : "operator_confirmed"}_${String(confirmedDefect).toLowerCase()}`]
@@ -487,7 +502,7 @@ export function exactUnitRecoveryProvenanceForTests({
     trigger_codes: triggerCodes,
     candidate_qa: candidate.qa ?? null,
     confirmed_evidence_sha256: confirmedEvidenceSha256,
-    ...(["operator_authorized_asr_consensus", "operator_confirmed_pronunciation", "reviewed_automated_delivery_qa"].includes(confirmedEvidenceBasis)
+    ...(["operator_authorized_asr_consensus", "operator_confirmed_pronunciation", "reviewed_automated_delivery_qa", "reviewed_structural_no_audio"].includes(confirmedEvidenceBasis)
       ? { evidence_basis: confirmedEvidenceBasis,
         human_listening_performed: confirmedEvidenceBasis === "operator_confirmed_pronunciation" } : {}),
   };
@@ -508,7 +523,7 @@ export function exactUnitRecoveryProvenanceForTests({
     trigger_evidence_sha256: canonicalQwenBatchSha256(triggerEvidence),
     confirmed_evidence_path: confirmedEvidencePath,
     confirmed_evidence_sha256: confirmedEvidenceSha256,
-    ...(["operator_authorized_asr_consensus", "operator_confirmed_pronunciation", "reviewed_automated_delivery_qa"].includes(confirmedEvidenceBasis)
+    ...(["operator_authorized_asr_consensus", "operator_confirmed_pronunciation", "reviewed_automated_delivery_qa", "reviewed_structural_no_audio"].includes(confirmedEvidenceBasis)
       ? { evidence_basis: confirmedEvidenceBasis,
         human_listening_performed: confirmedEvidenceBasis === "operator_confirmed_pronunciation" } : {}),
   };
@@ -3296,18 +3311,69 @@ async function main() {
     confirmedRetryEvidenceSha256 = createHash("sha256")
       .update(evidenceBuffer)
       .digest("hex");
-    validatedConfirmedRetryEvidence = validateConfirmedRetryEvidenceForTests({
-      evidence,
-      requestedUnitIds: requestedRecoveryScope.requested_unit_ids,
-      planSha256,
-      priorReport: priorNarrationReport,
-      priorReportSha256: priorNarrationReportSha256,
-      currentCandidates: preservedCandidates,
-      sourceScriptSha256: scriptHash,
-      planFileSha256,
-      currentUnits: units,
-      priorCandidates: priorUnitQa?.candidates ?? [],
-    });
+    if (evidence.evidence_basis === "reviewed_structural_no_audio") {
+      const structuralId = requestedRecoveryScope.requested_unit_ids[0];
+      const priorCandidate = (priorUnitQa?.candidates ?? []).find((row) => (
+        String(row?.unit_id) === structuralId
+      ));
+      const runnerPath = priorCandidate?.runner_report_path;
+      if (!runnerPath || !path.isAbsolute(runnerPath)
+        || !path.resolve(runnerPath).startsWith(`${path.resolve(outputDir)}${path.sep}`)) {
+        throw new Error("Structural no-audio retry lacks an episode-local original runner report.");
+      }
+      const runnerBuffer = await fs.readFile(runnerPath);
+      const runnerReportSha256 = createHash("sha256")
+        .update(runnerBuffer).digest("hex");
+      const structural = validateStructuralNoAudioRetryEvidence({
+        evidence,
+        requestedUnitIds: requestedRecoveryScope.requested_unit_ids,
+        sourceScriptSha256: scriptHash,
+        planSha256,
+        planFileSha256,
+        priorReport: priorNarrationReport,
+        priorReportSha256: priorNarrationReportSha256,
+        priorUnitQa,
+        priorUnitQaSha256,
+        runnerReport: JSON.parse(runnerBuffer.toString("utf8")),
+        runnerReportSha256,
+        units,
+        batchPlan,
+      });
+      if (policy.primary.provider !== "qwen_local"
+        || policy.synthesis_contract.mode !== QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT.mode
+        || preservationValidation.preserved_unit_ids.length !== units.length - 1) {
+        throw new Error("Structural no-audio retry requires one Qwen cohort failure and all other units hash-preserved.");
+      }
+      const archiveDir = path.join(outputDir, "structural-retry-predecessors");
+      const preRetryReportArchivePath = await preserveStructuralPredecessor(
+        priorNarrationReportBuffer,
+        path.join(archiveDir, `narration-report-${priorNarrationReportSha256}.json`),
+        priorNarrationReportSha256,
+      );
+      const preRetryUnitQaArchivePath = await preserveStructuralPredecessor(
+        priorUnitQaBuffer,
+        path.join(archiveDir, `unit-qa-${priorUnitQaSha256}.json`),
+        priorUnitQaSha256,
+      );
+      validatedConfirmedRetryEvidence = [{
+        ...structural,
+        pre_retry_report_archive_path: preRetryReportArchivePath,
+        pre_retry_unit_qa_archive_path: preRetryUnitQaArchivePath,
+      }];
+    } else {
+      validatedConfirmedRetryEvidence = validateConfirmedRetryEvidenceForTests({
+        evidence,
+        requestedUnitIds: requestedRecoveryScope.requested_unit_ids,
+        planSha256,
+        priorReport: priorNarrationReport,
+        priorReportSha256: priorNarrationReportSha256,
+        currentCandidates: preservedCandidates,
+        sourceScriptSha256: scriptHash,
+        planFileSha256,
+        currentUnits: units,
+        priorCandidates: priorUnitQa?.candidates ?? [],
+      });
+    }
     if (validatedConfirmedRetryEvidence.some((row) => row.evidence_basis === "operator_confirmed_pronunciation")
       && (policy.primary.provider !== "qwen_local"
         || policy.synthesis_contract.mode !== QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT.mode)) {
@@ -3508,6 +3574,9 @@ async function main() {
       policy,
     });
     candidates.push(...preservedFinalInputs.candidates);
+    candidates.push(...validatedConfirmedRetryEvidence
+      .filter((row) => row.evidence_basis === "reviewed_structural_no_audio")
+      .map((row) => row.candidate));
     synthesisRuns.push(...preservedFinalInputs.synthesisRuns);
     for (const row of preservedFinalInputs.selectedRows) {
       selected.set(String(row.unit_id), row);
@@ -4028,6 +4097,9 @@ async function main() {
     recoveryScope = {
       ...recoveryScope,
       status: validatedConfirmedRetryEvidence.every((row) => (
+        row.evidence_basis === "reviewed_structural_no_audio"
+      )) ? "validated_against_reviewed_structural_no_audio"
+        : validatedConfirmedRetryEvidence.every((row) => (
         row.evidence_basis === "operator_authorized_asr_consensus"
       )) ? "validated_against_operator_authorized_asr_consensus"
         : validatedConfirmedRetryEvidence.every((row) => row.evidence_basis === "reviewed_automated_delivery_qa")
@@ -4038,6 +4110,14 @@ async function main() {
       evidence_path: confirmedRetryEvidencePath,
       evidence_sha256: confirmedRetryEvidenceSha256,
       pre_retry_narration_report_sha256: priorNarrationReportSha256,
+      ...(validatedConfirmedRetryEvidence[0]?.evidence_basis === "reviewed_structural_no_audio"
+        ? {
+          pre_retry_narration_report_archive_path:
+            validatedConfirmedRetryEvidence[0].pre_retry_report_archive_path,
+          pre_retry_unit_qa_sha256: priorUnitQaSha256,
+          pre_retry_unit_qa_archive_path:
+            validatedConfirmedRetryEvidence[0].pre_retry_unit_qa_archive_path,
+        } : {}),
       confirmed_artifacts: validatedConfirmedRetryEvidence,
     };
     if (scopedRecoveryUnits.length) {

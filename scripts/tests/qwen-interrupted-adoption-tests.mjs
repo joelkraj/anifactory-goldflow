@@ -15,6 +15,7 @@ import {
   verifyInterruptedQwenInventory,
 } from "../lib/qwen-interrupted-adoption.mjs";
 import { creativeStageRerunDecision } from "../lib/creative-stage-rerun-policy.mjs";
+import { interruptedQwenGuardAdmission } from "../lib/qwen-interrupted-guard.mjs";
 import { narrationSynthesisScopeForTests, preservedTtsSelectionsForTests } from "../narration-tts-episode.mjs";
 
 const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");
@@ -151,6 +152,19 @@ try {
   const verified = await verifyInterruptedQwenInventory(inputs);
   assert.equal(verified.verified_units.length, 4);
   assert.deepEqual(verified.never_submitted_unit_ids, remainingIds);
+  const exactInventoryPath = path.join(episodeDir,
+    "narration_interrupted_qwen_triage_inventory_ep_01.json");
+  const adoptStatus = { episode_dir: episodeDir, current_stage: "qwen_tts_stitch",
+    current_stage_state: "blocked",
+    next_command_shape: `node bin/goldflow.mjs tts adopt-interrupted --episode-dir ${episodeDir} --inventory ${exactInventoryPath}` };
+  const adoptFlags = { "adopt-interrupted": "true", "episode-dir": episodeDir,
+    inventory: exactInventoryPath };
+  assert.equal(interruptedQwenGuardAdmission(adoptStatus, "tts", "adopt-interrupted",
+    adoptFlags).allowed, true);
+  assert.equal(interruptedQwenGuardAdmission({ ...adoptStatus,
+    current_stage: "voice_plan" }, "tts", "adopt-interrupted", adoptFlags).allowed, false);
+  assert.equal(interruptedQwenGuardAdmission(adoptStatus, "tts", "adopt-interrupted",
+    { ...adoptFlags, inventory: inventoryPath }).allowed, false);
   await fs.writeFile(listed[0].wav_path, "changed waveform");
   await assert.rejects(verifyInterruptedQwenInventory(inputs), /WAV or sidecar changed/);
   await fs.writeFile(listed[0].wav_path, `mock-waveform-${listed[0].unit_id}`);
@@ -159,6 +173,17 @@ try {
   await fs.unlink(path.join(unitDir, "unreviewed.wav"));
 
   const receiptPath = path.join(episodeDir, "narration_interrupted_qwen_adoption_ep_01.json");
+  const resumeFlags = { "episode-dir": episodeDir, concurrency: "1", "batch-size": "4",
+    "interrupted-adoption-receipt": receiptPath };
+  const resumeStatus = { episode_dir: episodeDir, current_stage: "qwen_tts_stitch",
+    current_stage_state: "blocked",
+    next_command_shape: `node bin/goldflow.mjs tts narrate --episode-dir ${episodeDir} --concurrency 1 --batch-size 4 --interrupted-adoption-receipt ${receiptPath}` };
+  assert.equal(interruptedQwenGuardAdmission(resumeStatus, "tts", "narrate",
+    resumeFlags).allowed, true);
+  assert.equal(interruptedQwenGuardAdmission(resumeStatus, "tts", "narrate",
+    { ...resumeFlags, "batch-size": "5" }).allowed, false);
+  assert.equal(interruptedQwenGuardAdmission({ ...resumeStatus,
+    current_stage_state: "passed" }, "tts", "narrate", resumeFlags).allowed, false);
   const reportPath = path.join(episodeDir, "narration_tts_report_ep_01.json");
   const unitQaPath = path.join(episodeDir, "narration_tts_unit_qa_ep_01.json");
   const gateArchivePath = path.join(episodeDir, "original-gate.json");
@@ -244,8 +269,10 @@ try {
   const receiptHash = hash(await fs.readFile(receiptPath));
   const resumeGateFileHash = await writeJson(resumeGatePath, {
     status: "passed", gate_sha256: resumeGateHashValue,
-    synthesis_scope: { interrupted_adoption_receipt_path: receiptPath,
-      interrupted_adoption_receipt_sha256: receiptHash },
+    scope: { mode: "interrupted_full_synthesis_resume_preserving_accepted_units",
+      evidence_path: receiptPath, evidence_sha256: receiptHash,
+      preserved_unit_ids: acceptedIds,
+      authorized_synthesis_unit_ids: remainingIds },
   });
   const remainingId = remainingIds[0];
   const remainingUnit = units.find((row) => row.unit_id === remainingId);

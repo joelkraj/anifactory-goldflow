@@ -403,8 +403,11 @@ export async function verifyInterruptedQwenFinalRun({
     && jobs.pre_synthesis_gate?.gate_sha256 === runner.pre_synthesis_gate_sha256
     && gate.gate_sha256 === runner.pre_synthesis_gate_sha256
     && gate.status === "passed"
-    && gate.synthesis_scope?.interrupted_adoption_receipt_path === receiptPath
-    && gate.synthesis_scope?.interrupted_adoption_receipt_sha256 === checked.receipt_sha256
+    && gate.scope?.mode === "interrupted_full_synthesis_resume_preserving_accepted_units"
+    && gate.scope?.evidence_path === receiptPath
+    && gate.scope?.evidence_sha256 === checked.receipt_sha256
+    && same(gate.scope?.preserved_unit_ids, receipt.accepted_unit_ids)
+    && same(gate.scope?.authorized_synthesis_unit_ids, remaining)
     && same((jobs.jobs ?? []).map((row) => row.unit_id), remaining),
   "serial resume jobs or gate lack exact adoption authorization");
   const bindings = qwenBatchBindingByUnit(batchPlan);

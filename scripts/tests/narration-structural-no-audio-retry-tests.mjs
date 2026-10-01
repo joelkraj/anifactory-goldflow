@@ -33,8 +33,9 @@ const retained = {
 const runner = {
   unit_id: failed.unit_id, status: "failed", attempt: 1,
   spoken_text_sha256: failed.spoken_text_sha256,
-  synthesis_identity_sha256: hash("2"), cohort_id: "cohort_1",
-  cohort_sha256: hash("d"), output_path: null, output_sha256: null,
+  synthesis_identity_sha256: hash("2"),
+  synthesis_identity: { cohort_id: "cohort_1", cohort_sha256: hash("d") },
+  output_path: null, output_sha256: null,
   error_code: "tts_batch_token_limit_reached", token_limit_reached: true,
 };
 const candidate = {
@@ -42,7 +43,8 @@ const candidate = {
   spoken_text_sha256: failed.spoken_text_sha256,
   synthesis_identity_sha256: runner.synthesis_identity_sha256,
   batch_plan_sha256: batchPlan.batch_plan_sha256,
-  cohort_id: runner.cohort_id, cohort_sha256: runner.cohort_sha256,
+  cohort_id: runner.synthesis_identity.cohort_id,
+  cohort_sha256: runner.synthesis_identity.cohort_sha256,
   runner_report_path: "/fixture/runner.json", runner_report_sha256: hash("3"),
   audio_path: null, audio_sha256: null, duration_sec: null,
   qa: { status: "blocked", findings: [
@@ -122,6 +124,10 @@ refuses((copy) => { copy.priorUnitQa.candidates[1].audio_path = "/fixture/failed
 refuses((copy) => { copy.priorUnitQa.candidates[1].disposition.blocker_codes = ["other"]; });
 refuses((copy) => { copy.priorUnitQa.candidates[1].cohort_sha256 = hash("0"); });
 refuses((copy) => { copy.runnerReport.results[0].error_code = "tts_serial_synthesis_failed"; });
+refuses((copy) => { copy.runnerReport.results[0].synthesis_identity.cohort_id = "other"; });
+refuses((copy) => { copy.runnerReport.results[0].synthesis_identity.cohort_sha256 = hash("0"); });
+refuses((copy) => { copy.runnerReport.results[0].cohort_id = "other"; });
+refuses((copy) => { copy.runnerReport.results[0].cohort_sha256 = hash("0"); });
 refuses((copy) => { copy.runnerReport.results[0].output_sha256 = hash("0"); });
 refuses((copy) => { copy.runnerReportSha256 = hash("0"); });
 refuses((copy) => { copy.evidence.confirmed_units[0].failure_candidate_sha256 = hash("0"); });

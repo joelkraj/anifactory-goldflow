@@ -97,8 +97,10 @@ export function validateStructuralNoAudioRetryEvidence({
     || runner.token_limit_reached !== true
     || runner.synthesis_identity_sha256 !== candidate.synthesis_identity_sha256
     || runner.spoken_text_sha256 !== unit.spoken_text_sha256
-    || runner.cohort_id !== cohort.cohort_id
-    || runner.cohort_sha256 !== cohort.cohort_sha256
+    || runner.synthesis_identity?.cohort_id !== cohort.cohort_id
+    || runner.synthesis_identity?.cohort_sha256 !== cohort.cohort_sha256
+    || (runner.cohort_id != null && runner.cohort_id !== cohort.cohort_id)
+    || (runner.cohort_sha256 != null && runner.cohort_sha256 !== cohort.cohort_sha256)
     || row.defect_type !== "token_limit_no_audio"
     || row.selected_attempt !== 1
     || row.audio_sha256 !== null

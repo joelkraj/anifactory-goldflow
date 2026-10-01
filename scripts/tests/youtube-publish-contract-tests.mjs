@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 import sharp from "sharp";
 import { sha256File } from "../lib/file-hash.mjs";
 import {
+  channelUploadExperimentUsage,
   validateChannelUploadExperimentSpec,
   verifyChannelUploadExperimentIdentity,
 } from "../lib/channel-upload-experiment.mjs";
@@ -267,6 +268,55 @@ export async function runYoutubePublishContractTests() {
     path.join(repoRoot, "docs/channel_experiments/manhwa_joey_75min_manual_midroll_test_v1.json"),
     "utf8",
   ));
+  const usageDataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-channel-experiment-usage-"));
+  try {
+    const writeReceipt = async (episode, name, receipt) => {
+      const episodeDir = path.join(usageDataRoot, "channels", "53rebirth", "weekly_runs", episode, "episodes", "ep_01");
+      await fs.mkdir(episodeDir, { recursive: true });
+      await fs.writeFile(path.join(episodeDir, name), `${JSON.stringify(receipt)}\n`, "utf8");
+    };
+    const uploadReceipt = (videoId, recordedAt, overrides = {}) => ({
+      schema: YOUTUBE_UPLOAD_RECEIPT_SCHEMA,
+      status: "passed",
+      video_id: videoId,
+      watch_url: `https://www.youtube.com/watch?v=${videoId}`,
+      recorded_at: recordedAt,
+      channel_experiment: { experiment_id: uploadExperiment.experiment_id, ordinal: 1 },
+      field_verification: {
+        active_channel: true, initial_private: true, title: true, description: true,
+        thumbnail: true, audience: true, monetization: true, mid_rolls: true,
+        comments: true, checks_complete: true,
+      },
+      ...overrides,
+    });
+    await writeReceipt("first", "youtube_upload_receipt_ep_01_private_before_release.json",
+      uploadReceipt("6R1ebPojk0Y", "2026-09-06T15:18:34Z"));
+    await writeReceipt("first", "youtube_upload_receipt_ep_01.json",
+      uploadReceipt("6R1ebPojk0Y", "2026-09-06T15:57:44Z", {
+        channel_experiment: { experiment_id: uploadExperiment.experiment_id, ordinal: 3 },
+      }));
+    await writeReceipt("second", "youtube_upload_receipt_ep_01.json",
+      uploadReceipt("a3KRti9Oaa0", "2026-09-08T09:46:16Z"));
+    await writeReceipt("unverified", "youtube_upload_receipt_ep_01.json",
+      uploadReceipt("invalid0000", "2026-09-09T09:46:16Z", {
+        field_verification: { active_channel: false },
+      }));
+    await writeReceipt("other-experiment", "youtube_upload_receipt_ep_01.json",
+      uploadReceipt("other000000", "2026-09-10T09:46:16Z", {
+        channel_experiment: { experiment_id: "other-experiment", ordinal: 1 },
+      }));
+    const usage = await channelUploadExperimentUsage({
+      dataRoot: usageDataRoot, channel: "53rebirth", experimentId: uploadExperiment.experiment_id,
+    });
+    assert.equal(usage.receipts.length, 3, "retain the duplicate receipts for audit");
+    assert.equal(usage.count, 2, "one video counts once across private and release receipts");
+    assert.deepEqual([...new Set(usage.receipts.map((row) => row.video_id))], ["6R1ebPojk0Y", "a3KRti9Oaa0"]);
+    assert.equal(validateChannelUploadExperimentSpec({
+      experiment: uploadExperiment, spec: {}, durationSec: 4500, usedCount: usage.count,
+    }).ordinal, 3);
+  } finally {
+    await fs.rm(usageDataRoot, { recursive: true, force: true });
+  }
   const identityDataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-channel-experiment-identity-"));
   try {
     const identityChannelRoot = path.join(identityDataRoot, "channels", "53rebirth");

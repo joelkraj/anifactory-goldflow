@@ -3,6 +3,10 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 
 export const CHANNEL_UPLOAD_EXPERIMENT_SCHEMA = "goldflow_channel_upload_experiment_v1";
+const EXPERIMENT_UPLOAD_VERIFICATIONS = [
+  "active_channel", "initial_private", "title", "description", "thumbnail",
+  "audience", "monetization", "mid_rolls", "comments", "checks_complete",
+];
 
 function clean(value) {
   return String(value ?? "").trim();
@@ -86,20 +90,28 @@ export async function channelUploadExperimentUsage({ dataRoot, channel, experime
   const receipts = [];
   for (const receiptPath of receiptPaths) {
     const receipt = await readJson(receiptPath);
+    const videoId = clean(receipt?.video_id);
+    const watchUrl = clean(receipt?.watch_url);
     if (
-      clean(receipt?.status) === "passed"
+      receipt?.schema === "goldflow_youtube_upload_receipt_v1"
+      && clean(receipt?.status) === "passed"
       && clean(receipt?.channel_experiment?.experiment_id) === clean(experimentId)
+      && videoId
+      && (/^https:\/\/(www\.)?youtube\.com\/watch\?v=/.test(watchUrl) || /^https:\/\/youtu\.be\//.test(watchUrl))
+      && watchUrl.includes(videoId)
+      && EXPERIMENT_UPLOAD_VERIFICATIONS.every((field) => receipt?.field_verification?.[field] === true)
     ) {
       receipts.push({
         path: receiptPath,
-        video_id: clean(receipt.video_id),
+        video_id: videoId,
         recorded_at: clean(receipt.recorded_at),
         ordinal: Number(receipt.channel_experiment?.ordinal),
       });
     }
   }
   receipts.sort((left, right) => left.recorded_at.localeCompare(right.recorded_at));
-  return { count: receipts.length, receipts };
+  // A private-upload receipt and a later release receipt may describe one upload.
+  return { count: new Set(receipts.map((receipt) => receipt.video_id)).size, receipts };
 }
 
 export function validateChannelUploadExperimentSpec({ experiment, spec, durationSec, finalVideoSha256, usedCount = 0 }) {

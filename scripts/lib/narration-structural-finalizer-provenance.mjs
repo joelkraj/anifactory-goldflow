@@ -42,12 +42,45 @@ export async function verifiedStructuralRecoveryFromManifest({ episodeDir, manif
     throw new Error("Selected structural retry lacks exact episode-local evidence or WAV provenance.");
   }
   const evidence = await readJson(evidencePath);
-  const retryRunnerPath = output.runner_report_path;
-  if (!inside(episodeDir, retryRunnerPath)
-    || await sha256File(retryRunnerPath).catch(() => null) !== output.runner_report_sha256) {
-    throw new Error("Structural retry attempt-two runner report is absent or hash-stale.");
+  let retryRunnerPath = output.runner_report_path;
+  let retryRunnerSha256 = output.runner_report_sha256;
+  let retryRunner;
+  if (retryRunnerPath == null && retryRunnerSha256 == null) {
+    // A later exact-unit cohort may preserve the structural WAV while its
+    // selected row loses the original runner pointer. The append-only run
+    // inventory still identifies the one runner that generated that WAV.
+    const matches = [];
+    for (const run of manifest.provider_execution?.synthesis_runs ?? []) {
+      if (Number(run.attempt) !== 2) continue;
+      if (!inside(episodeDir, run.report_path)
+        || await sha256File(run.report_path).catch(() => null) !== run.report_sha256) {
+        throw new Error("Structural retry synthesis-run inventory is absent or hash-stale.");
+      }
+      const candidateRunner = await readJson(run.report_path);
+      if ((candidateRunner.results ?? []).some((row) => row.unit_id === output.unit_id
+        && row.status === "generated" && Number(row.attempt) === 2
+        && row.output_path === output.audio_path
+        && row.output_sha256 === output.audio_sha256
+        && row.synthesis_identity_sha256 === output.synthesis_identity_sha256
+        && row.spoken_text_sha256 === output.spoken_text_sha256
+        && row.token_limit_reached === false)) {
+        matches.push({ path: run.report_path, sha256: run.report_sha256,
+          report: candidateRunner });
+      }
+    }
+    if (matches.length !== 1) {
+      throw new Error("Structural retry has no unique exact attempt-two runner in the immutable synthesis-run inventory.");
+    }
+    retryRunnerPath = matches[0].path;
+    retryRunnerSha256 = matches[0].sha256;
+    retryRunner = matches[0].report;
+  } else {
+    if (!inside(episodeDir, retryRunnerPath)
+      || await sha256File(retryRunnerPath).catch(() => null) !== retryRunnerSha256) {
+      throw new Error("Structural retry attempt-two runner report is absent or hash-stale.");
+    }
+    retryRunner = await readJson(retryRunnerPath);
   }
-  const retryRunner = await readJson(retryRunnerPath);
   const retryResults = (retryRunner.results ?? []).filter((row) => row.unit_id === output.unit_id);
   const retryResult = retryResults[0];
   if (retryRunner.status !== "passed" || retryResults.length !== 1

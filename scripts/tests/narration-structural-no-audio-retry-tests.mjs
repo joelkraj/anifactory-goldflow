@@ -289,6 +289,47 @@ try {
   });
   assert.equal(verified.unit_id, failed.unit_id);
   assert.deepEqual(verified.recovery_scope, completed.recovery_scope);
+  const laterRetryRunnerPath = path.join(temp,
+    "assets/audio/narration_tts/runs/later-exact-retry.json");
+  const laterRetryRunnerHash = await writeJson(laterRetryRunnerPath, {
+    status: "passed", results: [{ unit_id: retained.unit_id,
+      status: "generated", attempt: 2, output_path: "/fixture/later.wav",
+      output_sha256: hash("a"), synthesis_identity_sha256: hash("b"),
+      spoken_text_sha256: retained.spoken_text_sha256,
+      token_limit_reached: false }],
+  });
+  const laterRetakeManifest = structuredClone(manifest);
+  laterRetakeManifest.units[1].runner_report_path = null;
+  laterRetakeManifest.units[1].runner_report_sha256 = null;
+  laterRetakeManifest.provider_execution = { synthesis_runs: [
+    { attempt: 2, report_path: retryRunnerPath, report_sha256: retryRunnerHash },
+    { attempt: 2, report_path: laterRetryRunnerPath,
+      report_sha256: laterRetryRunnerHash },
+  ] };
+  assert.equal((await verifiedStructuralRecoveryFromManifest({
+    episodeDir: temp, manifest: laterRetakeManifest, manifestPath, plan,
+    planFileSha256: actualPlanFileHash, sourceScriptSha256: hash("4"),
+  })).unit_id, failed.unit_id);
+  const duplicateRunner = structuredClone(laterRetakeManifest);
+  duplicateRunner.provider_execution.synthesis_runs.push(
+    { attempt: 2, report_path: retryRunnerPath, report_sha256: retryRunnerHash },
+  );
+  await assert.rejects(verifiedStructuralRecoveryFromManifest({
+    episodeDir: temp, manifest: duplicateRunner, manifestPath, plan,
+    planFileSha256: actualPlanFileHash, sourceScriptSha256: hash("4"),
+  }), /unique exact attempt-two runner/u);
+  const staleRunInventory = structuredClone(laterRetakeManifest);
+  staleRunInventory.provider_execution.synthesis_runs[0].report_sha256 = hash("0");
+  await assert.rejects(verifiedStructuralRecoveryFromManifest({
+    episodeDir: temp, manifest: staleRunInventory, manifestPath, plan,
+    planFileSha256: actualPlanFileHash, sourceScriptSha256: hash("4"),
+  }), /hash-stale/u);
+  const partialRunnerPointer = structuredClone(laterRetakeManifest);
+  partialRunnerPointer.units[1].runner_report_path = retryRunnerPath;
+  await assert.rejects(verifiedStructuralRecoveryFromManifest({
+    episodeDir: temp, manifest: partialRunnerPointer, manifestPath, plan,
+    planFileSha256: actualPlanFileHash, sourceScriptSha256: hash("4"),
+  }), /hash-stale/u);
   const finalizerFields = providerNeutralRetryReportFieldsForTests({
     structuralRecovery: verified, provider: "qwen_local",
     rows: [{ recovery_provenance: null }, { recovery_provenance: actualProvenance }],

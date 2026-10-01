@@ -359,6 +359,44 @@ function testConfirmedRetryKeepsBlockedSelectionOnlyAsExactOrigin() {
     finding.code === "preserved_tts_selection_missing_or_stale"
     && finding.unit_id === "unit_002"
   )));
+  const partialReviewedRetake = preservedTtsSelectionsForTests({
+    units,
+    priorReport: { ...priorReport, status: "blocked",
+      blockers: [{ unit_id: "unit_002", code: "tts_audio_empty" }] },
+    priorUnitQa,
+    policy,
+    canonicalPlanSha256: planSha256,
+    planFileSha256,
+    requireAllUnrequested: true,
+    allowedBlockedUnrequestedIds: ["unit_002"],
+  });
+  assert.equal(partialReviewedRetake.status, "passed");
+  assert.deepEqual(partialReviewedRetake.preserved_unit_ids, ["unit_001", "unit_002"]);
+  const stalePartial = preservedTtsSelectionsForTests({
+    units,
+    priorReport: { ...priorReport, status: "blocked",
+      blockers: [{ unit_id: "unit_002", code: "tts_audio_empty" }] },
+    priorUnitQa: { ...priorUnitQa, selected_units: priorUnitQa.selected_units.map((row) => (
+      row.unit_id === "unit_002" ? { ...row, audio_sha256: "wrong-audio" } : row
+    )) },
+    policy,
+    canonicalPlanSha256: planSha256,
+    planFileSha256,
+    requireAllUnrequested: true,
+    allowedBlockedUnrequestedIds: ["unit_002"],
+  });
+  assert.equal(stalePartial.status, "blocked");
+  const unlistedBlocker = preservedTtsSelectionsForTests({
+    units,
+    priorReport: { ...priorReport, status: "blocked", blockers: [] },
+    priorUnitQa,
+    policy,
+    canonicalPlanSha256: planSha256,
+    planFileSha256,
+    requireAllUnrequested: true,
+    allowedBlockedUnrequestedIds: ["unit_002"],
+  });
+  assert.equal(unlistedBlocker.status, "blocked");
 }
 
 function manualReviewFixture(blockerCodes = ["tts_audio_tail_not_settled"]) {

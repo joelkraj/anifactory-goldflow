@@ -172,9 +172,11 @@ export function preservedTtsSelectionsForTests({
   planFileSha256 = null,
   requestedUnitIds = [],
   requireAllUnrequested = false,
+  allowedBlockedUnrequestedIds = [],
 } = {}) {
   const findings = [];
   const requested = new Set(requestedUnitIds.map(String));
+  const allowedBlockedUnrequested = new Set(allowedBlockedUnrequestedIds.map(String));
   const resultRows = priorReport?.results ?? [];
   const selectedRows = priorUnitQa?.selected_units ?? [];
   const reportResults = new Map(
@@ -232,9 +234,15 @@ export function preservedTtsSelectionsForTests({
       ?? selectedQa?.qa?.acoustic?.audio_sha256
       ?? null;
     const accepted = candidateDisposition(qa, PRIMARY_TTS_PROVIDER).accepted;
+    const exactUnresolvedBlocker = !requestedRetryOrigin
+      && allowedBlockedUnrequested.has(unitId)
+      && priorReport?.status === "blocked"
+      && qa?.status === "blocked"
+      && (priorReport.blockers ?? []).some((finding) =>
+        String(finding.unit_id ?? "") === unitId);
     if (!result
       || !selectedQa
-      || (!requestedRetryOrigin && !accepted)
+      || (!requestedRetryOrigin && !accepted && !exactUnresolvedBlocker)
       || !result.audio_path
       || !resultAudioSha256
       || result.audio_path !== selectedQa.audio_path
@@ -3636,6 +3644,30 @@ async function main() {
   let preservationValidation = null;
   let preservedCandidates = [];
   if (priorNarrationReport && priorUnitQa) {
+    const requestedIds = requestedRecoveryScope?.requested_unit_ids ?? [];
+    const blockedIds = new Set((priorNarrationReport.blockers ?? [])
+      .map((row) => String(row.unit_id ?? "")).filter(Boolean));
+    let allowedBlockedUnrequestedIds = [];
+    if (priorNarrationReport.status === "blocked"
+      && requestedIds.length > 0 && requestedIds.length < blockedIds.size
+      && requestedIds.every((id) => blockedIds.has(String(id)))) {
+      const evidence = await readJson(path.resolve(
+        String(flags["confirmed-retry-evidence"] ?? ""),
+      ), null);
+      if (evidence?.evidence_basis !== "reviewed_automated_delivery_qa") {
+        throw new Error("Partial narration retake requires reviewed automated delivery evidence.");
+      }
+      validateConfirmedRetryEvidenceForTests({
+        evidence, requestedUnitIds: requestedIds,
+        planSha256, priorReport: priorNarrationReport,
+        priorReportSha256: priorNarrationReportSha256,
+        currentCandidates: priorNarrationReport.results ?? [],
+        sourceScriptSha256: scriptHash, planFileSha256,
+      });
+      const requestedSet = new Set(requestedIds.map(String));
+      allowedBlockedUnrequestedIds = [...blockedIds]
+        .filter((id) => !requestedSet.has(id));
+    }
     preservationValidation = preservedTtsSelectionsForTests({
       units,
       priorReport: priorNarrationReport,
@@ -3646,6 +3678,7 @@ async function main() {
       requestedUnitIds:
         requestedRecoveryScope?.requested_unit_ids ?? [],
       requireAllUnrequested: false,
+      allowedBlockedUnrequestedIds,
     });
     if (preservationValidation.status !== "passed") {
       throw new Error(

@@ -14,6 +14,11 @@ import {
 import { NARRATION_DELIVERY_CONSENSUS_VERSION } from "../lib/narration-delivery-quality.mjs";
 import { finalizeNarrationProviderOutput } from "../narration-provider-output-finalize.mjs";
 import { validateOpeningFinalizationFlags } from "../lib/narration-opening-finalization.mjs";
+import {
+  CONTEXTUAL_ASR_SCHEMA, loadContextualAsrReconciliation,
+  applyContextualAsrReconciliation, validateAppliedContextualAsrReconciliation,
+} from "../lib/narration-full-stream-contextual-asr.mjs";
+import { validateBoundaryRepairScopeForTests } from "../tts-exact-boundary-repair.mjs";
 
 const execFile = promisify(execFileCallback);
 const hash = (value) => createHash("sha256").update(value).digest("hex");
@@ -98,6 +103,164 @@ try {
     return loadFullStreamManualReview({ ...input, ...overrides });
   };
   const valid = await load();
+  // A contextual full-stream omission may be reconciled only when the same
+  // selected unit is exact in both standalone ASR passes and its complete PCM
+  // survives the current stitch/mastered confirmation window.
+  const contextManifest = { status: "passed", units: [
+    { unit_id: "unit-a", spoken_text_sha256: hash("An exact sentence for the listener."),
+      audio_path: audios[0].path, audio_sha256: audios[0].sha256 },
+    { unit_id: "unit-b", spoken_text_sha256: hash("Known ones."),
+      audio_path: audios[1].path, audio_sha256: audios[1].sha256 },
+  ] };
+  const contextManifestFile = await write("context-manifest.json", contextManifest);
+  const contextDelivery = { status: "passed_with_warnings", units: [
+    { unit_id: "unit-a", audio_path: audios[0].path, audio_sha256: audios[0].sha256,
+      intended_text: "An exact sentence for the listener.",
+      intended_text_sha256: hash("An exact sentence for the listener."),
+      primary_recognized_text: "An exact sentence for the listener.",
+      confirmation_recognized_text: "An exact sentence for the listener.",
+      confirmation_transcript_qa: { deletions: 0, insertions: 0, substitutions: 0 },
+      decision: { status: "passed", blockers: [], confirmation_decision: { status: "passed" } } },
+    { unit_id: "unit-b", audio_path: audios[1].path, audio_sha256: audios[1].sha256,
+      intended_text: "Known ones.", intended_text_sha256: hash("Known ones."),
+      decision: { status: "passed_with_warnings", blockers: [] } },
+  ] };
+  const contextDeliveryFile = await write("context-delivery.json", contextDelivery);
+  const contextStitch = {
+    source_script_hash: report.source_script_hash,
+    narration_generation_plan_sha256: report.narration_generation_plan_sha256,
+    final_wav_path: master.path, final_wav_sha256: master.sha256,
+    raw_output_path: master.path, raw_output_sha256: master.sha256,
+    stitch_qa_status: "passed",
+    sample_accounting: { status: "passed", exact_sample_accounting: true,
+      actual_sample_count: 96000 },
+    segments: [
+      { unit_id: "unit-a", raw_audio_path: audios[0].path,
+        raw_audio_sha256: audios[0].sha256, prepared_audio_path: audios[0].path,
+        prepared_audio_sha256: audios[0].sha256 },
+      { unit_id: "unit-b", raw_audio_path: audios[1].path,
+        raw_audio_sha256: audios[1].sha256, prepared_audio_path: audios[1].path,
+        prepared_audio_sha256: audios[1].sha256 },
+    ],
+    boundaries: [{ after_unit_id: "unit-a", before_unit_id: "unit-b", gap_sample_count: 0 }],
+  };
+  const contextStitchFile = await write("context-stitch.json", contextStitch);
+  const contextReport = structuredClone(report);
+  contextReport.provider_output_manifest_file_sha256 = contextManifestFile.sha256;
+  contextReport.confirmation_windows[0].primary_recognized_text =
+    "An added sentence for the listener.";
+  contextReport.confirmation_windows[0].confirmation_recognized_text =
+    "An added sentence for the listener.";
+  contextReport.confirmation_windows[1].intended_text = "Known ones.";
+  contextReport.confirmation_windows[1].intended_text_sha256 = hash("Known ones.");
+  contextReport.confirmation_windows[1].binding_sha256 = fullStreamWindowBindingSha256(
+    contextReport.confirmation_windows[1]);
+  const protectedMismatch = { severity: "blocker",
+    code: "narration_confirmed_tts_transcript_protected_value_mismatch",
+    operations: [{ type: "substitution", intended: "ones", recognized: "once" }] };
+  contextReport.confirmation_windows[1].decision.blockers = [protectedMismatch];
+  contextReport.blockers[1] = { ...protectedMismatch,
+    confirmation_window_id: "window-1", unit_ids: ["unit-b", "unit-c"],
+    boundary_id: "unit-b__unit-c" };
+  contextReport.decision.blockers[1] = contextReport.blockers[1];
+  const contextPrior = await write("context-prior.json", contextReport);
+  const contextCurrent = await write("context-current.json", contextReport);
+  const contextFinding = fullStreamReviewScope(contextReport)[0];
+  const contextEvidence = {
+    schema: CONTEXTUAL_ASR_SCHEMA, status: "reviewed_evidence",
+    human_listening_performed: false, synthesis_authorized: false,
+    prior_full_stream_qa_path: contextPrior.path,
+    prior_full_stream_qa_sha256: contextPrior.sha256,
+    provider_manifest_path: contextManifestFile.path,
+    provider_manifest_sha256: contextManifestFile.sha256,
+    unit_delivery_path: contextDeliveryFile.path,
+    unit_delivery_sha256: contextDeliveryFile.sha256,
+    stitch_report_path: contextStitchFile.path,
+    stitch_report_sha256: contextStitchFile.sha256,
+    finding_sha256: contextFinding.finding_sha256,
+    confirmation_window_id: contextFinding.window.window_id,
+    confirmation_window_sha256: contextFinding.window.audio_sha256,
+    confirmation_window_binding_sha256: contextFinding.window.binding_sha256,
+    unit_id: "unit-a",
+    affected_passage_text: "An exact sentence for the listener.",
+    excerpt_start_sample_in_unit: 0, excerpt_end_sample_in_unit: 48000,
+  };
+  const contextEvidenceFile = await write("context-evidence.json", contextEvidence);
+  const contextLoad = async (candidate = contextEvidence) => {
+    await write("context-evidence.json", candidate);
+    return loadContextualAsrReconciliation({ evidencePath: contextEvidenceFile.path,
+      currentReportPath: contextCurrent.path,
+      currentStitchReportPath: contextStitchFile.path });
+  };
+  const contextValid = await contextLoad();
+  assert.equal(contextValid.waveform_correlation, 1);
+  const contextApplied = applyContextualAsrReconciliation({
+    fullStream: contextReport, reconciliation: contextValid });
+  assert.equal(contextApplied.decision.status, "blocked");
+  assert.deepEqual(contextApplied.decision.blockers, [contextReport.blockers[1]]);
+  await validateAppliedContextualAsrReconciliation({
+    ...contextApplied, status: contextApplied.decision.status,
+    blockers: contextApplied.decision.blockers,
+    warnings: contextApplied.decision.warnings });
+  const changedContext = structuredClone(contextEvidence);
+  changedContext.excerpt_start_sample_in_unit = 1000;
+  await assert.rejects(contextLoad(changedContext), /entire selected unit/);
+  await contextLoad();
+  const changedContextDelivery = structuredClone(contextDelivery);
+  changedContextDelivery.units[0].primary_recognized_text =
+    "An added sentence for the listener.";
+  await write("context-delivery.json", changedContextDelivery);
+  await assert.rejects(contextLoad(), /unit delivery hash changed/);
+  await write("context-delivery.json", contextDelivery);
+  const staleContext = { ...contextApplied, status: contextApplied.decision.status,
+    blockers: [], warnings: contextApplied.decision.warnings };
+  await assert.rejects(validateAppliedContextualAsrReconciliation(staleContext),
+    /applied decision or current media differs/);
+  const contextPlan = { plan_sha256: report.narration_generation_plan_sha256,
+    units: [
+      { unit_id: "unit-a", spoken_text: "An exact sentence for the listener.",
+        spoken_text_sha256: hash("An exact sentence for the listener.") },
+      { unit_id: "unit-b", spoken_text: "Known ones.",
+        spoken_text_sha256: hash("Known ones.") },
+    ] };
+  const contextSpec = {
+    schema: "goldflow_tts_exact_boundary_repair_spec_v1",
+    contextual_asr_evidence_path: contextEvidenceFile.path,
+    source_script_sha256: report.source_script_hash,
+    narration_generation_plan_sha256: contextPlan.plan_sha256,
+    narration_generation_plan_file_sha256: hash("plan-file"),
+    prior_report_file_sha256: hash("report"),
+    prior_delivery_file_sha256: contextDeliveryFile.sha256,
+    prior_manifest_file_sha256: contextManifestFile.sha256,
+    prior_full_stream_file_sha256: contextCurrent.sha256,
+    full_stream_targets: [{ unit_id: "unit-b",
+      finding_sha256: fullStreamReviewScope(contextReport)[1].finding_sha256 }],
+    units: [{ unit_id: "unit-b", fragments: ["Known", "ones."] }],
+  };
+  const contextTts = { status: "blocked", source_script_hash: report.source_script_hash,
+    full_stream_qa_status: "blocked",
+    provider_output_manifest_sha256: contextManifestFile.sha256 };
+  const contextHashes = { plan: hash("plan-file"), report: hash("report"),
+    delivery: contextDeliveryFile.sha256, manifest: contextManifestFile.sha256,
+    fullStream: contextCurrent.sha256 };
+  const admitted = validateBoundaryRepairScopeForTests({
+    plan: contextPlan, manifest: contextManifest, delivery: contextDelivery,
+    fullStream: contextReport, report: contextTts, spec: contextSpec,
+    fileHashes: contextHashes, contextualAsr: contextValid });
+  assert.deepEqual(admitted.selected, ["unit-b"]);
+  assert.throws(() => validateBoundaryRepairScopeForTests({
+    plan: contextPlan, manifest: contextManifest, delivery: contextDelivery,
+    fullStream: contextReport, report: contextTts,
+    spec: { ...contextSpec, full_stream_targets: [] },
+    fileHashes: contextHashes, contextualAsr: contextValid }),
+  /Every unresolved full-stream blocker/);
+  assert.throws(() => validateBoundaryRepairScopeForTests({
+    plan: contextPlan, manifest: contextManifest, delivery: contextDelivery,
+    fullStream: contextReport, report: contextTts,
+    spec: { ...contextSpec, units: [...contextSpec.units,
+      { unit_id: "unit-a", fragments: ["An exact", "sentence for the listener."] }] },
+    fileHashes: contextHashes, contextualAsr: contextValid }),
+  /Exact-boundary repair scope is not current/);
   const before = JSON.stringify(report);
   const applied = applyFullStreamManualReview({ fullStream: report, review: valid, bindings: report });
   assert.equal(applied.decision.status, "passed_with_warnings");

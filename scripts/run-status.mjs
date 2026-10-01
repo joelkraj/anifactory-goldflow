@@ -69,6 +69,7 @@ import {
   crossLevelArticleFusionCandidate,
 } from "./lib/narration-cross-level-asr.mjs";
 import { validateAppliedFullStreamManualReview } from "./lib/narration-full-stream-manual-review.mjs";
+import { loadContextualAsrReconciliation, validateAppliedContextualAsrReconciliation } from "./lib/narration-full-stream-contextual-asr.mjs";
 import {
   EXTERNAL_NARRATION_TTS_PROVIDERS,
   hasExplicitLegacyQwenIdentity,
@@ -2275,6 +2276,29 @@ async function synthesizedNarrationArtifactsComplete({
   } catch (error) {
     add(error.message);
   }
+  try {
+    await validateAppliedContextualAsrReconciliation(fullQa);
+    if (fullQa?.full_stream_contextual_asr) {
+      const manifestPath = ttsReport?.provider_output_manifest_path;
+      if (fullQa.full_stream_contextual_asr.unit_delivery_sha256
+        !== await fileSha256(path.join(episodeDir,
+          `narration_unit_delivery_qa_${episode}.json`))) {
+        add("contextual ASR unit delivery hash is stale");
+      }
+      if (!manifestPath || fullQa.provider_output_manifest_file_sha256
+        !== await fileSha256(manifestPath)) {
+        add("contextual ASR provider manifest hash is stale");
+      }
+      for (const report of [ttsReport, stitchReport]) {
+        if (JSON.stringify(report?.full_stream_contextual_asr)
+          !== JSON.stringify(fullQa.full_stream_contextual_asr)) {
+          add("contextual ASR provenance differs across narration reports");
+        }
+      }
+    }
+  } catch (error) {
+    add(error.message);
+  }
 
   const planBoundArtifacts = [
     ["TTS report", ttsReport],
@@ -4446,6 +4470,30 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
           return { done: false, state: "blocked",
             evidence: "Stored blocked narration unit-delivery decisions use an older comparator or consensus. The exact report-bound provider manifest and every selected WAV hash validate; re-adjudicate without synthesis",
             next_command_shape: `node bin/goldflow.mjs tts finalize-provider --episode-dir ${episodeDir} --manifest ${reportBoundManifestPath}` };
+        }
+      }
+      const contextualEvidencePath = path.join(episodeDir,
+        `narration_full_stream_contextual_asr_evidence_${episode}.json`);
+      if (await exists(contextualEvidencePath)) {
+        try {
+          const resolved = await loadContextualAsrReconciliation({
+            evidencePath: contextualEvidencePath,
+            currentReportPath: path.join(episodeDir,
+              `narration_full_stream_qa_${episode}.json`),
+            currentUnitDeliveryPath: unitDeliveryPath,
+            currentStitchReportPath: path.join(episodeDir,
+              `audio_stitch_report_${episode}-narration.json`),
+          });
+          if (resolved.scope.length !== 1 || reportBoundValidation.status !== "passed") {
+            throw new Error("other unresolved full-stream blockers remain");
+          }
+          return { done: false, state: "blocked",
+            evidence: "The sole full-stream omission is covered by exact unit dual-ASR and stitch/master waveform evidence; re-adjudicate retained media without synthesis",
+            next_command_shape: `node bin/goldflow.mjs tts finalize-provider --episode-dir ${episodeDir} --manifest ${reportBoundManifestPath} --contextual-asr-evidence ${contextualEvidencePath}` };
+        } catch (error) {
+          return { done: false, state: "blocked",
+            evidence: `Contextual ASR evidence is stale or invalid: ${error.message}`,
+            next_command_shape: "Operator hold: repair only the exact contextual ASR evidence; do not rerun narration." };
         }
       }
     }

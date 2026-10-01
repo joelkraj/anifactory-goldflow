@@ -14,6 +14,8 @@ import {
 } from "./lib/narration-provider-adapter.mjs";
 import { transcriptQaForTests } from "./modelslab-qwen-episode-audio.mjs";
 import { adjudicateNarrationDeliveryConsensus } from "./lib/narration-delivery-quality.mjs";
+import { fullStreamReviewScope } from "./lib/narration-full-stream-manual-review.mjs";
+import { loadContextualAsrReconciliation } from "./lib/narration-full-stream-contextual-asr.mjs";
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
 const PYTHON = "/Users/joel/AniFactoryData/voice_bank/bakeoff/.venv-kokoro-mlx-audio-0.4.6/bin/python";
@@ -31,6 +33,8 @@ const sameIds = (left, right) => Array.isArray(left) && Array.isArray(right)
   && new Set(right).size === right.length
   && [...left].sort().join("\n") === [...right].sort().join("\n");
 const sameCodes = sameIds;
+const lexicalTokens = (value) => String(value ?? "").toLowerCase()
+  .match(/[\p{L}\p{N}]+/gu) ?? [];
 const blockerKeys = (rows) => (rows ?? [])
   .filter((row) => row?.unit_id && row?.code)
   .map((row) => `${row.unit_id}|${row.code}`);
@@ -71,15 +75,36 @@ async function run(command, args, { cwd = DIR } = {}) {
 }
 
 export function validateBoundaryRepairScopeForTests({ plan, manifest, delivery,
-  fullStream = null, report = null, spec, fileHashes = {} }) {
+  fullStream = null, report = null, spec, fileHashes = {}, contextualAsr = null }) {
   const units = plan?.units ?? [];
   const unitById = new Map(units.map((row) => [row.unit_id, row]));
   const manifestById = new Map((manifest?.units ?? []).map((row) => [row.unit_id, row]));
   const deliveryById = new Map((delivery?.units ?? []).map((row) => [row.unit_id, row]));
   const blockedFullStream = fullStream?.status === "blocked" ? fullStream : null;
-  const fullStreamIds = new Set((blockedFullStream?.blockers ?? [])
-    .filter((row) => row.severity === "blocker" && row.unit_id)
-    .map((row) => row.unit_id));
+  const fullStreamScope = blockedFullStream ? fullStreamReviewScope(blockedFullStream) : [];
+  const contextualFinding = contextualAsr?.target?.finding_sha256 ?? null;
+  if (contextualFinding && (contextualAsr.prior.audio_sha256 !== blockedFullStream?.audio_sha256
+    || contextualAsr.prior.provider_output_manifest_file_sha256 !== fileHashes.manifest
+    || spec.contextual_asr_evidence_path !== contextualAsr.evidence_path
+    || !fullStreamScope.some((row) => row.finding_sha256 === contextualFinding))) {
+    throw new Error("Contextual ASR resolution is stale for exact-boundary repair.");
+  }
+  const unresolved = fullStreamScope.filter((row) => row.finding_sha256 !== contextualFinding);
+  const targets = spec?.full_stream_targets ?? [];
+  if (blockedFullStream && (targets.length !== unresolved.length
+    || new Set(targets.map((row) => row.finding_sha256)).size !== targets.length
+    || unresolved.some((row) => {
+      const target = targets.find((entry) => entry.finding_sha256 === row.finding_sha256);
+      const unit = unitById.get(target?.unit_id);
+      const relevant = [...(row.finding.intended_tokens ?? []),
+        ...(row.finding.operations ?? []).map((op) => op.intended).filter(Boolean)];
+      return !target || !row.finding.unit_ids.includes(target.unit_id) || !unit
+        || !relevant.length || !relevant.every((token) =>
+          lexicalTokens(unit.spoken_text).includes(String(token).toLowerCase()));
+    }))) {
+    throw new Error("Every unresolved full-stream blocker needs one exact text-bearing unit target.");
+  }
+  const fullStreamIds = new Set(targets.map((row) => row.unit_id));
   const subset = spec?.schema === "goldflow_tts_exact_boundary_repair_spec_v2";
   if (!["goldflow_tts_exact_boundary_repair_spec_v1",
     "goldflow_tts_exact_boundary_repair_spec_v2"].includes(spec?.schema)
@@ -95,6 +120,17 @@ export function validateBoundaryRepairScopeForTests({ plan, manifest, delivery,
     (row.decision?.blockers ?? []).map((blocker) => ({
       unit_id: row.unit_id, code: blocker.code,
     })));
+  if (blockedFullStream && (spec.source_script_sha256 !== report?.source_script_hash
+    || spec.narration_generation_plan_sha256 !== plan.plan_sha256
+    || spec.narration_generation_plan_file_sha256 !== fileHashes.plan
+    || spec.prior_report_file_sha256 !== fileHashes.report
+    || spec.prior_delivery_file_sha256 !== fileHashes.delivery
+    || spec.prior_manifest_file_sha256 !== fileHashes.manifest
+    || spec.prior_full_stream_file_sha256 !== fileHashes.fullStream
+    || report.provider_output_manifest_sha256 !== fileHashes.manifest
+    || report.full_stream_qa_status !== "blocked")) {
+    throw new Error("Full-stream boundary repair lacks exact current report and source bindings.");
+  }
   if (subset && (blockedFullStream
     || report?.status !== "blocked"
     || report?.unit_qa_status !== "blocked"
@@ -134,6 +170,10 @@ export function validateBoundaryRepairScopeForTests({ plan, manifest, delivery,
       throw new Error(`Exact-boundary repair scope is not current: ${entry.unit_id}`);
     }
     selected.add(entry.unit_id);
+  }
+  if (blockedFullStream && blockedIds.length === 0
+    && !sameIds([...selected], [...fullStreamIds])) {
+    throw new Error("Full-stream repair selected units outside the unresolved lexical target set.");
   }
   const otherBlocked = (delivery?.units ?? []).filter((row) =>
     row.decision?.status === "blocked" && !selected.has(row.unit_id));
@@ -279,10 +319,23 @@ export async function main(parts = process.argv.slice(2)) {
     || report.full_stream_qa_path !== fullStreamPath)) {
     throw new Error("Full-stream blocker evidence is stale.");
   }
+  const contextualPath = spec.contextual_asr_evidence_path
+    ? path.resolve(spec.contextual_asr_evidence_path) : null;
+  if (contextualPath && !contextualPath.startsWith(`${episodeDir}${path.sep}`)) {
+    throw new Error("Contextual ASR evidence must be inside the episode directory.");
+  }
+  const contextualAsr = contextualPath
+    ? await loadContextualAsrReconciliation({
+      evidencePath: contextualPath, currentReportPath: fullStreamPath,
+      currentStitchReportPath: path.join(episodeDir,
+        `audio_stitch_report_${episode}-narration.json`),
+      currentUnitDeliveryPath: deliveryPath,
+    }) : null;
   const scope = validateBoundaryRepairScopeForTests({ plan, manifest, delivery,
-    fullStream, report, spec,
+    fullStream, report, spec, contextualAsr,
     fileHashes: { plan: await fileHash(planPath), report: await fileHash(reportPath),
-      delivery: await fileHash(deliveryPath), manifest: await fileHash(manifestPath) } });
+      delivery: await fileHash(deliveryPath), manifest: await fileHash(manifestPath),
+      fullStream: fullStream ? await fileHash(fullStreamPath) : null } });
   const unitById = new Map(plan.units.map((row) => [row.unit_id, row]));
   const priorById = new Map(manifest.units.map((row) => [row.unit_id, row]));
   for (const row of manifest.units) {
@@ -301,6 +354,10 @@ export async function main(parts = process.argv.slice(2)) {
     prior_manifest_file_sha256: await fileHash(manifestPath),
     prior_delivery_file_sha256: await fileHash(deliveryPath),
     ...(fullStream ? { prior_full_stream_file_sha256: await fileHash(fullStreamPath) } : {}),
+    ...(contextualAsr ? { contextual_asr_evidence_path: contextualPath,
+      contextual_asr_evidence_sha256: contextualAsr.evidence_sha256,
+      contextual_asr_finding_sha256: contextualAsr.target.finding_sha256 } : {}),
+    ...(fullStream ? { full_stream_targets: spec.full_stream_targets } : {}),
     prior_report_file_sha256: await fileHash(reportPath),
     spec_path: specPath,
     spec_file_sha256: await fileHash(specPath),
@@ -315,7 +372,9 @@ export async function main(parts = process.argv.slice(2)) {
       prior_synthesis_identity_sha256: priorById.get(entry.unit_id).synthesis_identity_sha256,
       prior_blocker_codes: [
         ...delivery.units.find((row) => row.unit_id === entry.unit_id).decision.blockers.map((row) => row.code),
-        ...(fullStream?.blockers ?? []).filter((row) => row.unit_id === entry.unit_id).map((row) => row.code),
+        ...(fullStream ? fullStreamReviewScope(fullStream) : []).filter((item) => spec.full_stream_targets?.some((target) =>
+          target.unit_id === entry.unit_id && target.finding_sha256 === item.finding_sha256))
+          .map((item) => item.finding.code),
       ],
       fragments: entry.fragments,
     })),

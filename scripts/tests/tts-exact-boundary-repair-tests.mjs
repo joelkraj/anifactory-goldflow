@@ -44,14 +44,12 @@ const fullStreamDelivery = { status: "passed", units: delivery.units.map((row) =
 const fullStream = { status: "blocked", blockers: [{
   severity: "blocker", code: "narration_confirmed_word_omission", unit_id: "unit-1",
 }] };
-assert.deepEqual(validateBoundaryRepairScopeForTests({ plan, manifest,
-  delivery: fullStreamDelivery, fullStream, spec }), {
-  selected: ["unit-1"], orthographic: [],
-});
+assert.throws(() => validateBoundaryRepairScopeForTests({ plan, manifest,
+  delivery: fullStreamDelivery, fullStream, spec }), /a blocked full-stream report is required/);
 assert.throws(() => validateBoundaryRepairScopeForTests({ plan, manifest,
   delivery: fullStreamDelivery, fullStream: { ...fullStream, blockers: [{
     severity: "blocker", code: "narration_confirmed_word_omission", unit_id: "unit-2",
-  }] }, spec }), /scope is not current|Unrepaired full-stream blocker/);
+  }] }, spec }), /a blocked full-stream report is required/);
 assert.throws(() => validateBoundaryRepairScopeForTests({ plan, manifest, delivery,
   spec: { ...spec, units: [{ unit_id: "unit-1", fragments: ["First sentence.", "Wrong ending."] }] },
 }), /scope is not current/);

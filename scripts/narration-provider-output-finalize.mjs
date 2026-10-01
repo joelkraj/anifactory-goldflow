@@ -73,6 +73,7 @@ import { prepareFullPilotNarrationFinalization } from "./lib/narration-full-pilo
 import { loadNarrationSourceStructure } from "./lib/narration-source-structure.mjs";
 import { applyLowMarginDisposition, assertLowMarginActiveBindings, loadLowMarginDisposition } from "./lib/narration-low-margin-disposition.mjs";
 import { applyFullStreamManualReview, loadFullStreamManualReview } from "./lib/narration-full-stream-manual-review.mjs";
+import { applyAsrOrthographyReviewForTests, loadAsrOrthographyReview } from "./lib/narration-asr-orthography-review.mjs";
 
 const execFile = promisify(execFileCb);
 const CANONICAL_SAMPLE_RATE_HZ = 24000;
@@ -1485,6 +1486,21 @@ export async function finalizeNarrationProviderOutput(
     throw new Error("Provider manifest model or voice identity differs from run identity.");
   }
 
+  const orthographyReview = !phaseContext && policy.primary.provider === "qwen_local"
+    && narrationUsesAutomatedAsrAcceptance(qualityContract)
+    ? await loadAsrOrthographyReview({ episodeDir, episode, plan,
+        identityFileSha256, sourceScriptSha256: actualSourceScriptSha256,
+        planFileSha256, qualityContractSha256: qualityContract.contract_sha256,
+        currentManifest: manifest })
+    : null;
+  const explicitOrthographyPath = String(flags["asr-orthography-evidence"] ?? "").trim();
+  if (explicitOrthographyPath && (!orthographyReview
+    || path.resolve(explicitOrthographyPath) !== orthographyReview.evidence_path)) {
+    throw new Error("Explicit ASR orthography receipt is absent, stale, or not applicable.");
+  }
+  const orthographyProvenance = orthographyReview
+    ? { asr_orthography_review: orthographyReview.provenance } : {};
+
   const manifestById = new Map(
     manifest.units.map((row) => [String(row.unit_id), row]),
   );
@@ -1873,6 +1889,16 @@ export async function finalizeNarrationProviderOutput(
       row.unit_qa?.findings ?? [],
       qualityContract,
     );
+    const reviewedSpelling = orthographyReview?.rows_by_id.get(String(row.unit_id));
+    if (reviewedSpelling) {
+      if (primary.recognized?.text !== reviewedSpelling.primary_recognized_text
+        || confirmation?.text !== reviewedSpelling.confirmation_recognized_text) {
+        throw new Error(`Retained dual-ASR evidence changed for reviewed spelling ${row.unit_id}.`);
+      }
+      decision = applyAsrOrthographyReviewForTests(
+        decision, reviewedSpelling, orthographyReview.evidence_sha256,
+      );
+    }
     decision = applyLowMarginDisposition(decision, row.unit_id, lowMarginDisposition);
     if (acceptAsrDeliveryBlockers) {
       decision = operatorWaiveAsrDecision(
@@ -2038,6 +2064,7 @@ export async function finalizeNarrationProviderOutput(
   }
   const unitDeliveryArtifact = {
     ...lowMarginProvenance,
+    ...orthographyProvenance,
     schema: "goldflow_narration_unit_delivery_qa_v2",
     transcript_comparison_version: helpers.TRANSCRIPT_QA_COMPARISON_VERSION,
     status: blockers.length
@@ -2112,6 +2139,7 @@ export async function finalizeNarrationProviderOutput(
   const selectedBlockers = blockers.filter((finding) => finding.unit_id);
   const unitQaArtifact = {
     ...lowMarginProvenance,
+    ...orthographyProvenance,
     schema: "goldflow_narration_tts_unit_qa_v2",
     status: blockers.length
       ? "blocked"
@@ -2167,6 +2195,7 @@ export async function finalizeNarrationProviderOutput(
     );
     await atomicWriteJson(blockedTtsReportPath, {
       ...lowMarginProvenance,
+      ...orthographyProvenance,
       ...scopeFields,
       schema: "goldflow_narration_tts_report_v1",
       status: "blocked",
@@ -2544,6 +2573,7 @@ export async function finalizeNarrationProviderOutput(
   };
   const fullStreamArtifact = {
     ...scopeFields,
+    ...orthographyProvenance,
     schema: "goldflow_narration_full_stream_qa_v2",
     transcript_comparison_version: fullStream.transcript_comparison_version,
     delivery_consensus_version: fullStream.delivery_consensus_version,
@@ -2730,6 +2760,7 @@ export async function finalizeNarrationProviderOutput(
   };
   const ttsReport = {
     ...lowMarginProvenance,
+    ...orthographyProvenance,
     ...scopeFields,
     ...(pilotFinalization?.phaseBatchPlans ? { phase_batch_plans: pilotFinalization.phaseBatchPlans } : {}),
     schema: "goldflow_provider_neutral_narration_tts_report_v2",

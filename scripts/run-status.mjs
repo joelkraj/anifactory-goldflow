@@ -40,6 +40,7 @@ import { sha256File as streamSha256File } from "./lib/file-hash.mjs";
 import { verifyInterruptedQwenAdoptionReceipt, verifyInterruptedQwenFinalRun } from "./lib/qwen-interrupted-adoption.mjs";
 import { loadNarrationSourceStructure } from "./lib/narration-source-structure.mjs";
 import { loadLowMarginDisposition } from "./lib/narration-low-margin-disposition.mjs";
+import { loadAsrOrthographyReview } from "./lib/narration-asr-orthography-review.mjs";
 import {
   NARRATION_CROSS_LEVEL_ASR_POLICY_VERSION,
   crossLevelArticleFusionCandidate,
@@ -3493,6 +3494,49 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
         next_command_shape: `node bin/goldflow.mjs tts adopt-interrupted --episode-dir ${episodeDir} --inventory ${inventoryPath}` };
     }
     return { done: false, evidence: `narration_tts_report_${episode}.json missing` };
+  }
+  const orthographyPath = path.join(episodeDir,
+    `narration_asr_orthography_review_${episode}.json`);
+  if (await exists(orthographyPath) || ttsReport.asr_orthography_review) {
+    if (!(await exists(orthographyPath))) {
+      return { done: false, state: "blocked",
+        evidence: "Applied narration ASR orthography receipt is missing; restore exact evidence before continuing" };
+    }
+    try {
+      const planPath = path.join(episodeDir, "narration_generation_plan.json");
+      const manifestPath = path.join(episodeDir,
+        `narration_provider_output_manifest_${episode}.json`);
+      const [plan, currentManifest] = await Promise.all([
+        readJson(planPath, null), readJson(manifestPath, null),
+      ]);
+      const review = await loadAsrOrthographyReview({ episodeDir, episode,
+        plan, identityFileSha256: await fileSha256(path.join(episodeDir, "run_identity.json")),
+        sourceScriptSha256: currentScriptHash,
+        planFileSha256: await fileSha256(planPath),
+        qualityContractSha256: narrationQualityContract?.contract_sha256,
+        currentManifest });
+      if (ttsReport.asr_orthography_review?.evidence_sha256 !== review.evidence_sha256) {
+        if (ttsReport.status !== "blocked") {
+          throw new Error("Narration report applied-orthography binding is missing or stale");
+        }
+        const [activeReportSha256, activeDeliverySha256, activeManifestSha256] = await Promise.all([
+          fileSha256(path.join(episodeDir, `narration_tts_report_${episode}.json`)),
+          fileSha256(path.join(episodeDir, `narration_unit_delivery_qa_${episode}.json`)),
+          fileSha256(manifestPath),
+        ]);
+        if (activeReportSha256 !== review.pre_review_narration_report_sha256
+          || activeDeliverySha256 !== review.pre_review_unit_delivery_qa_sha256
+          || activeManifestSha256 !== review.pre_review_provider_manifest_sha256) {
+          throw new Error("Current blocked report, delivery QA, or manifest differs from reviewed immutable snapshots");
+        }
+        return { done: false, state: "blocked",
+          evidence: `Reviewed exact ASR orthography for ${review.unit_ids.length} retained units needs no-synthesis re-adjudication`,
+          next_command_shape: `node bin/goldflow.mjs tts finalize-provider --episode-dir ${episodeDir} --asr-orthography-evidence ${orthographyPath}` };
+      }
+    } catch (error) {
+      return { done: false, state: "blocked",
+        evidence: `Narration ASR orthography review is stale or invalid: ${error.message}` };
+    }
   }
   if (!statusPassed(ttsReport.status)) {
     if (ttsReport.status === "blocked" && policy.primary.provider === "qwen_local") {

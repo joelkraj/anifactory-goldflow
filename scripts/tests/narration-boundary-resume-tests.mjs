@@ -137,6 +137,101 @@ try {
   assert.equal(await exactBoundaryRepairResumeCandidate({ ...args,
     ttsReport: { ...ttsReport, results: [{ unit_id: "repaired", audio_path: compositePath,
       audio_sha256: result.units[0].audio_sha256 }] } }), null);
+
+  // A second repair may start from the first immutable derived manifest. If
+  // its finalizer is interrupted, the resume receipt must bind that exact
+  // prior manifest and the new exact spec, never the original canonical pair.
+  const secondSpecPath = path.join(episodeDir, "narration_exact_boundary_repair_spec_ep_01_v2.json");
+  await write(secondSpecPath, { units: [{ unit_id: "repaired", fragments: ["Tessa", "came."] }] });
+  const secondPrior = derived.units[0];
+  const secondRequest = {
+    ...request,
+    prior_manifest_path: derivedPath,
+    prior_manifest_sha256: derived.manifest_sha256,
+    prior_manifest_file_sha256: await fileHash(derivedPath),
+    spec_path: secondSpecPath,
+    spec_file_sha256: await fileHash(secondSpecPath),
+    units: [{ ...request.units[0], prior_audio_sha256: secondPrior.audio_sha256,
+      prior_synthesis_identity_sha256: secondPrior.synthesis_identity_sha256 }],
+  };
+  delete secondRequest.request_sha256;
+  secondRequest.request_sha256 = canonicalQwenBatchSha256(secondRequest);
+  const secondRepairDir = path.join(episodeDir, "assets/audio/narration_tts/exact_boundary_repairs",
+    secondRequest.request_sha256);
+  const secondRequestPath = path.join(secondRepairDir, "request.json");
+  const secondResultPath = path.join(secondRepairDir, "repair-result.json");
+  await write(secondRequestPath, secondRequest);
+  await write(path.join(secondRepairDir, "prior_manifest.json"), derived);
+  await write(path.join(secondRepairDir, "prior_report.json"), "prior report");
+  await write(path.join(secondRepairDir, "prior_delivery.json"), "prior delivery");
+  const secondCompositePath = path.join(secondRepairDir, "composites", "repaired.wav");
+  await write(secondCompositePath, "second composite audio");
+  const secondFragments = [];
+  for (const [index, text] of ["Tessa", "came."].entries()) {
+    const audioPath = path.join(secondRepairDir, "fragments", `${index}.wav`);
+    const sidecarPath = path.join(secondRepairDir, "fragments", `${index}.json`);
+    await write(audioPath, `second fragment ${index}`);
+    await write(sidecarPath, `second sidecar ${index}`);
+    secondFragments.push({ text_sha256: sha(text), audio_path: audioPath,
+      audio_sha256: await fileHash(audioPath), sidecar_path: sidecarPath,
+      sidecar_sha256: await fileHash(sidecarPath) });
+  }
+  const secondResult = { ...result,
+    request_sha256: secondRequest.request_sha256,
+    request_path: secondRequestPath,
+    request_file_sha256: await fileHash(secondRequestPath),
+    units: [{ ...result.units[0], audio_path: secondCompositePath,
+      audio_sha256: await fileHash(secondCompositePath), fragments: secondFragments }] };
+  await write(secondResultPath, secondResult);
+  const secondSynthesis = { ...synthesis,
+    request_sha256: secondRequest.request_sha256,
+    prior_audio_sha256: secondPrior.audio_sha256,
+    prior_synthesis_identity_sha256: secondPrior.synthesis_identity_sha256,
+    composite_audio_sha256: secondResult.units[0].audio_sha256 };
+  const secondDerived = structuredClone(derived);
+  Object.assign(secondDerived.units[0], {
+    audio_path: secondCompositePath,
+    audio_sha256: secondResult.units[0].audio_sha256,
+    recovery_provenance: { ...secondPrior.recovery_provenance,
+      request_path: secondRequestPath,
+      request_sha256: secondRequest.request_sha256,
+      result_path: secondResultPath,
+      result_sha256: await fileHash(secondResultPath),
+      prior_audio_sha256: secondPrior.audio_sha256,
+      prior_synthesis_identity_sha256: secondPrior.synthesis_identity_sha256 },
+    synthesis_identity: secondSynthesis,
+    synthesis_identity_sha256: narrationSynthesisIdentitySha256(secondSynthesis),
+  });
+  secondDerived.provider_execution.exact_boundary_repair = {
+    request_sha256: secondRequest.request_sha256,
+    result_sha256: await fileHash(secondResultPath),
+    repaired_unit_ids: ["repaired"], preserved_unit_count: 1,
+  };
+  secondDerived.repair_history.push({ mode: "exact_sentence_boundary_composite_v1",
+    prior_manifest_sha256: derived.manifest_sha256,
+    request_sha256: secondRequest.request_sha256 });
+  delete secondDerived.manifest_sha256;
+  secondDerived.manifest_sha256 = narrationProviderOutputManifestSha256(secondDerived);
+  const secondDerivedPath = path.join(secondRepairDir, "provider-output-manifest.json");
+  await write(secondDerivedPath, secondDerived);
+  const secondReport = { ...ttsReport,
+    provider_output_manifest_path: derivedPath,
+    provider_output_manifest_sha256: await fileHash(derivedPath),
+    results: [{ unit_id: "repaired", audio_path: secondPrior.audio_path,
+      audio_sha256: secondPrior.audio_sha256 }] };
+  const secondArgs = { ...args, repairDir: secondRepairDir, ttsReport: secondReport };
+  assert.equal((await exactBoundaryRepairResumeCandidate(secondArgs))?.manifestPath, secondDerivedPath);
+  assert.equal(await exactBoundaryRepairResumeCandidate({ ...secondArgs,
+    ttsReport: { ...secondReport, provider_output_manifest_path: canonicalPath,
+      provider_output_manifest_sha256: await fileHash(canonicalPath),
+      results: [{ unit_id: "repaired", audio_path: oldAudio,
+        audio_sha256: old.audio_sha256 }] } }), null);
+  await write(secondSpecPath, { units: [{ unit_id: "repaired", fragments: ["Tessa came."] }] });
+  assert.equal(await exactBoundaryRepairResumeCandidate(secondArgs), null);
+  await write(secondSpecPath, { units: [{ unit_id: "repaired", fragments: ["Tessa", "came."] }] });
+  await write(secondCompositePath, "tampered second composite");
+  assert.equal(await exactBoundaryRepairResumeCandidate(secondArgs), null);
+
   await write(compositePath, "tampered composite");
   assert.equal(await exactBoundaryRepairResumeCandidate(args), null);
   await write(compositePath, "composite audio");

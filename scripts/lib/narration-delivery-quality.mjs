@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 export const NARRATION_DELIVERY_QA_SCHEMA = "goldflow_narration_delivery_qa_v2";
-export const NARRATION_DELIVERY_CONSENSUS_VERSION = "protected_operations_same_intended_slot_v1";
+export const NARRATION_DELIVERY_CONSENSUS_VERSION = "protected_operations_edge_spelling_v2";
 export const NARRATION_EXACT_LISTEN_REVIEW_PACKET_SCHEMA =
   "goldflow_narration_exact_listen_review_packet_v2";
 export const NARRATION_EXACT_LISTEN_REVIEW_DECISION_SCHEMA =
@@ -190,6 +190,53 @@ function editDistance(leftValue, rightValue) {
     previous.splice(0, previous.length, ...current);
   }
   return previous.at(-1);
+}
+
+// This deliberately recognizes only the familiar English long-A spellings
+// C-a-C-e, C-ai-C, and C-ei-C. A broad consonant key (Soundex, etc.) would
+// also conflate genuinely different vowels such as dear/door.
+function longASpellingKey(value) {
+  const consonants = "[bcdfghjklmnpqrstvwxyz]+";
+  const magicE = new RegExp(`^(${consonants})a(${consonants})e$`, "u");
+  const digraph = new RegExp(`^(${consonants})(?:ai|ei)(${consonants})$`, "u");
+  const letters = String(value).toLowerCase();
+  const match = magicE.exec(letters) ?? digraph.exec(letters);
+  return match ? `${match[1]}:${match[2]}` : null;
+}
+
+function intactOpeningSpellingAmbiguity(primaryQa, confirmationQa, deliveryPolicy) {
+  if (deliveryPolicy.acceptance_mode !== "automated_asr_v1") return null;
+  const edge = (qa) => {
+    const first = qa?.operations?.[0];
+    if (qa?.first_token_ok !== false || first?.type !== "substitution"
+      || Number(qa.deletions) !== 0 || Number(qa.insertions) !== 0
+      || Number(qa.leading_deletion_run) !== 0
+      || !/^[a-z]+$/u.test(String(first.intended ?? ""))
+      || !/^[a-z]+$/u.test(String(first.recognized ?? ""))
+      || isProtectedToken(first.intended) || isProtectedToken(first.recognized)
+      || editDistance(first.intended, first.recognized) > 3
+      || !longASpellingKey(first.intended)
+      || longASpellingKey(first.intended) !== longASpellingKey(first.recognized)) return null;
+    return first;
+  };
+  const primary = edge(primaryQa);
+  const confirmation = edge(confirmationQa);
+  const primaryOperations = primaryQa?.operations ?? [];
+  const confirmationOperations = confirmationQa?.operations ?? [];
+  const supportedRemainder = primaryOperations.length > 1
+    && primaryOperations.length === confirmationOperations.length
+    && primaryOperations.slice(1).every((operation, index) => {
+      const second = confirmationOperations[index + 1];
+      if (!second || operation.intended !== second.intended) return false;
+      return isProtectedToken(operation.intended)
+        ? operation.type === "match" && second.type === "match"
+        : operation.type === "match" || second.type === "match";
+    });
+  return primary && confirmation && supportedRemainder
+    && primary.intended === confirmation.intended
+    && primary.recognized !== confirmation.recognized
+    ? { intended: primary.intended, primary: primary.recognized,
+      confirmation: confirmation.recognized } : null;
 }
 
 function likelyCompoundFusion(transcriptQa, deletedToken) {
@@ -510,10 +557,19 @@ export function adjudicateNarrationDeliveryConsensus({
   // exact-unit repair/triage when both independent ASR passes reject that edge.
   if (primaryTranscriptQa?.first_token_ok === false
     && confirmationTranscriptQa?.first_token_ok === false) {
-    blockers.push(blocker("narration_confirmed_opening_token_mismatch", {
-      primary_model: primaryModel,
-      confirmation_model: confirmationModel,
-    }));
+    const spelling = intactOpeningSpellingAmbiguity(
+      primaryTranscriptQa, confirmationTranscriptQa, deliveryPolicy);
+    if (spelling) {
+      warnings.push(advisory("narration_opening_asr_spelling_ambiguity", {
+        ...spelling, disposition: "intact_edge_spelling_advisory_no_retry",
+        primary_model: primaryModel, confirmation_model: confirmationModel,
+      }));
+    } else {
+      blockers.push(blocker("narration_confirmed_opening_token_mismatch", {
+        primary_model: primaryModel,
+        confirmation_model: confirmationModel,
+      }));
+    }
   }
   if (primaryTranscriptQa?.last_token_ok === false
     && confirmationTranscriptQa?.last_token_ok === false) {

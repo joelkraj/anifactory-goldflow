@@ -133,6 +133,7 @@ import {
 import { findExactBoundaryRepairResumeManifest } from "./lib/narration-boundary-resume.mjs";
 import { TRANSCRIPT_QA_COMPARISON_VERSION } from "./modelslab-qwen-episode-audio.mjs";
 import {
+  NARRATION_DELIVERY_CONSENSUS_VERSION,
   NARRATION_EXACT_LISTEN_REVIEW_PACKET_SCHEMA,
   narrationExactListenReviewPacketSha256,
   validateNarrationExactListenReviewDecision,
@@ -3301,12 +3302,18 @@ function blockedNarrationComparatorRefreshEligible({
     .map((row) => `${row?.unit_id ?? ""}|${row?.code ?? ""}`).sort();
   const reportBlockers = blockedKeys(ttsReport?.blockers);
   const deliveryBlockers = blockedKeys(unitDelivery?.blockers);
+  const recordedConsensusVersions = new Set((unitDelivery?.units ?? [])
+    .map((row) => row?.decision?.adjudication_version));
+  const staleConsensus = recordedConsensusVersions.size === 1
+    && !recordedConsensusVersions.has(undefined)
+    && !recordedConsensusVersions.has(NARRATION_DELIVERY_CONSENSUS_VERSION);
+  const staleComparison = Boolean(unitDelivery?.transcript_comparison_version)
+    && unitDelivery.transcript_comparison_version !== TRANSCRIPT_QA_COMPARISON_VERSION;
   return ttsReport?.status === "blocked"
     && ttsReport?.unit_qa_status === "blocked"
     && ttsReport?.full_stream_qa_status === "not_run_due_to_unit_blockers"
     && unitDelivery?.status === "blocked"
-    && Boolean(unitDelivery?.transcript_comparison_version)
-    && unitDelivery.transcript_comparison_version !== TRANSCRIPT_QA_COMPARISON_VERSION
+    && (staleComparison || staleConsensus)
     && reportBlockers.length > 0
     && JSON.stringify(reportBlockers) === JSON.stringify(deliveryBlockers)
     && reportBlockers.every((key) => key.includes("|narration_confirmed_"))
@@ -3697,7 +3704,6 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
       && ttsReport.status === "blocked") {
       const planPath = path.join(episodeDir, "narration_generation_plan.json");
       const unitDeliveryPath = path.join(episodeDir, `narration_unit_delivery_qa_${episode}.json`);
-      const providerOutputPath = path.join(episodeDir, `narration_provider_output_manifest_${episode}.json`);
       const unitDelivery = await readJson(unitDeliveryPath, null);
       const plan = await readJson(planPath, null);
       const planFileSha256 = await fileSha256(planPath);
@@ -3740,39 +3746,26 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
           evidence: "Full-stream-only ASR blocker uses a stale derived cross-level decision. The exact report-bound manifest, retained WAVs, stitch accounting, and current plan are hash-verified; re-adjudicate without synthesis",
           next_command_shape: `node bin/goldflow.mjs tts finalize-provider --episode-dir ${episodeDir} --manifest ${reportBoundManifestPath}` };
       }
-      if (unitDelivery?.transcript_comparison_version
-        && unitDelivery.transcript_comparison_version !== TRANSCRIPT_QA_COMPARISON_VERSION) {
-        const providerOutput = await readJson(providerOutputPath, null);
-        const providerValidation = validateNarrationProviderOutputManifest(
-          providerOutput, narrationPlanUnitsForStatus(plan), {
-            generationPlanSha256: plan?.plan_sha256 ?? planFileSha256,
-            generationPlanFileSha256: planFileSha256,
-            qualityContractSha256: narrationQualityContract.contract_sha256,
-            provider: policy.primary.provider,
-            voiceId: policy.primary.voice_id,
-            voiceSha256: policy.primary.voice_sha256,
-          },
-        );
-        let providerAudioHashesValid = providerValidation.status === "passed";
-        if (providerAudioHashesValid) {
-          for (const row of providerOutput.units) {
-            if (!row.audio_path || !row.audio_sha256
-              || !(await exists(row.audio_path))
-              || await fileSha256(row.audio_path) !== row.audio_sha256) {
-              providerAudioHashesValid = false;
-              break;
-            }
+      if (reportBoundManifestPath && reportBoundValidation.status === "passed") {
+        let providerAudioHashesValid = true;
+        for (const row of reportBoundManifest.units ?? []) {
+          if (!row.audio_path || !row.audio_sha256
+            || !(await exists(row.audio_path))
+            || await fileSha256(row.audio_path) !== row.audio_sha256) {
+            providerAudioHashesValid = false;
+            break;
           }
         }
         if (blockedNarrationComparatorRefreshEligible({
-          ttsReport, unitDelivery, providerOutput, plan, planFileSha256,
+          ttsReport, unitDelivery, providerOutput: reportBoundManifest, plan, planFileSha256,
           currentScriptHash, qualityContractSha256: narrationQualityContract.contract_sha256,
-          providerValidation, providerAudioHashesValid, providerOutputPath,
-          providerOutputFileSha256: await fileSha256(providerOutputPath),
+          providerValidation: reportBoundValidation, providerAudioHashesValid,
+          providerOutputPath: reportBoundManifestPath,
+          providerOutputFileSha256: await fileSha256(reportBoundManifestPath),
         })) {
           return { done: false, state: "blocked",
-            evidence: `Stored blocked narration delivery QA uses transcript comparator ${unitDelivery.transcript_comparison_version}; current comparator ${TRANSCRIPT_QA_COMPARISON_VERSION}. All provider audio hashes and plan bindings remain valid; re-adjudicate without synthesis`,
-            next_command_shape: `node bin/goldflow.mjs tts finalize-provider --episode-dir ${episodeDir}` };
+            evidence: "Stored blocked narration unit-delivery decisions use an older comparator or consensus. The exact report-bound provider manifest and every selected WAV hash validate; re-adjudicate without synthesis",
+            next_command_shape: `node bin/goldflow.mjs tts finalize-provider --episode-dir ${episodeDir} --manifest ${reportBoundManifestPath}` };
         }
       }
     }

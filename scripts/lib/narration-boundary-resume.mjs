@@ -45,8 +45,11 @@ export async function exactBoundaryRepairResumeCandidate({
     const reportBlockers = ttsReport?.blockers ?? [];
     const deliveryBlockers = unitDelivery?.blockers ?? [];
     const blockKeys = (rows) => rows.map((row) => `${row.unit_id}|${row.code}`).sort();
+    const requestPriorManifestPath = request.prior_manifest_path ?? canonicalPath;
+    const requestSpecPath = request.spec_path ?? path.join(episodeDir,
+      `narration_exact_boundary_repair_spec_${episode}.json`);
     const reportPath = path.resolve(ttsReport?.provider_output_manifest_path ?? "");
-    const reportUsesPrior = reportPath === canonicalPath;
+    const reportUsesPrior = reportPath === requestPriorManifestPath;
     const reportUsesDerived = reportPath === derivedPath;
     if (!hex(path.basename(repairDir))
       || !within(episodeDir, repairDir)
@@ -64,15 +67,16 @@ export async function exactBoundaryRepairResumeCandidate({
       || request.identity_sha256 !== await fileHash(path.join(episodeDir, "run_identity.json"))
       || request.plan_sha256 !== plan?.plan_sha256
       || request.plan_file_sha256 !== planFileSha256
+      || !within(episodeDir, requestPriorManifestPath)
+      || !within(episodeDir, requestSpecPath)
       || request.prior_manifest_file_sha256 !== await fileHash(priorPath)
-      || request.prior_manifest_file_sha256 !== await fileHash(canonicalPath)
+      || request.prior_manifest_file_sha256 !== await fileHash(requestPriorManifestPath)
       || request.prior_manifest_sha256 !== prior.manifest_sha256
       || request.prior_report_file_sha256 !== await fileHash(path.join(repairDir, "prior_report.json"))
       || request.prior_delivery_file_sha256 !== await fileHash(path.join(repairDir, "prior_delivery.json"))
       || (request.prior_full_stream_file_sha256
         && request.prior_full_stream_file_sha256 !== await fileHash(path.join(repairDir, "prior_full_stream.json")))
-      || request.spec_file_sha256 !== await fileHash(path.join(episodeDir,
-        `narration_exact_boundary_repair_spec_${episode}.json`))
+      || request.spec_file_sha256 !== await fileHash(requestSpecPath)
       || request.model_id !== policy.primary.model_id
       || request.model_revision !== policy.primary.model_revision
       || request.voice_id !== policy.primary.voice_id

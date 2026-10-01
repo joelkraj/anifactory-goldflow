@@ -125,6 +125,9 @@ export async function main(parts = process.argv.slice(2)) {
   if (!options["episode-dir"] || !options.spec || options["workflow-bypass"]) {
     throw new Error("Usage: goldflow tts repair-boundary --episode-dir <dir> --spec <reviewed.json>");
   }
+  if (!specPath.startsWith(`${episodeDir}${path.sep}`)) {
+    throw new Error("Exact boundary repair spec must be inside the episode directory.");
+  }
   const status = await run("node", ["bin/goldflow.mjs", "run", "status", "--episode-dir", episodeDir, "--format", "markdown"], { cwd: path.resolve(DIR, "..") });
   if (!status.out.includes("Current stage: qwen_tts_stitch")
     || !status.out.includes("tts repair-boundary")) {
@@ -184,10 +187,12 @@ export async function main(parts = process.argv.slice(2)) {
     plan_sha256: plan.plan_sha256,
     plan_file_sha256: await fileHash(planPath),
     prior_manifest_sha256: manifest.manifest_sha256,
+    prior_manifest_path: manifestPath,
     prior_manifest_file_sha256: await fileHash(manifestPath),
     prior_delivery_file_sha256: await fileHash(deliveryPath),
     ...(fullStream ? { prior_full_stream_file_sha256: await fileHash(fullStreamPath) } : {}),
     prior_report_file_sha256: await fileHash(reportPath),
+    spec_path: specPath,
     spec_file_sha256: await fileHash(specPath),
     model_id: manifest.model_id, model_revision: manifest.model_revision,
     voice_id: manifest.voice_id, voice_sha256: manifest.voice_sha256,

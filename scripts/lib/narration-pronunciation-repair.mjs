@@ -470,13 +470,15 @@ export function pronunciationGuardAdmission(status, command, subcommand, flags =
     ? `node bin/goldflow.mjs tts repair-pronunciation${automatedRepair ? "-auto" : ""} --episode-dir ${episodeDir} --evidence ${evidence}`
     : `node bin/goldflow.mjs tts finalize-provider --episode-dir ${episodeDir} --manifest ${manifest} --${automatedFinalize
       ? "automated-pronunciation-evidence" : "pronunciation-review-evidence"} ${evidence}`;
-  const exactFlags = Object.keys(flags).sort().join(",") === (repair || automatedRepair
-    ? "episode-dir,evidence" : automatedFinalize
+  const exactFlags = Object.keys(flags).sort().join(",") === (repair
+    ? "episode-dir,evidence" : automatedRepair
+      ? "automated,episode-dir,evidence" : automatedFinalize
       ? "automated-pronunciation-evidence,episode-dir,manifest"
       : "episode-dir,manifest,pronunciation-review-evidence");
   const allowed = status?.current_stage === "qwen_tts_stitch"
     && status?.current_stage_state === "blocked"
     && exactFlags
+    && (!automatedRepair || flags.automated === "true")
     && episodeDir.length > 0
     && path.resolve(String(flags["episode-dir"] ?? "")) === path.resolve(episodeDir)
     && path.isAbsolute(evidence)

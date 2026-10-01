@@ -350,9 +350,12 @@ const autoEvidence = path.join(episodeDir, "narration_automated_pronunciation_re
 const autoStatus = { ...status, next_command_shape:
   `node bin/goldflow.mjs tts repair-pronunciation-auto --episode-dir ${episodeDir} --evidence ${autoEvidence}` };
 assert.equal(pronunciationGuardAdmission(autoStatus, "tts", "repair-pronunciation-auto",
-  { "episode-dir": episodeDir, evidence: autoEvidence }).allowed, true);
+  { automated: "true", "episode-dir": episodeDir, evidence: autoEvidence }).allowed, true);
 assert.equal(pronunciationGuardAdmission(autoStatus, "tts", "repair-pronunciation-auto",
-  { "episode-dir": episodeDir, evidence: autoEvidence, "workflow-bypass": "true" }).allowed, false);
+  { "episode-dir": episodeDir, evidence: autoEvidence }).allowed, false);
+assert.equal(pronunciationGuardAdmission(autoStatus, "tts", "repair-pronunciation-auto",
+  { automated: "true", "episode-dir": episodeDir, evidence: autoEvidence,
+    "workflow-bypass": "true" }).allowed, false);
 const autoFinal = { ...status, next_command_shape:
   `node bin/goldflow.mjs tts finalize-provider --episode-dir ${episodeDir} --manifest ${manifestPath} --automated-pronunciation-evidence ${autoEvidence}` };
 assert.equal(pronunciationGuardAdmission(autoFinal, "tts", "finalize-provider",

@@ -28,13 +28,28 @@ try {
   });
   const v3Path = path.join(temp, `manual_blocker_triage_qwen_tts_stitch_${episode}_v3.json`);
   const v4Path = path.join(temp, `manual_blocker_triage_qwen_tts_stitch_${episode}_v4.json`);
+  const v5Path = path.join(temp, `manual_blocker_triage_qwen_tts_stitch_${episode}_v5.json`);
+  const v10Path = path.join(temp, `manual_blocker_triage_qwen_tts_stitch_${episode}_v10.json`);
   await fs.writeFile(v3Path, JSON.stringify(triage(oldSpecPath, sha256("old scope\n"))));
   await fs.writeFile(v4Path, JSON.stringify(triage(newSpecPath, sha256("one current unit\n"))));
+  await fs.writeFile(v5Path, JSON.stringify(triage(oldSpecPath, sha256("old scope\n"))));
+  await fs.writeFile(v10Path, JSON.stringify(triage(newSpecPath, sha256("one current unit\n"))));
 
   const status = () => qwenExactBoundaryRepairStatusForTests({
     episodeDir: temp, episode, ttsReportPath: reportPath, ttsReport,
     currentScriptHash: sourceScriptHash,
   });
+  assert.equal((await status()).next_command_shape,
+    `node bin/goldflow.mjs tts repair-boundary --episode-dir ${temp} --spec ${newSpecPath}`);
+  await fs.rm(v10Path);
+  assert.equal((await status()).next_command_shape,
+    `node bin/goldflow.mjs tts repair-boundary --episode-dir ${temp} --spec ${oldSpecPath}`);
+  await fs.writeFile(v5Path, JSON.stringify({
+    ...triage(oldSpecPath, sha256("old scope\n")),
+    blocked_report_sha256: sha256("stale report"),
+  }));
+  assert.equal(await status(), null, "a stale v5 receipt must not fall back to v4");
+  await fs.rm(v5Path);
   assert.equal((await status()).next_command_shape,
     `node bin/goldflow.mjs tts repair-boundary --episode-dir ${temp} --spec ${newSpecPath}`);
   await fs.writeFile(v4Path, JSON.stringify(triage(newSpecPath, sha256("wrong spec"))));
@@ -47,7 +62,7 @@ try {
   await fs.rm(v4Path);
   assert.equal((await status()).next_command_shape,
     `node bin/goldflow.mjs tts repair-boundary --episode-dir ${temp} --spec ${oldSpecPath}`);
-  console.log("PASS Qwen boundary triage v4 priority, exact route, stale hold, and v3 fallback");
+  console.log("PASS Qwen boundary triage latest-version priority, exact route, and stale hold");
 } finally {
   await fs.rm(temp, { recursive: true, force: true });
 }

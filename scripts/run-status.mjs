@@ -3622,16 +3622,17 @@ async function qwenExactBoundaryRepairStatus({
 }) {
   // New triage receipts supersede earlier ones; a stale latest receipt must
   // never fall back to an older repair scope.
-  const triageNames = ["_v4", "_v3", "_v2", ""]
-    .map((suffix) => `manual_blocker_triage_qwen_tts_stitch_${episode}${suffix}.json`);
-  let selectedPath = null;
-  for (const name of triageNames) {
-    const candidate = path.join(episodeDir, name);
-    if (await exists(candidate)) {
-      selectedPath = candidate;
-      break;
-    }
-  }
+  const base = `manual_blocker_triage_qwen_tts_stitch_${episode}`;
+  const triageNames = (await fs.readdir(episodeDir)).map((name) => {
+    if (name === `${base}.json`) return { name, version: 1 };
+    if (!name.startsWith(`${base}_v`)) return null;
+    const suffix = name.slice(`${base}_v`.length);
+    const match = /^([1-9]\d*)\.json$/u.exec(suffix);
+    const version = match ? Number(match[1]) : null;
+    return Number.isSafeInteger(version) && version >= 2 ? { name, version } : null;
+  }).filter(Boolean).sort((left, right) => right.version - left.version);
+  const selectedPath = triageNames.length
+    ? path.join(episodeDir, triageNames[0].name) : null;
   const triage = selectedPath ? await readJson(selectedPath, null) : null;
   if (ttsReport?.status !== "blocked"
     || triage?.status !== "operator_hold_pending_exact_boundary_recovery"

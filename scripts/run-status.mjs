@@ -3826,7 +3826,7 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
         }
         return { done: false, state: "blocked",
           evidence: `Reviewed exact ASR orthography for ${review.unit_ids.length} retained units needs no-synthesis re-adjudication`,
-          next_command_shape: `node bin/goldflow.mjs tts finalize-provider --episode-dir ${episodeDir} --asr-orthography-evidence ${orthographyPath}` };
+          next_command_shape: `node bin/goldflow.mjs tts finalize-provider --episode-dir ${episodeDir} --asr-orthography-evidence ${review.evidence_path}` };
       }
     } catch (error) {
       return { done: false, state: "blocked",

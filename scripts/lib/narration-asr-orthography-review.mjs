@@ -5,10 +5,13 @@ import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { sha256File } from "./file-hash.mjs";
+import { canonicalQwenBatchSha256 } from "./qwen-liam-batch-contract.mjs";
 import { transcriptQaForTests } from "../modelslab-qwen-episode-audio.mjs";
 
 export const NARRATION_ASR_ORTHOGRAPHY_SCHEMA =
   "goldflow_narration_asr_orthography_review_v1";
+export const NARRATION_ASR_ORTHOGRAPHY_AMENDMENT_SCHEMA =
+  "goldflow_narration_asr_orthography_amendment_v1";
 
 const hex = (value) => /^[a-f0-9]{64}$/u.test(String(value ?? ""));
 const sha256 = (value) => createHash("sha256").update(String(value)).digest("hex");
@@ -78,6 +81,159 @@ function unchangedExceptReviewedPhrase({ intended, recognized, expectedPhrase, o
   const qa = transcriptQaForTests(intended, normalized, { blockAnySubstitution: false });
   return qa.deletions === 0 && qa.insertions === 0 && qa.substitutions === 0
     && qa.first_token_ok === true && qa.last_token_ok === true;
+}
+
+function replaceUniqueWholePhrase(text, observedPhrase, expectedPhrase, position) {
+  const source = words(text);
+  const observed = words(observedPhrase);
+  if (!observed.length || observed.length > 3
+    || !/^[\p{L}]+(?: [\p{L}]+){0,2}$/u.test(observedPhrase)) return null;
+  const matches = [];
+  for (let index = 0; index <= source.length - observed.length; index += 1) {
+    if (source.slice(index, index + observed.length).every((word, offset) =>
+      lower(word.text) === lower(observed[offset].text))) matches.push(index);
+  }
+  if (matches.length !== 1) return null;
+  const index = matches[0];
+  if (position === "interior" && (index === 0 || index + observed.length === source.length)) return null;
+  if (position === "final" && index + observed.length !== source.length) return null;
+  const first = source[index], last = source[index + observed.length - 1];
+  if (lower(text.slice(first.start, last.end).replace(/\s+/gu, " "))
+    !== lower(observedPhrase)) return null;
+  return text.slice(0, first.start) + expectedPhrase + text.slice(last.end);
+}
+
+export function validateAsrOrthographyAmendmentForTests({
+  evidence, predecessor, priorReport, priorDelivery, priorManifest,
+  currentManifest, plan, expected, actualAudioHashes = {}, runnerReport,
+} = {}) {
+  if (evidence?.schema !== NARRATION_ASR_ORTHOGRAPHY_AMENDMENT_SCHEMA
+    || evidence.status !== "reviewed" || evidence.reviewer_kind !== "editorial_text_review"
+    || evidence.human_listening_performed !== false
+    || evidence.authorization_origin !== "user_authorized_autonomous_asr_qa"
+    || !String(evidence.reviewer ?? "").trim()
+    || !Number.isFinite(Date.parse(evidence.reviewed_at))
+    || String(evidence.note ?? "").trim().length < 40
+    || evidence.predecessor_evidence_path !== predecessor?.evidence_path
+    || evidence.predecessor_evidence_sha256 !== predecessor?.evidence_sha256
+    || evidence.source_script_sha256 !== expected.sourceScriptSha256
+    || evidence.run_identity_file_sha256 !== expected.identityFileSha256
+    || evidence.narration_generation_plan_sha256 !== expected.planSha256
+    || evidence.narration_generation_plan_file_sha256 !== expected.planFileSha256
+    || evidence.narration_quality_contract_sha256 !== expected.qualityContractSha256
+    || evidence.pre_review_narration_report_sha256 !== expected.priorReportFileSha256
+    || evidence.pre_review_unit_delivery_qa_sha256 !== expected.priorDeliveryFileSha256
+    || evidence.pre_review_provider_manifest_sha256 !== expected.priorManifestFileSha256
+    || priorReport?.schema !== "goldflow_narration_tts_report_v1"
+    || priorDelivery?.schema !== "goldflow_narration_unit_delivery_qa_v2"
+    || priorReport.status !== "blocked" || priorDelivery.status !== "blocked"
+    || priorManifest?.status !== "passed" || currentManifest?.status !== "passed"
+    || priorReport.source_script_hash !== expected.sourceScriptSha256
+    || priorReport.narration_generation_plan_sha256 !== expected.planSha256
+    || priorReport.narration_generation_plan_file_sha256 !== expected.planFileSha256
+    || priorReport.provider_output_manifest_sha256 !== expected.priorManifestFileSha256
+    || priorReport.asr_orthography_review?.evidence_sha256 !== predecessor.evidence_sha256
+    || priorDelivery.source_script_hash !== expected.sourceScriptSha256
+    || priorDelivery.narration_generation_plan_sha256 !== expected.planSha256
+    || priorDelivery.narration_generation_plan_file_sha256 !== expected.planFileSha256
+    || priorDelivery.quality_contract_sha256 !== expected.qualityContractSha256
+    || plan?.plan_sha256 !== expected.planSha256
+    || evidence.unit_count !== 1 || evidence.units?.length !== 1) {
+    throw new Error("ASR orthography amendment lacks exact predecessor, source, plan, or snapshot bindings.");
+  }
+  const row = evidence.units[0];
+  const id = String(row?.unit_id ?? "");
+  const oldResult = (priorReport.results ?? []).find((item) => item.unit_id === id);
+  const oldQa = (priorDelivery.units ?? []).find((item) => item.unit_id === id);
+  const oldOutput = (priorManifest.units ?? []).find((item) => item.unit_id === id);
+  const current = (currentManifest.units ?? []).find((item) => item.unit_id === id);
+  const unit = (plan.units ?? []).find((item) => item.unit_id === id);
+  const code = "narration_confirmed_final_token_mismatch";
+  const recovery = oldOutput?.recovery_provenance;
+  const runnerRows = (runnerReport?.results ?? []).filter((item) => item.unit_id === id);
+  const generated = runnerRows[0];
+  if (!id || !oldResult || !oldQa || !oldOutput || !current || !unit
+    || !exactCodes((oldQa.decision?.blockers ?? []).map((item) => item.code), [code])
+    || !exactCodes((priorReport.blockers ?? []).filter((item) => item.unit_id === id)
+      .map((item) => item.code), [code])
+    || !exactCodes(row.reviewed_blocker_codes ?? [], [code])
+    || row.selected_attempt !== 2 || Number(oldResult.attempt) !== 2
+    || Number(oldOutput.attempt) !== 2 || Number(current.attempt) !== 2
+    || oldOutput.status !== "accepted" || current.status !== "accepted"
+    || row.audio_path !== oldOutput.audio_path || row.audio_path !== current.audio_path
+    || row.audio_sha256 !== oldOutput.audio_sha256
+    || row.audio_sha256 !== current.audio_sha256
+    || row.audio_sha256 !== oldResult.audio_sha256
+    || row.audio_sha256 !== oldQa.audio_sha256
+    || actualAudioHashes[id] !== row.audio_sha256
+    || row.synthesis_identity_sha256 !== oldOutput.synthesis_identity_sha256
+    || row.synthesis_identity_sha256 !== current.synthesis_identity_sha256
+    || row.synthesis_identity_sha256 !== oldResult.synthesis_identity_sha256
+    || row.intended_text_sha256 !== unit.spoken_text_sha256
+    || row.intended_text_sha256 !== oldQa.intended_text_sha256
+    || row.intended_text !== unit.spoken_text || row.intended_text !== oldQa.intended_text
+    || row.primary_recognized_text !== oldQa.primary_recognized_text
+    || row.confirmation_recognized_text !== oldQa.confirmation_recognized_text
+    || !String(row.review_note ?? "").trim() || row.review_note.trim().length < 25
+    || recovery?.schema !== "goldflow_qwen_exact_unit_recovery_provenance_v1"
+    || recovery.evidence_basis !== "reviewed_automated_delivery_qa"
+    || recovery.human_listening_performed !== false
+    || recovery.unit_id !== id || !hex(recovery.origin_audio_sha256)
+    || !hex(recovery.origin_synthesis_identity_sha256)
+    || recovery.spoken_text_sha256 !== row.intended_text_sha256
+    || !exactCodes(recovery.trigger_codes ?? [], ["reviewed_automated_delivery_qa_delivery"])
+    || row.selected_recovery_provenance_sha256 !== canonicalQwenBatchSha256(recovery)
+    || canonicalQwenBatchSha256(current.recovery_provenance) !== canonicalQwenBatchSha256(recovery)
+    || row.runner_report_path !== oldOutput.runner_report_path
+    || row.runner_report_sha256 !== oldOutput.runner_report_sha256
+    || runnerReport?.status !== "passed" || runnerRows.length !== 1
+    || generated.status !== "generated" || Number(generated.attempt) !== 2
+    || generated.output_path !== row.audio_path
+    || generated.output_sha256 !== row.audio_sha256
+    || generated.synthesis_identity_sha256 !== row.synthesis_identity_sha256
+    || generated.spoken_text_sha256 !== row.intended_text_sha256
+    || canonicalQwenBatchSha256(generated.recovery_provenance) !== canonicalQwenBatchSha256(recovery)
+    || generated.token_limit_reached !== false) {
+    throw new Error(`ASR orthography amendment has stale second-take or runner evidence: ${id || "missing"}.`);
+  }
+  const joins = row.joins;
+  if (!Array.isArray(joins) || joins.length !== 2
+    || !exactCodes(joins.map((join) => join.position), ["interior", "final"])
+    || row.edge !== "final" || row.relation !== "spacing_join"
+    || row.expected_phrase !== joins.find((join) => join.position === "final")?.expected_phrase
+    || row.observed_phrase !== joins.find((join) => join.position === "final")?.observed_phrase) {
+    throw new Error(`ASR orthography amendment requires one interior and one final spacing join: ${id}.`);
+  }
+  for (const join of joins) {
+    const expectedWords = words(join.expected_phrase);
+    const observedWords = words(join.observed_phrase);
+    if (join.relation !== "spacing_join" || expectedWords.length !== 1
+      || observedWords.length !== 2
+      || lower(expectedWords.map((word) => word.text).join(""))
+        !== lower(observedWords.map((word) => word.text).join(""))
+      || replaceUniqueWholePhrase(row.intended_text,
+        join.expected_phrase, join.expected_phrase, join.position) == null) {
+      throw new Error(`ASR orthography amendment has a non-exact spacing join: ${id}.`);
+    }
+  }
+  for (const transcript of [row.primary_recognized_text, row.confirmation_recognized_text]) {
+    let normalized = transcript;
+    for (const join of joins) {
+      normalized = replaceUniqueWholePhrase(normalized,
+        join.observed_phrase, join.expected_phrase, join.position);
+      if (normalized == null) break;
+    }
+    if (normalized == null) {
+      throw new Error(`ASR orthography amendment cannot locate both exact joins: ${id}.`);
+    }
+    const qa = transcriptQaForTests(row.intended_text, normalized,
+      { blockAnySubstitution: false });
+    if (qa.deletions !== 0 || qa.insertions !== 0 || qa.substitutions !== 0
+      || qa.first_token_ok !== true || qa.last_token_ok !== true) {
+      throw new Error(`ASR orthography amendment would mask another transcript difference: ${id}.`);
+    }
+  }
+  return { unit_ids: [id], rows_by_id: new Map([[id, row]]) };
 }
 
 export function validateAsrOrthographyReviewForTests({
@@ -208,6 +364,7 @@ export function applyAsrOrthographyReviewForTests(decision, row, evidenceSha256)
       { severity: "warning", code: "narration_reviewed_asr_orthography_equivalence",
         original_blocker_code: expectedCode, relation: row.relation,
         expected_phrase: row.expected_phrase, observed_phrase: row.observed_phrase,
+        ...(row.joins ? { reviewed_spacing_joins: row.joins } : {}),
         evidence_sha256: evidenceSha256, review_required: false,
         human_listening_performed: false },
     ],
@@ -268,7 +425,7 @@ export async function loadAsrOrthographyReview({ episodeDir, episode, plan,
       priorManifestFileSha256: evidence.pre_review_provider_manifest_sha256 },
     actualAudioHashes,
   });
-  return { ...validated, evidence_path: evidencePath,
+  const predecessor = { ...validated, evidence_path: evidencePath,
     evidence_sha256: evidenceSha256,
     pre_review_narration_report_sha256: evidence.pre_review_narration_report_sha256,
     pre_review_unit_delivery_qa_sha256: evidence.pre_review_unit_delivery_qa_sha256,
@@ -276,6 +433,72 @@ export async function loadAsrOrthographyReview({ episodeDir, episode, plan,
     provenance: { schema: NARRATION_ASR_ORTHOGRAPHY_SCHEMA,
       evidence_path: evidencePath, evidence_sha256: evidenceSha256,
       unit_ids: validated.unit_ids, human_listening_performed: false } };
+  const amendmentPath = path.join(episodeDir,
+    `narration_asr_orthography_review_${episode}_v2.json`);
+  const amendment = await fs.readFile(amendmentPath, "utf8").then(JSON.parse)
+    .catch((error) => { if (error?.code === "ENOENT") return null; throw error; });
+  if (!amendment) return predecessor;
+  const amendmentSnapshots = {};
+  for (const name of names) {
+    const target = amendment[`pre_review_${name}_path`];
+    const expectedSha256 = amendment[`pre_review_${name}_sha256`];
+    const metadata = inside(episodeDir, target)
+      ? await fs.lstat(target).catch(() => null) : null;
+    if (!inside(episodeDir, target)
+      || path.resolve(target) === path.join(path.resolve(episodeDir), canonicalNames[name])
+      || !metadata?.isFile() || metadata.nlink !== 1 || !hex(expectedSha256)
+      || await sha256File(target).catch(() => null) !== expectedSha256) {
+      throw new Error(`ASR orthography amendment snapshot is missing or hash-stale: ${name}.`);
+    }
+    amendmentSnapshots[name] = JSON.parse(await fs.readFile(target, "utf8"));
+  }
+  const [reviewed] = amendment.units ?? [];
+  const selected = (amendmentSnapshots.provider_manifest.units ?? [])
+    .find((row) => row.unit_id === reviewed?.unit_id);
+  const recovery = selected?.recovery_provenance;
+  const runnerPath = reviewed?.runner_report_path;
+  if (!inside(episodeDir, reviewed?.audio_path)
+    || !inside(episodeDir, runnerPath)
+    || !inside(episodeDir, recovery?.confirmed_evidence_path)
+    || !hex(reviewed?.audio_sha256) || !hex(reviewed?.runner_report_sha256)
+    || await sha256File(reviewed.audio_path).catch(() => null) !== reviewed.audio_sha256
+    || await sha256File(runnerPath).catch(() => null) !== reviewed.runner_report_sha256
+    || await sha256File(recovery.confirmed_evidence_path).catch(() => null)
+      !== recovery.confirmed_evidence_sha256) {
+    throw new Error("ASR orthography amendment WAV, runner, or retake evidence is hash-stale.");
+  }
+  const amendmentValidated = validateAsrOrthographyAmendmentForTests({
+    evidence: amendment, predecessor,
+    priorReport: amendmentSnapshots.narration_report,
+    priorDelivery: amendmentSnapshots.unit_delivery_qa,
+    priorManifest: amendmentSnapshots.provider_manifest,
+    currentManifest, plan,
+    expected: { sourceScriptSha256, identityFileSha256,
+      planSha256: plan.plan_sha256, planFileSha256, qualityContractSha256,
+      priorReportFileSha256: amendment.pre_review_narration_report_sha256,
+      priorDeliveryFileSha256: amendment.pre_review_unit_delivery_qa_sha256,
+      priorManifestFileSha256: amendment.pre_review_provider_manifest_sha256 },
+    actualAudioHashes: { [reviewed.unit_id]: reviewed.audio_sha256 },
+    runnerReport: JSON.parse(await fs.readFile(runnerPath, "utf8")),
+  });
+  if (predecessor.rows_by_id.has(amendmentValidated.unit_ids[0])) {
+    throw new Error("ASR orthography amendment duplicates a predecessor review unit.");
+  }
+  const amendmentSha256 = await sha256File(amendmentPath);
+  const unitIds = [...predecessor.unit_ids, ...amendmentValidated.unit_ids];
+  return { ...amendmentValidated,
+    unit_ids: unitIds,
+    rows_by_id: new Map([...predecessor.rows_by_id,
+      ...amendmentValidated.rows_by_id]),
+    evidence_path: amendmentPath, evidence_sha256: amendmentSha256,
+    pre_review_narration_report_sha256: amendment.pre_review_narration_report_sha256,
+    pre_review_unit_delivery_qa_sha256: amendment.pre_review_unit_delivery_qa_sha256,
+    pre_review_provider_manifest_sha256: amendment.pre_review_provider_manifest_sha256,
+    provenance: { schema: NARRATION_ASR_ORTHOGRAPHY_AMENDMENT_SCHEMA,
+      evidence_path: amendmentPath, evidence_sha256: amendmentSha256,
+      predecessor_evidence_path: evidencePath,
+      predecessor_evidence_sha256: evidenceSha256,
+      unit_ids: unitIds, human_listening_performed: false } };
 }
 
 export function asrOrthographyGuardAdmission(status, command, subcommand, flags = {}) {

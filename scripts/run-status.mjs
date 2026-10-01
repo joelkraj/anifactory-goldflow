@@ -45,6 +45,10 @@ import {
 import { loadNarrationSourceStructure } from "./lib/narration-source-structure.mjs";
 import { loadLowMarginDisposition } from "./lib/narration-low-margin-disposition.mjs";
 import { loadAsrOrthographyReview } from "./lib/narration-asr-orthography-review.mjs";
+import {
+  APPEND_ONLY_TAIL_MODE, pcm16MonoWavFactsForTests,
+  validateAppendOnlyTailScopeForTests, verifyAppendOnlyTailSelection,
+} from "./lib/narration-append-only-tail.mjs";
 import { projectVerifiedStructuralRecoveryReport, structuralProjectionManifestForReport, verifiedStructuralRecoveryFromManifest } from "./lib/narration-structural-finalizer-provenance.mjs";
 import { validateConfirmedRetryEvidenceForTests } from "./narration-tts-episode.mjs";
 import { loadPronunciationRecoveryState } from "./lib/narration-pronunciation-episode.mjs";
@@ -141,6 +145,7 @@ import {
   validateNarrationTextIr,
 } from "./lib/narration-text-ir.mjs";
 import {
+  narrationProviderOutputManifestSha256,
   narrationSynthesisIdentitySha256,
   validateNarrationProviderOutputManifest,
 } from "./lib/narration-provider-adapter.mjs";
@@ -2455,6 +2460,7 @@ async function synthesizedNarrationArtifactsComplete({
     add(`${finding.path}=${finding.actual ?? "missing"}; required ${finding.expected}`);
   }
 
+  let verifiedAppendOnlyTail = null;
   for (let index = 0; index < plannedUnits.length; index += 1) {
     const planned = plannedUnits[index];
     const result = results[index];
@@ -2672,6 +2678,26 @@ async function synthesizedNarrationArtifactsComplete({
           }
         }
         if (!valid) add(`unit ${planned.unit_id} exact-boundary composite provenance is missing or stale`);
+      } else if (mode === APPEND_ONLY_TAIL_MODE) {
+        try {
+          if (!verifiedAppendOnlyTail) {
+            const manifestPath = ttsReport.provider_output_manifest_path;
+            const manifest = await readJson(manifestPath, null);
+            if (!manifest || await fileSha256(manifestPath)
+              !== ttsReport.provider_output_manifest_sha256) {
+              throw new Error("report-bound tail manifest is missing or hash-stale");
+            }
+            verifiedAppendOnlyTail = await verifyAppendOnlyTailSelection({
+              episodeDir, report: ttsReport, manifest, plan,
+              expectedManifestPath: manifestPath,
+            });
+          }
+          if (!verifiedAppendOnlyTail?.repaired_unit_ids.includes(planned.unit_id)) {
+            throw new Error("selected tail unit is not in the exact completion receipt");
+          }
+        } catch (error) {
+          add(`unit ${planned.unit_id} append-only tail provenance is invalid: ${error.message}`);
+        }
       } else if (mode === PRONUNCIATION_MODE) {
         const provenance = result.recovery_provenance;
         const review = ttsReport.user_pronunciation_review;
@@ -3621,6 +3647,110 @@ async function blockedFullStreamPolicyRefreshEligible({
   return true;
 }
 
+async function appendOnlyTailCompletionStatus({
+  episodeDir, episode, ttsReportPath, ttsReport, currentScriptHash,
+}) {
+  if (ttsReport?.status !== "blocked") return null;
+  const evidencePath = path.join(episodeDir,
+    `narration_append_only_tail_evidence_${episode}.json`);
+  if (!await exists(evidencePath)) return null;
+  const manifestPath = ttsReport.provider_output_manifest_path;
+  if (!manifestPath || !path.isAbsolute(manifestPath)
+    || !path.resolve(manifestPath).startsWith(`${path.resolve(episodeDir)}${path.sep}`)) {
+    return { done: false, state: "blocked",
+      evidence: "Append-only tail evidence exists, but the report-bound manifest path is invalid",
+      next_command_shape: "Operator hold: restore exact narration manifest provenance; do not synthesize." };
+  }
+  try {
+    const planPath = path.join(episodeDir, "narration_generation_plan.json");
+    const identityPath = path.join(episodeDir, "run_identity.json");
+    const deliveryPath = path.join(episodeDir,
+      `narration_unit_delivery_qa_${episode}.json`);
+    const [evidence, manifest, plan, delivery] = await Promise.all([
+      readJson(evidencePath, null), readJson(manifestPath, null),
+      readJson(planPath, null), readJson(deliveryPath, null),
+    ]);
+    if ((manifest?.repair_history ?? []).some((row) =>
+      row?.mode === APPEND_ONLY_TAIL_MODE)) {
+      await verifyAppendOnlyTailSelection({
+        episodeDir, report: ttsReport, manifest, plan,
+        expectedManifestPath: manifestPath,
+      });
+      return null;
+    }
+    const hashes = {
+      script: currentScriptHash,
+      identity: await fileSha256(identityPath),
+      plan: await fileSha256(planPath),
+      report: await fileSha256(ttsReportPath),
+      delivery: await fileSha256(deliveryPath),
+      manifest: await fileSha256(manifestPath),
+      evidence: await fileSha256(evidencePath),
+    };
+    // Old evidence after another exact repair must not authorize a new edit.
+    if (evidence?.prior_report_file_sha256 !== hashes.report) return null;
+    const audioFacts = {};
+    for (const row of evidence.units ?? []) {
+      const selected = (manifest.units ?? []).find((unit) =>
+        unit.unit_id === row.unit_id);
+      if (!selected?.audio_path || await fileSha256(selected.audio_path)
+        !== selected.audio_sha256) {
+        throw new Error(`Selected raw WAV is missing or changed: ${row.unit_id}`);
+      }
+      audioFacts[row.unit_id] = pcm16MonoWavFactsForTests(
+        await fs.readFile(selected.audio_path));
+    }
+    const scope = validateAppendOnlyTailScopeForTests({
+      evidence, episodeDir, report: ttsReport, delivery,
+      manifest, plan, hashes, audioFacts,
+    });
+    const candidateRoot = path.join(episodeDir,
+      "assets/audio/narration_tts/append_only_tail_completions");
+    const matches = [];
+    for (const name of await fs.readdir(candidateRoot).catch(() => [])) {
+      if (!/^[a-f0-9]{64}$/u.test(name)) continue;
+      const dir = path.join(candidateRoot, name);
+      const requestPath = path.join(dir, "request.json");
+      const request = await readJson(requestPath, null);
+      if (request?.prior_report_file_sha256 === hashes.report
+        && request?.evidence_file_sha256 === hashes.evidence) {
+        if (await fileSha256(requestPath) !== name) {
+          throw new Error("Append-only tail request directory/hash differs");
+        }
+        matches.push(dir);
+      }
+    }
+    if (matches.length > 1) throw new Error("Multiple exact tail completion candidates require triage");
+    if (matches.length === 1) {
+      const candidatePath = path.join(matches[0], "provider-output-manifest.json");
+      if (await exists(candidatePath)) {
+        const candidate = await readJson(candidatePath, null);
+        if (candidate?.manifest_sha256 !== narrationProviderOutputManifestSha256(candidate)
+          || candidate?.status !== "passed") {
+          throw new Error("Derived append-only tail manifest is invalid");
+        }
+        const verified = await verifyAppendOnlyTailSelection({
+          episodeDir, report: ttsReport, manifest: candidate,
+          plan, expectedManifestPath: candidatePath,
+        });
+        if (!exactOrderedIds(scope.selected_unit_ids, verified.repaired_unit_ids)) {
+          throw new Error("Derived append-only tail unit set differs from reviewed scope");
+        }
+        return { done: false, state: "blocked",
+          evidence: `${scope.selected_unit_ids.length} intact raw tails have only silence appended; all other selected audio is preserved. Re-adjudicate without synthesis`,
+          next_command_shape: `node bin/goldflow.mjs tts finalize-provider --episode-dir ${episodeDir} --manifest ${candidatePath}` };
+      }
+    }
+    return { done: false, state: "blocked",
+      evidence: `${scope.selected_unit_ids.length} exact intact low-energy raw tails have reviewed automated evidence; append silence only`,
+      next_command_shape: `node bin/goldflow.mjs tts complete-tail --episode-dir ${episodeDir} --evidence ${evidencePath}` };
+  } catch (error) {
+    return { done: false, state: "blocked",
+      evidence: `Append-only tail evidence is invalid or stale: ${error.message}`,
+      next_command_shape: "Operator hold: repair exact tail evidence; do not rerun narration." };
+  }
+}
+
 async function qwenExactBoundaryRepairStatus({
   episodeDir, episode, ttsReportPath, ttsReport, currentScriptHash,
 }) {
@@ -4345,6 +4475,10 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
           next_command_shape: "Operator hold: inspect the exact one-unit pronunciation receipt; do not rerun narration." };
       }
     }
+    const tailCompletion = await appendOnlyTailCompletionStatus({
+      episodeDir, episode, ttsReportPath, ttsReport, currentScriptHash,
+    });
+    if (tailCompletion) return tailCompletion;
     if (ttsReport.status === "blocked" && policy.primary.provider === "qwen_local") {
       const recovery = await qwenReviewedBoundaryOrAutomatedPronunciationStatusForTests({
         episodeDir, episode, ttsReportPath, ttsReport, currentScriptHash,

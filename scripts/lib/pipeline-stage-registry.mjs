@@ -130,6 +130,7 @@ const stages = [
       "tts import-provider",
       "tts finalize-provider",
       "tts repair-boundary",
+      "tts complete-tail",
       "tts repair-pronunciation",
       "tts repair-pronunciation-auto",
       "tts approve-listen",

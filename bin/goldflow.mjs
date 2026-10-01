@@ -37,6 +37,7 @@ import { interruptedQwenGuardAdmission } from "../scripts/lib/qwen-interrupted-g
 import { exactBlockedNarrationRetakeAdmission } from "../scripts/lib/narration-exact-retake-guard.mjs";
 import { asrOrthographyGuardAdmission } from "../scripts/lib/narration-asr-orthography-review.mjs";
 import { pronunciationGuardAdmission } from "../scripts/lib/narration-pronunciation-repair.mjs";
+import { appendOnlyTailGuardAdmission } from "../scripts/lib/narration-append-only-tail.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
@@ -116,6 +117,17 @@ function enforceWorkflowGuard(commandName, subcommandName, scriptArgs, episodeDi
   const allowedStages = Array.isArray(result.allowed_command_stages)
     ? result.allowed_command_stages
     : [currentStage];
+  const tailCompletion = appendOnlyTailGuardAdmission(
+    result, commandName, subcommandName, parsedFlags,
+  );
+  if (tailCompletion.applicable) {
+    if (!tailCompletion.allowed) {
+      console.error(`Workflow guard blocked append-only tail completion: ${tailCompletion.reason}`);
+      if (result.next_command_shape) console.error(`Next valid command shape: ${result.next_command_shape}`);
+      process.exit(1);
+    }
+    return;
+  }
   const interruptedQwen = interruptedQwenGuardAdmission(
     result, commandName, subcommandName, parsedFlags,
   );
@@ -532,6 +544,7 @@ ${registryCommands}
   goldflow tts import-provider     Import hash-bound WAV results from the identity-locked TTS provider
   goldflow tts finalize-provider   Run delivery, continuity, stitch, mastering, and full-stream QA
   goldflow tts repair-boundary     Repair only reviewed blocked Qwen sentence/word boundaries, then rerun narration QA
+  goldflow tts complete-tail       Append bounded silence to reviewed intact raw Qwen tails; no synthesis
   goldflow tts repair-pronunciation  Create one user-heard phonetic-word candidate; require a second listen before selection
   goldflow tts repair-pronunciation-auto  Create one reviewed automated-ASR phonetic-word candidate; select only after dual-ASR QA
   goldflow tts adopt-interrupted   QA and adopt only hash-bound completed Qwen cohorts from an interrupted invocation
@@ -734,6 +747,8 @@ if (command === "crime-proof" && !helpRequested) {
   run("narration-provider-output-finalize.mjs", flags);
 } else if (command === "tts" && subcommand === "repair-boundary") {
   run("tts-exact-boundary-repair.mjs", flags);
+} else if (command === "tts" && subcommand === "complete-tail") {
+  run("tts-append-tail-completion.mjs", flags);
 } else if (command === "tts" && subcommand === "repair-pronunciation") {
   run("tts-pronunciation-candidate.mjs", flags);
 } else if (command === "tts" && subcommand === "repair-pronunciation-auto") {

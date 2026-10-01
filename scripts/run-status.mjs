@@ -814,10 +814,16 @@ function inferredState(validation = {}) {
   return "missing";
 }
 
-function stage(stageId, validation, identity, nextCommandOverride = null) {
+export function stageForTests(stageId, validation, identity, nextCommandOverride = null) {
   const definition = stageDefinition(stageId);
   if (!definition) throw new Error(`Stage ${stageId} is missing from the pipeline registry.`);
   const state = inferredState(validation);
+  // A blocked narration report is a triage gate. Without an explicit,
+  // evidence-bound recovery command, the registry's generic narrate command
+  // would synthesize the whole episode and overwrite the operator's scope.
+  const blockedNarrationHold = stageId === "qwen_tts_stitch" && state === "blocked"
+    ? "Operator hold: inspect the current hash-bound narration QA and prepare only an exact reviewed repair; do not rerun all narration."
+    : null;
   return {
     stage: stageId,
     title: definition.title,
@@ -830,9 +836,11 @@ function stage(stageId, validation, identity, nextCommandOverride = null) {
     exists: stageIsSatisfied(state),
     evidence: validation.evidence ?? null,
     next_command_shape: stageIsSatisfied(state) || (identity.image_provider === "fal_ai" && stageId === "image_generation" && state === "blocked" && !validation.next_command_shape)
-      ? null : nextCommandOverride ?? validation.next_command_shape ?? commandFor(stageId, identity),
+      ? null : nextCommandOverride ?? validation.next_command_shape ?? blockedNarrationHold ?? commandFor(stageId, identity),
   };
 }
+
+const stage = stageForTests;
 
 async function visualPromptPlanReviewHardenCommand(episodeDir, identity, recoveryScope = null) {
   const channel = identity.channel ?? "<channel>";

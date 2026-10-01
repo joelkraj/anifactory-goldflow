@@ -6,11 +6,13 @@ import path from "node:path";
 import { canonicalQwenBatchSha256 } from "../lib/qwen-liam-batch-contract.mjs";
 import {
   NARRATION_ASR_ORTHOGRAPHY_AMENDMENT_SCHEMA,
+  NARRATION_ASR_ORTHOGRAPHY_EXTENSION_SCHEMA,
   NARRATION_ASR_ORTHOGRAPHY_SCHEMA,
   applyAsrOrthographyReviewForTests,
   asrOrthographyGuardAdmission,
   loadAsrOrthographyReview,
   validateAsrOrthographyAmendmentForTests,
+  validateAsrOrthographyExtensionForTests,
   validateAsrOrthographyReviewForTests,
 } from "../lib/narration-asr-orthography-review.mjs";
 
@@ -208,6 +210,90 @@ assert.throws(() => validateAsrOrthographyReviewForTests(fixture({
   observedPhrase: "Then", relation: "reviewed_homophone_spelling",
 })));
 
+function extensionFixture({ secondTake = false, possessive = false, rootDir = root } = {}) {
+  const input = fixture({ rootDir });
+  const id = "unit-2";
+  const intended = possessive ? "Sera’s people stood beside me." : "Beren stood beside me.";
+  const primary = possessive ? "Sarah's people stood beside me."
+    : "Barron stood beside me.";
+  const confirmation = possessive ? primary : "Baron stood beside me.";
+  const audio = sha(secondTake ? "second-audio" : "first-audio");
+  const synthesis = sha("name-synthesis");
+  const output = { unit_id: id, status: "accepted", attempt: secondTake ? 2 : 1,
+    audio_path: `${rootDir}/${id}.wav`, audio_sha256: audio,
+    synthesis_identity_sha256: synthesis };
+  if (secondTake) output.recovery_provenance = {
+    schema: "goldflow_qwen_exact_unit_recovery_provenance_v1",
+    evidence_basis: "reviewed_automated_delivery_qa",
+    human_listening_performed: false, unit_id: id,
+    spoken_text_sha256: sha(intended), origin_audio_sha256: sha("origin"),
+  };
+  const predecessor = { evidence_path: `${rootDir}/narration_asr_orthography_review_ep_01.json`,
+    evidence_sha256: sha("predecessor"), rows_by_id: new Map([["unit-1", {}]]) };
+  const code = "narration_confirmed_opening_token_mismatch";
+  input.priorReport.asr_orthography_review = { evidence_sha256: predecessor.evidence_sha256 };
+  input.priorReport.results.push({ ...output });
+  input.priorReport.blockers.push({ unit_id: id, code });
+  input.priorDelivery.units.push({ unit_id: id, audio_sha256: audio,
+    intended_text: intended, intended_text_sha256: sha(intended),
+    primary_recognized_text: primary, confirmation_recognized_text: confirmation,
+    edge_alignment: { status: "passed" },
+    decision: { status: "blocked", blockers: [{ code }] } });
+  input.priorManifest.units.push({ ...output });
+  input.currentManifest.units.push({ ...output });
+  input.plan.units.push({ unit_id: id, spoken_text: intended,
+    spoken_text_sha256: sha(intended) });
+  input.actualAudioHashes[id] = audio;
+  input.evidence = {
+    ...input.evidence,
+    schema: NARRATION_ASR_ORTHOGRAPHY_EXTENSION_SCHEMA,
+    predecessor_evidence_path: predecessor.evidence_path,
+    predecessor_evidence_sha256: predecessor.evidence_sha256,
+    units: [{ unit_id: id, selected_attempt: output.attempt,
+      edge: "opening", relation: "reviewed_dual_asr_phonetic_spelling",
+      expected_phrase: possessive ? "Sera’s" : "Beren",
+      observed_phrase: possessive ? "Sarah's" : "Barron",
+      primary_observed_phrase: possessive ? "Sarah's" : "Barron",
+      confirmation_observed_phrase: possessive ? "Sarah's" : "Baron",
+      audio_path: output.audio_path, audio_sha256: audio,
+      synthesis_identity_sha256: synthesis,
+      intended_text: intended, intended_text_sha256: sha(intended),
+      primary_recognized_text: primary, confirmation_recognized_text: confirmation,
+      reviewed_blocker_codes: [code],
+      ...(secondTake ? { selected_recovery_provenance_sha256:
+        canonicalQwenBatchSha256(output.recovery_provenance) } : {}),
+      review_note: "Both retained recognitions differ solely in their phonetic spelling of the opening character name." }],
+  };
+  return { ...input, predecessor };
+}
+
+for (const secondTake of [false, true]) {
+  const input = extensionFixture({ secondTake });
+  assert.deepEqual(validateAsrOrthographyExtensionForTests(input).unit_ids, ["unit-2"]);
+  const applied = applyAsrOrthographyReviewForTests({ status: "blocked",
+    blockers: [{ code: "narration_confirmed_opening_token_mismatch" }],
+    warnings: [] }, input.evidence.units[0], sha("extension"));
+  assert.equal(applied.status, "passed_with_warnings");
+  assert.equal(applied.warnings.at(-1).confirmation_observed_phrase, "Baron");
+}
+assert.deepEqual(validateAsrOrthographyExtensionForTests(
+  extensionFixture({ possessive: true })).unit_ids, ["unit-2"]);
+for (const mutate of [
+  (input) => { input.evidence.predecessor_evidence_sha256 = sha("other"); },
+  (input) => { input.evidence.units[0].confirmation_observed_phrase = "Then"; },
+  (input) => { input.priorDelivery.units[1].decision.blockers.push(
+    { code: "narration_unsettled_raw_audio_edge" }); },
+  (input) => { input.priorDelivery.units[1].edge_alignment.status = "missing"; },
+  (input) => { input.evidence.units[0].primary_recognized_text += " twice";
+    input.priorDelivery.units[1].primary_recognized_text += " twice"; },
+  (input) => { input.currentManifest.units[1].audio_sha256 = sha("changed"); },
+  (input) => { input.evidence.units[0].unit_id = "unit-1"; },
+]) {
+  const input = extensionFixture();
+  mutate(input);
+  assert.throws(() => validateAsrOrthographyExtensionForTests(input));
+}
+
 {
   const input = amendmentFixture();
   assert.deepEqual(validateAsrOrthographyAmendmentForTests(input).unit_ids, ["unit-2"]);
@@ -337,6 +423,73 @@ try {
   await assert.rejects(() => loadAsrOrthographyReview(request), /snapshot/);
 } finally {
   await fs.rm(tempDir, { recursive: true, force: true });
+}
+
+const extensionDir = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-orthography-extension-"));
+try {
+  const episode = "ep_01";
+  const input = extensionFixture({ rootDir: extensionDir });
+  const base = fixture({ rootDir: extensionDir });
+  await fs.writeFile(base.evidence.units[0].audio_path, "audio");
+  await fs.writeFile(input.evidence.units[0].audio_path, "first-audio");
+  const baseSnapshotDir = path.join(extensionDir, "base-snapshots");
+  await fs.mkdir(baseSnapshotDir);
+  for (const [name, value] of [
+    ["provider_manifest", base.priorManifest],
+    ["unit_delivery_qa", base.priorDelivery],
+  ]) {
+    const target = path.join(baseSnapshotDir, `${name}.json`);
+    await fs.writeFile(target, JSON.stringify(value));
+    base.evidence[`pre_review_${name}_path`] = target;
+    base.evidence[`pre_review_${name}_sha256`] = sha(JSON.stringify(value));
+  }
+  base.priorReport.provider_output_manifest_sha256 =
+    base.evidence.pre_review_provider_manifest_sha256;
+  const baseReportPath = path.join(baseSnapshotDir, "narration_report.json");
+  await fs.writeFile(baseReportPath, JSON.stringify(base.priorReport));
+  base.evidence.pre_review_narration_report_path = baseReportPath;
+  base.evidence.pre_review_narration_report_sha256 = sha(JSON.stringify(base.priorReport));
+  const basePath = path.join(extensionDir,
+    `narration_asr_orthography_review_${episode}.json`);
+  await fs.writeFile(basePath, JSON.stringify(base.evidence));
+  input.evidence.predecessor_evidence_path = basePath;
+  input.evidence.predecessor_evidence_sha256 = sha(JSON.stringify(base.evidence));
+  input.priorReport.asr_orthography_review.evidence_sha256 =
+    input.evidence.predecessor_evidence_sha256;
+
+  const extensionSnapshotDir = path.join(extensionDir, "extension-snapshots");
+  await fs.mkdir(extensionSnapshotDir);
+  for (const [name, value] of [
+    ["provider_manifest", input.priorManifest],
+    ["unit_delivery_qa", input.priorDelivery],
+  ]) {
+    const target = path.join(extensionSnapshotDir, `${name}.json`);
+    await fs.writeFile(target, JSON.stringify(value));
+    input.evidence[`pre_review_${name}_path`] = target;
+    input.evidence[`pre_review_${name}_sha256`] = sha(JSON.stringify(value));
+  }
+  input.priorReport.provider_output_manifest_sha256 =
+    input.evidence.pre_review_provider_manifest_sha256;
+  const extensionReportPath = path.join(extensionSnapshotDir, "narration_report.json");
+  await fs.writeFile(extensionReportPath, JSON.stringify(input.priorReport));
+  input.evidence.pre_review_narration_report_path = extensionReportPath;
+  input.evidence.pre_review_narration_report_sha256 = sha(JSON.stringify(input.priorReport));
+  const extensionPath = path.join(extensionDir,
+    `narration_asr_orthography_extension_${episode}.json`);
+  await fs.writeFile(extensionPath, JSON.stringify(input.evidence));
+  const request = { episodeDir: extensionDir, episode, plan: input.plan,
+    identityFileSha256: identity, sourceScriptSha256: source,
+    planFileSha256: planFile, qualityContractSha256: quality,
+    currentManifest: input.currentManifest };
+  const loaded = await loadAsrOrthographyReview(request);
+  assert.deepEqual(loaded.unit_ids, ["unit-1", "unit-2"]);
+  assert.equal(loaded.evidence_path, extensionPath);
+  assert.equal(loaded.provenance.human_listening_performed, false);
+  await fs.writeFile(input.evidence.units[0].audio_path, "changed-audio");
+  await assert.rejects(() => loadAsrOrthographyReview(request),
+    /stale|non-exact/);
+} finally {
+  await fs.rm(extensionDir, { recursive: true, force: true });
 }
 
 console.log("narration ASR orthography review tests passed");

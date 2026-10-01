@@ -440,12 +440,31 @@ export function applyManualReconciliationRepairForTests(parsed, artifact, script
   const entityAppends = artifact.canonical_entity_appends ?? [];
   if (!Array.isArray(entityAppends)) throw new Error("Semantic reconciliation entity appends must be an array");
   const knownEntityIds = new Set((patched.canonical_entities ?? []).map(row => row.entity_id));
+  const missingVisibleSubjects = new Set(canonicalVisibleEntityCoverageFindingsForTests(patched, patched.scenes)
+    .filter((finding) => finding.code === "canonical_visible_actor_missing")
+    .map((finding) => identityLabel(finding.subject)));
   for (const row of entityAppends) {
     if (!/^[a-z][a-z0-9_]+$/.test(row?.entity_id ?? "") || knownEntityIds.has(row.entity_id)
-      || row.kind !== "group" || !row.display_name?.trim() || !Array.isArray(row.aliases) || !row.aliases.length
+      || !["group", "person"].includes(row.kind) || !row.display_name?.trim() || !Array.isArray(row.aliases) || !row.aliases.length
       || !Array.isArray(row.evidence) || !row.evidence.length
       || row.evidence.some(item => !item?.exact_excerpt?.trim() || !script.includes(item.exact_excerpt) || !(Number(item.confidence) >= 0 && Number(item.confidence) <= 1))) {
-      throw new Error(`Invalid evidence-backed canonical group append: ${row?.entity_id ?? "unknown"}`);
+      throw new Error(`Invalid evidence-backed canonical entity append: ${row?.entity_id ?? "unknown"}`);
+    }
+    if (row.kind === "person") {
+      const displayLabel = identityLabel(row.display_name);
+      const existingLabels = (patched.canonical_entities ?? []).flatMap((entity) => [entity.display_name, ...(entity.aliases ?? [])]).filter(Boolean);
+      const cited = (label) => {
+        const phrase = identityLabel(label);
+        return phrase && row.evidence.some((item) => (` ${identityLabel(item.exact_excerpt)} `).includes(` ${phrase} `));
+      };
+      if (!missingVisibleSubjects.has(displayLabel)
+        || row.entity_id !== sanitizeCanonicalIdForTests(row.display_name)
+        || (patched.canonical_entities ?? []).some((entity) => sanitizeCanonicalIdForTests(entity.entity_id) === row.entity_id)
+        || ![row.display_name, ...row.aliases].every((label) => typeof label === "string" && label.trim() && cited(label))
+        || [row.display_name, ...row.aliases].some((label) => existingLabels.some((existing) => labelsDescribeSameEntity(label, existing)))) {
+        throw new Error(`Person append must name one missing visible actor with distinct, cited identity: ${row.entity_id}`);
+      }
+      missingVisibleSubjects.delete(displayLabel);
     }
     knownEntityIds.add(row.entity_id);
     patched.canonical_entities.push(structuredClone(row));

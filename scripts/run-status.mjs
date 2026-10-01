@@ -3625,6 +3625,67 @@ async function qwenExactBoundaryRepairStatus({
       : "Operator hold: implement a guarded exact-boundary repair for the material defects; do not rerun all narration units or waive confirmed omissions." };
 }
 
+export async function reviewedAutomatedRetryStatusForTests({
+  episodeDir, episode, ttsReport, ttsReportPath, currentScriptHash,
+} = {}) {
+  const evidencePath = path.join(episodeDir,
+    `narration_confirmed_retry_evidence_${episode}.json`);
+  const evidence = await readJson(evidencePath, null);
+  if (!evidence) return null;
+  const hold = (reason) => ({ done: false, state: "blocked",
+    evidence: `Exact narration retake evidence requires review: ${reason}`,
+    next_command_shape: "Operator hold: repair the current hash-bound exact-unit evidence; do not rerun narration." });
+  try {
+    const blockedIds = new Set((ttsReport?.blockers ?? [])
+      .map((row) => String(row.unit_id ?? "")).filter(Boolean));
+    const requestedIds = (evidence.confirmed_units ?? [])
+      .map((row) => String(row.unit_id ?? ""));
+    const planPath = path.join(episodeDir, "narration_generation_plan.json");
+    const plan = await readJson(planPath, null);
+    const planFileSha256 = await fileSha256(planPath);
+    const reportSha256 = await fileSha256(ttsReportPath);
+    if (ttsReport?.status !== "blocked"
+      || evidence.evidence_basis !== "reviewed_automated_delivery_qa"
+      || !requestedIds.length || requestedIds.some((id) => !blockedIds.has(id))
+      || plan?.source_script_hash !== currentScriptHash) {
+      throw new Error("receipt is not a subset of the current blocked source and plan");
+    }
+    if (requestedIds.length < blockedIds.size) {
+      const archivePath = evidence.pre_retry_narration_report_path;
+      const archiveInfo = path.isAbsolute(String(archivePath ?? ""))
+        && path.resolve(archivePath).startsWith(`${path.resolve(episodeDir)}${path.sep}`)
+        && path.resolve(archivePath) !== path.resolve(ttsReportPath)
+        ? await fs.lstat(archivePath).catch(() => null) : null;
+      if (!archiveInfo?.isFile() || archiveInfo.nlink !== 1
+        || await fileSha256(archivePath) !== reportSha256) {
+        throw new Error("subset receipt lacks an immutable exact blocked-report snapshot");
+      }
+    }
+    validateConfirmedRetryEvidenceForTests({
+      evidence, requestedUnitIds: requestedIds,
+      planSha256: plan.plan_sha256, priorReport: ttsReport,
+      priorReportSha256: reportSha256,
+      currentCandidates: ttsReport.results ?? [],
+      sourceScriptSha256: currentScriptHash, planFileSha256,
+    });
+    const selected = new Map((ttsReport.results ?? [])
+      .map((row) => [String(row.unit_id), row]));
+    for (const id of requestedIds) {
+      const audio = selected.get(id);
+      if (!path.isAbsolute(String(audio?.audio_path ?? ""))
+        || !path.resolve(audio.audio_path).startsWith(`${path.resolve(episodeDir)}${path.sep}`)
+        || await fileSha256(audio.audio_path) !== audio.audio_sha256) {
+        throw new Error(`selected audio changed for ${id}`);
+      }
+    }
+    return { done: false, state: "blocked",
+      evidence: `Reviewed exact delivery QA permits one retake of ${requestedIds.length} of ${blockedIds.size} blocked units; every other selected WAV remains preserved`,
+      next_command_shape: `node bin/goldflow.mjs tts narrate --episode-dir ${episodeDir} --confirmed-retry-unit-ids ${requestedIds.join(",")} --confirmed-retry-evidence ${evidencePath}` };
+  } catch (error) {
+    return hold(error instanceof Error ? error.message : String(error));
+  }
+}
+
 async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash, identity) {
   if (!currentScriptHash) return { done: false, evidence: "script_clean.md missing" };
   const narrationQualityContract = narrationQualityContractForIdentity(identity);
@@ -3968,20 +4029,10 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
     if (exactBoundaryRepair) return exactBoundaryRepair;
     if (narrationQualityContract && ttsReport.status === "blocked"
       && policy.primary.provider === "qwen_local") {
-      const retryEvidencePath = path.join(episodeDir, `narration_confirmed_retry_evidence_${episode}.json`);
-      const retryEvidence = await readJson(retryEvidencePath, null);
-      const blockedIds = [...new Set((ttsReport.blockers ?? []).map((row) => row.unit_id).filter(Boolean))];
-      const retryIds = (retryEvidence?.confirmed_units ?? []).map((row) => row.unit_id);
-      if (blockedIds.length && retryEvidence?.evidence_basis === "reviewed_automated_delivery_qa"
-        && retryEvidence.source_script_sha256 === currentScriptHash
-        && retryEvidence.narration_generation_plan_sha256 === ttsReport.narration_generation_plan_sha256
-        && retryEvidence.pre_retry_narration_report_sha256 === await fileSha256(ttsReportPath)
-        && canonicalQwenBatchSha256([...blockedIds].sort())
-          === canonicalQwenBatchSha256([...retryIds].sort())) {
-        return { done: false, state: "blocked",
-          evidence: `Reviewed automated delivery QA requires exact retakes of ${blockedIds.length} units; accepted units remain immutable`,
-          next_command_shape: `node bin/goldflow.mjs tts narrate --episode-dir ${episodeDir} --confirmed-retry-unit-ids ${blockedIds.join(",")} --confirmed-retry-evidence ${retryEvidencePath}` };
-      }
+      const exactRetry = await reviewedAutomatedRetryStatusForTests({
+        episodeDir, episode, ttsReport, ttsReportPath, currentScriptHash,
+      });
+      if (exactRetry) return exactRetry;
     }
     if (ttsReport.status === "blocked" && (ttsReport.results ?? []).some((row) =>
       row.recovery_provenance?.evidence_basis === "reviewed_structural_no_audio")) {

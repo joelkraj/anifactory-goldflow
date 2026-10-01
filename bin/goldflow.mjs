@@ -34,6 +34,7 @@ import { orphanedImageStreamSealAdmission } from "../scripts/lib/orphaned-image-
 import { openartTriageAdmission } from "../scripts/lib/openart-visual-restart.mjs";
 import { falBlockedStageRecoveryAdmission } from "../scripts/lib/fal-production-state.mjs";
 import { interruptedQwenGuardAdmission } from "../scripts/lib/qwen-interrupted-guard.mjs";
+import { exactBlockedNarrationRetakeAdmission } from "../scripts/lib/narration-exact-retake-guard.mjs";
 import { asrOrthographyGuardAdmission } from "../scripts/lib/narration-asr-orthography-review.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -120,6 +121,17 @@ function enforceWorkflowGuard(commandName, subcommandName, scriptArgs, episodeDi
   if (interruptedQwen.applicable) {
     if (!interruptedQwen.allowed) {
       console.error(`Workflow guard blocked interrupted Qwen recovery: ${interruptedQwen.reason}`);
+      if (result.next_command_shape) console.error(`Next valid command shape: ${result.next_command_shape}`);
+      process.exit(1);
+    }
+    return;
+  }
+  const exactNarrationRetake = exactBlockedNarrationRetakeAdmission(
+    result, commandName, subcommandName, parsedFlags,
+  );
+  if (exactNarrationRetake.applicable) {
+    if (!exactNarrationRetake.allowed) {
+      console.error(`Workflow guard blocked narration retake: ${exactNarrationRetake.reason}`);
       if (result.next_command_shape) console.error(`Next valid command shape: ${result.next_command_shape}`);
       process.exit(1);
     }

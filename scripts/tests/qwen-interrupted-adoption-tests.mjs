@@ -10,6 +10,7 @@ import {
   QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT,
 } from "../lib/qwen-liam-batch-contract.mjs";
 import {
+  verifyCompletedInterruptedQwenRunner,
   verifyInterruptedQwenAdoptionReceipt,
   verifyInterruptedQwenFinalRun,
   verifyInterruptedQwenInventory,
@@ -204,10 +205,16 @@ try {
     voice_id: policy.primary.voice_id, voice_sha256: policy.primary.voice_sha256,
     voice_continuity_contract: policy.primary.voice_continuity_contract,
     qa: { ...qa, audio_sha256: row.wav_sha256 } }));
+  const originalRun = { attempt: 1, status: "interrupted_after_completed_cohorts",
+    synthesis_mode: policy.synthesis_contract.mode,
+    jobs_path: jobPath, jobs_sha256: jobHash,
+    cohort_events_path: eventsPath, cohort_events_sha256: eventsHash,
+    runner_report_path: null };
   const reportHash = await writeJson(reportPath, { schema: "goldflow_narration_tts_report_v1",
     status: "interrupted_adoption_partial", narration_generation_plan_sha256: planSha256,
     narration_generation_plan_file_sha256: planFileHash,
-    recovery_scope: { adoption_receipt_path: receiptPath }, results: reportRows });
+    recovery_scope: { adoption_receipt_path: receiptPath },
+    synthesis_runs: [originalRun], results: reportRows });
   const qaHash = await writeJson(unitQaPath, { schema: "goldflow_narration_tts_unit_qa_v1",
     status: "interrupted_adoption_partial", narration_generation_plan_sha256: planSha256,
     narration_generation_plan_file_sha256: planFileHash,
@@ -320,6 +327,7 @@ try {
   await writeJson(resumeSidecarPath, resumeResult);
   const resumeRunPath = path.join(outputDir, "runs/resume.json");
   const resumeRunHash = await writeJson(resumeRunPath, {
+    schema: "goldflow_local_tts_production_run_v2",
     status: "passed", synthesis_mode: "serial_incomplete_unit_resume_v1",
     synthesis_contract: policy.synthesis_contract,
     batch_plan_sha256: batchPlan.batch_plan_sha256,
@@ -332,6 +340,9 @@ try {
     results_restored_to_original_order: true,
     original_order_unit_ids: remainingIds,
     jobs_path: resumeJobPath, jobs_sha256: resumeJobHash,
+    cohort_event_path: path.join(outputDir, "runs/resume-cohorts.jsonl"),
+    cohort_event_count: 0, cohort_executions: [],
+    job_count: 1, result_count: 1, failed_result_count: 0,
     pre_synthesis_gate_file_sha256: resumeGateFileHash,
     pre_synthesis_gate_sha256: resumeGateHashValue,
     results: [resumeResult],
@@ -342,11 +353,7 @@ try {
       audio_path: resumeWavPath, audio_sha256: resumeWavHash,
       synthesis_identity_sha256: resumeIdentityHash }],
     synthesis_runs: [
-      { attempt: 1, status: "interrupted_after_completed_cohorts",
-        synthesis_mode: policy.synthesis_contract.mode,
-        jobs_path: jobPath, jobs_sha256: jobHash,
-        cohort_events_path: eventsPath, cohort_events_sha256: eventsHash,
-        runner_report_path: null },
+      originalRun,
       { attempt: 1, synthesis_mode: "serial_incomplete_unit_resume_v1",
         batch_plan_sha256: batchPlan.batch_plan_sha256,
         report_path: resumeRunPath, report_sha256: resumeRunHash },
@@ -357,6 +364,29 @@ try {
     batchPlan, policy, finalReport };
   const finalCheck = await verifyInterruptedQwenFinalRun(finalInputs);
   assert.deepEqual(finalCheck.resumed_unit_ids, remainingIds);
+  const completedInputs = { ...finalInputs, finalReport: undefined,
+    runnerReportPath: resumeRunPath, receiptPath };
+  const completed = await verifyCompletedInterruptedQwenRunner(completedInputs);
+  assert.equal(completed.runner_sha256, resumeRunHash);
+  const finalizeStatus = { episode_dir: episodeDir, current_stage: "qwen_tts_stitch",
+    current_stage_state: "blocked",
+    next_command_shape: `node bin/goldflow.mjs tts finalize-interrupted --episode-dir ${episodeDir} --interrupted-adoption-receipt ${receiptPath} --completed-runner-report ${resumeRunPath}` };
+  const finalizeFlags = { "episode-dir": episodeDir,
+    "interrupted-adoption-receipt": receiptPath,
+    "completed-runner-report": resumeRunPath,
+    "finalize-interrupted": "true" };
+  assert.equal(interruptedQwenGuardAdmission(finalizeStatus, "tts", "finalize-interrupted",
+    finalizeFlags).allowed, true);
+  assert.equal(interruptedQwenGuardAdmission(finalizeStatus, "tts", "finalize-interrupted",
+    { ...finalizeFlags, "completed-runner-report": path.join(outputDir, "runs/other.json") }).allowed, false);
+  assert.equal(interruptedQwenGuardAdmission({ ...finalizeStatus,
+    current_stage_state: "passed" }, "tts", "finalize-interrupted", finalizeFlags).allowed, false);
+  await fs.writeFile(path.join(unitDir, "unbound.json"), "{}");
+  await assert.rejects(verifyCompletedInterruptedQwenRunner(completedInputs), /output tree/);
+  await fs.unlink(path.join(unitDir, "unbound.json"));
+  await fs.writeFile(path.join(outputDir, "runs/resume-cohorts.jsonl"), "unexpected event\n");
+  await assert.rejects(verifyCompletedInterruptedQwenRunner(completedInputs), /not empty/);
+  await fs.unlink(path.join(outputDir, "runs/resume-cohorts.jsonl"));
   await fs.writeFile(resumeWavPath, "tampered-resume");
   await assert.rejects(verifyInterruptedQwenFinalRun(finalInputs), /waveform/);
   await fs.writeFile(resumeWavPath, "mock-resumed-waveform");

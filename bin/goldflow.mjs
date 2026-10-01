@@ -700,6 +700,8 @@ if (command === "crime-proof" && !helpRequested) {
   run("narration-tts-episode.mjs", flags);
 } else if (command === "tts" && subcommand === "adopt-interrupted") {
   run("narration-tts-episode.mjs", ["--adopt-interrupted", "true", ...flags]);
+} else if (command === "tts" && subcommand === "finalize-interrupted") {
+  run("narration-tts-episode.mjs", ["--finalize-interrupted", "true", ...flags]);
 } else if (command === "tts" && subcommand === "import-provider") {
   run("narration-provider-output-import.mjs", flags);
 } else if (command === "tts" && subcommand === "finalize-provider") {

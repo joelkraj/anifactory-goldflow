@@ -37,7 +37,11 @@ import {
 } from "./lib/image-provider-policy.mjs";
 import { findSourceCompatibleHybridDeadletters } from "./hybrid-browser-image-pool.mjs";
 import { sha256File as streamSha256File } from "./lib/file-hash.mjs";
-import { verifyInterruptedQwenAdoptionReceipt, verifyInterruptedQwenFinalRun } from "./lib/qwen-interrupted-adoption.mjs";
+import {
+  verifyCompletedInterruptedQwenRunner,
+  verifyInterruptedQwenAdoptionReceipt,
+  verifyInterruptedQwenFinalRun,
+} from "./lib/qwen-interrupted-adoption.mjs";
 import { loadNarrationSourceStructure } from "./lib/narration-source-structure.mjs";
 import { loadLowMarginDisposition } from "./lib/narration-low-margin-disposition.mjs";
 import { loadAsrOrthographyReview } from "./lib/narration-asr-orthography-review.mjs";
@@ -3633,9 +3637,40 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
       try {
         const planPath = path.join(episodeDir, "narration_generation_plan.json");
         const plan = await readJson(planPath, null);
+        const outputDir = path.join(episodeDir, "assets/audio/narration_tts");
+        const runsDir = path.join(outputDir, "runs");
+        const completedRunners = [];
+        for (const name of await fs.readdir(runsDir).catch(() => [])) {
+          if (!name.endsWith(".json")) continue;
+          const candidatePath = path.join(runsDir, name);
+          const candidate = await readJson(candidatePath, null);
+          if (candidate?.synthesis_mode === "serial_incomplete_unit_resume_v1"
+            && candidate?.schema === "goldflow_local_tts_production_run_v2") {
+            completedRunners.push(candidatePath);
+          }
+        }
+        if (completedRunners.length) {
+          if (completedRunners.length !== 1) {
+            throw new Error("multiple completed serial runner reports require exact operator triage");
+          }
+          await verifyCompletedInterruptedQwenRunner({
+            runnerReportPath: completedRunners[0], receiptPath, episodeDir,
+            outputDir,
+            identityPath: path.join(episodeDir, "run_identity.json"),
+            planPath, scriptPath: path.join(episodeDir, "script_clean.md"),
+            reportPath: ttsReportPath,
+            unitQaPath: path.join(episodeDir, `narration_tts_unit_qa_${episode}.json`),
+            units: narrationPlanUnitsForStatus(plan),
+            planSha256: plan?.plan_sha256 ?? await fileSha256(planPath),
+            batchPlan: plan?.qwen_liam_batch_plan, policy,
+          });
+          return { done: false, state: "blocked",
+            evidence: "Exact serial Qwen runner is complete; its outputs need no-model canonical QA and stitching",
+            next_command_shape: `node bin/goldflow.mjs tts finalize-interrupted --episode-dir ${episodeDir} --interrupted-adoption-receipt ${receiptPath} --completed-runner-report ${completedRunners[0]}` };
+        }
         const receipt = await verifyInterruptedQwenAdoptionReceipt({
           receiptPath, episodeDir,
-          outputDir: path.join(episodeDir, "assets/audio/narration_tts"),
+          outputDir,
           identityPath: path.join(episodeDir, "run_identity.json"),
           planPath, scriptPath: path.join(episodeDir, "script_clean.md"),
           reportPath: ttsReportPath,
@@ -3651,7 +3686,8 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
           next_command_shape: `node bin/goldflow.mjs tts narrate --episode-dir ${episodeDir} --concurrency 1 --batch-size ${policy.synthesis_contract?.nominal_batch_size ?? 1} --interrupted-adoption-receipt ${receiptPath}` };
       } catch (error) {
         return { done: false, state: "blocked",
-          evidence: `Interrupted Qwen adoption receipt is stale or incomplete: ${error.message}` };
+          evidence: `Interrupted Qwen recovery evidence is stale or incomplete: ${error.message}`,
+          next_command_shape: "Operator hold: inspect the exact serial runner and adoption evidence; do not rerun Qwen." };
       }
     }
     // A changed transcript comparator can clear a blocked ASR spelling while

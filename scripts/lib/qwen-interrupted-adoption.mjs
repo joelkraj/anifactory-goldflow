@@ -465,3 +465,84 @@ export async function verifyInterruptedQwenFinalRun({
   return { receipt, runner, adopted_unit_ids: receipt.accepted_unit_ids,
     resumed_unit_ids: remaining };
 }
+
+// A serial interrupted-resume runner may finish writing every unit and its
+// immutable report before the controller reaches QA. Replaying that completed
+// report is safe only when the original adoption, the exact complement, the
+// authorization gate, every waveform/sidecar, and the whole output set agree.
+// This helper is read-only; the caller may materialize the truthful empty
+// cohort ledger only after it passes.
+export async function verifyCompletedInterruptedQwenRunner({
+  runnerReportPath, receiptPath, episodeDir, outputDir,
+  identityPath, planPath, scriptPath, reportPath, unitQaPath,
+  units, planSha256, batchPlan, policy,
+} = {}) {
+  const root = path.resolve(episodeDir);
+  const completedPath = path.resolve(runnerReportPath);
+  required(inside(path.join(outputDir, "runs"), completedPath),
+    "completed runner report must be episode-local");
+  const adoption = await verifyInterruptedQwenAdoptionReceipt({
+    receiptPath, episodeDir, outputDir, identityPath, planPath, scriptPath,
+    reportPath, unitQaPath, units, planSha256,
+    requireExactOutputSet: false,
+  });
+  const runnerBytes = await fs.readFile(completedPath);
+  const runner = JSON.parse(runnerBytes.toString("utf8"));
+  const runnerSha256 = sha256(runnerBytes);
+  const expectedEventsPath = completedPath.replace(/\.json$/iu, "-cohorts.jsonl");
+  required(runner.schema === "goldflow_local_tts_production_run_v2"
+    && runner.status === "passed"
+    && runner.synthesis_mode === QWEN_LIAM_INCOMPLETE_UNIT_RESUME_MODE
+    && Number(runner.cohort_event_count) === 0
+    && same(runner.cohort_executions ?? [], [])
+    && path.resolve(runner.cohort_event_path) === expectedEventsPath
+    && Number(runner.job_count) === adoption.receipt.never_submitted_unit_ids.length
+    && Number(runner.result_count) === adoption.receipt.never_submitted_unit_ids.length
+    && Number(runner.failed_result_count) === 0,
+  "completed runner is not the exact zero-cohort successful serial complement");
+  const eventStat = await fs.stat(expectedEventsPath).catch(() => null);
+  required(!eventStat || (eventStat.isFile() && eventStat.size === 0),
+    "serial cohort event ledger is not empty");
+  await verifyInterruptedQwenFinalRun({
+    episodeDir, outputDir, identityPath, planPath, scriptPath,
+    reportPath, unitQaPath, units, planSha256, batchPlan, policy,
+    finalReport: {
+      synthesis_runs: [
+        ...(adoption.report.synthesis_runs ?? []),
+        {
+          attempt: 1,
+          synthesis_mode: QWEN_LIAM_INCOMPLETE_UNIT_RESUME_MODE,
+          batch_plan_sha256: batchPlan.batch_plan_sha256,
+          report_path: completedPath,
+          report_sha256: runnerSha256,
+        },
+      ],
+      results: [],
+    },
+  });
+  const expectedFiles = new Set((adoption.receipt.accepted_artifacts ?? [])
+    .flatMap((row) => [row.audio_path, row.synthesis_sidecar_path])
+    .concat((runner.results ?? []).flatMap((row) => [row.output_path, row.sidecar_path]))
+    .map((filePath) => path.resolve(filePath)));
+  const unitDir = path.join(outputDir, "units", "qwen_local");
+  const actualFiles = (await fs.readdir(unitDir))
+    .filter((name) => /\.(?:wav|json)$/iu.test(name))
+    .map((name) => path.join(unitDir, name));
+  required(expectedFiles.size === 2 * units.length
+    && actualFiles.length === expectedFiles.size
+    && actualFiles.every((filePath) => expectedFiles.has(path.resolve(filePath))),
+  "completed runner output tree contains a missing, duplicate, or unbound file");
+  return {
+    runner,
+    runner_path: completedPath,
+    runner_sha256: runnerSha256,
+    jobs_path: path.resolve(runner.jobs_path),
+    jobs_sha256: runner.jobs_sha256,
+    cohort_events_path: expectedEventsPath,
+    empty_cohort_events_sha256: sha256(""),
+    adoption_receipt_path: adoption.receipt_path,
+    adoption_receipt_sha256: adoption.receipt_sha256,
+    accepted_unit_ids: adoption.receipt.accepted_unit_ids,
+    resumed_unit_ids: adoption.receipt.never_submitted_unit_ids,
+  };
+}

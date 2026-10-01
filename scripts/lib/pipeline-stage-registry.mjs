@@ -126,6 +126,7 @@ const stages = [
     commands: [
       "tts narrate",
       "tts adopt-interrupted",
+      "tts finalize-interrupted",
       "tts import-provider",
       "tts finalize-provider",
       "tts repair-boundary",

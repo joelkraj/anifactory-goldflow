@@ -68,6 +68,7 @@ import {
   narrationPreSynthesisGateSha256,
 } from "./lib/narration-pre-synthesis-gate.mjs";
 import {
+  verifyCompletedInterruptedQwenRunner,
   verifyInterruptedQwenAdoptionReceipt,
   verifyInterruptedQwenInventory,
 } from "./lib/qwen-interrupted-adoption.mjs";
@@ -2414,6 +2415,7 @@ export async function runSynthesis({
   scriptPath,
   scriptSha256,
   onCohortComplete = null,
+  completedRunner = null,
 }) {
   if (route !== "qwen") {
     throw new Error(`Qwen Liam production forbids alternate synthesis route ${route}`);
@@ -2475,38 +2477,49 @@ export async function runSynthesis({
         recoveryProvenanceByUnit.get(String(unit.unit_id)) ?? null,
     })),
   };
-  const jobsPath = path.join(outputDir, "jobs", `${invocationId}-${route}-attempt-${attempt}.json`);
-  const reportPath = path.join(outputDir, "runs", `${invocationId}-${route}-attempt-${attempt}.json`);
-  const cohortEventsPath = path.join(
+  const jobsPath = completedRunner?.jobs_path ?? path.join(outputDir, "jobs", `${invocationId}-${route}-attempt-${attempt}.json`);
+  const reportPath = completedRunner?.runner_path ?? path.join(outputDir, "runs", `${invocationId}-${route}-attempt-${attempt}.json`);
+  const cohortEventsPath = completedRunner?.cohort_events_path ?? path.join(
     outputDir,
     "runs",
     `${invocationId}-${route}-attempt-${attempt}-cohorts.jsonl`,
   );
-  await atomicWriteJson(jobsPath, jobs);
-  const args = [
-    runnerPath,
-    "--route", route,
-    "--jobs", jobsPath,
-    "--output-dir", path.join(outputDir, "units", provider),
-    "--report", reportPath,
-    "--events", cohortEventsPath,
-  ];
-  args.push(
-    "--qwen-reference-audio", policy.primary.reference_audio_path,
-    "--qwen-reference-text", policy.primary.reference_text,
-  );
-  const runnerExecution = await run(python, args, {
-    progressJsonlPath: cohortEventsPath,
-    onProgressEvent: async (event) => {
-      if (event?.schema !== "goldflow_local_tts_cohort_event_v1"
-        || event?.event !== "cohort_complete") return;
-      if (event.jobs_sha256 !== await sha256File(jobsPath)
-        || event.batch_plan_sha256 !== batchPlan.batch_plan_sha256) {
-        throw new Error(`Stale Qwen cohort event for ${event.cohort_id ?? "unknown"}`);
-      }
-      if (typeof onCohortComplete === "function") await onCohortComplete(event);
-    },
-  });
+  let runnerExecution = { progressErrors: [] };
+  if (completedRunner) {
+    const [storedJobs, storedReportHash, storedJobsHash] = await Promise.all([
+      readJson(jobsPath, null), sha256File(reportPath), sha256File(jobsPath),
+    ]);
+    if (synthesisMode !== QWEN_LIAM_INCOMPLETE_UNIT_RESUME_MODE
+      || storedReportHash !== completedRunner.runner_sha256
+      || storedJobsHash !== completedRunner.jobs_sha256
+      || JSON.stringify(storedJobs) !== JSON.stringify(jobs)) {
+      throw new Error("Completed interrupted Qwen runner differs from this exact no-synthesis job");
+    }
+  } else {
+    await atomicWriteJson(jobsPath, jobs);
+    const args = [
+      runnerPath,
+      "--route", route,
+      "--jobs", jobsPath,
+      "--output-dir", path.join(outputDir, "units", provider),
+      "--report", reportPath,
+      "--events", cohortEventsPath,
+      "--qwen-reference-audio", policy.primary.reference_audio_path,
+      "--qwen-reference-text", policy.primary.reference_text,
+    ];
+    runnerExecution = await run(python, args, {
+      progressJsonlPath: cohortEventsPath,
+      onProgressEvent: async (event) => {
+        if (event?.schema !== "goldflow_local_tts_cohort_event_v1"
+          || event?.event !== "cohort_complete") return;
+        if (event.jobs_sha256 !== await sha256File(jobsPath)
+          || event.batch_plan_sha256 !== batchPlan.batch_plan_sha256) {
+          throw new Error(`Stale Qwen cohort event for ${event.cohort_id ?? "unknown"}`);
+        }
+        if (typeof onCohortComplete === "function") await onCohortComplete(event);
+      },
+    });
+  }
   const report = await readJson(reportPath, null);
   if (!["passed", "completed_with_job_failures"].includes(report?.status)
     || report.job_count !== units.length
@@ -2519,12 +2532,17 @@ export async function runSynthesis({
       !== JSON.stringify(policy.synthesis_contract)) {
     throw new Error(`Invalid ${route} production runner report: ${reportPath}`);
   }
-  if (synthesisMode === QWEN_LIAM_EXACT_UNIT_RECOVERY_MODE
+  if ((synthesisMode === QWEN_LIAM_EXACT_UNIT_RECOVERY_MODE
+      || synthesisMode === QWEN_LIAM_INCOMPLETE_UNIT_RESUME_MODE)
     && Number(report.cohort_event_count) === 0) {
     // The runner removes a stale event file at startup and exact-unit recovery
     // intentionally emits no batch cohort events. Materialize that empty ledger
     // so the run receipt can still bind its hash.
-    await fs.writeFile(cohortEventsPath, "", "utf8");
+    const priorEvents = await fs.stat(cohortEventsPath).catch(() => null);
+    if (priorEvents && (!priorEvents.isFile() || priorEvents.size !== 0)) {
+      throw new Error("Serial recovery cohort event ledger is not empty");
+    }
+    if (!priorEvents) await fs.writeFile(cohortEventsPath, "", { flag: "wx" });
   }
   const expectedModel = policy.primary;
   if (report.provider !== provider
@@ -3157,6 +3175,7 @@ export async function adoptInterruptedQwenFirstTakes(flags = {}) {
 
 async function main() {
   const flags = parseFlags(process.argv.slice(2));
+  const finalizeInterrupted = boolFlag(flags["finalize-interrupted"]);
   const channel = flags.channel ?? "53rebirth";
   const week = flags.week ?? "current";
   const episode = flags.episode ?? "ep_01";
@@ -3190,7 +3209,10 @@ async function main() {
     identityPath,
     priorGate: priorPreSynthesisGate,
   });
-  await atomicWriteJson(preSynthesisGatePath, bootstrapGate);
+  if (finalizeInterrupted && !priorPreSynthesisGate) {
+    throw new Error("No-model interrupted finalization requires the retained authorization gate.");
+  }
+  if (!finalizeInterrupted) await atomicWriteJson(preSynthesisGatePath, bootstrapGate);
   const historicalSynthesisAuthorized =
     bootstrapGate.historical_synthesis_authorized;
   const scriptPath = path.resolve(
@@ -3429,7 +3451,7 @@ async function main() {
     ...gateInputs,
     synthesisScope: preliminarySynthesisScope,
   });
-  await atomicWriteJson(preSynthesisGatePath, preSynthesisGate);
+  if (!finalizeInterrupted) await atomicWriteJson(preSynthesisGatePath, preSynthesisGate);
   if (preSynthesisGate.gate_sha256
       !== narrationPreSynthesisGateSha256(preSynthesisGate)
     || preSynthesisGate.status !== "passed") {
@@ -3514,6 +3536,11 @@ async function main() {
   ).trim()
     ? path.resolve(flags["interrupted-adoption-receipt"])
     : null;
+  const completedRunnerReportPath = String(
+    flags["completed-runner-report"] ?? "",
+  ).trim()
+    ? path.resolve(flags["completed-runner-report"])
+    : null;
   const stitchRepairTailUnitIds = String(
     flags["stitch-repair-tail-unit-ids"] ?? "",
   ).split(",").map((value) => value.trim()).filter(Boolean);
@@ -3540,6 +3567,13 @@ async function main() {
       || flags["allow-full-stage-rerun"])) {
     throw new Error("Interrupted-Qwen adoption resume cannot be combined with retakes, manual acceptance, stitch repair, or workflow bypass.");
   }
+  if (finalizeInterrupted && (!interruptedAdoptionReceiptPath
+    || !completedRunnerReportPath || dryRun || planOnly)) {
+    throw new Error("No-model interrupted finalization requires its adoption receipt and completed runner report, without dry-run or plan-only.");
+  }
+  if (!finalizeInterrupted && completedRunnerReportPath) {
+    throw new Error("A completed runner report is accepted only by the no-model interrupted finalizer.");
+  }
   if (requestedRecoveryScope && !String(
     flags["confirmed-retry-evidence"] ?? "",
   ).trim()) {
@@ -3563,6 +3597,7 @@ async function main() {
     ? createHash("sha256").update(priorUnitQaBuffer).digest("hex")
     : null;
   let interruptedAdoption = null;
+  let completedInterruptedRunner = null;
   if (priorNarrationReport?.status === "interrupted_adoption_partial"
     && !interruptedAdoptionReceiptPath) {
     throw new Error("Interrupted-Qwen partial checkpoint requires --interrupted-adoption-receipt; unscoped synthesis is forbidden.");
@@ -3575,6 +3610,15 @@ async function main() {
       receiptPath: interruptedAdoptionReceiptPath,
       episodeDir, outputDir, identityPath, planPath, scriptPath,
       reportPath, unitQaPath, units, planSha256,
+      requireExactOutputSet: !finalizeInterrupted,
+    });
+  }
+  if (finalizeInterrupted) {
+    completedInterruptedRunner = await verifyCompletedInterruptedQwenRunner({
+      runnerReportPath: completedRunnerReportPath,
+      receiptPath: interruptedAdoptionReceiptPath,
+      episodeDir, outputDir, identityPath, planPath, scriptPath,
+      reportPath, unitQaPath, units, planSha256, batchPlan, policy,
     });
   }
   if (!priorNarrationReport || !priorUnitQa) {
@@ -3763,17 +3807,26 @@ async function main() {
       );
     }
   }
-  preSynthesisGate = buildNarrationPreSynthesisGate({
+  const expectedPreSynthesisGate = buildNarrationPreSynthesisGate({
     ...gateInputs,
     synthesisScope: finalSynthesisScope,
   });
-  await atomicWriteJson(preSynthesisGatePath, preSynthesisGate);
+  preSynthesisGate = finalizeInterrupted
+    ? await readJson(preSynthesisGatePath, null)
+    : expectedPreSynthesisGate;
+  if (!finalizeInterrupted) await atomicWriteJson(preSynthesisGatePath, preSynthesisGate);
   let preSynthesisGateFileSha256 = await sha256File(preSynthesisGatePath);
-  if (preSynthesisGate.gate_sha256
+  if (!preSynthesisGate
+    || preSynthesisGate.gate_sha256
       !== narrationPreSynthesisGateSha256(preSynthesisGate)
-    || preSynthesisGate.status !== "passed") {
+    || preSynthesisGate.status !== "passed"
+    || (finalizeInterrupted && (
+      preSynthesisGate.authorization?.validation_gate_sha256
+        !== expectedPreSynthesisGate.gate_sha256
+      || preSynthesisGateFileSha256
+        !== completedInterruptedRunner.runner.pre_synthesis_gate_file_sha256))) {
     throw new Error(
-      `Narration pre-synthesis gate blocked before helper import/model load: ${JSON.stringify(preSynthesisGate.findings)}`,
+      `Narration pre-synthesis gate blocked before helper import/model load: ${JSON.stringify(preSynthesisGate?.findings ?? [])}`,
     );
   }
   if (alreadyComplete && !allowAlreadyCompleteFinalization) {
@@ -3889,7 +3942,7 @@ async function main() {
     throw new Error("--unit-qa-whisper-model is production-locked to small");
   }
   ensureArg("--unit-qa-whisper-model", "small");
-  if (!manualReviewEvidencePath) {
+  if (!manualReviewEvidencePath && !finalizeInterrupted) {
     preSynthesisGate = authorizeNarrationPreSynthesisGate(preSynthesisGate);
     await atomicWriteJson(preSynthesisGatePath, preSynthesisGate);
     preSynthesisGateFileSha256 = await sha256File(preSynthesisGatePath);
@@ -4047,6 +4100,7 @@ async function main() {
         scriptPath,
         scriptSha256: scriptHash,
         onCohortComplete: prefetchCohortQa,
+        completedRunner: completedInterruptedRunner,
       });
     } catch (error) {
       for (const unit of targetUnits) {
@@ -4293,6 +4347,27 @@ async function main() {
     pre_synthesis_gate_path: preSynthesisGatePath,
     pre_synthesis_gate_sha256: preSynthesisGate.gate_sha256,
     pre_synthesis_gate_file_sha256: preSynthesisGateFileSha256,
+    ...(completedInterruptedRunner ? {
+      completed_runner_finalization: {
+        schema: "goldflow_completed_interrupted_qwen_finalization_v1",
+        status: "exact_completed_runner_verified_no_synthesis",
+        adoption_receipt_path: completedInterruptedRunner.adoption_receipt_path,
+        adoption_receipt_sha256: completedInterruptedRunner.adoption_receipt_sha256,
+        runner_report_path: completedInterruptedRunner.runner_path,
+        runner_report_sha256: completedInterruptedRunner.runner_sha256,
+        jobs_path: completedInterruptedRunner.jobs_path,
+        jobs_sha256: completedInterruptedRunner.jobs_sha256,
+        pre_synthesis_gate_path: preSynthesisGatePath,
+        pre_synthesis_gate_file_sha256: preSynthesisGateFileSha256,
+        empty_cohort_events_path: completedInterruptedRunner.cohort_events_path,
+        empty_cohort_events_sha256:
+          completedInterruptedRunner.empty_cohort_events_sha256,
+        adopted_unit_ids: completedInterruptedRunner.accepted_unit_ids,
+        completed_runner_unit_ids: completedInterruptedRunner.resumed_unit_ids,
+        model_loaded_by_finalizer: false,
+        synthesis_invoked_by_finalizer: false,
+      },
+    } : {}),
   };
   if (manualReviewEvidencePath) {
     const evidenceBuffer = await fs.readFile(manualReviewEvidencePath);

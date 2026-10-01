@@ -11,6 +11,7 @@ import {
 import { canonicalQwenBatchSha256 } from "../lib/qwen-liam-batch-contract.mjs";
 import { narrationTtsRetryReportPolicy } from "../lib/narration-tts-policy.mjs";
 import { validateStructuralNoAudioRetryEvidence } from "../lib/tts-structural-no-audio-retry.mjs";
+import { projectVerifiedStructuralRecoveryReport, providerNeutralRetryReportFieldsForTests, verifiedStructuralRecoveryFromManifest } from "../lib/narration-structural-finalizer-provenance.mjs";
 import {
   narrationStructuralNoAudioRetryReportValidForTests,
   structuralNoAudioEvidenceConsumedForTests,
@@ -207,14 +208,17 @@ try {
   const actualRunnerHash = await writeJson(runnerPath, runnerReport);
   const archivedReport = { ...priorReport,
     narration_generation_plan_file_sha256: actualPlanFileHash };
-  const reportArchivePath = path.join(temp, "assets/audio/narration_tts/structural-retry-predecessors/report.json");
+  const reportArchiveDir = path.join(temp, "assets/audio/narration_tts/structural-retry-predecessors");
+  const reportArchivePath = path.join(reportArchiveDir,
+    `narration-report-${digest(JSON.stringify(archivedReport))}.json`);
   const actualReportHash = await writeJson(reportArchivePath, archivedReport);
   const archivedCandidate = { ...candidate, runner_report_path: runnerPath,
     runner_report_sha256: actualRunnerHash };
   const archivedQa = { ...priorUnitQa,
     narration_generation_plan_file_sha256: actualPlanFileHash,
     candidates: [retained, archivedCandidate] };
-  const qaArchivePath = path.join(temp, "assets/audio/narration_tts/structural-retry-predecessors/qa.json");
+  const qaArchivePath = path.join(reportArchiveDir,
+    `unit-qa-${digest(JSON.stringify(archivedQa))}.json`);
   const actualQaHash = await writeJson(qaArchivePath, archivedQa);
   const reviewedEvidence = structuredClone(evidence);
   reviewedEvidence.narration_generation_plan_file_sha256 = actualPlanFileHash;
@@ -242,10 +246,27 @@ try {
     spoken_text_sha256: failed.spoken_text_sha256,
     audio_sha256: wavHash, synthesis_identity_sha256: hash("9"),
     recovery_provenance: actualProvenance };
+  const retryRunnerPath = path.join(temp, "assets/audio/narration_tts/runs/retry.json");
+  const retryRunnerHash = await writeJson(retryRunnerPath, {
+    status: "passed", results: [{ unit_id: failed.unit_id,
+      status: "generated", attempt: 2, output_path: wavPath,
+      output_sha256: wavHash, synthesis_identity_sha256: hash("9"),
+      spoken_text_sha256: failed.spoken_text_sha256,
+      token_limit_reached: false }],
+  });
   const manifestPath = path.join(temp, "narration_provider_output_manifest_ep_01.json");
-  const manifestHash = await writeJson(manifestPath, { units: [
-    { ...repaired, audio_path: wavPath },
-  ] });
+  const manifest = { status: "passed", provider: "qwen_local",
+    narration_generation_plan_sha256: plan.plan_sha256,
+    narration_generation_plan_file_sha256: actualPlanFileHash,
+    units: [
+      { ...retained, status: "accepted" },
+      { ...repaired, status: "accepted", audio_path: wavPath,
+        batch_plan_sha256: batchPlan.batch_plan_sha256,
+        token_limit_reached: false,
+        runner_report_path: retryRunnerPath,
+        runner_report_sha256: retryRunnerHash },
+    ] };
+  const manifestHash = await writeJson(manifestPath, manifest);
   const completed = { source_script_hash: hash("4"),
     narration_generation_plan_path: planPath,
     narration_generation_plan_sha256: hash("5"),
@@ -262,6 +283,67 @@ try {
     retry_policy: narrationTtsRetryReportPolicy({ recoveryProvenances: [actualProvenance] }),
   };
   assert.equal(await narrationStructuralNoAudioRetryReportValidForTests(completed, hash("4")), true);
+  const verified = await verifiedStructuralRecoveryFromManifest({
+    episodeDir: temp, manifest, manifestPath, plan,
+    planFileSha256: actualPlanFileHash, sourceScriptSha256: hash("4"),
+  });
+  assert.equal(verified.unit_id, failed.unit_id);
+  assert.deepEqual(verified.recovery_scope, completed.recovery_scope);
+  const finalizerFields = providerNeutralRetryReportFieldsForTests({
+    structuralRecovery: verified, provider: "qwen_local",
+    rows: [{ recovery_provenance: null }, { recovery_provenance: actualProvenance }],
+  });
+  assert.deepEqual(finalizerFields.recovery_scope, verified.recovery_scope);
+  assert.equal(finalizerFields.retry_policy.reviewed_structural_no_audio_repairs[0].unit_id,
+    failed.unit_id);
+  const providerNeutralBlocked = {
+    schema: "goldflow_narration_tts_report_v1", status: "blocked",
+    source_script_hash: hash("4"), narration_generation_plan_path: planPath,
+    narration_generation_plan_sha256: plan.plan_sha256,
+    narration_generation_plan_file_sha256: actualPlanFileHash,
+    provider_output_manifest_path: manifestPath,
+    provider_output_manifest_sha256: manifestHash,
+    results: [retained, { ...repaired, recovery_provenance: undefined }],
+  };
+  const projected = projectVerifiedStructuralRecoveryReport({
+    report: providerNeutralBlocked, manifest,
+    manifestFileSha256: manifestHash, structuralRecovery: verified,
+  });
+  assert.equal(structuralNoAudioEvidenceConsumedForTests({
+    ttsReport: projected, evidence: reviewedEvidence,
+    evidencePath, evidenceSha256: actualEvidenceHash,
+  }), true);
+  assert.equal(await narrationStructuralNoAudioRetryReportValidForTests(projected, hash("4")), true);
+  const passingReport = projectVerifiedStructuralRecoveryReport({
+    report: { ...providerNeutralBlocked, status: "passed",
+      results: [{ ...retained, recovery_provenance: null }, repaired],
+      retry_policy: narrationTtsRetryReportPolicy({
+        provider: "qwen_local", recoveryProvenances: [null, actualProvenance],
+      }) },
+    manifest, manifestFileSha256: manifestHash, structuralRecovery: verified,
+  });
+  assert.equal(await narrationStructuralNoAudioRetryReportValidForTests(passingReport, hash("4")), true);
+  assert.throws(() => projectVerifiedStructuralRecoveryReport({
+    report: { ...providerNeutralBlocked, provider_output_manifest_sha256: hash("0") },
+    manifest, manifestFileSha256: manifestHash, structuralRecovery: verified,
+  }));
+  assert.throws(() => projectVerifiedStructuralRecoveryReport({
+    report: { ...providerNeutralBlocked,
+      results: [retained, { ...repaired, audio_sha256: hash("0") }] },
+    manifest, manifestFileSha256: manifestHash, structuralRecovery: verified,
+  }));
+  const changedFirstTake = structuredClone(manifest);
+  changedFirstTake.units[0].audio_sha256 = hash("0");
+  await assert.rejects(verifiedStructuralRecoveryFromManifest({
+    episodeDir: temp, manifest: changedFirstTake, manifestPath, plan,
+    planFileSha256: actualPlanFileHash, sourceScriptSha256: hash("4"),
+  }));
+  const staleEvidence = structuredClone(manifest);
+  staleEvidence.units[1].recovery_provenance.confirmed_evidence_sha256 = hash("0");
+  await assert.rejects(verifiedStructuralRecoveryFromManifest({
+    episodeDir: temp, manifest: staleEvidence, manifestPath, plan,
+    planFileSha256: actualPlanFileHash, sourceScriptSha256: hash("4"),
+  }));
   const tampered = structuredClone(completed);
   tampered.retry_policy.reviewed_structural_no_audio_repairs[0].unit_id = "other";
   assert.equal(await narrationStructuralNoAudioRetryReportValidForTests(tampered, hash("4")), false);

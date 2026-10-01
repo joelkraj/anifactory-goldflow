@@ -33,7 +33,6 @@ import {
   validateNarrationSubjectiveReviewManifest,
 } from "./lib/narration-subjective-review.mjs";
 import {
-  narrationTtsRetryReportPolicy,
   narrationTtsPolicyForIdentity,
   validateNarrationTtsPolicy,
 } from "./lib/narration-tts-policy.mjs";
@@ -74,6 +73,7 @@ import { loadNarrationSourceStructure } from "./lib/narration-source-structure.m
 import { applyLowMarginDisposition, assertLowMarginActiveBindings, loadLowMarginDisposition } from "./lib/narration-low-margin-disposition.mjs";
 import { applyFullStreamManualReview, loadFullStreamManualReview } from "./lib/narration-full-stream-manual-review.mjs";
 import { applyAsrOrthographyReviewForTests, loadAsrOrthographyReview } from "./lib/narration-asr-orthography-review.mjs";
+import { providerNeutralRetryReportFieldsForTests, verifiedStructuralRecoveryFromManifest } from "./lib/narration-structural-finalizer-provenance.mjs";
 
 const execFile = promisify(execFileCb);
 const CANONICAL_SAMPLE_RATE_HZ = 24000;
@@ -1485,6 +1485,11 @@ export async function finalizeNarrationProviderOutput(
       !== policy.primary.voice_continuity_contract) {
     throw new Error("Provider manifest model or voice identity differs from run identity.");
   }
+  const structuralRecovery = !phaseContext && manifest.provider === "qwen_local"
+    ? await verifiedStructuralRecoveryFromManifest({ episodeDir, manifest,
+        manifestPath, plan, planFileSha256,
+        sourceScriptSha256: actualSourceScriptSha256 })
+    : null;
 
   const orthographyReview = !phaseContext && policy.primary.provider === "qwen_local"
     && narrationUsesAutomatedAsrAcceptance(qualityContract)
@@ -2225,6 +2230,9 @@ export async function finalizeNarrationProviderOutput(
       manual_review_rejected_unit_ids: manualReview?.rejected_unit_ids ?? [],
       expected_unit_count: rows.length,
       selected_unit_count: rows.length,
+      ...providerNeutralRetryReportFieldsForTests({
+        structuralRecovery, provider: manifest.provider, qualityContract, rows,
+      }),
       retry_scope_policy:
         "no_automatic_retry; later_hash_bound_exact_unit_repair_only",
       results: rows.map((row, index) => ({
@@ -2242,6 +2250,7 @@ export async function finalizeNarrationProviderOutput(
         audio_sha256: row.audio_sha256,
         synthesis_identity: row.synthesis_identity,
         synthesis_identity_sha256: row.synthesis_identity_sha256,
+        recovery_provenance: row.recovery_provenance,
         selected_qa: selectedUnits[index].qa,
         qa_status: selectedUnits[index].qa_status,
       })),
@@ -2794,13 +2803,11 @@ export async function finalizeNarrationProviderOutput(
     full_stream_qa_path: fullStreamPath,
     expected_unit_count: rows.length,
     selected_unit_count: rows.length,
+    ...providerNeutralRetryReportFieldsForTests({
+      structuralRecovery, provider: manifest.provider, qualityContract, rows,
+    }),
     fallback_unit_ids: [],
     fallback_usage: null,
-    retry_policy: narrationTtsRetryReportPolicy({
-      provider: manifest.provider,
-      qualityContract,
-      recoveryProvenances: rows.map((row) => row.recovery_provenance),
-    }),
     provider_output_manifest_path: manifestPath,
     provider_output_manifest_sha256: await sha256File(manifestPath),
     voice_continuity_report_path: continuityPath,

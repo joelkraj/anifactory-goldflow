@@ -45,6 +45,7 @@ import {
 import { loadNarrationSourceStructure } from "./lib/narration-source-structure.mjs";
 import { loadLowMarginDisposition } from "./lib/narration-low-margin-disposition.mjs";
 import { loadAsrOrthographyReview } from "./lib/narration-asr-orthography-review.mjs";
+import { projectVerifiedStructuralRecoveryReport, verifiedStructuralRecoveryFromManifest } from "./lib/narration-structural-finalizer-provenance.mjs";
 import {
   NARRATION_CROSS_LEVEL_ASR_POLICY_VERSION,
   crossLevelArticleFusionCandidate,
@@ -3487,7 +3488,7 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
   }
   const ttsReportPath = path.join(episodeDir, `narration_tts_report_${episode}.json`);
   const stitchReportPath = path.join(episodeDir, `audio_stitch_report_${episode}-narration.json`);
-  const [ttsReport, stitchReport] = await Promise.all([
+  let [ttsReport, stitchReport] = await Promise.all([
     readJson(ttsReportPath, null),
     readJson(stitchReportPath, null),
   ]);
@@ -3535,6 +3536,32 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
         next_command_shape: `node bin/goldflow.mjs tts adopt-interrupted --episode-dir ${episodeDir} --inventory ${inventoryPath}` };
     }
     return { done: false, evidence: `narration_tts_report_${episode}.json missing` };
+  }
+  if (policy.primary?.provider === "qwen_local") {
+    try {
+      const manifestPath = path.join(episodeDir,
+        `narration_provider_output_manifest_${episode}.json`);
+      const manifest = await readJson(manifestPath, null);
+      if ((manifest?.units ?? []).some((row) =>
+        row?.recovery_provenance?.evidence_basis === "reviewed_structural_no_audio")) {
+        const planPath = path.join(episodeDir, "narration_generation_plan.json");
+        const plan = await readJson(planPath, null);
+        const manifestFileSha256 = await fileSha256(manifestPath);
+        const structuralRecovery = await verifiedStructuralRecoveryFromManifest({
+          episodeDir, manifest, manifestPath, plan,
+          planFileSha256: await fileSha256(planPath),
+          sourceScriptSha256: currentScriptHash,
+        });
+        ttsReport = projectVerifiedStructuralRecoveryReport({
+          report: ttsReport, manifest, manifestFileSha256,
+          structuralRecovery, qualityContract: narrationQualityContract,
+        });
+      }
+    } catch (error) {
+      return { done: false, state: "blocked",
+        evidence: `Structural retry provenance is stale or invalid: ${error.message}`,
+        next_command_shape: "Operator hold: preserve selected audio and repair exact structural provenance; do not rerun narration." };
+    }
   }
   const orthographyPath = path.join(episodeDir,
     `narration_asr_orthography_review_${episode}.json`);
@@ -3789,6 +3816,12 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
           evidence: `Reviewed automated delivery QA requires exact retakes of ${blockedIds.length} units; accepted units remain immutable`,
           next_command_shape: `node bin/goldflow.mjs tts narrate --episode-dir ${episodeDir} --confirmed-retry-unit-ids ${blockedIds.join(",")} --confirmed-retry-evidence ${retryEvidencePath}` };
       }
+    }
+    if (ttsReport.status === "blocked" && (ttsReport.results ?? []).some((row) =>
+      row.recovery_provenance?.evidence_basis === "reviewed_structural_no_audio")) {
+      return { done: false, state: "blocked",
+        evidence: "The exact token-limit retry is complete; remaining delivery blockers require a current hash-bound orthography review or exact-unit retake evidence",
+        next_command_shape: "Operator hold: review the current delivery QA and prepare only exact hash-bound repairs; do not rerun all narration." };
     }
     return { done: false, evidence: `narration_tts_report_${episode}.json status=${ttsReport.status ?? "missing"}` };
   }

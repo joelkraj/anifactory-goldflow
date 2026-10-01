@@ -3,7 +3,10 @@ import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { qwenExactBoundaryRepairStatusForTests } from "../run-status.mjs";
+import {
+  qwenExactBoundaryRepairStatusForTests,
+  qwenReviewedBoundaryOrAutomatedPronunciationStatusForTests,
+} from "../run-status.mjs";
 
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-qwen-boundary-triage-"));
@@ -39,8 +42,21 @@ try {
     episodeDir: temp, episode, ttsReportPath: reportPath, ttsReport,
     currentScriptHash: sourceScriptHash,
   });
+  let staleAutomatedReads = 0;
+  const statusWithStaleAutomated = () => qwenReviewedBoundaryOrAutomatedPronunciationStatusForTests({
+    episodeDir: temp, episode, ttsReportPath: reportPath, ttsReport,
+    currentScriptHash: sourceScriptHash,
+    loadAutomated: async () => {
+      staleAutomatedReads += 1;
+      throw new Error("prior candidate receipt is stale");
+    },
+  });
   assert.equal((await status()).next_command_shape,
     `node bin/goldflow.mjs tts repair-boundary --episode-dir ${temp} --spec ${newSpecPath}`);
+  assert.equal((await statusWithStaleAutomated()).next_command_shape,
+    `node bin/goldflow.mjs tts repair-boundary --episode-dir ${temp} --spec ${newSpecPath}`,
+    "current report-bound boundary triage must supersede stale automated-pronunciation evidence");
+  assert.equal(staleAutomatedReads, 0, "a current boundary triage must not load stale phonetic evidence");
   await fs.rm(v10Path);
   assert.equal((await status()).next_command_shape,
     `node bin/goldflow.mjs tts repair-boundary --episode-dir ${temp} --spec ${oldSpecPath}`);
@@ -49,6 +65,10 @@ try {
     blocked_report_sha256: sha256("stale report"),
   }));
   assert.equal(await status(), null, "a stale v5 receipt must not fall back to v4");
+  assert.match((await statusWithStaleAutomated()).next_command_shape,
+    /^Operator hold: inspect the exact one-unit automated pronunciation evidence/,
+    "stale latest boundary triage must not bypass the older pronunciation hold");
+  assert.equal(staleAutomatedReads, 1);
   await fs.rm(v5Path);
   assert.equal((await status()).next_command_shape,
     `node bin/goldflow.mjs tts repair-boundary --episode-dir ${temp} --spec ${newSpecPath}`);

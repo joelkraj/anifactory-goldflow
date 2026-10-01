@@ -3653,6 +3653,39 @@ async function qwenExactBoundaryRepairStatus({
       : "Operator hold: implement a guarded exact-boundary repair for the material defects; do not rerun all narration units or waive confirmed omissions." };
 }
 
+export async function qwenReviewedBoundaryOrAutomatedPronunciationStatusForTests({
+  episodeDir, episode, ttsReportPath, ttsReport, currentScriptHash,
+  loadAutomated = loadAutomatedPronunciationState,
+}) {
+  // A new report-bound boundary triage supersedes an older, now-stale phonetic
+  // candidate receipt. The latest triage is checked against the current report
+  // before the earlier candidate can place the episode on hold.
+  const exactBoundaryRepair = await qwenExactBoundaryRepairStatus({
+    episodeDir, episode, ttsReportPath, ttsReport, currentScriptHash,
+  });
+  if (exactBoundaryRepair) return exactBoundaryRepair;
+  try {
+    const automated = await loadAutomated({
+      episodeDir, episode, sourceScriptSha256: currentScriptHash,
+    });
+    if (automated?.kind === "evidence_reviewed") {
+      return { done: false, state: "blocked",
+        evidence: `Reviewed automated delivery evidence authorizes one exact phonetic opening fragment for ${automated.unit_id}; no human listening is claimed`,
+        next_command_shape: `node bin/goldflow.mjs tts repair-pronunciation-auto --episode-dir ${episodeDir} --evidence ${automated.evidence_path}` };
+    }
+    if (automated?.kind === "candidate_ready") {
+      return { done: false, state: "blocked",
+        evidence: `One hash-bound phonetic candidate exists for ${automated.unit_id}; fresh dual-ASR, acoustic, voice and full-stream QA must decide it`,
+        next_command_shape: `node bin/goldflow.mjs tts finalize-provider --episode-dir ${episodeDir} --manifest ${automated.manifest_path} --automated-pronunciation-evidence ${automated.evidence_path}` };
+    }
+  } catch (error) {
+    return { done: false, state: "blocked",
+      evidence: `Automated pronunciation evidence is stale or incomplete: ${error.message}`,
+      next_command_shape: "Operator hold: inspect the exact one-unit automated pronunciation evidence; do not rerun narration." };
+  }
+  return null;
+}
+
 export async function reviewedAutomatedRetryStatusForTests({
   episodeDir, episode, ttsReport, ttsReportPath, currentScriptHash,
 } = {}) {
@@ -4313,30 +4346,11 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
       }
     }
     if (ttsReport.status === "blocked" && policy.primary.provider === "qwen_local") {
-      try {
-        const automated = await loadAutomatedPronunciationState({
-          episodeDir, episode, sourceScriptSha256: currentScriptHash,
-        });
-        if (automated?.kind === "evidence_reviewed") {
-          return { done: false, state: "blocked",
-            evidence: `Reviewed automated delivery evidence authorizes one exact phonetic opening fragment for ${automated.unit_id}; no human listening is claimed`,
-            next_command_shape: `node bin/goldflow.mjs tts repair-pronunciation-auto --episode-dir ${episodeDir} --evidence ${automated.evidence_path}` };
-        }
-        if (automated?.kind === "candidate_ready") {
-          return { done: false, state: "blocked",
-            evidence: `One hash-bound phonetic candidate exists for ${automated.unit_id}; fresh dual-ASR, acoustic, voice and full-stream QA must decide it`,
-            next_command_shape: `node bin/goldflow.mjs tts finalize-provider --episode-dir ${episodeDir} --manifest ${automated.manifest_path} --automated-pronunciation-evidence ${automated.evidence_path}` };
-        }
-      } catch (error) {
-        return { done: false, state: "blocked",
-          evidence: `Automated pronunciation evidence is stale or incomplete: ${error.message}`,
-          next_command_shape: "Operator hold: inspect the exact one-unit automated pronunciation evidence; do not rerun narration." };
-      }
+      const recovery = await qwenReviewedBoundaryOrAutomatedPronunciationStatusForTests({
+        episodeDir, episode, ttsReportPath, ttsReport, currentScriptHash,
+      });
+      if (recovery) return recovery;
     }
-    const exactBoundaryRepair = await qwenExactBoundaryRepairStatus({
-      episodeDir, episode, ttsReportPath, ttsReport, currentScriptHash,
-    });
-    if (exactBoundaryRepair) return exactBoundaryRepair;
     if (narrationQualityContract && ttsReport.status === "blocked"
       && policy.primary.provider === "qwen_local") {
       const exactRetry = await reviewedAutomatedRetryStatusForTests({

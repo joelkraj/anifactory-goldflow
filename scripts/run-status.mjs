@@ -37,6 +37,7 @@ import {
 } from "./lib/image-provider-policy.mjs";
 import { findSourceCompatibleHybridDeadletters } from "./hybrid-browser-image-pool.mjs";
 import { sha256File as streamSha256File } from "./lib/file-hash.mjs";
+import { verifyInterruptedQwenAdoptionReceipt, verifyInterruptedQwenFinalRun } from "./lib/qwen-interrupted-adoption.mjs";
 import { loadNarrationSourceStructure } from "./lib/narration-source-structure.mjs";
 import { loadLowMarginDisposition } from "./lib/narration-low-margin-disposition.mjs";
 import {
@@ -65,6 +66,7 @@ import {
 } from "./lib/narration-tts-policy.mjs";
 import {
   QWEN_LIAM_EXACT_UNIT_RECOVERY_MODE,
+  QWEN_LIAM_INCOMPLETE_UNIT_RESUME_MODE,
   canonicalQwenBatchSha256,
   qwenBatchBindingByUnit,
   validateQwenLiamBatchPlan,
@@ -2305,6 +2307,7 @@ async function synthesizedNarrationArtifactsComplete({
   if (!exactOrderedIds(plannedIds, stitchUnitIds)) add("stitch segment unit IDs are missing, reordered, duplicated, or unexpected");
   let expectedBatchBindings = null;
   let synthesisRuns = [];
+  let interruptedAdoptionFinal = null;
   if (policy.synthesis_contract?.mode
     === QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT.mode) {
     const batchValidation = validateQwenLiamBatchPlan(
@@ -2340,6 +2343,22 @@ async function synthesizedNarrationArtifactsComplete({
     );
     if (!firstTakeRun) {
       add("TTS report lacks its batch-four first-take runner provenance");
+    } else if (firstTakeRun.status === "interrupted_after_completed_cohorts") {
+      try {
+        interruptedAdoptionFinal = await verifyInterruptedQwenFinalRun({
+          episodeDir,
+          outputDir: path.join(episodeDir, "assets/audio/narration_tts"),
+          identityPath: path.join(episodeDir, "run_identity.json"),
+          planPath, scriptPath: path.join(episodeDir, "script_clean.md"),
+          reportPath: path.join(episodeDir, `narration_tts_report_${episode}.json`),
+          unitQaPath, units: plannedUnits,
+          planSha256: canonicalPlanSha256,
+          batchPlan: batchValidation.expected,
+          policy, finalReport: ttsReport,
+        });
+      } catch (error) {
+        add(`interrupted Qwen final provenance is stale: ${error.message}`);
+      }
     } else {
       if (firstTakeRun.batch_plan_sha256
         !== plan?.qwen_liam_batch_plan?.batch_plan_sha256
@@ -2541,6 +2560,10 @@ async function synthesizedNarrationArtifactsComplete({
         }
         if (!matchingRecoveryRunner) {
           add(`unit ${planned.unit_id} exact-unit recovery runner provenance is missing or stale`);
+        }
+      } else if (mode === QWEN_LIAM_INCOMPLETE_UNIT_RESUME_MODE) {
+        if (!interruptedAdoptionFinal?.resumed_unit_ids.includes(String(planned.unit_id))) {
+          add(`unit ${planned.unit_id} lacks the exact interrupted-Qwen resume receipt`);
         }
       } else if (mode === "exact_sentence_boundary_composite_v1") {
         const provenance = result.recovery_provenance;
@@ -3455,6 +3478,20 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
         next_command_shape: `node bin/goldflow.mjs tts finalize-provider --episode-dir ${episodeDir}`,
       };
     }
+    const inventoryPath = path.join(episodeDir,
+      `narration_interrupted_qwen_triage_inventory_${episode}.json`);
+    const adoptionQaPath = path.join(episodeDir,
+      `narration_interrupted_qwen_adoption_qa_${episode}.json`);
+    const adoptionQa = await readJson(adoptionQaPath, null);
+    if (adoptionQa) {
+      return { done: false, state: "blocked",
+        evidence: `Interrupted Qwen adoption QA status=${adoptionQa.status ?? "unknown"}; inspect ${adoptionQaPath} before any further synthesis` };
+    }
+    if (policy.primary?.provider === "qwen_local" && await exists(inventoryPath)) {
+      return { done: false, state: "blocked",
+        evidence: "Interrupted Qwen raw cohorts require hash verification and ordinary unit/voice QA before any remaining synthesis",
+        next_command_shape: `node bin/goldflow.mjs tts adopt-interrupted --episode-dir ${episodeDir} --inventory ${inventoryPath}` };
+    }
     return { done: false, evidence: `narration_tts_report_${episode}.json missing` };
   }
   if (!statusPassed(ttsReport.status)) {
@@ -3502,6 +3539,33 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
             evidence: `Structural no-audio retry evidence is stale or invalid: ${error.message}`,
             next_command_shape: "Operator hold: correct the exact hash-bound structural retry evidence; do not rerun narration." };
         }
+      }
+    }
+    if (ttsReport.status === "interrupted_adoption_partial") {
+      const receiptPath = path.join(episodeDir,
+        `narration_interrupted_qwen_adoption_${episode}.json`);
+      try {
+        const planPath = path.join(episodeDir, "narration_generation_plan.json");
+        const plan = await readJson(planPath, null);
+        const receipt = await verifyInterruptedQwenAdoptionReceipt({
+          receiptPath, episodeDir,
+          outputDir: path.join(episodeDir, "assets/audio/narration_tts"),
+          identityPath: path.join(episodeDir, "run_identity.json"),
+          planPath, scriptPath: path.join(episodeDir, "script_clean.md"),
+          reportPath: ttsReportPath,
+          unitQaPath: path.join(episodeDir, `narration_tts_unit_qa_${episode}.json`),
+          units: narrationPlanUnitsForStatus(plan),
+          planSha256: plan?.plan_sha256 ?? await fileSha256(planPath),
+        });
+        if (receipt.receipt.source_script_sha256 !== currentScriptHash) {
+          throw new Error("source script changed after adoption");
+        }
+        return { done: false, state: "blocked",
+          evidence: `${receipt.receipt.accepted_unit_ids.length} Qwen first takes were QA-accepted; ${receipt.receipt.never_submitted_unit_ids.length} units remain unsubmitted`,
+          next_command_shape: `node bin/goldflow.mjs tts narrate --episode-dir ${episodeDir} --concurrency 1 --batch-size ${policy.synthesis_contract?.nominal_batch_size ?? 1} --interrupted-adoption-receipt ${receiptPath}` };
+      } catch (error) {
+        return { done: false, state: "blocked",
+          evidence: `Interrupted Qwen adoption receipt is stale or incomplete: ${error.message}` };
       }
     }
     // A changed transcript comparator can clear a blocked ASR spelling while

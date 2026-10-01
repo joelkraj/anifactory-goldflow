@@ -16,6 +16,7 @@ const ONE_SHOT_CREATIVE_COMMANDS = Object.freeze(new Map([
       "confirmed-retry-unit-ids",
       "regenerate-unit-ids",
       "stitch-repair-tail-unit-ids",
+      "interrupted-adoption-receipt",
     ]),
   })],
   ["tts qwen", Object.freeze({
@@ -218,6 +219,27 @@ export function creativeStageRerunDecision({
   const scopeFlags = oneShot?.scope_flags ?? [];
   const activeScopeFlags = scopeFlags.filter((name) => hasValue(flags[name]));
   if (activeScopeFlags.length) {
+    if (commandKey === "tts narrate"
+      && activeScopeFlags.includes("interrupted-adoption-receipt")) {
+      const priorStarts = priorEvents.filter((event) => (
+        event?.stage === "qwen_tts_stitch"
+        && priorCommandLane(event) === "tts:qwen_tts_stitch"
+        && event?.event_type === "stage_started"
+      ));
+      const priorPasses = priorEvents.filter((event) => (
+        event?.stage === "qwen_tts_stitch"
+        && priorCommandLane(event) === "tts:qwen_tts_stitch"
+        && event?.event_type === "stage_completed"
+        && event?.status === "passed"
+      ));
+      if (activeScopeFlags.length !== 1 || !priorStarts.length || priorPasses.length) {
+        return { allowed: false,
+          reason: "interrupted_adoption_resume_requires_prior_started_unpassed_qwen_stage",
+          required_recovery: "Use only the exact QA-accepted adoption receipt for a prior interrupted Qwen narration invocation." };
+      }
+      return { allowed: true, reason: "interrupted_adoption_exact_resume",
+        scope_flags: activeScopeFlags };
+    }
     return {
       allowed: true,
       reason: "exact_scope_repair",

@@ -2,7 +2,7 @@
 
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { promises as fs } from "node:fs";
+import { constants as fsConstants, promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -67,6 +67,10 @@ import {
   buildNarrationPreSynthesisGate,
   narrationPreSynthesisGateSha256,
 } from "./lib/narration-pre-synthesis-gate.mjs";
+import {
+  verifyInterruptedQwenAdoptionReceipt,
+  verifyInterruptedQwenInventory,
+} from "./lib/qwen-interrupted-adoption.mjs";
 
 const DATA_ROOT = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const DEFAULT_PYTHON = "/Users/joel/AniFactoryData/voice_bank/bakeoff/.venv-kokoro-mlx-audio-0.4.6/bin/python";
@@ -1118,6 +1122,17 @@ async function atomicWriteJson(filePath, value) {
   );
   await fs.writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, "utf8");
   await fs.rename(temporary, filePath);
+}
+
+async function atomicWriteJsonExclusive(filePath, value) {
+  const temporary = path.join(path.dirname(filePath),
+    `.${path.basename(filePath)}.adoption-${process.pid}-${Date.now()}`);
+  await fs.writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { flag: "wx" });
+  try {
+    await fs.link(temporary, filePath);
+  } finally {
+    await fs.unlink(temporary).catch(() => {});
+  }
 }
 
 async function hydratePreservedTtsSelections({
@@ -2851,6 +2866,295 @@ async function applyQwenVoiceContinuityQa({
   };
 }
 
+export async function adoptInterruptedQwenFirstTakes(flags = {}) {
+  if (!flags["episode-dir"] || !flags.inventory
+    || flags["workflow-bypass"] || flags["allow-full-stage-rerun"]
+    || flags["confirmed-retry-unit-ids"] || flags["regenerate-unit-ids"]
+    || flags["manual-review-evidence"] || flags["output-dir"]
+    || flags.script || flags.plan || flags.identity) {
+    throw new Error("Interrupted Qwen adoption requires --episode-dir and --inventory only; no bypass, alternate sources, or creative retry flags.");
+  }
+  const episodeDir = path.resolve(flags["episode-dir"]);
+  const episode = path.basename(episodeDir);
+  const identityPath = path.join(episodeDir, "run_identity.json");
+  const planPath = path.join(episodeDir, "narration_generation_plan.json");
+  const scriptPath = path.join(episodeDir, "script_clean.md");
+  const gatePath = path.join(episodeDir, `narration_tts_pre_synthesis_gate_${episode}.json`);
+  const outputDir = path.join(episodeDir, "assets/audio/narration_tts");
+  const reportPath = path.join(episodeDir, `narration_tts_report_${episode}.json`);
+  const unitQaPath = path.join(episodeDir, `narration_tts_unit_qa_${episode}.json`);
+  const receiptPath = path.join(episodeDir, `narration_interrupted_qwen_adoption_${episode}.json`);
+  for (const target of [reportPath, unitQaPath, receiptPath]) {
+    if (await fs.stat(target).catch(() => null)) {
+      throw new Error(`Interrupted Qwen adoption cannot overwrite an existing checkpoint: ${target}`);
+    }
+  }
+  const [identity, plan] = await Promise.all([
+    readJson(identityPath, null), readJson(planPath, null),
+  ]);
+  if (!identity || !plan) throw new Error("Interrupted Qwen adoption requires locked identity and narration plan.");
+  const policy = validateNarrationTtsPolicyForTests(identity);
+  if (policy.status !== "passed") throw new Error(`Locked narration policy failed: ${JSON.stringify(policy.findings)}`);
+  const planPolicy = validateNarrationPlanPolicyForTests(plan, policy);
+  if (planPolicy.status !== "passed") throw new Error(`Locked narration plan failed: ${JSON.stringify(planPolicy.findings)}`);
+  const units = normalizeNarrationUnitsForTests(plan, {
+    voiceId: policy.primary.voice_id,
+    referenceVariantId: policy.primary.reference_variant_id ?? null,
+  });
+  const batchValidation = validateQwenLiamBatchPlan(
+    plan.qwen_liam_batch_plan, units, policy.synthesis_contract,
+  );
+  if (batchValidation.status !== "passed") {
+    throw new Error(`Interrupted Qwen adoption needs the valid pinned batch plan: ${JSON.stringify(batchValidation.findings)}`);
+  }
+  const planSha256 = String(plan.plan_sha256 ?? await sha256File(planPath));
+  const original = await verifyInterruptedQwenInventory({
+    inventoryPath: flags.inventory,
+    episodeDir, outputDir, identityPath, planPath, scriptPath, gatePath,
+    units, policy, batchPlan: batchValidation.expected, planSha256,
+  });
+  const originalGateArchivePath = path.join(episodeDir,
+    `narration_tts_original_pre_synthesis_gate_${episode}.json`);
+  await fs.copyFile(gatePath, originalGateArchivePath, fsConstants.COPYFILE_EXCL);
+  if (await sha256File(originalGateArchivePath)
+    !== original.inventory.pre_synthesis_gate_file_sha256) {
+    throw new Error("Archived original pre-synthesis gate hash differs; adoption refused.");
+  }
+  // The helper reads its unit-QA switches from argv when imported. Adoption
+  // runs the same waveform/continuity checks as normal Qwen selection and
+  // defers transcript fidelity to the required full-stream Whisper stage.
+  if (!process.argv.includes("--unit-transcript-qa")) {
+    process.argv.push("--unit-transcript-qa", "false");
+  }
+  if (!process.argv.includes("--unit-qa-whisper-model")) {
+    process.argv.push("--unit-qa-whisper-model", "small");
+  }
+  const helpers = await import("./modelslab-qwen-episode-audio.mjs");
+  const byId = new Map(original.verified_units.map((row) => [row.unit_id, row]));
+  const rows = units.flatMap((unit) => {
+    const verified = byId.get(String(unit.unit_id));
+    if (!verified) return [];
+    return [{
+      ...unit,
+      text: unit.spoken_text,
+      segment_id: unit.segment_id ?? unit.source_segment_ids?.[0]
+        ?? unit.inherited_segment_id ?? unit.unit_id,
+      speaker: unit.speaker ?? "NARRATOR",
+      provider: policy.primary.provider,
+      model_id: verified.result.model_id,
+      voice_id: policy.primary.voice_id,
+      attempt: Number(verified.result.attempt),
+      wav: verified.wav_path,
+      audio_sha256: verified.wav_sha256,
+      duration_sec: Number(verified.result.duration_sec),
+      synthesis_mode: verified.result.synthesis_mode,
+      batch_plan_sha256: verified.result.batch_plan_sha256,
+      cohort_id: verified.result.cohort_id,
+      cohort_sha256: verified.result.cohort_sha256,
+      generated_token_count: verified.result.generated_token_count,
+      effective_token_limit: verified.result.effective_token_limit,
+      token_limit_reached: verified.result.token_limit_reached,
+      synthesis_identity: verified.result.synthesis_identity,
+      synthesis_identity_sha256: verified.result.synthesis_identity_sha256,
+    }];
+  });
+  await helpers.runUnitOutputQaForDiagnostics(rows);
+  applyProtectedTermQa(rows);
+  const narrationQualityContract = narrationQualityContractForIdentity(identity);
+  const similarityPython = path.resolve(process.env.ANIFACTORY_TTS_SIMILARITY_PYTHON
+    ?? DEFAULT_SIMILARITY_PYTHON);
+  const similarityRunnerPath = path.join(path.dirname(fileURLToPath(import.meta.url)),
+    "tts-speaker-similarity.py");
+  const invocationId = `interrupted-adoption-${Date.now()}-${process.pid}`;
+  const continuity = await applyQwenVoiceContinuityQa({
+    rows, policy, outputDir, invocationId, attempt: 1,
+    similarityPython, similarityRunnerPath, narrationQualityContract,
+  });
+  for (const row of rows) row.unit_qa = softenPrimaryQa(row.unit_qa);
+  const rejected = rows.filter((row) => !candidateDisposition(
+    row.unit_qa, policy.primary.provider,
+  ).accepted);
+  const qaEvidencePath = path.join(episodeDir,
+    `narration_interrupted_qwen_adoption_qa_${episode}.json`);
+  const qaEvidence = {
+    schema: "goldflow_interrupted_qwen_adoption_qa_v1",
+    status: rejected.length ? "blocked" : "passed_partial",
+    inventory_path: original.inventory_path,
+    inventory_sha256: original.inventory_sha256,
+    original_job_path: original.original_job_path,
+    original_job_sha256: original.original_job_sha256,
+    cohort_events_path: original.cohort_events_path,
+    cohort_events_sha256: original.cohort_events_sha256,
+    voice_continuity_report_path: continuity?.reportPath ?? null,
+    voice_continuity_report_sha256: continuity?.reportPath
+      ? await sha256File(continuity.reportPath).catch(() => null) : null,
+    unit_count: rows.length,
+    rejected_unit_ids: rejected.map((row) => row.unit_id),
+    units: rows.map((row) => ({ unit_id: row.unit_id,
+      audio_path: row.wav, audio_sha256: row.unit_qa?.audio_sha256,
+      synthesis_identity_sha256: row.synthesis_identity_sha256,
+      qa: row.unit_qa,
+      disposition: candidateDisposition(row.unit_qa, policy.primary.provider) })),
+    full_stream_qa_still_required: true,
+  };
+  await atomicWriteJsonExclusive(qaEvidencePath, qaEvidence);
+  if (rejected.length) {
+    throw new Error(`Interrupted Qwen adoption QA blocked ${rejected.length} raw first takes; no remaining units were submitted. Inspect ${qaEvidencePath}`);
+  }
+  const candidates = rows.map((row) => {
+    const verified = byId.get(String(row.unit_id));
+    return {
+      unit_id: row.unit_id, provider: policy.primary.provider,
+      model_id: policy.primary.model_id, voice_id: policy.primary.voice_id,
+      voice_sha256: policy.primary.voice_sha256,
+      voice_continuity_contract: policy.primary.voice_continuity_contract,
+      attempt: row.attempt, seed: verified.sidecar.per_unit_serial_seed,
+      spoken_text_sha256: row.spoken_text_sha256,
+      synthesis_identity: row.synthesis_identity,
+      synthesis_identity_sha256: row.synthesis_identity_sha256,
+      synthesis_mode: row.synthesis_mode,
+      batch_plan_sha256: row.batch_plan_sha256,
+      cohort_id: row.cohort_id, cohort_sha256: row.cohort_sha256,
+      generated_token_count: row.generated_token_count,
+      effective_token_limit: row.effective_token_limit,
+      token_limit_reached: row.token_limit_reached,
+      runner_report_path: verified.sidecar_path,
+      runner_report_sha256: verified.sidecar_sha256,
+      audio_path: verified.wav_path, audio_sha256: verified.wav_sha256,
+      duration_sec: row.duration_sec, voice_continuity: row.unit_qa?.voice_continuity,
+      qa: row.unit_qa,
+      disposition: candidateDisposition(row.unit_qa, policy.primary.provider),
+      preservation_provenance: {
+        schema: "goldflow_preserved_tts_unit_v1",
+        selected_report_synthesis_identity_sha256: row.synthesis_identity_sha256,
+        synthesis_sidecar_path: verified.sidecar_path,
+        synthesis_sidecar_sha256: verified.sidecar_sha256,
+        audio_sha256: verified.wav_sha256,
+      },
+    };
+  });
+  const selectedRows = rows.map((row) => preservedSelectionRow(
+    row, candidates.find((candidate) => candidate.unit_id === row.unit_id),
+    row.unit_qa, policy,
+  ));
+  const recoveryScope = {
+    schema: "goldflow_interrupted_qwen_adoption_scope_v1",
+    mode: "interrupted_qwen_first_take_adoption",
+    adoption_receipt_path: receiptPath,
+    inventory_path: original.inventory_path,
+    inventory_sha256: original.inventory_sha256,
+    accepted_unit_ids: rows.map((row) => row.unit_id),
+    never_submitted_unit_ids: original.never_submitted_unit_ids,
+    model_loaded: false,
+    synthesis_invoked: false,
+  };
+  const unitQaReport = rebuildQaAggregate(
+    candidates.map((candidate) => ({ unit_id: candidate.unit_id,
+      provider: candidate.provider, attempt: candidate.attempt, unit_qa: candidate.qa })),
+    candidates,
+  );
+  unitQaReport.status = "interrupted_adoption_partial";
+  unitQaReport.source_script_hash = original.inventory.source_script_sha256;
+  unitQaReport.narration_generation_plan_path = planPath;
+  unitQaReport.narration_generation_plan_sha256 = planSha256;
+  unitQaReport.narration_generation_plan_file_sha256 = original.inventory.narration_generation_plan_file_sha256;
+  unitQaReport.selection_policy_version = NARRATION_TTS_SELECTION_POLICY_VERSION;
+  unitQaReport.recovery_scope = recoveryScope;
+  unitQaReport.selected_units = selectedRows.map((row) => ({
+    unit_id: row.unit_id, provider: row.provider, model_id: row.model_id,
+    voice_id: row.voice_id, voice_sha256: policy.primary.voice_sha256,
+    voice_continuity_contract: policy.primary.voice_continuity_contract,
+    attempt: row.attempt, spoken_text_sha256: row.spoken_text_sha256,
+    synthesis_identity_sha256: row.synthesis_identity_sha256,
+    audio_path: row.wav, audio_sha256: row.unit_qa.audio_sha256,
+    qa: row.unit_qa,
+  }));
+  const report = {
+    schema: "goldflow_narration_tts_report_v1",
+    status: "interrupted_adoption_partial",
+    source_script_hash: original.inventory.source_script_sha256,
+    narration_generation_plan_path: planPath,
+    narration_generation_plan_sha256: planSha256,
+    narration_generation_plan_file_sha256: original.inventory.narration_generation_plan_file_sha256,
+    recovery_scope: recoveryScope,
+    policy,
+    ...ttsStatusContract({
+      policy, units, selectedRows, candidates,
+      unitQaStatus: unitQaReport.status,
+      fullStreamQaStatus: "not_run_pending_interrupted_resume",
+      recoveryScope, batchPlan: batchValidation.expected,
+      synthesisRuns: [{ attempt: 1, synthesis_mode: policy.synthesis_contract.mode,
+        status: "interrupted_after_completed_cohorts",
+        jobs_path: original.original_job_path,
+        jobs_sha256: original.original_job_sha256,
+        cohort_events_path: original.cohort_events_path,
+        cohort_events_sha256: original.cohort_events_sha256,
+        runner_report_path: null }],
+    }),
+    unit_qa_path: unitQaPath,
+    full_stream_qa_path: path.join(episodeDir, `narration_full_stream_qa_${episode}.json`),
+    stitch_report_path: path.join(episodeDir, `audio_stitch_report_${episode}-narration.json`),
+    blockers: [{ code: "interrupted_qwen_remaining_units_never_submitted",
+      unit_count: original.never_submitted_unit_ids.length }],
+  };
+  await atomicWriteJsonExclusive(unitQaPath, unitQaReport);
+  await atomicWriteJsonExclusive(reportPath, report);
+  const partialReportArchivePath = path.join(episodeDir,
+    `narration_interrupted_qwen_partial_report_${episode}.json`);
+  const partialUnitQaArchivePath = path.join(episodeDir,
+    `narration_interrupted_qwen_partial_unit_qa_${episode}.json`);
+  await fs.copyFile(reportPath, partialReportArchivePath, fsConstants.COPYFILE_EXCL);
+  await fs.copyFile(unitQaPath, partialUnitQaArchivePath, fsConstants.COPYFILE_EXCL);
+  const receipt = {
+    schema: "goldflow_interrupted_qwen_adoption_v1",
+    status: "passed_partial",
+    episode_dir: episodeDir,
+    run_identity_path: identityPath,
+    run_identity_file_sha256: original.inventory.run_identity_file_sha256,
+    narration_generation_plan_path: planPath,
+    narration_generation_plan_file_sha256: original.inventory.narration_generation_plan_file_sha256,
+    narration_generation_plan_canonical_sha256: planSha256,
+    source_script_path: scriptPath,
+    source_script_sha256: original.inventory.source_script_sha256,
+    inventory_path: original.inventory_path,
+    inventory_file_sha256: original.inventory_sha256,
+    original_job_path: original.original_job_path,
+    original_job_file_sha256: original.original_job_sha256,
+    cohort_events_path: original.cohort_events_path,
+    cohort_events_file_sha256: original.cohort_events_sha256,
+    original_pre_synthesis_gate_path: originalGateArchivePath,
+    original_pre_synthesis_gate_file_sha256:
+      original.inventory.pre_synthesis_gate_file_sha256,
+    original_pre_synthesis_gate_sha256:
+      original.inventory.pre_synthesis_gate_sha256,
+    adoption_qa_path: qaEvidencePath,
+    adoption_qa_file_sha256: await sha256File(qaEvidencePath),
+    partial_report_path: partialReportArchivePath,
+    partial_report_file_sha256: await sha256File(partialReportArchivePath),
+    partial_unit_qa_path: partialUnitQaArchivePath,
+    partial_unit_qa_file_sha256: await sha256File(partialUnitQaArchivePath),
+    canonical_report_path: reportPath,
+    canonical_unit_qa_path: unitQaPath,
+    accepted_unit_ids: rows.map((row) => row.unit_id),
+    accepted_artifacts: rows.map((row) => {
+      const verified = byId.get(String(row.unit_id));
+      return { unit_id: row.unit_id, audio_path: verified.wav_path,
+        audio_sha256: verified.wav_sha256,
+        synthesis_sidecar_path: verified.sidecar_path,
+        synthesis_sidecar_sha256: verified.sidecar_sha256 };
+    }),
+    never_submitted_unit_ids: original.never_submitted_unit_ids,
+    model_loaded: false,
+    synthesis_invoked: false,
+    full_stream_qa_still_required: true,
+  };
+  await atomicWriteJsonExclusive(receiptPath, receipt);
+  return { status: "passed_partial", receipt_path: receiptPath,
+    receipt_sha256: await sha256File(receiptPath),
+    accepted_unit_count: rows.length,
+    never_submitted_unit_count: original.never_submitted_unit_ids.length };
+}
+
 async function main() {
   const flags = parseFlags(process.argv.slice(2));
   const channel = flags.channel ?? "53rebirth";
@@ -3205,6 +3509,11 @@ async function main() {
   ).trim()
     ? path.resolve(flags["manual-review-evidence"])
     : null;
+  const interruptedAdoptionReceiptPath = String(
+    flags["interrupted-adoption-receipt"] ?? "",
+  ).trim()
+    ? path.resolve(flags["interrupted-adoption-receipt"])
+    : null;
   const stitchRepairTailUnitIds = String(
     flags["stitch-repair-tail-unit-ids"] ?? "",
   ).split(",").map((value) => value.trim()).filter(Boolean);
@@ -3224,6 +3533,12 @@ async function main() {
       "--manual-review-evidence and --confirmed-retry-unit-ids are mutually exclusive. "
       + "Accept reviewed first takes or retry confirmed defects in separate guarded calls.",
     );
+  }
+  if (interruptedAdoptionReceiptPath
+    && (manualReviewEvidencePath || requestedRecoveryScope
+      || flags["stitch-repair-tail-unit-ids"] || workflowBypass
+      || flags["allow-full-stage-rerun"])) {
+    throw new Error("Interrupted-Qwen adoption resume cannot be combined with retakes, manual acceptance, stitch repair, or workflow bypass.");
   }
   if (requestedRecoveryScope && !String(
     flags["confirmed-retry-evidence"] ?? "",
@@ -3247,6 +3562,21 @@ async function main() {
   const priorUnitQaSha256 = priorUnitQaBuffer
     ? createHash("sha256").update(priorUnitQaBuffer).digest("hex")
     : null;
+  let interruptedAdoption = null;
+  if (priorNarrationReport?.status === "interrupted_adoption_partial"
+    && !interruptedAdoptionReceiptPath) {
+    throw new Error("Interrupted-Qwen partial checkpoint requires --interrupted-adoption-receipt; unscoped synthesis is forbidden.");
+  }
+  if (interruptedAdoptionReceiptPath) {
+    if (!priorNarrationReport || !priorUnitQa) {
+      throw new Error("Interrupted-Qwen resume requires its exact partial report and unit-QA checkpoint.");
+    }
+    interruptedAdoption = await verifyInterruptedQwenAdoptionReceipt({
+      receiptPath: interruptedAdoptionReceiptPath,
+      episodeDir, outputDir, identityPath, planPath, scriptPath,
+      reportPath, unitQaPath, units, planSha256,
+    });
+  }
   if (!priorNarrationReport || !priorUnitQa) {
     const orphanedUnitFiles = (await filesBelow(
       path.join(outputDir, "units"),
@@ -3394,6 +3724,22 @@ async function main() {
         ? await sha256File(manualReviewEvidencePath).catch(() => null)
         : null,
   });
+  if (interruptedAdoption) {
+    finalSynthesisScope.evidence_path = interruptedAdoption.receipt_path;
+    finalSynthesisScope.evidence_sha256 = interruptedAdoption.receipt_sha256;
+    finalSynthesisScope.interrupted_adoption_receipt_path =
+      interruptedAdoption.receipt_path;
+    finalSynthesisScope.interrupted_adoption_receipt_sha256 =
+      interruptedAdoption.receipt_sha256;
+  }
+  if (interruptedAdoption && (finalSynthesisScope.mode
+      !== "interrupted_full_synthesis_resume_preserving_accepted_units"
+      || JSON.stringify(finalSynthesisScope.preserved_unit_ids)
+        !== JSON.stringify(interruptedAdoption.receipt.accepted_unit_ids)
+      || JSON.stringify(finalSynthesisScope.authorized_synthesis_unit_ids)
+        !== JSON.stringify(interruptedAdoption.receipt.never_submitted_unit_ids))) {
+    throw new Error("Interrupted-Qwen resume scope differs from the QA-accepted and never-submitted receipt partition.");
+  }
   const preservedForInvocation = preservedCandidates.filter((candidate) => (
     finalSynthesisScope.preserved_unit_ids.includes(String(candidate.unit_id))
   ));
@@ -3547,6 +3893,15 @@ async function main() {
     preSynthesisGate = authorizeNarrationPreSynthesisGate(preSynthesisGate);
     await atomicWriteJson(preSynthesisGatePath, preSynthesisGate);
     preSynthesisGateFileSha256 = await sha256File(preSynthesisGatePath);
+    if (interruptedAdoption) {
+      const resumeGateArchivePath = path.join(episodeDir,
+        `narration_tts_interrupted_resume_gate_${episode}.json`);
+      await fs.copyFile(preSynthesisGatePath, resumeGateArchivePath,
+        fsConstants.COPYFILE_EXCL);
+      if (await sha256File(resumeGateArchivePath) !== preSynthesisGateFileSha256) {
+        throw new Error("Interrupted-Qwen resume gate archive differs before synthesis.");
+      }
+    }
   }
   const helpers = await import("./modelslab-qwen-episode-audio.mjs");
 
@@ -5022,7 +5377,13 @@ async function main() {
 }
 
 if (path.resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {
-  main().catch((error) => {
+  const entryFlags = parseFlags(process.argv.slice(2));
+  const entry = boolFlag(entryFlags["adopt-interrupted"])
+    ? adoptInterruptedQwenFirstTakes(entryFlags).then((result) => {
+        console.log(JSON.stringify(result, null, 2));
+      })
+    : main();
+  entry.catch((error) => {
     console.error(error instanceof Error ? error.stack || error.message : String(error));
     process.exitCode = 1;
   });

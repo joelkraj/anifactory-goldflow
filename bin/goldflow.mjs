@@ -484,6 +484,7 @@ ${registryCommands}
   goldflow tts import-provider     Import hash-bound WAV results from the identity-locked TTS provider
   goldflow tts finalize-provider   Run delivery, continuity, stitch, mastering, and full-stream QA
   goldflow tts repair-boundary     Repair only reviewed blocked Qwen sentence/word boundaries, then rerun narration QA
+  goldflow tts adopt-interrupted   QA and adopt only hash-bound completed Qwen cohorts from an interrupted invocation
   goldflow tts approve-listen      Record hash-bound decisions for exact narration listen items
   goldflow tts approve-subjective  Approve the mandatory hash-bound whole-episode narration sample manifest
   goldflow tts source-structure    Record reviewed narrative chapters separately from technical voice segments
@@ -673,6 +674,8 @@ if (command === "crime-proof" && !helpRequested) {
   run("voice-direction-gate.mjs", flags);
 } else if (command === "tts" && subcommand === "narrate") {
   run("narration-tts-episode.mjs", flags);
+} else if (command === "tts" && subcommand === "adopt-interrupted") {
+  run("narration-tts-episode.mjs", ["--adopt-interrupted", "true", ...flags]);
 } else if (command === "tts" && subcommand === "import-provider") {
   run("narration-provider-output-import.mjs", flags);
 } else if (command === "tts" && subcommand === "finalize-provider") {

@@ -48,8 +48,12 @@ import { loadAsrOrthographyReview } from "./lib/narration-asr-orthography-review
 import { projectVerifiedStructuralRecoveryReport, structuralProjectionManifestForReport, verifiedStructuralRecoveryFromManifest } from "./lib/narration-structural-finalizer-provenance.mjs";
 import { validateConfirmedRetryEvidenceForTests } from "./narration-tts-episode.mjs";
 import { loadPronunciationRecoveryState } from "./lib/narration-pronunciation-episode.mjs";
+import { loadAutomatedPronunciationState } from "./lib/narration-automated-pronunciation-episode.mjs";
 import {
   PRONUNCIATION_MODE,
+  AUTOMATED_PRONUNCIATION_MODE,
+  applyAutomatedPronunciationCandidateForTests,
+  validateAutomatedPronunciationEvidenceForTests,
   validatePronunciationCandidateArtifactsForTests,
   validatePronunciationCandidateReviewForTests,
   validatePronunciationDefectEvidenceForTests,
@@ -3829,6 +3833,112 @@ async function appliedPronunciationReviewValid({
   } catch { return false; }
 }
 
+async function appliedAutomatedPronunciationReviewValid({
+  episodeDir, sourceScriptSha256, plan, planFileSha256,
+  ttsReport, unitDelivery, providerOutput, providerOutputPath,
+}) {
+  const proof = ttsReport?.automated_pronunciation_review;
+  const candidateRows = (providerOutput?.units ?? []).filter(
+    (row) => row.synthesis_mode === AUTOMATED_PRONUNCIATION_MODE);
+  if (!proof) return candidateRows.length === 0;
+  const within = (name) => typeof name === "string" && path.isAbsolute(name)
+    && path.resolve(name).startsWith(`${path.resolve(episodeDir)}${path.sep}`);
+  if (proof.schema !== "goldflow_tts_exact_automated_pronunciation_review_v1"
+    || proof.human_listening_performed !== false
+    || proof.acceptance_basis !== "fresh_independent_dual_asr_and_normal_audio_qa"
+    || candidateRows.length !== 1 || candidateRows[0].unit_id !== proof.unit_id
+    || !within(proof.evidence_path) || !within(proof.prior_report_snapshot_path)
+    || !within(proof.prior_delivery_snapshot_path)
+    || proof.manifest_path !== providerOutputPath
+    || proof.manifest_file_sha256 !== ttsReport.provider_output_manifest_sha256
+    || await fileSha256(proof.evidence_path) !== proof.evidence_sha256
+    || await fileSha256(proof.prior_report_snapshot_path)
+      !== proof.prior_report_snapshot_sha256
+    || await fileSha256(proof.prior_delivery_snapshot_path)
+      !== proof.prior_delivery_snapshot_sha256
+    || unitDelivery?.automated_pronunciation_review?.evidence_sha256 !== proof.evidence_sha256) {
+    return false;
+  }
+  try {
+    const [evidence, priorReport, priorDelivery] = await Promise.all([
+      readJson(proof.evidence_path, null),
+      readJson(proof.prior_report_snapshot_path, null),
+      readJson(proof.prior_delivery_snapshot_path, null),
+    ]);
+    const priorManifestPath = priorReport?.provider_output_manifest_path;
+    if (!within(priorManifestPath)
+      || priorReport.provider_output_manifest_sha256 !== await fileSha256(priorManifestPath)) return false;
+    const priorManifest = await readJson(priorManifestPath, null);
+    const priorSelected = priorManifest?.units?.find((row) => row.unit_id === proof.unit_id);
+    const priorBoundaryRequestPath = priorSelected?.recovery_provenance?.request_path;
+    const priorBoundaryResultPath = priorSelected?.recovery_provenance?.result_path;
+    if (!within(priorSelected?.audio_path) || !within(priorBoundaryRequestPath)
+      || !within(priorBoundaryResultPath)) return false;
+    validateAutomatedPronunciationEvidenceForTests({
+      evidence, evidenceFileSha256: proof.evidence_sha256,
+      sourceScriptSha256, plan, planFileSha256,
+      report: priorReport, reportFileSha256: proof.prior_report_snapshot_sha256,
+      delivery: priorDelivery,
+      deliveryFileSha256: proof.prior_delivery_snapshot_sha256,
+      manifest: priorManifest,
+      manifestFileSha256: await fileSha256(priorManifestPath),
+      selectedAudioFileSha256: await fileSha256(priorSelected.audio_path),
+      priorBoundaryRequest: await readJson(priorBoundaryRequestPath, null),
+      priorBoundaryResult: await readJson(priorBoundaryResultPath, null),
+      priorBoundaryResultFileSha256: await fileSha256(priorBoundaryResultPath),
+    });
+    const selected = candidateRows[0];
+    const provenance = selected.recovery_provenance;
+    if (!within(selected.audio_path) || !within(provenance?.request_path)
+      || !within(provenance?.result_path)
+      || provenance.defect_evidence_path !== proof.evidence_path
+      || provenance.defect_evidence_sha256 !== proof.evidence_sha256
+      || await fileSha256(selected.audio_path) !== selected.audio_sha256
+      || await fileSha256(provenance.result_path) !== provenance.result_sha256) return false;
+    const [request, result] = await Promise.all([
+      readJson(provenance.request_path, null), readJson(provenance.result_path, null),
+    ]);
+    const made = result?.unit;
+    for (const name of [made?.audio_path, made?.phonetic_fragment?.audio_path,
+      made?.phonetic_fragment?.sidecar_path, made?.retained_remainder?.audio_path,
+      made?.retained_remainder?.sidecar_path]) if (!within(name)) return false;
+    if (request?.prior_report_file_sha256 !== proof.prior_report_snapshot_sha256
+      || request?.prior_delivery_file_sha256 !== proof.prior_delivery_snapshot_sha256
+      || request?.defect_evidence_sha256 !== proof.evidence_sha256
+      || request?.expected_word !== proof.expected_word
+      || request?.tts_only_phonetic_word !== proof.phonetic_word) return false;
+    validatePronunciationCandidateArtifactsForTests({
+      defect: evidence, defectFileSha256: proof.evidence_sha256,
+      request, requestFileSha256: await fileSha256(provenance.request_path),
+      result, resultFileSha256: await fileSha256(provenance.result_path),
+      priorManifest, priorManifestFileSha256: await fileSha256(priorManifestPath),
+      candidateManifest: providerOutput,
+      candidateAudioFileSha256: await fileSha256(made.audio_path),
+      phoneticAudioFileSha256: await fileSha256(made.phonetic_fragment.audio_path),
+      phoneticSidecarFileSha256: await fileSha256(made.phonetic_fragment.sidecar_path),
+      remainderAudioFileSha256: await fileSha256(made.retained_remainder.audio_path),
+      remainderSidecarFileSha256: await fileSha256(made.retained_remainder.sidecar_path),
+      synthesisMode: AUTOMATED_PRONUNCIATION_MODE,
+      candidateReviewStatus: "pending_automated_asr",
+    });
+    const delivered = (unitDelivery?.units ?? []).find((row) => row.unit_id === proof.unit_id);
+    if (delivered?.audio_sha256 !== selected.audio_sha256
+      || delivered?.decision?.automated_pronunciation_review?.evidence_sha256
+        !== proof.evidence_sha256) return false;
+    const adjudicated = applyAutomatedPronunciationCandidateForTests({
+      decision: { status: "blocked", warnings: [], blockers: [{
+        code: "narration_confirmed_opening_token_mismatch",
+      }] },
+      unitId: proof.unit_id, reviewedUnitId: proof.unit_id,
+      evidenceSha256: proof.evidence_sha256,
+      expectedWord: proof.expected_word, phoneticWord: proof.phonetic_word,
+      primaryTranscriptQa: delivered.transcript_qa,
+      confirmationTranscriptQa: delivered.confirmation_transcript_qa,
+    });
+    return adjudicated.blockers.length === 0;
+  } catch { return false; }
+}
+
 async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash, identity) {
   if (!currentScriptHash) return { done: false, evidence: "script_clean.md missing" };
   const narrationQualityContract = narrationQualityContractForIdentity(identity);
@@ -4202,6 +4312,27 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
           next_command_shape: "Operator hold: inspect the exact one-unit pronunciation receipt; do not rerun narration." };
       }
     }
+    if (ttsReport.status === "blocked" && policy.primary.provider === "qwen_local") {
+      try {
+        const automated = await loadAutomatedPronunciationState({
+          episodeDir, episode, sourceScriptSha256: currentScriptHash,
+        });
+        if (automated?.kind === "evidence_reviewed") {
+          return { done: false, state: "blocked",
+            evidence: `Reviewed automated delivery evidence authorizes one exact phonetic opening fragment for ${automated.unit_id}; no human listening is claimed`,
+            next_command_shape: `node bin/goldflow.mjs tts repair-pronunciation-auto --episode-dir ${episodeDir} --evidence ${automated.evidence_path}` };
+        }
+        if (automated?.kind === "candidate_ready") {
+          return { done: false, state: "blocked",
+            evidence: `One hash-bound phonetic candidate exists for ${automated.unit_id}; fresh dual-ASR, acoustic, voice and full-stream QA must decide it`,
+            next_command_shape: `node bin/goldflow.mjs tts finalize-provider --episode-dir ${episodeDir} --manifest ${automated.manifest_path} --automated-pronunciation-evidence ${automated.evidence_path}` };
+        }
+      } catch (error) {
+        return { done: false, state: "blocked",
+          evidence: `Automated pronunciation evidence is stale or incomplete: ${error.message}`,
+          next_command_shape: "Operator hold: inspect the exact one-unit automated pronunciation evidence; do not rerun narration." };
+      }
+    }
     const exactBoundaryRepair = await qwenExactBoundaryRepairStatus({
       episodeDir, episode, ttsReportPath, ttsReport, currentScriptHash,
     });
@@ -4290,6 +4421,11 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
       plan, planFileSha256, ttsReport, unitDelivery,
       providerOutput, providerOutputPath,
     })) v2Findings.push("user_pronunciation_review_stale_or_missing");
+    if (!await appliedAutomatedPronunciationReviewValid({
+      episodeDir, sourceScriptSha256: currentScriptHash,
+      plan, planFileSha256, ttsReport, unitDelivery,
+      providerOutput, providerOutputPath,
+    })) v2Findings.push("automated_pronunciation_review_stale_or_missing");
     try {
       await loadLowMarginDisposition({ episodeDir, episode,
         expectedBinding: unitDelivery?.voice_low_margin_disposition ?? null });

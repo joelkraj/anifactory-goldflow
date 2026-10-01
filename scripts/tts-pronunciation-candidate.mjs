@@ -14,7 +14,9 @@ import {
 } from "./lib/narration-provider-adapter.mjs";
 import {
   PRONUNCIATION_REQUEST_SCHEMA, PRONUNCIATION_RESULT_SCHEMA,
-  PRONUNCIATION_MODE, validatePronunciationDefectEvidenceForTests,
+  PRONUNCIATION_MODE, AUTOMATED_PRONUNCIATION_MODE,
+  validatePronunciationDefectEvidenceForTests,
+  validateAutomatedPronunciationEvidenceForTests,
 } from "./lib/narration-pronunciation-repair.mjs";
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -65,13 +67,14 @@ async function run(command, args, cwd) {
 
 export async function main(parts = process.argv.slice(2)) {
   const options = flags(parts);
+  const automated = options.automated === "true";
   if (!options["episode-dir"] || !options.evidence || options["workflow-bypass"]) {
-    throw new Error("Usage: goldflow tts repair-pronunciation --episode-dir <dir> --evidence <user-heard.json>");
+    throw new Error("Usage: goldflow tts repair-pronunciation[-auto] --episode-dir <dir> --evidence <exact-review.json>");
   }
   const episodeDir = path.resolve(options["episode-dir"]);
   const evidencePath = path.resolve(options.evidence);
   if (!within(episodeDir, evidencePath)) throw new Error("Defect receipt must be episode-local.");
-  const expectedCommand = `node bin/goldflow.mjs tts repair-pronunciation --episode-dir ${episodeDir} --evidence ${evidencePath}`;
+  const expectedCommand = `node bin/goldflow.mjs tts repair-pronunciation${automated ? "-auto" : ""} --episode-dir ${episodeDir} --evidence ${evidencePath}`;
   const status = await run("node", ["bin/goldflow.mjs", "run", "status", "--episode-dir", episodeDir,
     "--format", "markdown"], path.resolve(DIR, ".."));
   if (!status.out.includes("Current stage: qwen_tts_stitch")
@@ -105,7 +108,9 @@ export async function main(parts = process.argv.slice(2)) {
   const [priorBoundaryRequest, priorBoundaryResult] = await Promise.all([
     read(priorBoundaryRequestPath), read(priorBoundaryResultPath),
   ]);
-  const validated = validatePronunciationDefectEvidenceForTests({
+  const validated = (automated
+    ? validateAutomatedPronunciationEvidenceForTests
+    : validatePronunciationDefectEvidenceForTests)({
     evidence, evidenceFileSha256: await fileHash(evidencePath),
     sourceScriptSha256: await fileHash(scriptPath), plan,
     planFileSha256: await fileHash(planPath), report, reportFileSha256: await fileHash(reportPath),
@@ -156,17 +161,23 @@ export async function main(parts = process.argv.slice(2)) {
     spoken_text_sha256: selected.spoken_text_sha256,
     prior_audio_sha256: selected.audio_sha256,
     prior_synthesis_identity_sha256: selected.synthesis_identity_sha256,
-    expected_word: validated.intended_word,
-    tts_only_phonetic_word: validated.tts_only_phonetic_word,
+    expected_word: automated ? validated.expected_word : validated.intended_word,
+    tts_only_phonetic_word: automated ? validated.phonetic_word : validated.tts_only_phonetic_word,
     remainder_text: validated.remainder_text,
     retained_remainder: validated.retained_remainder,
+    ...(automated ? { recovery_authorization: {
+      evidence_basis: "reviewed_automated_delivery_qa",
+      authorization_origin: "user_authorized_autonomous_production",
+      human_listening_performed: false,
+    } } : {}),
     model_id: manifest.model_id, model_revision: manifest.model_revision,
     voice_id: manifest.voice_id, voice_sha256: manifest.voice_sha256,
     voice_continuity_contract: manifest.voice_continuity_contract,
   };
   request.request_sha256 = canonicalHash(request);
   const candidateDir = path.join(episodeDir,
-    "assets/audio/narration_tts/pronunciation_candidates", request.request_sha256);
+    `assets/audio/narration_tts/${automated ? "automated_pronunciation_candidates" : "pronunciation_candidates"}`,
+    request.request_sha256);
   const requestPath = path.join(candidateDir, "request.json");
   const resultPath = path.join(candidateDir, "repair-result.json");
   await writeNew(requestPath, `${JSON.stringify(request, null, 2)}\n`);
@@ -208,7 +219,7 @@ export async function main(parts = process.argv.slice(2)) {
   Object.assign(row, {
     audio_path: result.unit.audio_path, audio_sha256: result.unit.audio_sha256,
     duration_sec: result.unit.duration_sec, token_limit_reached: false,
-    synthesis_mode: PRONUNCIATION_MODE,
+    synthesis_mode: automated ? AUTOMATED_PRONUNCIATION_MODE : PRONUNCIATION_MODE,
     generated_token_count: result.unit.generated_token_count,
     effective_token_limit: result.unit.effective_token_limit,
     recovery_provenance: {
@@ -219,7 +230,11 @@ export async function main(parts = process.argv.slice(2)) {
       defect_evidence_sha256: request.defect_evidence_sha256,
       prior_audio_sha256: request.prior_audio_sha256,
       prior_synthesis_identity_sha256: request.prior_synthesis_identity_sha256,
-      candidate_review_status: "pending_user_listening",
+      candidate_review_status: automated ? "pending_automated_asr" : "pending_user_listening",
+      ...(automated ? {
+        authorization_origin: request.recovery_authorization.authorization_origin,
+        human_listening_performed: false,
+      } : {}),
     },
     synthesis_identity: synthesisIdentity,
     synthesis_identity_sha256: narrationSynthesisIdentitySha256(synthesisIdentity),
@@ -231,7 +246,8 @@ export async function main(parts = process.argv.slice(2)) {
       result_sha256: await fileHash(resultPath), candidate_unit_id: request.unit_id,
       preserved_unit_count: next.units.length - 1 } };
   next.repair_history = [...(next.repair_history ?? []), {
-    mode: PRONUNCIATION_MODE, prior_manifest_sha256: manifest.manifest_sha256,
+    mode: automated ? AUTOMATED_PRONUNCIATION_MODE : PRONUNCIATION_MODE,
+    prior_manifest_sha256: manifest.manifest_sha256,
     request_sha256: request.request_sha256 }];
   delete next.manifest_sha256;
   next.validation = validateNarrationProviderOutputManifest(next, plan.units, expected);
@@ -240,7 +256,8 @@ export async function main(parts = process.argv.slice(2)) {
   next.manifest_sha256 = narrationProviderOutputManifestSha256(next);
   const candidateManifestPath = path.join(candidateDir, "provider-output-manifest.json");
   await writeNew(candidateManifestPath, `${JSON.stringify(next, null, 2)}\n`);
-  process.stdout.write(`${JSON.stringify({ status: "candidate_pending_user_listening",
+  process.stdout.write(`${JSON.stringify({ status: automated
+      ? "candidate_pending_automated_asr" : "candidate_pending_user_listening",
     unit_id: request.unit_id, candidate_audio_path: row.audio_path,
     candidate_audio_sha256: row.audio_sha256,
     candidate_manifest_path: candidateManifestPath,

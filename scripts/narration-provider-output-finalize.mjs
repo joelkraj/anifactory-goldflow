@@ -75,7 +75,12 @@ import { applyFullStreamManualReview, loadFullStreamManualReview } from "./lib/n
 import { applyAsrOrthographyReviewForTests, loadAsrOrthographyReview } from "./lib/narration-asr-orthography-review.mjs";
 import { providerNeutralRetryReportFieldsForTests, verifiedStructuralRecoveryFromManifest } from "./lib/narration-structural-finalizer-provenance.mjs";
 import { loadPronunciationRecoveryState } from "./lib/narration-pronunciation-episode.mjs";
-import { applyPronunciationCandidateReviewForTests, PRONUNCIATION_MODE } from "./lib/narration-pronunciation-repair.mjs";
+import { loadAutomatedPronunciationState } from "./lib/narration-automated-pronunciation-episode.mjs";
+import {
+  applyPronunciationCandidateReviewForTests,
+  applyAutomatedPronunciationCandidateForTests,
+  PRONUNCIATION_MODE, AUTOMATED_PRONUNCIATION_MODE,
+} from "./lib/narration-pronunciation-repair.mjs";
 
 const execFile = promisify(execFileCb);
 const CANONICAL_SAMPLE_RATE_HZ = 24000;
@@ -1506,8 +1511,20 @@ export async function finalizeNarrationProviderOutput(
   const hasPronunciationCandidate = manifest.units.some(
     (row) => row.synthesis_mode === PRONUNCIATION_MODE,
   );
+  const hasAutomatedPronunciationCandidate = manifest.units.some(
+    (row) => row.synthesis_mode === AUTOMATED_PRONUNCIATION_MODE,
+  );
+  const automatedPronunciationEvidencePath = String(
+    flags["automated-pronunciation-evidence"] ?? "",
+  ).trim() ? path.resolve(flags["automated-pronunciation-evidence"]) : null;
   if (hasPronunciationCandidate && !pronunciationReviewEvidencePath) {
     throw new Error("A phonetic-word candidate cannot be selected without exact user listening approval.");
+  }
+  if (hasAutomatedPronunciationCandidate && !automatedPronunciationEvidencePath) {
+    throw new Error("Automated phonetic candidate requires its exact reviewed ASR evidence.");
+  }
+  if (pronunciationReviewEvidencePath && automatedPronunciationEvidencePath) {
+    throw new Error("User listening and automated pronunciation reviews cannot be combined.");
   }
   let pronunciationReview = null;
   if (pronunciationReviewEvidencePath) {
@@ -1527,8 +1544,26 @@ export async function finalizeNarrationProviderOutput(
       throw new Error("Pronunciation listening approval does not bind this exact provider manifest.");
     }
   }
+  let automatedPronunciationReview = null;
+  if (automatedPronunciationEvidencePath) {
+    if (phaseContext || policy.primary.provider !== "qwen_local"
+      || !narrationUsesAutomatedAsrAcceptance(qualityContract)
+      || acceptAsrDeliveryBlockers || acceptReviewWarnings || pronunciationReview) {
+      throw new Error("Exact automated pronunciation review cannot combine with another route.");
+    }
+    automatedPronunciationReview = await loadAutomatedPronunciationState({
+      episodeDir, episode, sourceScriptSha256: actualSourceScriptSha256,
+    });
+    if (automatedPronunciationReview?.kind !== "candidate_ready"
+      || automatedPronunciationReview.evidence_path !== automatedPronunciationEvidencePath
+      || automatedPronunciationReview.manifest_path !== manifestPath
+      || automatedPronunciationReview.manifest_file_sha256 !== manifestFileSha256
+      || !hasAutomatedPronunciationCandidate) {
+      throw new Error("Automated pronunciation evidence does not bind this exact candidate manifest.");
+    }
+  }
   let pronunciationSnapshots = null;
-  if (pronunciationReview) {
+  if (pronunciationReview || automatedPronunciationReview) {
     for (const row of manifest.units) {
       if (await sha256File(row.audio_path) !== row.audio_sha256) {
         throw new Error(`Provider audio hash is stale for ${row.unit_id}.`);
@@ -1536,7 +1571,8 @@ export async function finalizeNarrationProviderOutput(
     }
     const snapshotDir = path.join(episodeDir,
       "assets/audio/narration_tts/pronunciation_reviews",
-      pronunciationReview.review_file_sha256);
+      pronunciationReview?.review_file_sha256
+        ?? automatedPronunciationReview.evidence_file_sha256);
     const copyImmutable = async (sourcePath, basename) => {
       const targetPath = path.join(snapshotDir, basename);
       const bytes = await fs.readFile(sourcePath);
@@ -1569,6 +1605,24 @@ export async function finalizeNarrationProviderOutput(
       prior_delivery_snapshot_path: pronunciationSnapshots.prior_delivery.path,
       prior_delivery_snapshot_sha256: pronunciationSnapshots.prior_delivery.sha256,
       human_listening_performed: true,
+    },
+  } : {};
+  const automatedPronunciationProvenance = automatedPronunciationReview ? {
+    automated_pronunciation_review: {
+      schema: "goldflow_tts_exact_automated_pronunciation_review_v1",
+      unit_id: automatedPronunciationReview.unit_id,
+      evidence_path: automatedPronunciationReview.evidence_path,
+      evidence_sha256: automatedPronunciationReview.evidence_file_sha256,
+      manifest_path: manifestPath,
+      manifest_file_sha256: manifestFileSha256,
+      prior_report_snapshot_path: pronunciationSnapshots.prior_report.path,
+      prior_report_snapshot_sha256: pronunciationSnapshots.prior_report.sha256,
+      prior_delivery_snapshot_path: pronunciationSnapshots.prior_delivery.path,
+      prior_delivery_snapshot_sha256: pronunciationSnapshots.prior_delivery.sha256,
+      expected_word: automatedPronunciationReview.expected_word,
+      phonetic_word: automatedPronunciationReview.phonetic_word,
+      human_listening_performed: false,
+      acceptance_basis: "fresh_independent_dual_asr_and_normal_audio_qa",
     },
   } : {};
 
@@ -1883,7 +1937,8 @@ export async function finalizeNarrationProviderOutput(
     if (cached?.confirmation_recognition) {
       cachedConfirmationMap.set(String(row.unit_id), cached.confirmation_recognition);
     }
-    if (narrationDeliveryNeedsConfirmation(transcriptQa, decision)) {
+    if (narrationDeliveryNeedsConfirmation(transcriptQa, decision)
+      || String(row.unit_id) === automatedPronunciationReview?.unit_id) {
       confirmationRequiredIds.add(String(row.unit_id));
       if (!cached?.confirmation_recognition) {
         confirmationCandidates.push({ unit_id: row.unit_id, wav: row.wav });
@@ -1987,6 +2042,17 @@ export async function finalizeNarrationProviderOutput(
         confirmationTranscriptQa: confirmationQa
           ?? (pronunciationReview.kind === "candidate_approved"
             ? primary.transcriptQa : null),
+      });
+    }
+    if (automatedPronunciationReview) {
+      decision = applyAutomatedPronunciationCandidateForTests({
+        decision, unitId: String(row.unit_id),
+        reviewedUnitId: automatedPronunciationReview.unit_id,
+        evidenceSha256: automatedPronunciationReview.evidence_file_sha256,
+        expectedWord: automatedPronunciationReview.expected_word,
+        phoneticWord: automatedPronunciationReview.phonetic_word,
+        primaryTranscriptQa: primary.transcriptQa,
+        confirmationTranscriptQa: confirmationQa,
       });
     }
     const reviewedSpelling = orthographyReview?.rows_by_id.get(String(row.unit_id));
@@ -2166,6 +2232,7 @@ export async function finalizeNarrationProviderOutput(
     ...lowMarginProvenance,
     ...orthographyProvenance,
     ...pronunciationProvenance,
+    ...automatedPronunciationProvenance,
     schema: "goldflow_narration_unit_delivery_qa_v2",
     transcript_comparison_version: helpers.TRANSCRIPT_QA_COMPARISON_VERSION,
     status: blockers.length
@@ -2242,6 +2309,7 @@ export async function finalizeNarrationProviderOutput(
     ...lowMarginProvenance,
     ...orthographyProvenance,
     ...pronunciationProvenance,
+    ...automatedPronunciationProvenance,
     schema: "goldflow_narration_tts_unit_qa_v2",
     status: blockers.length
       ? "blocked"
@@ -2300,6 +2368,7 @@ export async function finalizeNarrationProviderOutput(
       ...lowMarginProvenance,
       ...orthographyProvenance,
       ...pronunciationProvenance,
+      ...automatedPronunciationProvenance,
       ...scopeFields,
       schema: "goldflow_narration_tts_report_v1",
       status: "blocked",
@@ -2870,6 +2939,7 @@ export async function finalizeNarrationProviderOutput(
     ...lowMarginProvenance,
     ...orthographyProvenance,
     ...pronunciationProvenance,
+    ...automatedPronunciationProvenance,
     ...scopeFields,
     ...(pilotFinalization?.phaseBatchPlans ? { phase_batch_plans: pilotFinalization.phaseBatchPlans } : {}),
     schema: "goldflow_provider_neutral_narration_tts_report_v2",

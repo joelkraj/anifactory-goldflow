@@ -2,6 +2,10 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import {
+  AUTOMATED_PRONUNCIATION_SCHEMA,
+  AUTOMATED_PRONUNCIATION_MODE,
+  applyAutomatedPronunciationCandidateForTests,
+  validateAutomatedPronunciationEvidenceForTests,
   applyPronunciationCandidateReviewForTests,
   pronunciationGuardAdmission,
   PRONUNCIATION_DEFECT_ATTESTATION,
@@ -74,6 +78,68 @@ const common = { sourceScriptSha256, plan, planFileSha256, report,
   reportFileSha256, delivery, deliveryFileSha256, manifest,
   manifestFileSha256, selectedAudioFileSha256 };
 const reviewedAt = "2026-10-01T19:00:00Z";
+
+const automated = {
+  schema: AUTOMATED_PRONUNCIATION_SCHEMA,
+  status: "reviewed", evidence_basis: "reviewed_automated_delivery_qa",
+  authorization_origin: "user_authorized_autonomous_production",
+  human_listening_performed: false, user_listening_claimed: false,
+  reviewed_by: "Codex", reviewed_at: reviewedAt,
+  review_note: "Both retained ASR passes substitute Then for the isolated opening name; the later words match exactly.",
+  unit_id: id, expected_word: "Venn", tts_only_phonetic_word: "Ven",
+  observed_primary_first_word: "then", observed_confirmation_first_word: "then",
+  source_script_sha256: sourceScriptSha256,
+  narration_generation_plan_sha256: plan.plan_sha256,
+  narration_generation_plan_file_sha256: planFileSha256,
+  prior_narration_report_sha256: reportFileSha256,
+  prior_unit_delivery_qa_sha256: deliveryFileSha256,
+  prior_provider_manifest_file_sha256: manifestFileSha256,
+  prior_audio_sha256: selectedAudioFileSha256,
+  prior_synthesis_identity_sha256: selected.synthesis_identity_sha256,
+  prior_boundary_result_sha256: priorBoundaryResultFileSha256,
+};
+const automatedArgs = { evidence: automated, evidenceFileSha256: h("auto-review"),
+  sourceScriptSha256, plan, planFileSha256, report, reportFileSha256,
+  delivery, deliveryFileSha256, manifest, manifestFileSha256,
+  selectedAudioFileSha256, priorBoundaryRequest: boundaryRequest,
+  priorBoundaryResult: boundaryResult, priorBoundaryResultFileSha256 };
+assert.equal(validateAutomatedPronunciationEvidenceForTests(automatedArgs).unit_id, id);
+for (const changed of [
+  { human_listening_performed: true },
+  { user_listening_claimed: true },
+  { tts_only_phonetic_word: "Van" },
+  { observed_primary_first_word: "ven" },
+  { prior_audio_sha256: h("stale") },
+]) assert.throws(() => validateAutomatedPronunciationEvidenceForTests({ ...automatedArgs,
+  evidence: { ...automated, ...changed } }), /automated pronunciation evidence/i);
+assert.throws(() => validateAutomatedPronunciationEvidenceForTests({ ...automatedArgs,
+  delivery: { ...delivery, units: [{ ...delivery.units[0],
+    confirmation_transcript_qa: { ...exactLaterQa, deletions: 1 } }] },
+}), /automated pronunciation evidence/i);
+const phoneticQa = { ...exactLaterQa, operations: [
+  { type: "substitution", intended: "venn", recognized: "ven" },
+  ...exactLaterQa.operations.slice(1),
+] };
+const automatedDecision = applyAutomatedPronunciationCandidateForTests({
+  decision: { status: "blocked", blockers: [blocker], warnings: [] },
+  unitId: id, reviewedUnitId: id, evidenceSha256: h("auto-review"),
+  expectedWord: "Venn", phoneticWord: "Ven",
+  primaryTranscriptQa: phoneticQa, confirmationTranscriptQa: phoneticQa,
+});
+assert.equal(automatedDecision.status, "passed_with_warnings");
+assert.equal(automatedDecision.blockers.length, 0);
+assert.equal(automatedDecision.automated_pronunciation_review.human_listening_performed, false);
+assert.equal(applyAutomatedPronunciationCandidateForTests({
+  decision: { status: "blocked", blockers: [blocker] }, unitId: id, reviewedUnitId: id,
+  evidenceSha256: h("auto-review"), expectedWord: "Venn", phoneticWord: "Ven",
+  primaryTranscriptQa: exactLaterQa, confirmationTranscriptQa: phoneticQa,
+}).blockers.length, 1);
+assert.equal(applyAutomatedPronunciationCandidateForTests({
+  decision: { status: "blocked", blockers: [blocker] }, unitId: id, reviewedUnitId: id,
+  evidenceSha256: h("auto-review"), expectedWord: "Venn", phoneticWord: "Ven",
+  primaryTranscriptQa: phoneticQa,
+  confirmationTranscriptQa: { ...phoneticQa, insertions: 1 },
+}).blockers.length, 1);
 
 const defect = { schema: PRONUNCIATION_DEFECT_SCHEMA, status: "reviewed",
   listener_role: "user", human_listening_performed: true,
@@ -220,6 +286,16 @@ const artifactArgs = {
   remainderSidecarFileSha256: h("remainder-sidecar"),
 };
 assert.equal(validatePronunciationCandidateArtifactsForTests(artifactArgs).preserved_unit_count, 2);
+const autoAfter = { ...after, units: [before.units[0], {
+  ...after.units[1], synthesis_mode: AUTOMATED_PRONUNCIATION_MODE,
+  recovery_provenance: { ...after.units[1].recovery_provenance,
+    candidate_review_status: "pending_automated_asr" },
+}, before.units[2]] };
+assert.equal(validatePronunciationCandidateArtifactsForTests({ ...artifactArgs,
+  defect: automated, candidateManifest: autoAfter,
+  synthesisMode: AUTOMATED_PRONUNCIATION_MODE,
+  candidateReviewStatus: "pending_automated_asr",
+}).preserved_unit_count, 2);
 assert.throws(() => validatePronunciationCandidateArtifactsForTests({ ...artifactArgs,
   candidateManifest: { ...after, units: [
     { ...before.units[0], audio_sha256: h("silently-changed") }, ...after.units.slice(1),
@@ -270,4 +346,16 @@ assert.equal(pronunciationGuardAdmission(finalStatus, "tts", "finalize-provider"
 assert.equal(pronunciationGuardAdmission(finalStatus, "tts", "finalize-provider",
   { "episode-dir": episodeDir, manifest: "/tmp/other.json",
     "pronunciation-review-evidence": review }).allowed, false);
+const autoEvidence = path.join(episodeDir, "narration_automated_pronunciation_review_ep_01.json");
+const autoStatus = { ...status, next_command_shape:
+  `node bin/goldflow.mjs tts repair-pronunciation-auto --episode-dir ${episodeDir} --evidence ${autoEvidence}` };
+assert.equal(pronunciationGuardAdmission(autoStatus, "tts", "repair-pronunciation-auto",
+  { "episode-dir": episodeDir, evidence: autoEvidence }).allowed, true);
+assert.equal(pronunciationGuardAdmission(autoStatus, "tts", "repair-pronunciation-auto",
+  { "episode-dir": episodeDir, evidence: autoEvidence, "workflow-bypass": "true" }).allowed, false);
+const autoFinal = { ...status, next_command_shape:
+  `node bin/goldflow.mjs tts finalize-provider --episode-dir ${episodeDir} --manifest ${manifestPath} --automated-pronunciation-evidence ${autoEvidence}` };
+assert.equal(pronunciationGuardAdmission(autoFinal, "tts", "finalize-provider",
+  { "episode-dir": episodeDir, manifest: manifestPath,
+    "automated-pronunciation-evidence": autoEvidence }).allowed, true);
 console.log("narration pronunciation repair contracts passed");

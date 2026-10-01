@@ -131,6 +131,7 @@ const stages = [
       "tts finalize-provider",
       "tts repair-boundary",
       "tts repair-pronunciation",
+      "tts repair-pronunciation-auto",
       "tts approve-listen",
       "tts source-structure",
       "tts low-margin-disposition",

@@ -36,6 +36,7 @@ import { falBlockedStageRecoveryAdmission } from "../scripts/lib/fal-production-
 import { interruptedQwenGuardAdmission } from "../scripts/lib/qwen-interrupted-guard.mjs";
 import { exactBlockedNarrationRetakeAdmission } from "../scripts/lib/narration-exact-retake-guard.mjs";
 import { asrOrthographyGuardAdmission } from "../scripts/lib/narration-asr-orthography-review.mjs";
+import { pronunciationGuardAdmission } from "../scripts/lib/narration-pronunciation-repair.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
@@ -143,6 +144,17 @@ function enforceWorkflowGuard(commandName, subcommandName, scriptArgs, episodeDi
   if (orthography.applicable) {
     if (!orthography.allowed) {
       console.error(`Workflow guard blocked ASR orthography review: ${orthography.reason}`);
+      if (result.next_command_shape) console.error(`Next valid command shape: ${result.next_command_shape}`);
+      process.exit(1);
+    }
+    return;
+  }
+  const pronunciation = pronunciationGuardAdmission(
+    result, commandName, subcommandName, parsedFlags,
+  );
+  if (pronunciation.applicable) {
+    if (!pronunciation.allowed) {
+      console.error(`Workflow guard blocked pronunciation recovery: ${pronunciation.reason}`);
       if (result.next_command_shape) console.error(`Next valid command shape: ${result.next_command_shape}`);
       process.exit(1);
     }
@@ -520,6 +532,7 @@ ${registryCommands}
   goldflow tts import-provider     Import hash-bound WAV results from the identity-locked TTS provider
   goldflow tts finalize-provider   Run delivery, continuity, stitch, mastering, and full-stream QA
   goldflow tts repair-boundary     Repair only reviewed blocked Qwen sentence/word boundaries, then rerun narration QA
+  goldflow tts repair-pronunciation  Create one user-heard phonetic-word candidate; require a second listen before selection
   goldflow tts adopt-interrupted   QA and adopt only hash-bound completed Qwen cohorts from an interrupted invocation
   goldflow tts approve-listen      Record hash-bound decisions for exact narration listen items
   goldflow tts approve-subjective  Approve the mandatory hash-bound whole-episode narration sample manifest
@@ -720,6 +733,8 @@ if (command === "crime-proof" && !helpRequested) {
   run("narration-provider-output-finalize.mjs", flags);
 } else if (command === "tts" && subcommand === "repair-boundary") {
   run("tts-exact-boundary-repair.mjs", flags);
+} else if (command === "tts" && subcommand === "repair-pronunciation") {
+  run("tts-pronunciation-candidate.mjs", flags);
 } else if (command === "tts" && subcommand === "approve-listen") {
   run("narration-exact-listen-review.mjs", flags);
 } else if (command === "tts" && subcommand === "approve-subjective") {

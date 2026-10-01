@@ -74,6 +74,8 @@ import { applyLowMarginDisposition, assertLowMarginActiveBindings, loadLowMargin
 import { applyFullStreamManualReview, loadFullStreamManualReview } from "./lib/narration-full-stream-manual-review.mjs";
 import { applyAsrOrthographyReviewForTests, loadAsrOrthographyReview } from "./lib/narration-asr-orthography-review.mjs";
 import { providerNeutralRetryReportFieldsForTests, verifiedStructuralRecoveryFromManifest } from "./lib/narration-structural-finalizer-provenance.mjs";
+import { loadPronunciationRecoveryState } from "./lib/narration-pronunciation-episode.mjs";
+import { applyPronunciationCandidateReviewForTests, PRONUNCIATION_MODE } from "./lib/narration-pronunciation-repair.mjs";
 
 const execFile = promisify(execFileCb);
 const CANONICAL_SAMPLE_RATE_HZ = 24000;
@@ -1491,6 +1493,78 @@ export async function finalizeNarrationProviderOutput(
         sourceScriptSha256: actualSourceScriptSha256 })
     : null;
 
+  const pronunciationReviewEvidencePath = String(
+    flags["pronunciation-review-evidence"] ?? "",
+  ).trim() ? path.resolve(flags["pronunciation-review-evidence"]) : null;
+  const hasPronunciationCandidate = manifest.units.some(
+    (row) => row.synthesis_mode === PRONUNCIATION_MODE,
+  );
+  if (hasPronunciationCandidate && !pronunciationReviewEvidencePath) {
+    throw new Error("A phonetic-word candidate cannot be selected without exact user listening approval.");
+  }
+  let pronunciationReview = null;
+  if (pronunciationReviewEvidencePath) {
+    if (phaseContext || policy.primary.provider !== "qwen_local"
+      || acceptAsrDeliveryBlockers || acceptReviewWarnings) {
+      throw new Error("Exact pronunciation listening cannot combine with another review or waiver route.");
+    }
+    pronunciationReview = await loadPronunciationRecoveryState({
+      episodeDir, episode, sourceScriptSha256: actualSourceScriptSha256,
+    });
+    if (!pronunciationReview
+      || !["selected_approved", "candidate_approved"].includes(pronunciationReview.kind)
+      || pronunciationReview.review_path !== pronunciationReviewEvidencePath
+      || pronunciationReview.manifest_path !== manifestPath
+      || pronunciationReview.manifest_file_sha256 !== manifestFileSha256
+      || hasPronunciationCandidate !== (pronunciationReview.kind === "candidate_approved")) {
+      throw new Error("Pronunciation listening approval does not bind this exact provider manifest.");
+    }
+  }
+  let pronunciationSnapshots = null;
+  if (pronunciationReview) {
+    for (const row of manifest.units) {
+      if (await sha256File(row.audio_path) !== row.audio_sha256) {
+        throw new Error(`Provider audio hash is stale for ${row.unit_id}.`);
+      }
+    }
+    const snapshotDir = path.join(episodeDir,
+      "assets/audio/narration_tts/pronunciation_reviews",
+      pronunciationReview.review_file_sha256);
+    const copyImmutable = async (sourcePath, basename) => {
+      const targetPath = path.join(snapshotDir, basename);
+      const bytes = await fs.readFile(sourcePath);
+      await fs.mkdir(snapshotDir, { recursive: true });
+      try { await fs.writeFile(targetPath, bytes, { flag: "wx" }); }
+      catch (error) {
+        if (error?.code !== "EEXIST"
+          || !bytes.equals(await fs.readFile(targetPath))) throw error;
+      }
+      return { path: targetPath, sha256: await sha256File(targetPath) };
+    };
+    pronunciationSnapshots = {
+      prior_report: await copyImmutable(path.join(episodeDir,
+        `narration_tts_report_${episode}.json`), "prior_report.json"),
+      prior_delivery: await copyImmutable(path.join(episodeDir,
+        `narration_unit_delivery_qa_${episode}.json`), "prior_delivery.json"),
+    };
+  }
+  const pronunciationProvenance = pronunciationReview ? {
+    user_pronunciation_review: {
+      schema: "goldflow_tts_exact_user_pronunciation_review_v1",
+      unit_id: pronunciationReview.unit_id,
+      kind: pronunciationReview.kind,
+      evidence_path: pronunciationReview.review_path,
+      evidence_sha256: pronunciationReview.review_file_sha256,
+      manifest_path: manifestPath,
+      manifest_file_sha256: manifestFileSha256,
+      prior_report_snapshot_path: pronunciationSnapshots.prior_report.path,
+      prior_report_snapshot_sha256: pronunciationSnapshots.prior_report.sha256,
+      prior_delivery_snapshot_path: pronunciationSnapshots.prior_delivery.path,
+      prior_delivery_snapshot_sha256: pronunciationSnapshots.prior_delivery.sha256,
+      human_listening_performed: true,
+    },
+  } : {};
+
   const orthographyReview = !phaseContext && policy.primary.provider === "qwen_local"
     && narrationUsesAutomatedAsrAcceptance(qualityContract)
     ? await loadAsrOrthographyReview({ episodeDir, episode, plan,
@@ -1894,6 +1968,20 @@ export async function finalizeNarrationProviderOutput(
       row.unit_qa?.findings ?? [],
       qualityContract,
     );
+    if (pronunciationReview) {
+      decision = applyPronunciationCandidateReviewForTests({
+        decision, unitId: String(row.unit_id),
+        reviewedUnitId: pronunciationReview.unit_id,
+        reviewFileSha256: pronunciationReview.review_file_sha256,
+        primaryTranscriptQa: primary.transcriptQa,
+        // The candidate reuses the immutable remainder whose prior Small and
+        // Medium passes both matched every later word. A clean current Small
+        // pass need not trigger a new Medium diagnostic.
+        confirmationTranscriptQa: confirmationQa
+          ?? (pronunciationReview.kind === "candidate_approved"
+            ? primary.transcriptQa : null),
+      });
+    }
     const reviewedSpelling = orthographyReview?.rows_by_id.get(String(row.unit_id));
     if (reviewedSpelling) {
       if (primary.recognized?.text !== reviewedSpelling.primary_recognized_text
@@ -2070,6 +2158,7 @@ export async function finalizeNarrationProviderOutput(
   const unitDeliveryArtifact = {
     ...lowMarginProvenance,
     ...orthographyProvenance,
+    ...pronunciationProvenance,
     schema: "goldflow_narration_unit_delivery_qa_v2",
     transcript_comparison_version: helpers.TRANSCRIPT_QA_COMPARISON_VERSION,
     status: blockers.length
@@ -2145,6 +2234,7 @@ export async function finalizeNarrationProviderOutput(
   const unitQaArtifact = {
     ...lowMarginProvenance,
     ...orthographyProvenance,
+    ...pronunciationProvenance,
     schema: "goldflow_narration_tts_unit_qa_v2",
     status: blockers.length
       ? "blocked"
@@ -2201,6 +2291,7 @@ export async function finalizeNarrationProviderOutput(
     await atomicWriteJson(blockedTtsReportPath, {
       ...lowMarginProvenance,
       ...orthographyProvenance,
+      ...pronunciationProvenance,
       ...scopeFields,
       schema: "goldflow_narration_tts_report_v1",
       status: "blocked",
@@ -2770,6 +2861,7 @@ export async function finalizeNarrationProviderOutput(
   const ttsReport = {
     ...lowMarginProvenance,
     ...orthographyProvenance,
+    ...pronunciationProvenance,
     ...scopeFields,
     ...(pilotFinalization?.phaseBatchPlans ? { phase_batch_plans: pilotFinalization.phaseBatchPlans } : {}),
     schema: "goldflow_provider_neutral_narration_tts_report_v2",

@@ -47,6 +47,14 @@ import { loadLowMarginDisposition } from "./lib/narration-low-margin-disposition
 import { loadAsrOrthographyReview } from "./lib/narration-asr-orthography-review.mjs";
 import { projectVerifiedStructuralRecoveryReport, verifiedStructuralRecoveryFromManifest } from "./lib/narration-structural-finalizer-provenance.mjs";
 import { validateConfirmedRetryEvidenceForTests } from "./narration-tts-episode.mjs";
+import { loadPronunciationRecoveryState } from "./lib/narration-pronunciation-episode.mjs";
+import {
+  PRONUNCIATION_MODE,
+  validatePronunciationCandidateArtifactsForTests,
+  validatePronunciationCandidateReviewForTests,
+  validatePronunciationDefectEvidenceForTests,
+  validateSelectedPronunciationReviewForTests,
+} from "./lib/narration-pronunciation-repair.mjs";
 import {
   NARRATION_CROSS_LEVEL_ASR_POLICY_VERSION,
   crossLevelArticleFusionCandidate,
@@ -2660,6 +2668,21 @@ async function synthesizedNarrationArtifactsComplete({
           }
         }
         if (!valid) add(`unit ${planned.unit_id} exact-boundary composite provenance is missing or stale`);
+      } else if (mode === PRONUNCIATION_MODE) {
+        const provenance = result.recovery_provenance;
+        const review = ttsReport.user_pronunciation_review;
+        if (provenance?.schema !== "goldflow_tts_pronunciation_candidate_provenance_v1"
+          || synthesisIdentity.schema !== "goldflow_tts_pronunciation_fragment_identity_v1"
+          || result.synthesis_identity_sha256
+            !== narrationSynthesisIdentitySha256(synthesisIdentity)
+          || synthesisIdentity.unit_id !== planned.unit_id
+          || synthesisIdentity.spoken_text_sha256 !== planned.spoken_text_sha256
+          || synthesisIdentity.composite_audio_sha256 !== result.audio_sha256
+          || synthesisIdentity.request_sha256 !== provenance.request_sha256
+          || review?.kind !== "candidate_approved"
+          || review?.unit_id !== planned.unit_id) {
+          add(`unit ${planned.unit_id} user-listened pronunciation candidate provenance is missing or stale`);
+        }
       } else {
         add(`unit ${planned.unit_id} selected synthesis mode ${mode ?? "missing"} is not allowed by the batch-four contract`);
       }
@@ -3686,6 +3709,125 @@ export async function reviewedAutomatedRetryStatusForTests({
   }
 }
 
+async function appliedPronunciationReviewValid({
+  episodeDir, episode, sourceScriptSha256, plan, planFileSha256,
+  ttsReport, unitDelivery, providerOutput, providerOutputPath,
+}) {
+  const proof = ttsReport?.user_pronunciation_review;
+  const pronunciationRows = (providerOutput?.units ?? []).filter(
+    (row) => row.synthesis_mode === PRONUNCIATION_MODE);
+  if (!proof) return pronunciationRows.length === 0;
+  const within = (name) => typeof name === "string" && path.isAbsolute(name)
+    && path.resolve(name).startsWith(`${path.resolve(episodeDir)}${path.sep}`);
+  if (proof.schema !== "goldflow_tts_exact_user_pronunciation_review_v1"
+    || !["selected_approved", "candidate_approved"].includes(proof.kind)
+    || proof.human_listening_performed !== true
+    || !within(proof.evidence_path)
+    || !within(proof.prior_report_snapshot_path)
+    || !within(proof.prior_delivery_snapshot_path)
+    || proof.manifest_path !== providerOutputPath
+    || proof.manifest_file_sha256 !== ttsReport.provider_output_manifest_sha256
+    || await fileSha256(proof.evidence_path) !== proof.evidence_sha256
+    || await fileSha256(proof.prior_report_snapshot_path)
+      !== proof.prior_report_snapshot_sha256
+    || await fileSha256(proof.prior_delivery_snapshot_path)
+      !== proof.prior_delivery_snapshot_sha256
+    || unitDelivery?.user_pronunciation_review?.evidence_sha256 !== proof.evidence_sha256
+    || pronunciationRows.length !== (proof.kind === "candidate_approved" ? 1 : 0)) return false;
+  const [review, priorReport, priorDelivery] = await Promise.all([
+    readJson(proof.evidence_path, null), readJson(proof.prior_report_snapshot_path, null),
+    readJson(proof.prior_delivery_snapshot_path, null),
+  ]);
+  if (!review || !priorReport || !priorDelivery || priorReport.status !== "blocked"
+    || priorDelivery.status !== "blocked" || priorReport.blockers?.length !== 1
+    || priorReport.blockers[0]?.unit_id !== proof.unit_id
+    || priorReport.blockers[0]?.code !== "narration_confirmed_opening_token_mismatch") return false;
+  const unit = providerOutput.units.find((row) => row.unit_id === proof.unit_id);
+  if (!unit || await fileSha256(unit.audio_path) !== unit.audio_sha256) return false;
+  if (proof.kind === "selected_approved") {
+    try {
+      validateSelectedPronunciationReviewForTests({
+        review, reviewFileSha256: proof.evidence_sha256,
+        sourceScriptSha256, plan, planFileSha256, report: priorReport,
+        reportFileSha256: proof.prior_report_snapshot_sha256,
+        delivery: priorDelivery,
+        deliveryFileSha256: proof.prior_delivery_snapshot_sha256,
+        manifest: providerOutput, manifestFileSha256: proof.manifest_file_sha256,
+        selectedAudioFileSha256: unit.audio_sha256,
+      });
+      return true;
+    } catch { return false; }
+  }
+  const provenance = unit.recovery_provenance;
+  if (!within(provenance?.request_path) || !within(provenance?.result_path)
+    || !within(provenance?.defect_evidence_path)
+    || await fileSha256(provenance.request_path) === null
+    || await fileSha256(provenance.result_path) !== provenance.result_sha256) return false;
+  const [request, result, defect] = await Promise.all([
+    readJson(provenance.request_path, null), readJson(provenance.result_path, null),
+    readJson(provenance.defect_evidence_path, null),
+  ]);
+  const priorManifestPath = request?.prior_manifest_path;
+  if (!within(priorManifestPath)
+    || await fileSha256(priorManifestPath) !== request?.prior_manifest_file_sha256) return false;
+  const priorManifest = await readJson(priorManifestPath, null);
+  const made = result?.unit;
+  for (const name of [made?.audio_path, made?.phonetic_fragment?.audio_path,
+    made?.phonetic_fragment?.sidecar_path, made?.retained_remainder?.audio_path,
+    made?.retained_remainder?.sidecar_path]) if (!within(name)) return false;
+  try {
+    if (request.prior_report_file_sha256 !== proof.prior_report_snapshot_sha256
+      || request.prior_delivery_file_sha256 !== proof.prior_delivery_snapshot_sha256
+      || defect.prior_narration_report_sha256 !== proof.prior_report_snapshot_sha256
+      || defect.prior_unit_delivery_qa_sha256 !== proof.prior_delivery_snapshot_sha256) return false;
+    const priorSelected = (priorManifest?.units ?? []).find(
+      (row) => row.unit_id === proof.unit_id);
+    const priorBoundaryRequestPath = request.prior_boundary_request_path;
+    const priorBoundaryResultPath = request.prior_boundary_result_path;
+    if (!within(priorSelected?.audio_path) || !within(priorBoundaryRequestPath)
+      || !within(priorBoundaryResultPath)
+      || await fileSha256(priorBoundaryRequestPath)
+        !== request.prior_boundary_request_file_sha256
+      || await fileSha256(priorBoundaryResultPath)
+        !== request.prior_boundary_result_file_sha256) return false;
+    validatePronunciationDefectEvidenceForTests({
+      evidence: defect,
+      evidenceFileSha256: await fileSha256(provenance.defect_evidence_path),
+      sourceScriptSha256, plan, planFileSha256,
+      report: priorReport, reportFileSha256: proof.prior_report_snapshot_sha256,
+      delivery: priorDelivery,
+      deliveryFileSha256: proof.prior_delivery_snapshot_sha256,
+      manifest: priorManifest,
+      manifestFileSha256: await fileSha256(priorManifestPath),
+      selectedAudioFileSha256: await fileSha256(priorSelected.audio_path),
+      priorBoundaryRequest: await readJson(priorBoundaryRequestPath, null),
+      priorBoundaryResult: await readJson(priorBoundaryResultPath, null),
+      priorBoundaryResultFileSha256: await fileSha256(priorBoundaryResultPath),
+    });
+    validatePronunciationCandidateArtifactsForTests({
+      defect, defectFileSha256: await fileSha256(provenance.defect_evidence_path),
+      request, requestFileSha256: await fileSha256(provenance.request_path),
+      result, resultFileSha256: await fileSha256(provenance.result_path),
+      priorManifest, priorManifestFileSha256: await fileSha256(priorManifestPath),
+      candidateManifest: providerOutput, candidateAudioFileSha256: unit.audio_sha256,
+      phoneticAudioFileSha256: await fileSha256(made.phonetic_fragment.audio_path),
+      phoneticSidecarFileSha256: await fileSha256(made.phonetic_fragment.sidecar_path),
+      remainderAudioFileSha256: await fileSha256(made.retained_remainder.audio_path),
+      remainderSidecarFileSha256: await fileSha256(made.retained_remainder.sidecar_path),
+    });
+    validatePronunciationCandidateReviewForTests({
+      review, defect, request, result, candidateManifest: providerOutput,
+      reviewFileSha256: proof.evidence_sha256,
+      defectFileSha256: await fileSha256(provenance.defect_evidence_path),
+      requestFileSha256: await fileSha256(provenance.request_path),
+      resultFileSha256: await fileSha256(provenance.result_path),
+      candidateManifestFileSha256: proof.manifest_file_sha256,
+      candidateAudioFileSha256: unit.audio_sha256,
+    });
+    return true;
+  } catch { return false; }
+}
+
 async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash, identity) {
   if (!currentScriptHash) return { done: false, evidence: "script_clean.md missing" };
   const narrationQualityContract = narrationQualityContractForIdentity(identity);
@@ -4023,6 +4165,33 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
         }
       }
     }
+    if (ttsReport.status === "blocked" && policy.primary.provider === "qwen_local") {
+      try {
+        const pronunciation = await loadPronunciationRecoveryState({
+          episodeDir, episode, sourceScriptSha256: currentScriptHash,
+        });
+        if (pronunciation?.kind === "defect_reviewed") {
+          return { done: false, state: "blocked",
+            evidence: `User-heard pronunciation defect is bound to ${pronunciation.unit_id}; only one phonetic opening fragment may be attempted, with the source and remaining audio retained`,
+            next_command_shape: `node bin/goldflow.mjs tts repair-pronunciation --episode-dir ${episodeDir} --evidence ${pronunciation.defect_path}` };
+        }
+        if (pronunciation?.kind === "candidate_pending_user_listening") {
+          return { done: false, state: "blocked",
+            evidence: `One phonetic pronunciation candidate is available for ${pronunciation.unit_id}: ${pronunciation.candidate_audio_path} (sha256 ${pronunciation.candidate_audio_sha256}). It is not selected; genuine user listening is required`,
+            next_command_shape: "Operator hold: record an exact hash-bound user listening decision for the candidate; do not finalize or synthesize again." };
+        }
+        if (pronunciation?.kind === "selected_approved"
+          || pronunciation?.kind === "candidate_approved") {
+          return { done: false, state: "blocked",
+            evidence: `User listened to the exact ${pronunciation.unit_id} selected WAV and confirmed the opening; re-adjudicate the hash-bound manifest without synthesis`,
+            next_command_shape: `node bin/goldflow.mjs tts finalize-provider --episode-dir ${episodeDir} --manifest ${pronunciation.manifest_path} --pronunciation-review-evidence ${pronunciation.review_path}` };
+        }
+      } catch (error) {
+        return { done: false, state: "blocked",
+          evidence: `Pronunciation recovery receipt is stale or invalid: ${error.message}`,
+          next_command_shape: "Operator hold: inspect the exact one-unit pronunciation receipt; do not rerun narration." };
+      }
+    }
     const exactBoundaryRepair = await qwenExactBoundaryRepairStatus({
       episodeDir, episode, ttsReportPath, ttsReport, currentScriptHash,
     });
@@ -4106,6 +4275,11 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
       },
     );
     const v2Findings = [];
+    if (!await appliedPronunciationReviewValid({
+      episodeDir, episode, sourceScriptSha256: currentScriptHash,
+      plan, planFileSha256, ttsReport, unitDelivery,
+      providerOutput, providerOutputPath,
+    })) v2Findings.push("user_pronunciation_review_stale_or_missing");
     try {
       await loadLowMarginDisposition({ episodeDir, episode,
         expectedBinding: unitDelivery?.voice_low_margin_disposition ?? null });

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { validateBoundaryRepairScopeForTests,
   validateSubsetBoundaryFinalizationForTests,
+  fullStreamFindingTargetsLockedUnitForTests,
   selectBoundaryRepairFullStreamForTests } from "../tts-exact-boundary-repair.mjs";
 import { assertPartialRepairUnitBlockerHoldForTests } from "../narration-provider-output-finalize.mjs";
 
@@ -63,6 +64,16 @@ assert.throws(() => validateBoundaryRepairScopeForTests({ plan, manifest, delive
 } }), /scope is not current/);
 
 const digest = (text) => createHash("sha256").update(text).digest("hex");
+const canonicalOneFinding = { operations: [{ intended: "num:1", recognized: "what" }] };
+assert.equal(fullStreamFindingTargetsLockedUnitForTests(canonicalOneFinding,
+  "I couldn’t imagine one I wanted to hear."), true,
+"a confirmed canonical number must target its exact locked spoken word");
+assert.equal(fullStreamFindingTargetsLockedUnitForTests(canonicalOneFinding,
+  "I couldn’t imagine what I wanted to hear."), false,
+"a different locked word cannot inherit the numerical repair scope");
+assert.equal(fullStreamFindingTargetsLockedUnitForTests({ operations: [{ intended: "num:11" }] },
+  "I couldn’t imagine one I wanted to hear."), false,
+"canonical numerical scope must preserve the exact value");
 const subsetPlan = { plan_sha256: digest("plan"), units: [
   { unit_id: "cutoff", spoken_text: "He was twenty, two years older.",
     spoken_text_sha256: digest("He was twenty, two years older.") },

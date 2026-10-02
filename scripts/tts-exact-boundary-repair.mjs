@@ -35,6 +35,17 @@ const sameIds = (left, right) => Array.isArray(left) && Array.isArray(right)
 const sameCodes = sameIds;
 const lexicalTokens = (value) => String(value ?? "").toLowerCase()
   .match(/[\p{L}\p{N}]+/gu) ?? [];
+export function fullStreamFindingTargetsLockedUnitForTests(finding, spokenText) {
+  const relevant = [...(finding?.intended_tokens ?? []),
+    ...(finding?.operations ?? []).map((operation) => operation.intended).filter(Boolean)]
+    .map((token) => String(token).toLowerCase());
+  if (!relevant.length) return false;
+  const locked = new Set([
+    ...lexicalTokens(spokenText),
+    ...(transcriptQaForTests(spokenText, spokenText).intended_canonical_tokens ?? []),
+  ]);
+  return relevant.every((token) => locked.has(token));
+}
 const blockerKeys = (rows) => (rows ?? [])
   .filter((row) => row?.unit_id && row?.code)
   .map((row) => `${row.unit_id}|${row.code}`);
@@ -96,11 +107,8 @@ export function validateBoundaryRepairScopeForTests({ plan, manifest, delivery,
     || unresolved.some((row) => {
       const target = targets.find((entry) => entry.finding_sha256 === row.finding_sha256);
       const unit = unitById.get(target?.unit_id);
-      const relevant = [...(row.finding.intended_tokens ?? []),
-        ...(row.finding.operations ?? []).map((op) => op.intended).filter(Boolean)];
       return !target || !row.finding.unit_ids.includes(target.unit_id) || !unit
-        || !relevant.length || !relevant.every((token) =>
-          lexicalTokens(unit.spoken_text).includes(String(token).toLowerCase()));
+        || !fullStreamFindingTargetsLockedUnitForTests(row.finding, unit.spoken_text);
     }))) {
     throw new Error("Every unresolved full-stream blocker needs one exact text-bearing unit target.");
   }

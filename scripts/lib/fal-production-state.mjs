@@ -4,6 +4,7 @@ import { falAdjudicationPath } from "./fal-ambiguous-adjudication.mjs";
 import { falAmbiguousSubmissionAttempts, falRetryBudgetState, falSpendProjectionState, falProjectedSpendUsd } from "./fal-retry-budget.mjs";
 import { validateFalValidationCorrection, validateFalValidationRecovery } from "./fal-validation-recovery.mjs";
 import { validateFalPrebulkPromptCorrection } from "./fal-prebulk-prompt-correction.mjs";
+import { inspectFalPostplanPromptCorrection } from "./fal-postplan-prompt-correction.mjs";
 import { validateFalReviewedReferenceSuccessRepair } from "./fal-reviewed-reference-success-repair.mjs";
 
 async function exists(file) { return fs.access(file).then(() => true, () => false); }
@@ -310,7 +311,15 @@ export async function falProductionStageStates({ episodeDir, identity } = {}) {
   const validationPassed = correction ? recovery?.status === "passed" : review?.status === "passed";
   if (validationPassed) await validateFalPrebulkPromptCorrection({ episodeDir,
     validationPlanPath: planPath, validationReviewPath: reviewPath });
-  const bulkPath = path.join(root, "bulk-plan.json"); const bulk = await exists(bulkPath) ? await read(bulkPath) : null;
+  const bulkPath = path.join(root, "bulk-plan.json");
+  const lockedBulk = await exists(bulkPath) ? await read(bulkPath) : null;
+  let postplanCorrection = null, postplanError = null;
+  if (lockedBulk) {
+    try { postplanCorrection = await inspectFalPostplanPromptCorrection({ episodeDir, bulkPlan: lockedBulk }); }
+    catch (error) { postplanError = error; }
+  }
+  const bulk = lockedBulk && postplanCorrection?.state === "applied"
+    ? { ...lockedBulk, assignments: postplanCorrection.assignments } : lockedBulk;
   let bulkState;
   if (validationPassed && !bulk) bulkState = { state: "missing", evidence: "Fal bulk plan is missing", next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action prepare-bulk --image-ids all` };
   else if (bulk) {
@@ -389,6 +398,11 @@ export async function falProductionStageStates({ episodeDir, identity } = {}) {
     if (retryPending >= 0) bulkState = { state: "missing", evidence: `Reviewed no-job adjudication awaits one conservative paid retry: ${bulk.assignments[retryPending].image_id}`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action dispatch-adjudicated --image-id ${bulk.assignments[retryPending].image_id} --confirm-spend exact_fal_ambiguous_retry` };
     else if (retrySubmitted.some((value,index)=>value&&!retryResults[index])) bulkState = { state: "missing", evidence: "Exact adjudicated retry is pending observation", next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action observe-adjudicated` };
   }
+  if (postplanError) bulkState = { state: "blocked",
+    evidence: `Fal post-plan prompt correction is invalid: ${postplanError.message}` };
+  else if (postplanCorrection?.state === "pending") bulkState = { state: "missing",
+    evidence: `Reviewed post-plan prompt correction for ${postplanCorrection.changed.size} unsubmitted cuts requires an append-only receipt before more paid dispatch`,
+    next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action apply-postplan-prompt-correction --request ${postplanCorrection.paths.request}` };
   if (earlyReferenceFork) return withSpendState({
     reference_generation: referenceState,
     ...(reviewRepairState ? { reference_image_approval: reviewRepairState } : {}),

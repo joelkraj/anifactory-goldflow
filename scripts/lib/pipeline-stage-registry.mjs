@@ -275,7 +275,7 @@ const stages = [
     validator: "prompt_blocker_resolution",
     skip: "harden_has_no_blockers",
     output_patterns: [/^section_image_prompts_reviewed\.json$/],
-    commands: ["visual review", "visual repair-screen-identity", "visual repair-identity-binding"],
+    commands: ["visual review", "visual repair-screen-identity", "visual repair-identity-binding", "visual repair-reviewed-ref-scope"],
   },
   {
     id: "transition_edit_plan",

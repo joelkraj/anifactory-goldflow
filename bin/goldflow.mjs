@@ -28,6 +28,7 @@ import { visualBeatDensityRepairAdmission } from "../scripts/lib/visual-beat-den
 import { exactVisualPromptRepairAdmission } from "../scripts/lib/visual-prompt-exact-repair.mjs";
 import { screenIdentityBlockerRepairAdmission } from "../scripts/lib/visual-screen-identity-blocker-repair.mjs";
 import { identityBindingRepairAdmission } from "../scripts/lib/visual-identity-binding-repair.mjs";
+import { reviewedReferenceScopeRepairAdmission } from "../scripts/lib/reviewed-reference-scope-repair.mjs";
 import { visualReferenceRecoveryAdmission } from "../scripts/lib/visual-reference-recovery.mjs";
 import { referenceImageQaRecoveryAdmission } from "../scripts/lib/reference-image-recovery.mjs";
 import { partialSceneImageQaRecoveryAdmission } from "../scripts/lib/partial-scene-image-recovery.mjs";
@@ -266,6 +267,14 @@ function enforceWorkflowGuard(commandName, subcommandName, scriptArgs, episodeDi
     }
     return;
   }
+  if (commandName === "visual" && subcommandName === "repair-reviewed-ref-scope") {
+    const repair = reviewedReferenceScopeRepairAdmission(result, parsedFlags);
+    if (!repair.allowed) {
+      console.error(`Workflow guard blocked reviewed reference scope repair: ${repair.reason}.`);
+      process.exit(1);
+    }
+    return;
+  }
   if (commandName === "visual" && subcommandName === "plan") {
     const recovery = visualPromptRecoveryAdmission(result, parsedFlags);
     if (recovery.applicable && !recovery.allowed) {
@@ -347,7 +356,7 @@ function run(script, scriptArgs = []) {
   }
   enforceWorkflowGuard(command, subcommand, scriptArgs, episodeDir);
   const stage = commandStage(command, subcommand, parsedFlags, episodeDir);
-  const plannerRerunDecision = command === "visual" && ["repair-beats", "repair-beat-density", "repair-prompt", "repair-prompt-multiplier", "repair-screen-identity", "repair-identity-binding"].includes(subcommand)
+  const plannerRerunDecision = command === "visual" && ["repair-beats", "repair-beat-density", "repair-prompt", "repair-prompt-multiplier", "repair-screen-identity", "repair-identity-binding", "repair-reviewed-ref-scope"].includes(subcommand)
     ? { allowed: true }
     : plannerRerunDecisionForEpisode({ stage, flags: parsedFlags, episodeDir });
   if (!plannerRerunDecision.allowed) {
@@ -814,6 +823,8 @@ if (command === "crime-proof" && !helpRequested) {
   run("visual-screen-identity-blocker-repair.mjs", flags);
 } else if (command === "visual" && subcommand === "repair-identity-binding") {
   run("visual-identity-binding-repair.mjs", flags);
+} else if (command === "visual" && subcommand === "repair-reviewed-ref-scope") {
+  run("reviewed-reference-scope-repair.mjs", flags);
 } else if (command === "visual" && subcommand === "refs") {
   run("visual-reference-plan.mjs", flags);
 } else if (command === "visual" && subcommand === "approve-ref-plan") {

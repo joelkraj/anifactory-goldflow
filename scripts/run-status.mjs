@@ -69,7 +69,8 @@ import {
   crossLevelArticleFusionCandidate,
 } from "./lib/narration-cross-level-asr.mjs";
 import { validateAppliedFullStreamManualReview } from "./lib/narration-full-stream-manual-review.mjs";
-import { loadContextualAsrReconciliation, validateAppliedContextualAsrReconciliation } from "./lib/narration-full-stream-contextual-asr.mjs";
+import { loadContextualAsrReconciliation, validateAppliedContextualAsrReconciliation,
+  validateCurrentContextualAsrDelivery } from "./lib/narration-full-stream-contextual-asr.mjs";
 import { loadFullStreamSpacingBridge, validateAppliedFullStreamSpacingBridge } from "./lib/narration-full-stream-spacing-bridge.mjs";
 import {
   EXTERNAL_NARRATION_TTS_PROVIDERS,
@@ -2281,11 +2282,11 @@ async function synthesizedNarrationArtifactsComplete({
     await validateAppliedContextualAsrReconciliation(fullQa);
     if (fullQa?.full_stream_contextual_asr) {
       const manifestPath = ttsReport?.provider_output_manifest_path;
-      if (fullQa.full_stream_contextual_asr.unit_delivery_sha256
-        !== await fileSha256(path.join(episodeDir,
-          `narration_unit_delivery_qa_${episode}.json`))) {
-        add("contextual ASR unit delivery hash is stale");
-      }
+      await validateCurrentContextualAsrDelivery({
+        receipt: fullQa.full_stream_contextual_asr,
+        currentDeliveryPath: path.join(episodeDir,
+          `narration_unit_delivery_qa_${episode}.json`),
+      });
       if (!manifestPath || fullQa.provider_output_manifest_file_sha256
         !== await fileSha256(manifestPath)) {
         add("contextual ASR provider manifest hash is stale");

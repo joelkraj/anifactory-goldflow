@@ -17,6 +17,7 @@ import { validateOpeningFinalizationFlags } from "../lib/narration-opening-final
 import {
   CONTEXTUAL_ASR_SCHEMA, loadContextualAsrReconciliation,
   applyContextualAsrReconciliation, validateAppliedContextualAsrReconciliation,
+  validateCurrentContextualAsrDelivery,
 } from "../lib/narration-full-stream-contextual-asr.mjs";
 import { validateBoundaryRepairScopeForTests } from "../tts-exact-boundary-repair.mjs";
 
@@ -113,7 +114,11 @@ try {
       audio_path: audios[1].path, audio_sha256: audios[1].sha256 },
   ] };
   const contextManifestFile = await write("context-manifest.json", contextManifest);
-  const contextDelivery = { status: "passed_with_warnings", units: [
+  const contextDelivery = { status: "passed_with_warnings", unit_count: 2, blockers: [],
+    source_script_hash: report.source_script_hash,
+    narration_generation_plan_sha256: report.narration_generation_plan_sha256,
+    narration_generation_plan_file_sha256: report.narration_generation_plan_file_sha256,
+    units: [
     { unit_id: "unit-a", audio_path: audios[0].path, audio_sha256: audios[0].sha256,
       intended_text: "An exact sentence for the listener.",
       intended_text_sha256: hash("An exact sentence for the listener."),
@@ -202,6 +207,29 @@ try {
     ...contextApplied, status: contextApplied.decision.status,
     blockers: contextApplied.decision.blockers,
     warnings: contextApplied.decision.warnings });
+  const refreshedDelivery = structuredClone(contextDelivery);
+  refreshedDelivery.units[1].acoustic_qa = { status: "passed_with_warnings" };
+  refreshedDelivery.voice_continuity_report_sha256 = hash("fresh speaker diagnostics");
+  const refreshedDeliveryPath = (await write("context-delivery-refreshed.json", refreshedDelivery)).path;
+  await validateCurrentContextualAsrDelivery({
+    receipt: contextApplied.full_stream_contextual_asr,
+    currentDeliveryPath: refreshedDeliveryPath,
+  });
+  const changedMedia = structuredClone(refreshedDelivery);
+  changedMedia.units[1].audio_sha256 = hash("different selected WAV");
+  await write("context-delivery-refreshed.json", changedMedia);
+  await assert.rejects(validateCurrentContextualAsrDelivery({
+    receipt: contextApplied.full_stream_contextual_asr,
+    currentDeliveryPath: refreshedDeliveryPath,
+  }), /selected unit media\/text/);
+  const changedSelectedAsr = structuredClone(refreshedDelivery);
+  changedSelectedAsr.units[0].primary_recognized_text = "An added sentence for the listener.";
+  await write("context-delivery-refreshed.json", changedSelectedAsr);
+  await assert.rejects(validateCurrentContextualAsrDelivery({
+    receipt: contextApplied.full_stream_contextual_asr,
+    currentDeliveryPath: refreshedDeliveryPath,
+  }), /selected-unit transcripts changed/);
+  await write("context-delivery-refreshed.json", refreshedDelivery);
   const changedContext = structuredClone(contextEvidence);
   changedContext.excerpt_start_sample_in_unit = 1000;
   await assert.rejects(contextLoad(changedContext), /entire selected unit/);

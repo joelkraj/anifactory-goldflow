@@ -266,3 +266,39 @@ export async function validateAppliedContextualAsrReconciliation(report) {
     && report.provider_output_manifest_file_sha256 === reconciliation.prior.provider_output_manifest_file_sha256,
   "applied decision or current media differs from evidence");
 }
+
+export async function validateCurrentContextualAsrDelivery({ receipt,
+  currentDeliveryPath } = {}) {
+  need(receipt?.schema === CONTEXTUAL_ASR_SCHEMA,
+    "applied receipt is missing or invalid");
+  const evidence = await bound(receipt.evidence_path, receipt.evidence_sha256,
+    "applied evidence", true);
+  const prior = await bound(evidence.unit_delivery_path,
+    evidence.unit_delivery_sha256, "prior unit delivery", true);
+  need(receipt.unit_delivery_sha256 === evidence.unit_delivery_sha256,
+    "receipt delivery binding changed");
+  const current = JSON.parse(await fs.readFile(currentDeliveryPath, "utf8"));
+  need(["passed", "passed_with_warnings"].includes(current.status)
+    && current.source_script_hash === prior.source_script_hash
+    && current.narration_generation_plan_sha256 === prior.narration_generation_plan_sha256
+    && current.narration_generation_plan_file_sha256 === prior.narration_generation_plan_file_sha256
+    && current.units?.length === prior.units?.length
+    && current.units?.length === current.unit_count
+    && (current.blockers ?? []).length === 0,
+  "current unit delivery is blocked or source/plan scope changed");
+  for (let i = 0; i < prior.units.length; i++) {
+    const before = prior.units[i];
+    const after = current.units[i];
+    need(before.unit_id === after.unit_id
+      && before.audio_path === after.audio_path
+      && before.audio_sha256 === after.audio_sha256
+      && before.intended_text_sha256 === after.intended_text_sha256
+      && (after.decision?.blockers ?? []).length === 0,
+    `selected unit media/text or delivery blockers changed at ${before.unit_id}`);
+    if (before.unit_id === receipt.unit_id) {
+      need(before.primary_recognized_text === after.primary_recognized_text
+        && before.confirmation_recognized_text === after.confirmation_recognized_text,
+      "contextual ASR selected-unit transcripts changed");
+    }
+  }
+}

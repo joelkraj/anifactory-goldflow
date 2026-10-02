@@ -85,6 +85,8 @@ class ExactContractionCandidateTests(unittest.TestCase):
         self.assertEqual(retained_path, self.remainder_wav)
         for change in (
             {"expected_first_fragment": "She looked at me"},
+            {"expected_first_fragment": "She’d go",
+             "tts_only_first_fragment": "She had go"},
             {"tts_only_first_fragment": "She looked at me"},
             {"tts_only_first_fragment": "She had seen me"},
             {"remainder_text": "at me in the mirror. She knew where she was going."},

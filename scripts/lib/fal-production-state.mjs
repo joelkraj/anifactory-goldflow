@@ -29,6 +29,15 @@ async function reviewedSecondRepair(root, imageId) {
 
 export function falBlockedStageRecoveryAdmission(status, flags = {}) {
   const action = String(flags.action ?? "");
+  if (status?.current_stage === "reference_image_approval" && status?.current_stage_state === "blocked"
+    && action === "repair-failed-reviewed-reference") {
+    const id = String(flags["image-id"] ?? "");
+    const directives = String(flags.directives ?? "");
+    return { applicable: true, allowed: /^[a-z0-9][a-z0-9_-]{1,100}$/.test(id)
+      && String(status.next_command_shape ?? "").endsWith(`--action repair-failed-reviewed-reference --image-id ${id} --directives ${directives} --confirm-spend exact_fal_reviewed_reference_v3`)
+      && flags["confirm-spend"] === "exact_fal_reviewed_reference_v3" && path.isAbsolute(directives),
+      reason: "Current status does not authorize this exact reviewed-reference second repair." };
+  }
   if (status?.current_stage === "image_generation" && status?.current_stage_state === "blocked"
     && action === "repair-failed-repair") {
     const id = String(flags["image-id"] ?? "");
@@ -51,7 +60,7 @@ export function falBlockedStageRecoveryAdmission(status, flags = {}) {
   const bulkReviewRecovery = status?.current_stage === "image_output_qa";
   const recoveryActions = new Set(referenceRecovery
     ? ["repair-reference-failures", "observe-reference-repairs"]
-    : reviewRecovery ? ["repair-reviewed-references", "observe-reviewed-references", "finalize-reviewed-references"]
+    : reviewRecovery ? ["repair-reviewed-references", "observe-reviewed-references", "observe-failed-reviewed-reference", "finalize-reviewed-references"]
     : bulkReviewRecovery ? ["repair-reviewed-bulk", "observe-reviewed-bulk", "finalize-reviewed-bulk"]
     : ["observe-bulk", "observe-holds", "recover-holds", "observe-transport-recovery", "repair-failures", "observe-repairs", "inspect-repair-failure", "observe-repair-v2"]);
   if ((!referenceRecovery && !reviewRecovery && !bulkReviewRecovery && status?.current_stage !== "image_generation") || status?.current_stage_state !== "blocked") {
@@ -61,7 +70,7 @@ export function falBlockedStageRecoveryAdmission(status, flags = {}) {
     return { applicable: false, allowed: false, reason: "This is not a Fal blocked-stage recovery action." };
   }
   const expected = new RegExp(`\\bimagegen fal\\b[\\s\\S]*--action ${action}\\b`);
-  if (action === "inspect-repair-failure" || action === "observe-repair-v2") {
+  if (action === "inspect-repair-failure" || action === "observe-repair-v2" || action === "observe-failed-reviewed-reference") {
     const imageId = String(flags["image-id"] ?? "");
     return { applicable: true, allowed: /^[a-z0-9][a-z0-9_-]{1,100}$/.test(imageId)
       && next.includes(`--action ${action} --image-id ${imageId}`),
@@ -126,6 +135,8 @@ export async function falProductionStageStates({ episodeDir, identity } = {}) {
       const repairSubmitted = await Promise.all(referencePlan.assignments.map(row => exists(path.join(root, "reference", "repair-submission-receipts", `${row.image_id}.json`))));
       const repairFailures = await Promise.all(referencePlan.assignments.map(row => exists(path.join(root, "reference", "repair-failure-receipts", `${row.image_id}.json`))));
       const effectivePath = await Promise.all(referencePlan.assignments.map(async row => {
+        const reviewedV3 = path.join(root, "reference", "review-repair-v3-result-receipts", `${row.image_id}.json`);
+        if (await exists(reviewedV3)) return (await read(reviewedV3)).output_path;
         const reviewed = path.join(root, "reference", "review-repair-result-receipts", `${row.image_id}.json`);
         if (await exists(reviewed)) return (await read(reviewed)).output_path;
         return row.output_path;
@@ -178,17 +189,35 @@ export async function falProductionStageStates({ episodeDir, identity } = {}) {
       const ids = review.rejections.map(row => row.image_id);
       const assignments = await Promise.all(ids.map(id => exists(path.join(root, "reference", "review-repair-assignments", `${id}.json`))));
       const results = await Promise.all(ids.map(id => exists(path.join(root, "reference", "review-repair-result-receipts", `${id}.json`))));
+      const v3Assignments = await Promise.all(ids.map(id => exists(path.join(root, "reference", "review-repair-v3-assignments", `${id}.json`))));
+      const v3Submissions = await Promise.all(ids.map(id => exists(path.join(root, "reference", "review-repair-v3-submission-receipts", `${id}.json`))));
+      const v3Results = await Promise.all(ids.map(id => exists(path.join(root, "reference", "review-repair-v3-result-receipts", `${id}.json`))));
+      const v2Failures = await Promise.all(ids.map(id => exists(path.join(root, "reference", "review-repair-failure-receipts", `${id}.json`))));
+      const v3Failures = await Promise.all(ids.map(id => exists(path.join(root, "reference", "review-repair-v3-failure-receipts", `${id}.json`))));
+      const effectiveResults = ids.map((_, index) => results[index] || v3Results[index]);
       const nativePlan = await read(path.join(episodeDir, "visual_reference_plan.json"));
-      const materialized = results.every(Boolean) && review.rejections.every(row => {
-        const expected = path.join(episodeDir, "assets", "images", "reference-repairs", `${row.image_id}-v2.png`);
+      const materialized = effectiveResults.every(Boolean) && review.rejections.every((row, index) => {
+        const expected = path.join(episodeDir, "assets", "images", "reference-repairs", `${row.image_id}-${v3Results[index] ? "v3" : "v2"}.png`);
         return nativePlan.reference_targets?.some(target => target.ref_id === row.image_id && target.reference_image_path === expected && target.conditioning_image_path === expected);
       });
+      const v3FailedIndex = ids.findIndex((_, index) => v3Failures[index] && !effectiveResults[index]);
+      const v2FailedIndex = ids.findIndex((_, index) => v2Failures[index] && !effectiveResults[index]);
+      const secondRepairDirective = v2FailedIndex < 0 ? null
+        : path.join(root, "reference", "review-repair-v3-directives", `${ids[v2FailedIndex]}.json`);
       if (!materialized) reviewRepairState = !assignments.every(Boolean)
         ? retryCapEvidence
           ? { state: "blocked", evidence: retryCapEvidence }
           : { state: "blocked", evidence: `Exact visual reference repairs required=${ids.length}`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action repair-reviewed-references --confirm-spend exact_fal_reviewed_reference_repair` }
-        : !results.every(Boolean)
-          ? { state: "blocked", evidence: `Exact visual reference repairs complete=${results.filter(Boolean).length}/${ids.length}`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action observe-reviewed-references` }
+        : v3FailedIndex >= 0
+          ? { state: "blocked", evidence: `Second reviewed-reference repair failed for exact ID ${ids[v3FailedIndex]}; inspect immutable provider failure receipt before another recovery decision` }
+        : v2FailedIndex >= 0
+          ? v3Assignments[v2FailedIndex] && v3Submissions[v2FailedIndex]
+            ? { state: "blocked", evidence: `Second reviewed-reference repair submitted for exact ID ${ids[v2FailedIndex]}`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action observe-failed-reviewed-reference --image-id ${ids[v2FailedIndex]}` }
+            : retryCapEvidence
+              ? { state: "blocked", evidence: retryCapEvidence }
+              : { state: "blocked", evidence: `Provider rejected reviewed reference ${ids[v2FailedIndex]}; record a changed, hash-bound exact prompt in ${secondRepairDirective}`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action repair-failed-reviewed-reference --image-id ${ids[v2FailedIndex]} --directives ${secondRepairDirective} --confirm-spend exact_fal_reviewed_reference_v3` }
+        : !effectiveResults.every(Boolean)
+          ? { state: "blocked", evidence: `Exact visual reference repairs complete=${effectiveResults.filter(Boolean).length}/${ids.length}`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action observe-reviewed-references` }
           : { state: "blocked", evidence: `Exact visual reference repairs complete=${ids.length}/${ids.length}; materialization pending`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action finalize-reviewed-references` };
     }
   }

@@ -39,9 +39,12 @@ export async function promoteApprovedFalReferences({ episodeDir, identity, contr
     if (!assignment) continue;
     const reviewedAssignmentPath = path.join(episodeDir, "fal", "reference", "review-repair-assignments", `${assignment.image_id}.json`);
     const reviewedReceiptPath = path.join(episodeDir, "fal", "reference", "review-repair-result-receipts", `${assignment.image_id}.json`);
+    const reviewedV3AssignmentPath = path.join(episodeDir, "fal", "reference", "review-repair-v3-assignments", `${assignment.image_id}.json`);
+    const reviewedV3ReceiptPath = path.join(episodeDir, "fal", "reference", "review-repair-v3-result-receipts", `${assignment.image_id}.json`);
     const repairedAssignmentPath = path.join(episodeDir, "fal", "reference", "repair-assignments", `${assignment.image_id}.json`);
     const repairedReceiptPath = path.join(episodeDir, "fal", "reference", "repair-result-receipts", `${assignment.image_id}.json`);
-    const activeAssignment = await exists(reviewedReceiptPath) ? await read(reviewedAssignmentPath)
+    const activeAssignment = await exists(reviewedV3ReceiptPath) ? await read(reviewedV3AssignmentPath)
+      : await exists(reviewedReceiptPath) ? await read(reviewedAssignmentPath)
       : await exists(repairedReceiptPath) ? await read(repairedAssignmentPath) : assignment;
     const receipt = await read(activeAssignment.result_receipt_path);
     const approvedHash = approval.reference_hash_by_ref_id[target.ref_id];

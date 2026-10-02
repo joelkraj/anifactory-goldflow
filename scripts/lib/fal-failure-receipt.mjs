@@ -4,7 +4,10 @@ import path from "node:path";
 export function falFailureReceiptPath(row) {
   const resultDir = path.basename(path.dirname(row.result_receipt_path));
   const failureDir = resultDir === "repair-result-receipts" ? "repair-failure-receipts"
-    : resultDir === "repair-v2-result-receipts" ? "repair-v2-failure-receipts" : "failure-receipts";
+    : resultDir === "repair-v2-result-receipts" ? "repair-v2-failure-receipts"
+    : resultDir === "review-repair-result-receipts" ? "review-repair-failure-receipts"
+    : resultDir === "review-repair-v3-result-receipts" ? "review-repair-v3-failure-receipts"
+    : "failure-receipts";
   return path.join(path.dirname(path.dirname(row.result_receipt_path)), failureDir, `${row.image_id}.json`);
 }
 

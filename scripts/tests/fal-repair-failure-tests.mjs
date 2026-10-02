@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { recordFalFailure } from "../lib/fal-failure-receipt.mjs";
+import { falFailureReceiptPath, recordFalFailure } from "../lib/fal-failure-receipt.mjs";
 import { falBlockedStageRecoveryAdmission, falProductionStageStates } from "../lib/fal-production-state.mjs";
 
 test("failed Fal repair keeps the original receipt and blocks on exact-ID triage", async () => {
@@ -83,5 +83,77 @@ test("failed Fal repair keeps the original receipt and blocks on exact-ID triage
     assert.equal(held.state, "blocked");
     assert.equal(held.next_command_shape, undefined);
     assert.equal(await readFile(originalFailure, "utf8"), original);
+  } finally { await rm(episodeDir, { recursive: true, force: true }); }
+});
+
+test("reviewed reference provider failure gets its own receipt and an exact second-repair route", async () => {
+  const episodeDir = await mkdtemp(path.join(os.tmpdir(), "goldflow-fal-reviewed-reference-failure-"));
+  try {
+    const root = path.join(episodeDir, "fal", "reference");
+    const id = "escort_identity_ref";
+    const originalOutput = path.join(episodeDir, "assets", "images", "references", `${id}.png`);
+    const originalResult = path.join(root, "result-receipts", `${id}.json`);
+    await mkdir(path.dirname(originalOutput), { recursive: true });
+    await writeFile(originalOutput, "original image");
+    await mkdir(path.dirname(originalResult), { recursive: true });
+    await writeFile(originalResult, JSON.stringify({ output_path: originalOutput }));
+    await writeFile(path.join(episodeDir, "fal", "reference-plan.json"), JSON.stringify({ assignments: [{
+      image_id: id, ref_id: id, endpoint: "openai/gpt-image-2.5/sunburst/text-to-image",
+      output_path: originalOutput, result_receipt_path: originalResult,
+    }] }));
+    await writeFile(path.join(episodeDir, "visual_reference_plan.json"), JSON.stringify({ reference_targets: [{
+      ref_id: id, reference_image_path: originalOutput, conditioning_image_path: originalOutput,
+    }] }));
+    await writeFile(path.join(root, "review-rejections.json"), JSON.stringify({
+      schema: "goldflow_fal_reference_visual_review_v1", rejections: [{ image_id: id }],
+    }));
+    const v2 = { image_id: id, assignment_sha256: "v2-assignment",
+      result_receipt_path: path.join(root, "review-repair-result-receipts", `${id}.json`),
+      submission_receipt_path: path.join(root, "review-repair-submission-receipts", `${id}.json`) };
+    await mkdir(path.join(root, "review-repair-assignments"), { recursive: true });
+    await writeFile(path.join(root, "review-repair-assignments", `${id}.json`), JSON.stringify(v2));
+    const v2Failure = falFailureReceiptPath(v2);
+    assert.equal(v2Failure, path.join(root, "review-repair-failure-receipts", `${id}.json`));
+    await mkdir(path.dirname(v2Failure), { recursive: true });
+    await writeFile(v2Failure, JSON.stringify({ schema: "goldflow_fal_exact_failure_v1", image_id: id,
+      assignment_sha256: v2.assignment_sha256, request_id: "v2-request", error_status: 422 }));
+    const identity = { visual_restart: { fork_at: "visual_reference_plan" } };
+    const blocked = (await falProductionStageStates({ episodeDir, identity })).stageStates.reference_image_approval;
+    assert.equal(blocked.state, "blocked");
+    assert.match(blocked.next_command_shape, new RegExp(`--action repair-failed-reviewed-reference --image-id ${id} `));
+    const directive = path.join(root, "review-repair-v3-directives", `${id}.json`);
+    const allowed = falBlockedStageRecoveryAdmission({ current_stage: "reference_image_approval",
+      current_stage_state: "blocked", next_command_shape: blocked.next_command_shape }, {
+      action: "repair-failed-reviewed-reference", "image-id": id, directives: directive,
+      "confirm-spend": "exact_fal_reviewed_reference_v3",
+    });
+    assert.equal(allowed.allowed, true);
+    assert.equal(falBlockedStageRecoveryAdmission({ current_stage: "reference_image_approval",
+      current_stage_state: "blocked", next_command_shape: blocked.next_command_shape }, {
+      action: "repair-failed-reviewed-reference", "image-id": "different", directives: directive,
+      "confirm-spend": "exact_fal_reviewed_reference_v3",
+    }).allowed, false);
+    const v3 = { image_id: id, assignment_sha256: "v3-assignment",
+      result_receipt_path: path.join(root, "review-repair-v3-result-receipts", `${id}.json`),
+      submission_receipt_path: path.join(root, "review-repair-v3-submission-receipts", `${id}.json`) };
+    await mkdir(path.join(root, "review-repair-v3-assignments"), { recursive: true });
+    await writeFile(path.join(root, "review-repair-v3-assignments", `${id}.json`), JSON.stringify(v3));
+    await mkdir(path.dirname(v3.submission_receipt_path), { recursive: true });
+    await writeFile(v3.submission_receipt_path, JSON.stringify({ schema: "goldflow_fal_submission_receipt_v1",
+      image_id: id, assignment_sha256: v3.assignment_sha256, request_id: "v3-request" }));
+    const pending = (await falProductionStageStates({ episodeDir, identity })).stageStates.reference_image_approval;
+    assert.match(pending.next_command_shape, new RegExp(`--action observe-failed-reviewed-reference --image-id ${id}$`));
+    assert.equal(falFailureReceiptPath(v3), path.join(root, "review-repair-v3-failure-receipts", `${id}.json`));
+    await mkdir(path.dirname(v3.result_receipt_path), { recursive: true });
+    const v3Output = path.join(episodeDir, "assets", "images", "reference-repairs", `${id}-v3.png`);
+    await writeFile(v3.result_receipt_path, JSON.stringify({ output_path: v3Output }));
+    const ready = (await falProductionStageStates({ episodeDir, identity })).stageStates.reference_image_approval;
+    assert.match(ready.next_command_shape, /--action finalize-reviewed-references$/);
+    await writeFile(path.join(episodeDir, "visual_reference_plan.json"), JSON.stringify({ reference_targets: [{
+      ref_id: id, reference_image_path: v3Output, conditioning_image_path: v3Output,
+    }] }));
+    const finalized = (await falProductionStageStates({ episodeDir, identity })).stageStates;
+    assert.equal(finalized.reference_generation.done, true);
+    assert.equal(finalized.reference_image_approval, undefined);
   } finally { await rm(episodeDir, { recursive: true, force: true }); }
 });

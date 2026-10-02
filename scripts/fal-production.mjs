@@ -80,12 +80,15 @@ async function finalizeReferences(ctx){
   const referencePlan=await read(path.join(ctx.root,"reference-plan.json"));
   const byId=new Map();
   for(const row of referencePlan.assignments){
+    const reviewedV3AssignmentPath=path.join(ctx.root,"reference","review-repair-v3-assignments",`${row.image_id}.json`);
+    const reviewedV3ReceiptPath=path.join(ctx.root,"reference","review-repair-v3-result-receipts",`${row.image_id}.json`);
     const reviewedAssignmentPath=path.join(ctx.root,"reference","review-repair-assignments",`${row.image_id}.json`);
     const reviewedReceiptPath=path.join(ctx.root,"reference","review-repair-result-receipts",`${row.image_id}.json`);
     const repairReceiptPath=path.join(ctx.root,"reference","repair-result-receipts",`${row.image_id}.json`);
+    const reviewedV3=await fs.access(reviewedV3ReceiptPath).then(()=>true,()=>false);
     const reviewed=await fs.access(reviewedReceiptPath).then(()=>true,()=>false);
-    const activeAssignment=reviewed?await read(reviewedAssignmentPath):row;
-    const receipt=await read(reviewed?reviewedReceiptPath
+    const activeAssignment=reviewedV3?await read(reviewedV3AssignmentPath):reviewed?await read(reviewedAssignmentPath):row;
+    const receipt=await read(reviewedV3?reviewedV3ReceiptPath:reviewed?reviewedReceiptPath
       :await fs.access(repairReceiptPath).then(()=>repairReceiptPath,()=>row.result_receipt_path));
     need(receipt.output_path===activeAssignment.output_path&&await falFileSha256(activeAssignment.output_path)===receipt.output_sha256,
       `Fal reference result is missing or changed: ${row.ref_id}`);
@@ -509,10 +512,64 @@ async function main(){
  if(action==="observe-reviewed-references"){
    const dir=path.join(ctx.root,"reference","review-repair-assignments");const names=await fs.readdir(dir);const rows=[];
    for(const name of names.filter(value=>value.endsWith(".json"))){const row=await read(path.join(dir,name));
-     if(!await fs.access(row.result_receipt_path).then(()=>true,()=>false))rows.push(row);}
+     if(!await fs.access(row.result_receipt_path).then(()=>true,()=>false)
+       &&!await fs.access(falFailureReceiptPath(row)).then(()=>true,()=>false))rows.push(row);}
    const result=await observeRows(ctx,rows,ctx.contract.production_concurrency);
    return console.log(JSON.stringify({status:result.every(row=>row.complete)?"complete":"pending",checked:result.length,
-     complete:result.filter(row=>row.complete).length,pending:result.filter(row=>!row.complete).length},null,2));
+     complete:result.filter(row=>row.complete).length,pending:result.filter(row=>!row.complete&&!row.failed).length,
+     failed:result.filter(row=>row.failed).length},null,2));
+ }
+ if(action==="repair-failed-reviewed-reference"){
+   need(f["confirm-spend"]==="exact_fal_reviewed_reference_v3","Second reviewed-reference repair requires exact spend token.");
+   need(path.isAbsolute(f.directives??""),"Second reviewed-reference repair requires an absolute directive file.");
+   const id=String(f["image-id"]??"");
+   need(/^[a-z0-9][a-z0-9_-]{1,100}$/.test(id),"Exact reviewed-reference ID is required.");
+   const review=await read(path.join(ctx.root,"reference","review-rejections.json"));
+   need(review.schema==="goldflow_fal_reference_visual_review_v1"&&review.rejections.some(row=>row.image_id===id),
+     `Reviewed reference rejection is missing for ${id}.`);
+   const previous=await read(path.join(ctx.root,"reference","review-repair-assignments",`${id}.json`));
+   const priorSubmission=await read(previous.submission_receipt_path);
+   const failurePath=falFailureReceiptPath(previous);
+   const failure=await read(failurePath);
+   need(failure.schema==="goldflow_fal_exact_failure_v1"&&failure.image_id===id
+     &&failure.assignment_sha256===previous.assignment_sha256&&failure.request_id===priorSubmission.request_id
+     &&failure.error_status===422,`Exact reviewed-reference provider failure changed for ${id}.`);
+   need(!await fs.access(previous.result_receipt_path).then(()=>true,()=>false),`Reviewed-reference repair already succeeded for ${id}.`);
+   const directive=await read(f.directives);
+   need(directive.schema==="goldflow_fal_reviewed_reference_failure_repair_v1"
+     &&directive.image_id===id&&directive.failed_assignment_sha256===previous.assignment_sha256
+     &&directive.failure_receipt_sha256===await falFileSha256(failurePath)
+     &&directive.failed_request_id===failure.request_id
+     &&typeof directive.replacement_prompt==="string"&&directive.replacement_prompt.length>80
+     &&digest(directive.replacement_prompt)!==previous.prompt_sha256
+     &&typeof directive.repair_reason==="string"&&directive.repair_reason.length>20,
+     `Second reviewed-reference directive is not bound to the exact failure for ${id}.`);
+   await preflightPaidRepair(ctx,"reference/review-repair-v3-submission-receipts",[id]);
+   const core={...previous,prompt:directive.replacement_prompt,
+     prompt_sha256:digest(directive.replacement_prompt),previous_assignment_sha256:previous.assignment_sha256,
+     failed_repair_request_id:failure.request_id,failed_repair_receipt_sha256:directive.failure_receipt_sha256,
+     repair_reason:directive.repair_reason,
+     output_path:path.join(ctx.episodeDir,"assets","images","reference-repairs",`${id}-v3.png`)};
+   for(const key of ["assignment_sha256","assignment_path","submission_receipt_path","result_receipt_path","upload_receipt_path"])delete core[key];
+   const row={...core,assignment_sha256:falObjectSha256(JSON.stringify(core)),
+     submission_receipt_path:path.join(ctx.root,"reference","review-repair-v3-submission-receipts",`${id}.json`),
+     result_receipt_path:path.join(ctx.root,"reference","review-repair-v3-result-receipts",`${id}.json`),
+     upload_receipt_path:path.join(ctx.root,"reference","review-repair-v3-upload-receipts",`${id}.json`)};
+   await write(path.join(ctx.root,"reference","review-repair-v3-assignments",`${id}.json`),row);
+   const result=await submitRows(ctx,[row],1);
+   return console.log(JSON.stringify({status:"reviewed_reference_v3_submitted",image_id:id,count:result.length},null,2));
+ }
+ if(action==="observe-failed-reviewed-reference"){
+   const id=String(f["image-id"]??"");
+   need(/^[a-z0-9][a-z0-9_-]{1,100}$/.test(id),"Exact reviewed-reference ID is required.");
+   const row=await read(path.join(ctx.root,"reference","review-repair-v3-assignments",`${id}.json`));
+   need(row.image_id===id&&await fs.access(row.submission_receipt_path).then(()=>true,()=>false),
+     `Second reviewed-reference submission is missing for ${id}.`);
+   if(await fs.access(row.result_receipt_path).then(()=>true,()=>false))
+     return console.log(JSON.stringify({status:"complete",image_id:id},null,2));
+   const result=(await observeRows(ctx,[row],1))[0];
+   return console.log(JSON.stringify({status:result.complete?"complete":result.failed?"failed":"pending",
+     image_id:id,...(result.failed?{failure_path:result.failure_path}:{})},null,2));
  }
  if(action==="finalize-reviewed-references") return console.log(JSON.stringify(await finalizeReferences(ctx),null,2));
  if(action==="finalize-references") return console.log(JSON.stringify(await finalizeReferences(ctx),null,2));

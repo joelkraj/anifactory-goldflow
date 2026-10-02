@@ -480,7 +480,7 @@ export function commandStageFor(commandName, subcommandName, flags = {}, identit
   if (registry === PIPELINE_STAGE_REGISTRY && key === "imagegen fal") {
     if (["repair-reviewed-bulk", "observe-reviewed-bulk", "finalize-reviewed-bulk"].includes(String(flags.action ?? ""))) return "image_output_qa";
     if (identity.visual_restart?.fork_at === "visual_reference_plan") {
-      if (["repair-reviewed-references", "observe-reviewed-references", "finalize-reviewed-references"].includes(String(flags.action ?? ""))) return "reference_image_approval";
+      if (["repair-reviewed-references", "observe-reviewed-references", "repair-failed-reviewed-reference", "observe-failed-reviewed-reference", "finalize-reviewed-references"].includes(String(flags.action ?? ""))) return "reference_image_approval";
       return ["prepare-references", "billing-submit-reference", "billing-observe-reference", "dispatch-references", "observe-references", "repair-reference-failures", "observe-reference-repairs", "finalize-references"].includes(String(flags.action ?? ""))
         ? "reference_generation" : "image_generation";
     }

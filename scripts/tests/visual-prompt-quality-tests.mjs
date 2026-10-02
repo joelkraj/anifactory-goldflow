@@ -18,6 +18,8 @@ import {
 } from "../lib/codex-image-work-contract.mjs";
 import {
   VISUAL_PROMPT_SAFE_MAX_BYTES,
+  historicalMemoryReferenceScopeForTests,
+  normalizePromptPacketForTests,
   relevantReferenceTargetsForTests,
   sizeBoundVisualPromptChunksForTests,
 } from "../visual-plan.mjs";
@@ -136,6 +138,40 @@ assert.equal(compactLocalReference.reference_image_path, null);
 assert.equal(compactLocalReference.resolved_reference_image_path, null);
 assert.equal(compactLocalReference.scene_prompt_anchor, "Joey with short black hair and a charcoal work jacket.");
 assert.equal(compactLocalReference.prompt_anchor, null);
+
+const mixedTimelineRefs = {
+  reference_targets: [
+    { ref_id: "joey_face", kind: "character_state", character: "Joey", canonical_subject_id: "joey", identity_usage: "face_only", scene_ids: ["scene_mixed"], planned_beat_ids: [], scene_prompt_anchor: "Joey's face" },
+    { ref_id: "caleb_before_injury", kind: "character_state", character: "Caleb", canonical_subject_id: "caleb", identity_usage: "full_identity", scene_ids: ["scene_mixed"], planned_beat_ids: ["beat_memory"], scene_prompt_anchor: "Caleb before injury" },
+    { ref_id: "joey_current_workwear", kind: "character_state", character: "Joey", canonical_subject_id: "joey", identity_usage: "full_identity", scene_ids: ["scene_mixed"], planned_beat_ids: ["beat_current"], scene_prompt_anchor: "Joey in current workwear" },
+    { ref_id: "caleb_current_quarry", kind: "character_state", character: "Caleb", canonical_subject_id: "caleb", identity_usage: "full_identity", scene_ids: ["scene_mixed"], planned_beat_ids: ["beat_current"], scene_prompt_anchor: "Caleb in current quarry coat" },
+  ],
+};
+const mixedTimelineStates = { character_state_refs: mixedTimelineRefs.reference_targets.map((target) => ({
+  state_ref_id: target.ref_id,
+  source_ref_id: target.ref_id,
+  character: target.character,
+  scene_ids: target.scene_ids,
+  scene_prompt_anchor: target.scene_prompt_anchor,
+})) };
+const memoryBeat = { scene_id: "scene_mixed", parent_scene_id: "scene_mixed", visual_beat_id: "beat_memory", depiction_mode: "memory_or_flashback", visible_characters: ["Joey", "Caleb"] };
+const memoryScope = historicalMemoryReferenceScopeForTests(memoryBeat, mixedTimelineRefs, mixedTimelineStates);
+assert.deepEqual(memoryScope.target_ids, ["joey_face", "caleb_before_injury"]);
+assert.deepEqual(memoryScope.state_ids, ["joey_face", "caleb_before_injury"]);
+assert.equal(memoryScope.allowed_ids.includes("joey_current_workwear"), false);
+assert.equal(memoryScope.allowed_ids.includes("caleb_current_quarry"), false);
+const memoryPrompt = normalizePromptPacketForTests({
+  scene_id: "scene_mixed", visual_beat_id: "beat_memory", image_prompt: "A historical bedroom memory.",
+  shot_manifest: { visible_characters: ["Joey", "Caleb"], character_state_ref_ids: ["joey_face", "caleb_before_injury", "joey_current_workwear", "caleb_current_quarry"], reference_slots: [
+    { ref_id: "caleb_before_injury", kind: "character_state" },
+    { ref_id: "caleb_current_quarry", kind: "character_state" },
+  ] },
+}, memoryBeat, { visualReferencePlan: mixedTimelineRefs, stateRefIndex: new Map(mixedTimelineStates.character_state_refs.map((row) => [row.state_ref_id, row])) });
+assert.deepEqual(memoryPrompt.character_state_refs_used, ["joey_face", "caleb_before_injury"]);
+assert.deepEqual(memoryPrompt.shot_manifest.character_state_ref_ids, ["joey_face", "caleb_before_injury"]);
+assert.deepEqual(memoryPrompt.reference_requirements.map((row) => row.ref_id), ["caleb_before_injury"]);
+const currentScope = historicalMemoryReferenceScopeForTests({ ...memoryBeat, visual_beat_id: "beat_current", depiction_mode: "current_reality" }, mixedTimelineRefs, mixedTimelineStates);
+assert.deepEqual(currentScope.target_ids, mixedTimelineRefs.reference_targets.map((target) => target.ref_id), "current-scene behavior remains broad and unchanged");
 
 const transitionBoundaries = Array.from({ length: 12 }, (_, index) => ({
   boundary_id: `boundary_${index + 1}`,

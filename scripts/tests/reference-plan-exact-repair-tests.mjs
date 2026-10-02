@@ -88,6 +88,79 @@ try {
 } finally {
   await fs.rm(path.dirname(first.episodeDir), { recursive: true, force: true });
 }
+const memoryBinding = await fixture();
+try {
+  const { file } = memoryBinding;
+  const beatPlan = JSON.parse(await fs.readFile(file("visual_beat_plan.json")));
+  beatPlan.beats[0].scene_id = "scene_080";
+  beatPlan.beats[0].depiction_mode = "memory_or_flashback";
+  beatPlan.beats[0].visible_characters = ["Blue"];
+  beatPlan.beats[0].physically_visible_entity_ids = ["blue"];
+  beatPlan.beats[0].visual_beat_script_excerpt = "Blue remembers the repaired shoulder before the factory door closed.";
+  const beatHash = sha(bytes(beatPlan));
+  await fs.writeFile(file("visual_beat_plan.json"), bytes(beatPlan));
+  const approval = JSON.parse(await fs.readFile(file("visual_beat_approval.json")));
+  approval.visual_beat_plan_sha256 = beatHash;
+  approval.grouping_lock_sha256 = groupingLockHash(beatPlan.beats);
+  const approvalHash = sha(bytes(approval));
+  await fs.writeFile(file("visual_beat_approval.json"), bytes(approval));
+  const plan = JSON.parse(await fs.readFile(file("visual_reference_plan.json")));
+  plan.reference_targets[0].canonical_subject_id = "blue";
+  plan.source_hashes[file("visual_beat_plan.json")] = beatHash;
+  await fs.writeFile(file("visual_reference_plan.json"), bytes(plan));
+  const inventory = JSON.parse(await fs.readFile(file("reference_inventory_ledger.json")));
+  inventory.assets[0].canonical_subject_id = "blue";
+  const inventoryHash = sha(bytes(inventory));
+  await fs.writeFile(file("reference_inventory_ledger.json"), bytes(inventory));
+  plan.source_hashes[file("reference_inventory_ledger.json")] = inventoryHash;
+  const reboundPlanHash = sha(bytes(plan));
+  await fs.writeFile(file("visual_reference_plan.json"), bytes(plan));
+  const states = JSON.parse(await fs.readFile(file("character_state_refs.json")));
+  states.source_hashes[file("visual_reference_plan.json")] = reboundPlanHash;
+  const statesHash = sha(bytes(states));
+  await fs.writeFile(file("character_state_refs.json"), bytes(states));
+  const spec = {
+    schema: "goldflow_reference_plan_exact_repair_v1", episode: "ep_01", reviewer: "Reviewer", note: "Bind one source-quoted historical state before reference spend",
+    expected: { visual_beat_plan_sha256: beatHash, visual_beat_approval_sha256: approvalHash, visual_reference_plan_sha256: reboundPlanHash, reference_inventory_ledger_sha256: inventoryHash, character_state_refs_sha256: statesHash },
+    reference_patches: [{ ref_id: "blue_repaired_handpainted", add_memory_beat_quotes: [{ beat_id: beatPlan.beats[0].visual_beat_id, source_quote: "Blue remembers the repaired shoulder" }] }],
+  };
+  const wrongQuote = structuredClone(spec);
+  wrongQuote.reference_patches[0].add_memory_beat_quotes[0].source_quote = "not in source";
+  await assert.rejects(repairReferencePlanExact({ episodeDir: memoryBinding.episodeDir, spec: wrongQuote, currentStage: "reference_plan_approval" }), /source-backed visible character/);
+  const changedBeats = structuredClone(beatPlan);
+  changedBeats.beats[0].depiction_mode = "current_reality";
+  await fs.writeFile(file("visual_beat_plan.json"), bytes(changedBeats));
+  const changedApproval = structuredClone(approval);
+  changedApproval.visual_beat_plan_sha256 = sha(bytes(changedBeats));
+  await fs.writeFile(file("visual_beat_approval.json"), bytes(changedApproval));
+  const changedPlan = structuredClone(plan);
+  changedPlan.source_hashes[file("visual_beat_plan.json")] = sha(bytes(changedBeats));
+  await fs.writeFile(file("visual_reference_plan.json"), bytes(changedPlan));
+  const changedStates = structuredClone(states);
+  changedStates.source_hashes[file("visual_reference_plan.json")] = sha(bytes(changedPlan));
+  await fs.writeFile(file("character_state_refs.json"), bytes(changedStates));
+  const wrongMode = structuredClone(spec);
+  wrongMode.expected.visual_beat_plan_sha256 = sha(bytes(changedBeats));
+  wrongMode.expected.visual_beat_approval_sha256 = sha(bytes(changedApproval));
+  wrongMode.expected.visual_reference_plan_sha256 = sha(bytes(changedPlan));
+  wrongMode.expected.character_state_refs_sha256 = sha(bytes(changedStates));
+  await assert.rejects(repairReferencePlanExact({ episodeDir: memoryBinding.episodeDir, spec: wrongMode, currentStage: "reference_plan_approval" }), /source-backed visible character/);
+  await fs.writeFile(file("visual_beat_plan.json"), bytes(beatPlan));
+  await fs.writeFile(file("visual_beat_approval.json"), bytes(approval));
+  await fs.writeFile(file("visual_reference_plan.json"), bytes(plan));
+  await fs.writeFile(file("character_state_refs.json"), bytes(states));
+  const result = await repairReferencePlanExact({ episodeDir: memoryBinding.episodeDir, spec, currentStage: "reference_plan_approval" });
+  assert.equal(result.status, "passed");
+  const revisedPlan = JSON.parse(await fs.readFile(file("visual_reference_plan.json")));
+  const revisedInventory = JSON.parse(await fs.readFile(file("reference_inventory_ledger.json")));
+  assert.deepEqual(revisedPlan.reference_targets[0].planned_beat_ids, revisedInventory.assets[0].planned_beat_ids);
+  assert.equal(revisedPlan.reference_targets[0].planned_beat_ids.at(-1), beatPlan.beats[0].visual_beat_id);
+  const receipt = JSON.parse(await fs.readFile(result.receipt_path));
+  assert.deepEqual(receipt.reference_changes[0].added_memory_beat_ids, [beatPlan.beats[0].visual_beat_id]);
+  assert.equal(receipt.provider_calls, 0);
+} finally {
+  await fs.rm(path.dirname(memoryBinding.episodeDir), { recursive: true, force: true });
+}
 const spent = await fixture();
 try {
   await fs.mkdir(path.join(spent.episodeDir, "assets", "images", "references"), { recursive: true });

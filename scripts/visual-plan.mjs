@@ -255,7 +255,33 @@ function uniqueStrings(values) {
   return [...new Set((values ?? []).map((value) => String(value ?? "").trim()).filter(Boolean))];
 }
 
-function sceneCharacterStateRefs(scene, stateRefIndex = new Map()) {
+function referencePlanForHistoricalBeat(scene, visualReferencePlan) {
+  if (!localPromptPackets || scene?.depiction_mode !== "memory_or_flashback" || !scene?.visual_beat_id) return visualReferencePlan;
+  const beatId = String(scene.visual_beat_id);
+  return {
+    ...visualReferencePlan,
+    reference_targets: (visualReferencePlan?.reference_targets ?? []).filter((target) => {
+      if (String(target?.kind ?? "").toLowerCase() !== "character_state") return true;
+      return target.identity_usage === "face_only"
+        || (target.planned_beat_ids ?? []).includes(beatId);
+    }),
+  };
+}
+
+function sceneCharacterStateRefs(scene, stateRefIndex = new Map(), visualReferencePlan = null) {
+  if (localPromptPackets && scene?.depiction_mode === "memory_or_flashback" && scene?.visual_beat_id) {
+    const scopedPlan = referencePlanForHistoricalBeat(scene, visualReferencePlan);
+    const visible = new Set(uniqueStrings([
+      ...(scene.visible_characters ?? []),
+      ...(scene.screen_visible_characters ?? []),
+      ...(scene.preview_visible_characters ?? []),
+    ]).map(normalizeLabel));
+    return referenceTargetsForScene(scene, scopedPlan)
+      .filter((target) => String(target?.kind ?? "").toLowerCase() === "character_state")
+      .filter((target) => visible.has(normalizeLabel(target.character ?? target.canonical_subject_id ?? target.subject)))
+      .map((target) => characterStateRefForTarget(target, scene, stateRefIndex))
+      .filter(Boolean);
+  }
   if (Array.isArray(scene.character_state_refs)) return scene.character_state_refs;
   const refs = [];
   const sceneId = String(scene.scene_id ?? "");
@@ -435,7 +461,7 @@ export function expireElapsedPhysicalState(rows = []) {
   });
 }
 
-function compactSceneForPrompt(scene, stateRefIndex = new Map()) {
+function compactSceneForPrompt(scene, stateRefIndex = new Map(), visualReferencePlan = null) {
   const absoluteIndex = Number.isFinite(Number(scene.__visual_plan_absolute_index))
     ? Number(scene.__visual_plan_absolute_index)
     : null;
@@ -488,7 +514,7 @@ function compactSceneForPrompt(scene, stateRefIndex = new Map()) {
     // Full state anchors live once in the packet reference dictionary. Beat
     // rows carry only stable ids so the same 300-900 character anchor is not
     // repeated for every nearby cut.
-    character_state_ref_ids: sceneCharacterStateRefs(scene, stateRefIndex)
+    character_state_ref_ids: sceneCharacterStateRefs(scene, stateRefIndex, visualReferencePlan)
       .map((ref) => ref.state_ref_id ?? ref.ref_id ?? null)
       .filter(Boolean),
     ui_text_on_screen: scene.local_ui_elements ?? scene.ui_text_on_screen ?? [],
@@ -537,7 +563,7 @@ function characterStateRefForTarget(target, scene, stateRefIndex = new Map()) {
 }
 
 function relevantReferenceTargets(scene, visualReferencePlan, stateRefIndex = new Map()) {
-  let targets = referenceTargetsForScene(scene, visualReferencePlan)
+  let targets = referenceTargetsForScene(scene, referencePlanForHistoricalBeat(scene, visualReferencePlan))
     .filter((target) => locationTargetMatchesSourceRow(target, scene));
   if (localPromptPackets) {
     const visibleLabels = uniqueStrings([
@@ -977,7 +1003,7 @@ function buildPrompt(timedPlan, semanticPlan, visualReferencePlan = null, stateR
         ? (referenceTargetsByUnit[unitId] ?? [])
         : (referenceTargetsByScene[scene.parent_scene_id ?? scene.scene_id] ?? []);
       return {
-        ...compactSceneForPrompt(scene, stateRefIndex),
+        ...compactSceneForPrompt(scene, stateRefIndex, visualReferencePlan),
         target_provider_route: routedProviderForPrompt(scene, activeProvider, activeProviderOptions),
         previous_beat_context: scene.__previous_visual_context ?? compactNeighborContext(rows[index - 1]),
         next_beat_context: scene.__next_visual_context ?? compactNeighborContext(rows[index + 1]),
@@ -1614,13 +1640,18 @@ function normalizePrompt(row, index, episodeId, sourceUnit = null, scope = {}) {
     image_generation_required: true,
   };
   const scene = sourceUnit ?? row;
-  const scopedCharacterRefs = sceneCharacterStateRefs(scene, scope.stateRefIndex ?? new Map());
+  const scopedReferencePlan = referencePlanForHistoricalBeat(scene, scope.visualReferencePlan);
+  const scopedCharacterRefs = sceneCharacterStateRefs(scene, scope.stateRefIndex ?? new Map(), scope.visualReferencePlan);
   const allowedRefIds = allowedRefIdsForScene({
     scene,
-    visualReferencePlan: scope.visualReferencePlan,
+    visualReferencePlan: scopedReferencePlan,
     characterStateRefs: scopedCharacterRefs,
   });
-  return dropOutOfScopePromptRefs(basePrompt, allowedRefIds);
+  const scopedPrompt = dropOutOfScopePromptRefs(basePrompt, allowedRefIds);
+  if (scene?.depiction_mode === "memory_or_flashback" && scene?.visual_beat_id) {
+    scopedPrompt.character_state_refs_used = scopedPrompt.character_state_refs_used.filter((id) => allowedRefIds.has(id));
+  }
+  return scopedPrompt;
 }
 
 function plannerRecoveryPlaceholder(sourceUnit, episodeId, scope = {}) {
@@ -1653,13 +1684,14 @@ export function plannerRecoveryPlaceholderForTests(sourceUnit, options = {}) {
 }
 
 function revalidateExistingPrompt(prompt, sourceUnit, scope = {}) {
-  const scopedCharacterRefs = sceneCharacterStateRefs(sourceUnit, scope.stateRefIndex ?? new Map());
+  const scopedReferencePlan = referencePlanForHistoricalBeat(sourceUnit, scope.visualReferencePlan);
+  const scopedCharacterRefs = sceneCharacterStateRefs(sourceUnit, scope.stateRefIndex ?? new Map(), scope.visualReferencePlan);
   const allowedRefIds = allowedRefIdsForScene({
     scene: sourceUnit,
-    visualReferencePlan: scope.visualReferencePlan,
+    visualReferencePlan: scopedReferencePlan,
     characterStateRefs: scopedCharacterRefs,
   });
-  return dropOutOfScopePromptRefs({
+  const scopedPrompt = dropOutOfScopePromptRefs({
     ...prompt,
     depiction_mode: sourceUnit?.depiction_mode ?? prompt.depiction_mode ?? "current_reality",
     physically_visible_entity_ids: sourceUnit?.physically_visible_entity_ids ?? prompt.physically_visible_entity_ids ?? [],
@@ -1667,6 +1699,10 @@ function revalidateExistingPrompt(prompt, sourceUnit, scope = {}) {
     preview_visible_entity_ids: sourceUnit?.preview_visible_entity_ids ?? prompt.preview_visible_entity_ids ?? [],
     mentioned_only_entity_ids: sourceUnit?.mentioned_only_entity_ids ?? prompt.mentioned_only_entity_ids ?? [],
   }, allowedRefIds);
+  if (sourceUnit?.depiction_mode === "memory_or_flashback" && sourceUnit?.visual_beat_id) {
+    scopedPrompt.character_state_refs_used = (scopedPrompt.character_state_refs_used ?? []).filter((id) => allowedRefIds.has(id));
+  }
+  return scopedPrompt;
 }
 
 export function normalizePromptPacketForTests(row, sourceUnit, options = {}) {
@@ -2738,6 +2774,17 @@ export function indexCharacterStateRefs(artifact) {
 
 export function relevantReferenceTargetsForTests(scene, visualReferencePlan, characterStateRefs) {
   return relevantReferenceTargets(scene, visualReferencePlan, indexCharacterStateRefs(characterStateRefs));
+}
+
+export function historicalMemoryReferenceScopeForTests(scene, visualReferencePlan, characterStateRefs) {
+  const index = indexCharacterStateRefs(characterStateRefs);
+  const scopedPlan = referencePlanForHistoricalBeat(scene, visualReferencePlan);
+  const states = sceneCharacterStateRefs(scene, index, visualReferencePlan);
+  return {
+    target_ids: relevantReferenceTargets(scene, visualReferencePlan, index).map((target) => target.ref_id),
+    state_ids: states.map((state) => state.state_ref_id),
+    allowed_ids: [...allowedRefIdsForScene({ scene, visualReferencePlan: scopedPlan, characterStateRefs: states })],
+  };
 }
 
 async function main() {

@@ -128,20 +128,21 @@ function patchBeatLocations(beats, patches) {
   return result;
 }
 
-function patchReferences(plan, inventory, patches) {
+function patchReferences(plan, inventory, beats, patches) {
   if (patches === undefined) return [];
   if (!Array.isArray(patches)) throw new Error("reference_patches must be an array.");
   const touched = new Set();
   const result = [];
   for (const [index, patch] of patches.entries()) {
     const name = `reference_patches[${index}]`;
-    keys(patch, ["ref_id", "remove_scene_ids", "remove_planned_beat_ids", "set"], name);
+    keys(patch, ["ref_id", "remove_scene_ids", "remove_planned_beat_ids", "add_memory_beat_quotes", "set"], name);
     const refId = nonempty(patch.ref_id, `${name}.ref_id`);
     if (touched.has(refId)) throw new Error(`Reference ${refId} is patched twice.`);
     touched.add(refId);
     const target = uniqueRow(plan.reference_targets, "ref_id", refId, "Reference target");
     const asset = uniqueRow(inventory.assets, "ref_id", refId, "Selected inventory asset");
-    if (patch.remove_scene_ids === undefined && patch.remove_planned_beat_ids === undefined && patch.set === undefined) throw new Error(`${name} is empty.`);
+    if (patch.remove_scene_ids === undefined && patch.remove_planned_beat_ids === undefined
+      && patch.add_memory_beat_quotes === undefined && patch.set === undefined) throw new Error(`${name} is empty.`);
     for (const field of ["scene_ids", "planned_beat_ids"]) {
       if (JSON.stringify(target[field]) !== JSON.stringify(asset[field])) throw new Error(`Reference ${refId} and inventory disagree on ${field}.`);
     }
@@ -158,6 +159,38 @@ function patchReferences(plan, inventory, patches) {
       target.planned_beat_ids = removeExact(target.planned_beat_ids, patch.remove_planned_beat_ids, `${name}.remove_planned_beat_ids`);
       asset.planned_beat_ids = [...target.planned_beat_ids];
     }
+    if (patch.add_memory_beat_quotes !== undefined) {
+      if (!Array.isArray(patch.add_memory_beat_quotes) || !patch.add_memory_beat_quotes.length) {
+        throw new Error(`${name}.add_memory_beat_quotes must be a nonempty array.`);
+      }
+      if (target.kind !== "character_state" || target.generation_mode !== "standalone_ref") {
+        throw new Error(`${name} can add only selected standalone character-state memory bindings.`);
+      }
+      const seen = new Set();
+      for (const [quoteIndex, binding] of patch.add_memory_beat_quotes.entries()) {
+        const bindingName = `${name}.add_memory_beat_quotes[${quoteIndex}]`;
+        keys(binding, ["beat_id", "source_quote"], bindingName);
+        const beatId = nonempty(binding.beat_id, `${bindingName}.beat_id`);
+        const sourceQuote = nonempty(binding.source_quote, `${bindingName}.source_quote`);
+        if (seen.has(beatId) || target.planned_beat_ids.includes(beatId)) {
+          throw new Error(`${bindingName} duplicates an existing memory beat binding.`);
+        }
+        seen.add(beatId);
+        const beat = uniqueRow(beats, "visual_beat_id", beatId, "Memory beat");
+        const sceneId = beat.parent_scene_id ?? beat.scene_id;
+        const characterId = String(target.canonical_subject_id ?? target.character ?? "").trim().toLowerCase();
+        const visibleIds = (beat.physically_visible_entity_ids ?? []).map((id) => String(id).toLowerCase());
+        const visibleNames = (beat.visible_characters ?? []).map((name) => String(name).toLowerCase());
+        if (beat.depiction_mode !== "memory_or_flashback"
+          || !target.scene_ids.includes(sceneId)
+          || !(visibleIds.includes(characterId) || visibleNames.includes(characterId))
+          || !String(beat.visual_beat_script_excerpt ?? "").includes(sourceQuote)) {
+          throw new Error(`${bindingName} is not a source-backed visible character in a scoped memory beat.`);
+        }
+        target.planned_beat_ids.push(beatId);
+      }
+      asset.planned_beat_ids = [...target.planned_beat_ids];
+    }
     if (patch.set !== undefined) {
       for (const field of Object.keys(patch.set)) {
         if (asset[field] !== target[field]) throw new Error(`Reference ${refId} and inventory disagree on ${field}.`);
@@ -165,7 +198,7 @@ function patchReferences(plan, inventory, patches) {
       applySet(target, patch.set, REF_SET_FIELDS, name);
       for (const field of Object.keys(patch.set)) asset[field] = target[field];
     }
-    result.push({ ref_id: refId, removed_scene_ids: patch.remove_scene_ids ?? [], removed_planned_beat_ids: patch.remove_planned_beat_ids ?? [], set_fields: Object.keys(patch.set ?? {}) });
+    result.push({ ref_id: refId, removed_scene_ids: patch.remove_scene_ids ?? [], removed_planned_beat_ids: patch.remove_planned_beat_ids ?? [], added_memory_beat_ids: (patch.add_memory_beat_quotes ?? []).map((row) => row.beat_id), set_fields: Object.keys(patch.set ?? {}) });
   }
   return result;
 }
@@ -348,7 +381,7 @@ export async function repairReferencePlanExact({ episodeDir, spec, specPath, cur
   await assertNoReferenceSpend(episodeDir, plan);
   const priorGrouping = groupingLockHash(beatPlan.beats);
   const beatChanges = patchBeatLocations(beatPlan.beats, spec.beat_location_patches);
-  const refChanges = patchReferences(plan, inventory, spec.reference_patches);
+  const refChanges = patchReferences(plan, inventory, beatPlan.beats, spec.reference_patches);
   const stateChanges = patchStates(plan, spec.state_ref_patches);
   const locationChanges = patchLocationContracts(locationLedger, beatPlan.beats, spec.location_contract_patches);
   if (groupingLockHash(beatPlan.beats) !== priorGrouping) throw new Error("Repair changed locked beat grouping.");

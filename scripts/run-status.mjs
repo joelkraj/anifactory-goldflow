@@ -898,6 +898,12 @@ async function visualPromptPlanReviewHardenCommand(episodeDir, identity, recover
     const targetRow = reviewedPlan.prompts?.find((row) => row.image_id === manualReview?.image_ids?.[0]);
     const beatPlan = await readJson(path.join(episodeDir, "visual_beat_plan.json"), null);
     const targetBeat = beatPlan?.beats?.find((beat) => beat.visual_beat_id === targetRow?.visual_beat_id);
+    if (manualReview?.status === "needs_manual_agent_review" && blockers.length > 0
+      && blockers.length === manualReview.image_ids?.length
+      && blockers.every((item) => item.code === "required_source_identity_ambiguous"
+        && manualReview.image_ids.includes(item.image_id))) {
+      return `node bin/goldflow.mjs visual repair-identity-binding --episode-dir ${episodeDir} --repair-spec <reviewed-json>`;
+    }
     if (manualReview?.status === "needs_manual_agent_review" && manualReview?.image_ids?.length === 1
       && blockers.length === 1 && blockers[0]?.code === "visible_character_ref_scope_missing"
       && blockers[0]?.image_id === manualReview.image_ids[0]

@@ -82,6 +82,20 @@ test("reviewed bulk hold recovery counts toward retry cap, spend, and ambiguous 
   } finally { await rm(episodeDir,{recursive:true,force:true}); }
 });
 
+test("reference transport recovery counts as a paid retry and possible spend", async () => {
+  const episodeDir = await fixture(20);
+  try {
+    const file = path.join(episodeDir, "fal", "reference", "transport-recovery-submission-receipts", "held.json");
+    await attempt(file, "held");
+    assert.equal((await falRetryBudgetState(episodeDir)).paid_retry_submissions, 1);
+    assert.equal((await falAmbiguousSubmissionAttempts(episodeDir)).length, 1);
+    await receipt(file, "held");
+    assert.equal((await falAmbiguousSubmissionAttempts(episodeDir)).length, 0);
+    assert.equal((await falSpendProjectionState({ episodeDir, warningBudgetUsd: 30,
+      hardBudgetUsd: 35 })).paid_submissions, 1);
+  } finally { await rm(episodeDir, { recursive: true, force: true }); }
+});
+
 test("Fal revised validation counts only shots already submitted in the original validation", async () => {
   const episodeDir = await fixture(10);
   try {

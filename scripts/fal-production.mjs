@@ -13,6 +13,7 @@ import { validateFalValidationCorrection, validateFalValidationRecovery } from "
 import { validateFalPrebulkPromptCorrection } from "./lib/fal-prebulk-prompt-correction.mjs";
 import { applyFalPostplanPromptCorrection, inspectFalPostplanPromptCorrection } from "./lib/fal-postplan-prompt-correction.mjs";
 import { validateFalReviewedReferenceSuccessRepair } from "./lib/fal-reviewed-reference-success-repair.mjs";
+import { recheckFalReferenceHolds } from "./lib/fal-reference-hold-recheck.mjs";
 import { reviewedBulkRepairRound } from "./lib/fal-reviewed-bulk-round.mjs";
 import { reviewedBulkHoldRecoveryPrompt } from "./lib/fal-reviewed-bulk-hold-recovery.mjs";
 
@@ -116,11 +117,16 @@ async function finalizeReferences(ctx){
     const reviewedAssignmentPath=path.join(ctx.root,"reference","review-repair-assignments",`${row.image_id}.json`);
     const reviewedReceiptPath=path.join(ctx.root,"reference","review-repair-result-receipts",`${row.image_id}.json`);
     const repairReceiptPath=path.join(ctx.root,"reference","repair-result-receipts",`${row.image_id}.json`);
+    const transportReceiptPath=path.join(ctx.root,"reference","transport-recovery-result-receipts",`${row.image_id}.json`);
+    const transportAssignmentPath=path.join(ctx.root,"reference","transport-recovery-assignments",`${row.image_id}.json`);
     const reviewedV3=await fs.access(reviewedV3ReceiptPath).then(()=>true,()=>false);
     const reviewed=await fs.access(reviewedReceiptPath).then(()=>true,()=>false);
-    const activeAssignment=reviewedV3?await read(reviewedV3AssignmentPath):reviewed?await read(reviewedAssignmentPath):row;
+    const transportRecovered=await fs.access(transportReceiptPath).then(()=>true,()=>false);
+    const activeAssignment=reviewedV3?await read(reviewedV3AssignmentPath):reviewed?await read(reviewedAssignmentPath)
+      :transportRecovered?await read(transportAssignmentPath):row;
     const receipt=await read(reviewedV3?reviewedV3ReceiptPath:reviewed?reviewedReceiptPath
-      :await fs.access(repairReceiptPath).then(()=>repairReceiptPath,()=>row.result_receipt_path));
+      :await fs.access(repairReceiptPath).then(()=>repairReceiptPath,
+        ()=>transportRecovered?transportReceiptPath:row.result_receipt_path));
     need(receipt.output_path===activeAssignment.output_path&&await falFileSha256(activeAssignment.output_path)===receipt.output_sha256,
       `Fal reference result is missing or changed: ${row.ref_id}`);
     byId.set(row.ref_id,activeAssignment.output_path);
@@ -307,7 +313,7 @@ async function preflightPaidRepair(ctx,receiptDir,imageIds,fileStemForId=id=>id)
   await assertFalSpendProjectionBudget({episodeDir:ctx.episodeDir,assignments:pending,
     warningBudgetUsd:ctx.contract.warning_budget_usd,hardBudgetUsd:ctx.contract.hard_budget_usd});
 }
-async function observeRows(ctx,rows,limit){return mapLimit(rows,limit,async row=>{const receipt=await read(row.submission_receipt_path);try{return await observeFalImage({endpoint:receipt.endpoint,requestId:receipt.request_id,outputPath:row.output_path,receiptPath:row.result_receipt_path});}catch(error){const timedOut=error?.name==="TimeoutError"||/aborted due to timeout/i.test(error?.message??"");const stale=Date.now()-Date.parse(receipt.submitted_at)>15*60_000;if(timedOut&&!stale)return {complete:false,transient_observation_timeout:true,request_id:receipt.request_id};if(timedOut||Number(error?.status)>=500||/Gateway Timeout|Internal Server Error/i.test(error?.message??"")){const resultDir=path.basename(path.dirname(row.result_receipt_path));const holdName=resultDir==="review-repair-result-receipts"?path.basename(row.result_receipt_path):resultDir==="review-repair-transport-recovery-result-receipts"?`${path.basename(row.result_receipt_path,".json")}-recovery.json`:`${row.image_id}.json`;const holdPath=path.join(path.dirname(path.dirname(row.result_receipt_path)),"transport-holds",holdName);if(!await fs.access(holdPath).then(()=>true,()=>false))await write(holdPath,{schema:"goldflow_fal_transport_hold_v1",created_at:new Date().toISOString(),image_id:row.image_id,endpoint:receipt.endpoint,request_id:receipt.request_id,assignment_sha256:row.assignment_sha256,provider_queue_status:"unknown_or_completed",reason:timedOut?"stale_observation_timeout":"provider_5xx_during_observation",billable_request_resubmitted:false});return {complete:false,transport_pending:true,request_id:receipt.request_id,hold_path:holdPath};}if(error?.status!==422)throw error;const failurePath=await recordFalFailure(row,receipt,error);return {complete:false,failed:true,failure_path:failurePath};}});}
+async function observeRows(ctx,rows,limit){return mapLimit(rows,limit,async row=>{const receipt=await read(row.submission_receipt_path);try{return await observeFalImage({endpoint:receipt.endpoint,requestId:receipt.request_id,outputPath:row.output_path,receiptPath:row.result_receipt_path});}catch(error){const timedOut=error?.name==="TimeoutError"||/aborted due to timeout/i.test(error?.message??"");const stale=Date.now()-Date.parse(receipt.submitted_at)>15*60_000;if(timedOut&&!stale)return {complete:false,transient_observation_timeout:true,request_id:receipt.request_id};if(timedOut||Number(error?.status)>=500||/Gateway Timeout|Internal Server Error/i.test(error?.message??"")){const resultDir=path.basename(path.dirname(row.result_receipt_path));const holdName=resultDir==="review-repair-result-receipts"?path.basename(row.result_receipt_path):resultDir==="review-repair-transport-recovery-result-receipts"||resultDir==="transport-recovery-result-receipts"?`${path.basename(row.result_receipt_path,".json")}-recovery.json`:`${row.image_id}.json`;const holdPath=path.join(path.dirname(path.dirname(row.result_receipt_path)),"transport-holds",holdName);if(!await fs.access(holdPath).then(()=>true,()=>false))await write(holdPath,{schema:"goldflow_fal_transport_hold_v1",created_at:new Date().toISOString(),image_id:row.image_id,endpoint:receipt.endpoint,request_id:receipt.request_id,assignment_sha256:row.assignment_sha256,provider_queue_status:"unknown_or_completed",reason:timedOut?"stale_observation_timeout":"provider_5xx_during_observation",billable_request_resubmitted:false});return {complete:false,transport_pending:true,request_id:receipt.request_id,hold_path:holdPath};}if(error?.status!==422)throw error;const failurePath=await recordFalFailure(row,receipt,error);return {complete:false,failed:true,failure_path:failurePath};}});}
 async function main(){
  const f=flags(process.argv.slice(2)); const ctx=await context(f); const action=f.action;
  if(action==="apply-postplan-prompt-correction"){
@@ -459,6 +465,84 @@ async function main(){
      if(submitted&&!done&&!failed&&!held)rows.push(row);
    }
    const result=await observeRows(ctx,rows,ctx.contract.production_concurrency);return console.log(JSON.stringify({status:result.every(r=>r.complete)?"complete":"pending",checked:result.length,complete:result.filter(r=>r.complete).length,pending:result.filter(r=>!r.complete).length},null,2));
+ }
+ if(action==="observe-reference-holds"){
+   const plan=await read(path.join(ctx.root,"reference-plan.json"));
+   const result=await recheckFalReferenceHolds({root:ctx.root,assignments:plan.assignments,
+     observe:rows=>observeRows(ctx,rows,ctx.contract.production_concurrency)});
+   return console.log(JSON.stringify(result,null,2));
+ }
+ if(action==="recover-reference-holds"){
+   need(f["confirm-spend"]==="exact_fal_reference_transport_recovery",
+     "Paid reference transport recovery requires the exact confirmation token.");
+   need(path.isAbsolute(f.directives??""),"Reference transport recovery needs absolute reviewed directives.");
+   const plan=await read(path.join(ctx.root,"reference-plan.json"));
+   const directives=await read(f.directives);
+   need(directives?.schema==="goldflow_fal_reference_transport_recovery_directives_v1"
+     &&Array.isArray(directives.recoveries)&&directives.recoveries.length,
+     "Exact reference transport recovery directives are required.");
+   need(new Set(directives.recoveries.map(row=>row.image_id)).size===directives.recoveries.length,
+     "Reference transport recovery repeats an image ID.");
+   await preflightPaidRepair(ctx,"reference/transport-recovery-submission-receipts",
+     directives.recoveries.map(row=>row.image_id));
+   const recoveries=[];
+   for(const directive of directives.recoveries){
+     const original=plan.assignments.find(row=>row.image_id===directive.image_id);
+     need(original&&directive.original_assignment_sha256===original.assignment_sha256,
+       `Reference transport recovery assignment changed: ${directive.image_id}`);
+     const holdPath=path.join(ctx.root,"reference","transport-holds",`${directive.image_id}.json`);
+     const observationPath=path.join(ctx.root,"reference","hold-observation-receipts",`${directive.image_id}.json`);
+     const [hold,observation,submission]=await Promise.all([
+       read(holdPath),read(observationPath),read(original.submission_receipt_path)]);
+     need(hold.schema==="goldflow_fal_transport_hold_v1"&&hold.request_id===submission.request_id
+       &&hold.assignment_sha256===original.assignment_sha256
+       &&observation.schema==="goldflow_fal_reference_hold_observation_v1"
+       &&["provider_failed","transport_pending"].includes(observation.outcome)
+       &&observation.original_request_id===hold.request_id
+       &&observation.original_assignment_sha256===original.assignment_sha256
+       &&observation.original_transport_hold_sha256===await falFileSha256(holdPath)
+       &&observation.original_submission_receipt_sha256===await falFileSha256(original.submission_receipt_path)
+       &&directive.original_request_id===hold.request_id
+       &&directive.hold_observation_receipt_sha256===await falFileSha256(observationPath)
+       &&typeof directive.recovery_reason==="string"&&directive.recovery_reason.trim()
+       &&typeof directive.reviewer==="string"&&directive.reviewer.trim()
+       &&typeof directive.note==="string"&&directive.note.trim(),
+       `Reference transport recovery lacks reviewed original-request lineage: ${directive.image_id}`);
+     need(!await fs.access(original.result_receipt_path).then(()=>true,()=>false)
+       &&!await fs.access(path.join(ctx.root,"reference","failure-receipts",`${directive.image_id}.json`)).then(()=>true,()=>false),
+       `Original reference request resolved before paid transport recovery: ${directive.image_id}`);
+     const core={...original,previous_request_id:hold.request_id,
+       previous_assignment_sha256:original.assignment_sha256,
+       original_transport_hold_sha256:await falFileSha256(holdPath),
+       hold_observation_receipt_sha256:await falFileSha256(observationPath),
+       transport_recovery_reason:directive.recovery_reason};
+     for(const key of ["assignment_sha256","assignment_path","submission_receipt_path","result_receipt_path","output_path","upload_receipt_path"])delete core[key];
+     const recovery={...core,assignment_sha256:falObjectSha256(JSON.stringify(core)),
+       submission_receipt_path:path.join(ctx.root,"reference","transport-recovery-submission-receipts",`${directive.image_id}.json`),
+       result_receipt_path:path.join(ctx.root,"reference","transport-recovery-result-receipts",`${directive.image_id}.json`),
+       output_path:path.join(ctx.episodeDir,"assets","images","reference-repairs",`${directive.image_id}-transport.png`),
+       upload_receipt_path:path.join(ctx.root,"reference","transport-recovery-upload-receipts",`${directive.image_id}.json`)};
+     await write(path.join(ctx.root,"reference","transport-recovery-assignments",`${directive.image_id}.json`),recovery);
+     recoveries.push(recovery);
+   }
+   const result=await submitRows(ctx,recoveries,Math.min(ctx.contract.production_concurrency,recoveries.length));
+   return console.log(JSON.stringify({status:"reference_transport_recovery_submitted",count:result.length,
+     image_ids:recoveries.map(row=>row.image_id)},null,2));
+ }
+ if(action==="observe-reference-transport-recovery"){
+   const dir=path.join(ctx.root,"reference","transport-recovery-assignments");
+   const names=await fs.readdir(dir);const rows=[];
+   for(const name of names.filter(value=>value.endsWith(".json"))){
+     const row=await read(path.join(dir,name));
+     const failed=await fs.access(path.join(ctx.root,"reference","transport-recovery-failure-receipts",`${row.image_id}.json`)).then(()=>true,()=>false);
+     const held=await fs.access(path.join(ctx.root,"reference","transport-holds",`${row.image_id}-recovery.json`)).then(()=>true,()=>false);
+     if(!failed&&!held&&!await fs.access(row.result_receipt_path).then(()=>true,()=>false))rows.push(row);
+   }
+   const result=await observeRows(ctx,rows,ctx.contract.production_concurrency);
+   return console.log(JSON.stringify({status:result.every(row=>row.complete)?"complete":"pending",
+     checked:result.length,complete:result.filter(row=>row.complete).length,
+     failed:result.filter(row=>row.failed).length,held:result.filter(row=>row.transport_pending).length,
+     pending:result.filter(row=>!row.complete&&!row.failed&&!row.transport_pending).length},null,2));
  }
  if(action==="repair-reference-failures"){
    need(f["confirm-spend"]==="exact_fal_reference_repair","Paid reference repair requires exact confirmation token.");

@@ -8,6 +8,7 @@ export function falFailureReceiptPath(row) {
     : resultDir === "review-repair-result-receipts" ? "review-repair-failure-receipts"
     : resultDir === "review-repair-transport-recovery-result-receipts" ? "review-repair-transport-recovery-failure-receipts"
     : resultDir === "review-repair-v3-result-receipts" ? "review-repair-v3-failure-receipts"
+    : resultDir === "transport-recovery-result-receipts" ? "transport-recovery-failure-receipts"
     : "failure-receipts";
   const receiptName = resultDir === "review-repair-result-receipts"
     || resultDir === "review-repair-transport-recovery-result-receipts"

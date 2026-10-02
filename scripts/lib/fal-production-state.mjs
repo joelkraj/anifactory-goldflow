@@ -2,6 +2,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { falAdjudicationPath } from "./fal-ambiguous-adjudication.mjs";
 import { falAmbiguousSubmissionAttempts, falRetryBudgetState, falSpendProjectionState, falProjectedSpendUsd } from "./fal-retry-budget.mjs";
+import { validateFalValidationCorrection, validateFalValidationRecovery } from "./fal-validation-recovery.mjs";
 
 async function exists(file) { return fs.access(file).then(() => true, () => false); }
 async function read(file) { return JSON.parse(await fs.readFile(file, "utf8")); }
@@ -211,7 +212,30 @@ export async function falProductionStageStates({ episodeDir, identity } = {}) {
     else if (!await exists(reviewPath)) next = `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action review-validation --reviewer <name> --note "<production-grade visual review>" --approve-ids <ids> --reject-ids <ids>`;
   }
   const review = await exists(reviewPath) ? await read(reviewPath) : null;
-  const validationPassed = review?.status === "passed";
+  const correction = review ? await validateFalValidationCorrection({ root, validationPlanPath: planPath, validationReviewPath: reviewPath }) : null;
+  const recovery = correction ? await validateFalValidationRecovery({ root, correction }) : null;
+  let validationEvidence = "Fal validation review did not pass";
+  if (correction) {
+    if (!correction.recorded) next = `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action correct-validation-review`;
+    else if (recovery.status === "plan_missing") next = `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action prepare-validation-recovery`;
+    else if (recovery.status === "pending") {
+      if (recovery.failures.some(Boolean) || recovery.holds.some(Boolean)) {
+        next = null;
+        validationEvidence = "Exact validation recovery has a failed or held provider result; inspect exact receipts before further spend";
+      } else if (recovery.submissions.some(Boolean) && !recovery.submissions.every(Boolean)) {
+        next = null;
+        validationEvidence = "Exact validation recovery has a partial submission; inspect attempts before further spend";
+      } else if (!recovery.submissions.some(Boolean)) {
+        next = retryCapEvidence ? null : `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action dispatch-validation-recovery --confirm-spend exact_fal_validation_recovery`;
+        if (retryCapEvidence) validationEvidence = retryCapEvidence;
+      } else if (!recovery.results.every(Boolean)) next = `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action observe-validation-recovery`;
+      else next = `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action review-validation-recovery --reviewer <name> --note "<exact visual review>" --approve-ids <ids> --reject-ids <ids>`;
+    } else if (recovery.status === "failed") {
+      next = null;
+      validationEvidence = "Reviewed exact validation recovery still has rejected rasters; inspect immutable result/review before a further scoped decision";
+    } else next = null;
+  }
+  const validationPassed = correction ? recovery?.status === "passed" : review?.status === "passed";
   const bulkPath = path.join(root, "bulk-plan.json"); const bulk = await exists(bulkPath) ? await read(bulkPath) : null;
   let bulkState;
   if (validationPassed && !bulk) bulkState = { state: "missing", evidence: "Fal bulk plan is missing", next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action prepare-bulk --image-ids all` };
@@ -296,12 +320,12 @@ export async function falProductionStageStates({ episodeDir, identity } = {}) {
     ...(reviewRepairState ? { reference_image_approval: reviewRepairState } : {}),
     image_generation: validationPassed
       ? bulkState ?? { state: "missing", evidence: "Awaiting Fal bulk preparation" }
-      : { state: "missing", evidence: next ? "Fal collage validation is incomplete" : "Fal validation review did not pass", ...(next ? { next_command_shape: next } : {}) },
+      : { state: next ? "missing" : "blocked", evidence: next ? "Fal collage validation is incomplete" : validationEvidence, ...(next ? { next_command_shape: next } : {}) },
   });
   return withSpendState({
     reference_image_approval: validationPassed
-      ? { done: true, evidence: `Fal eight-shot collage validation passed (${review.approved_ids.length}/8 usable)` }
-      : { state: "missing", evidence: next ? "Fal collage validation is incomplete" : "Fal validation review did not pass", ...(next ? { next_command_shape: next } : {}) },
+      ? { done: true, evidence: `Fal eight-shot collage validation passed (${correction ? correction.expected.approved_ids.length + recovery.review.approved_ids.length : review.approved_ids.length}/8 usable)` }
+      : { state: next ? "missing" : "blocked", evidence: next ? "Fal collage validation is incomplete" : validationEvidence, ...(next ? { next_command_shape: next } : {}) },
     image_generation: bulkState ?? { state: "missing", evidence: "Awaiting Fal validation approval" },
   });
 }

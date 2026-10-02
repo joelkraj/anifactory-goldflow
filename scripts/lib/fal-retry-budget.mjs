@@ -9,6 +9,7 @@ const RETRY_FRACTION = 0.10;
 // text-to-image averaged about $0.005. This is not a provider-enforced quote.
 export const FAL_PROJECTED_PAID_REQUEST_USD = 0.022;
 const REPAIR_RECEIPT_DIRS = Object.freeze([
+  "validation-recovery/submission-receipts",
   "reference/repair-submission-receipts",
   "reference/review-repair-submission-receipts",
   "bulk/repair-submission-receipts",

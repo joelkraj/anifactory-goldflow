@@ -9,6 +9,7 @@ import { assertFalRetryBudget, assertFalSpendProjectionBudget, falAmbiguousSubmi
 import { chooseNativeValidationRows } from "./lib/fal-validation-selector.mjs";
 import { falAdjudicationPath, validateFalNoJobAdjudication } from "./lib/fal-ambiguous-adjudication.mjs";
 import { falFailureReceiptPath, recordFalFailure } from "./lib/fal-failure-receipt.mjs";
+import { validateFalValidationCorrection, validateFalValidationRecovery } from "./lib/fal-validation-recovery.mjs";
 
 const digest = value => createHash("sha256").update(value).digest("hex");
 const bytes = value => `${JSON.stringify(value, null, 2)}\n`;
@@ -175,7 +176,10 @@ async function prepareBulk(ctx,f){
   const nativeFal=ctx.identity.visual_restart?.fork_at==="visual_reference_plan";
   const approval=nativeFal?await read(path.join(ctx.episodeDir,`visual_reference_approval_${ctx.identity.episode}.json`)):null;
   const validation=nativeFal?await read(await validationPlanPath(ctx)):null;
-  const validationReview=nativeFal?await read(await validationReviewPath(ctx)):null;
+  const correction=nativeFal?await validateFalValidationCorrection({root:ctx.root,validationPlanPath:await validationPlanPath(ctx),validationReviewPath:await validationReviewPath(ctx)}):null;
+  const recovery=correction?await validateFalValidationRecovery({root:ctx.root,correction}):null;
+  need(!correction||recovery?.status==="passed","Corrected Fal validation requires both exact replacement shots visually approved before bulk.");
+  const validationReview=nativeFal?(correction?{approved_ids:[...correction.expected.approved_ids,...recovery.review.approved_ids]}:await read(await validationReviewPath(ctx))):null;
   for(const row of rows){
     const refs=nativeFal?await nativePromptReferences(ctx,row,approval):(row.reference_bindings??[]).slice(0,4).map(ref=>({asset_id:ref.asset_id,asset_class:ref.asset_class,path:ref.portable_file?.path??ref.path,sha256:ref.portable_file?.sha256??ref.sha256}));
     need(refs.every(ref=>ref.path&&ref.sha256),`Portable reference binding missing for ${row.image_id}.`);
@@ -183,10 +187,21 @@ async function prepareBulk(ctx,f){
     const basePrompt=row.provider_prompt??row.image_prompt??row.canonical_prompt; need(basePrompt,`Prompt missing for ${row.image_id}.`);
     const prompt=board?`${basePrompt}\n\n${referenceBoardPromptGuidance(board)}`:basePrompt;
     const core={image_id:row.image_id,endpoint:board?FAL_ENDPOINTS.primary_edit:FAL_ENDPOINTS.primary_text,prompt,prompt_sha256:digest(prompt),run_identity_sha256:ctx.identityHash,reference_mode:board?"one_positional_collage":"text_only",reference_asset_ids:refs.map(r=>r.asset_id),reference_hashes:refs.map(r=>r.sha256),board_path:board?.output_path??null,board_sha256:board?.output_sha256??null,board_manifest_path:board?.manifest_path??null,max_cost_usd:0.05,start_sec:row.start_sec,duration_sec:row.duration_sec};
-    const acceptedValidation=validation?.assignments?.find(item=>item.image_id===row.image_id&&validationReview?.approved_ids?.includes(item.image_id));
+    const acceptedValidation=correction?.expected.rejected_ids.includes(row.image_id)
+      ?recovery.plan.assignments.find(item=>item.image_id===row.image_id&&recovery.review.approved_ids.includes(item.image_id))
+      :validation?.assignments?.find(item=>item.image_id===row.image_id&&validationReview?.approved_ids?.includes(item.image_id));
     if(acceptedValidation){
-      need(acceptedValidation.prompt_sha256===core.prompt_sha256&&acceptedValidation.board_sha256===core.board_sha256&&JSON.stringify(acceptedValidation.reference_hashes)===JSON.stringify(core.reference_hashes),`Accepted Fal validation shot changed before bulk reuse: ${row.image_id}`);
-      need(await fs.access(acceptedValidation.result_receipt_path).then(()=>true,()=>false),`Accepted Fal validation result is missing: ${row.image_id}`);
+      const recovered=correction?.expected.rejected_ids.includes(row.image_id);
+      if(recovered)need(validation.assignments.find(item=>item.image_id===row.image_id)?.prompt_sha256===core.prompt_sha256,
+        `Underlying approved Fal prompt changed before exact validation recovery reuse: ${row.image_id}`);
+      need((recovered||acceptedValidation.prompt_sha256===core.prompt_sha256)
+        &&acceptedValidation.board_sha256===core.board_sha256
+        &&JSON.stringify(acceptedValidation.reference_hashes)===JSON.stringify(core.reference_hashes),
+      `Accepted Fal validation shot changed before bulk reuse: ${row.image_id}`);
+      const receipt=await read(acceptedValidation.result_receipt_path);
+      need(receipt.output_sha256===await falFileSha256(receipt.output_path)
+        &&(recovered?recovery.review.result_sha256_by_id[row.image_id]===await falFileSha256(acceptedValidation.result_receipt_path):true),
+      `Accepted Fal validation result is missing or changed: ${row.image_id}`);
       assignments.push({...acceptedValidation,reused_validation_shot:true,start_sec:row.start_sec,duration_sec:row.duration_sec});
       continue;
     }
@@ -202,7 +217,8 @@ async function prepareBulk(ctx,f){
     "Projected Fal episode spend reaches the locked hard budget; estimate only, verify actual account spend.");
   if(projectedEpisode>=ctx.contract.warning_budget_usd)
     console.error(`Fal projected episode spend $${projectedEpisode} reaches the locked warning threshold; estimate only, verify actual account spend.`);
-  const plan={schema:"goldflow_fal_bulk_plan_v1",created_at:new Date().toISOString(),run_identity_sha256:ctx.identityHash,model:FAL_ENDPOINTS.primary_edit,quality:"low",width:1920,height:1080,format:"png",reference_mode:"one_positional_collage",concurrency:ctx.contract.production_concurrency,assignment_count:assignments.length,projected_base_cost_usd:projectedBase,projected_observed_rate_episode_cost_usd:projectedEpisode,pricing_note:"$0.00441 is base-output only. The episode spend projection uses $0.022 per paid request from observed Fal billing; actual charges require dashboard verification.",assignments};
+  const plan={schema:"goldflow_fal_bulk_plan_v1",created_at:new Date().toISOString(),run_identity_sha256:ctx.identityHash,model:FAL_ENDPOINTS.primary_edit,quality:"low",width:1920,height:1080,format:"png",reference_mode:"one_positional_collage",concurrency:ctx.contract.production_concurrency,assignment_count:assignments.length,projected_base_cost_usd:projectedBase,projected_observed_rate_episode_cost_usd:projectedEpisode,pricing_note:"$0.00441 is base-output only. The episode spend projection uses $0.022 per paid request from observed Fal billing; actual charges require dashboard verification.",
+    ...(correction?{validation_review_correction_sha256:await falFileSha256(correction.paths.correction),validation_recovery_review_sha256:await falFileSha256(correction.paths.review)}:{}),assignments};
   await write(path.join(ctx.root,"bulk-plan.json"),plan);return {status:"prepared",count:assignments.length,projected_base_cost_usd:projectedBase,projected_observed_rate_episode_cost_usd:projectedEpisode};
 }
 async function submitRows(ctx,rows,limit){
@@ -304,6 +320,76 @@ async function main(){
    return console.log(JSON.stringify({status:"observed",checked:result.length,complete:result.filter(x=>x.complete).length},null,2));
  }
  if(action==="prepare-references") return console.log(JSON.stringify(await prepareReferences(ctx),null,2));
+ if(["correct-validation-review","prepare-validation-recovery","dispatch-validation-recovery","observe-validation-recovery","review-validation-recovery"].includes(action)){
+   const correction=await validateFalValidationCorrection({root:ctx.root,validationPlanPath:await validationPlanPath(ctx),validationReviewPath:await validationReviewPath(ctx)});
+   need(correction,"Reviewed validation correction request is missing.");
+   if(action==="correct-validation-review"){
+     need(!correction.recorded,"Validation review correction is already recorded.");
+     await write(correction.paths.correction,correction.expected);
+     return console.log(JSON.stringify({status:"needs_exact_recovery",approved:correction.expected.approved_ids.length,rejected:correction.expected.rejected_ids.length,correction_path:correction.paths.correction},null,2));
+   }
+   need(correction.recorded,"Record the hash-bound validation correction before recovery.");
+   const recovery=await validateFalValidationRecovery({root:ctx.root,correction});
+   if(action==="prepare-validation-recovery"){
+     need(recovery.status==="plan_missing","Exact validation recovery is already prepared.");
+     const assignments=[];
+     for(const imageId of correction.expected.rejected_ids){
+       const original=correction.plan.assignments.find(row=>row.image_id===imageId);
+       const directive=correction.request.recovery_prompts.find(row=>row.image_id===imageId);
+       const core={...original};
+       for(const key of ["assignment_sha256","assignment_path","submission_receipt_path","result_receipt_path","output_path","upload_receipt_path","prompt","prompt_sha256"])
+         delete core[key];
+       Object.assign(core,{prompt:directive.replacement_prompt,prompt_sha256:digest(directive.replacement_prompt),
+         previous_assignment_sha256:original.assignment_sha256,previous_result_sha256:directive.previous_result_sha256,
+         rejected_image_sha256:directive.previous_output_sha256,recovery_correction_sha256:await falFileSha256(correction.paths.correction),
+         recovery_reason:directive.reason});
+       const root=path.join(ctx.root,"validation-recovery");
+       const assignment={...core,assignment_sha256:falObjectSha256(JSON.stringify(core)),
+         submission_receipt_path:path.join(root,"submission-receipts",`${imageId}.json`),
+         result_receipt_path:path.join(root,"result-receipts",`${imageId}.json`),
+         output_path:path.join(root,"outputs",`${imageId}.png`),
+         upload_receipt_path:path.join(root,"upload-receipts",`${imageId}.json`)};
+       const assignmentPath=path.join(root,"assignments",`${imageId}.json`);
+       await write(assignmentPath,assignment);
+       assignments.push({...assignment,assignment_path:assignmentPath});
+     }
+     await write(correction.paths.plan,{schema:"goldflow_fal_validation_recovery_plan_v1",created_at:new Date().toISOString(),
+       correction_sha256:await falFileSha256(correction.paths.correction),validation_plan_sha256:correction.expected.validation_plan_sha256,
+       count:assignments.length,assignments});
+     return console.log(JSON.stringify({status:"prepared",count:assignments.length,image_ids:assignments.map(row=>row.image_id)},null,2));
+   }
+   need(recovery.plan,"Exact validation recovery plan is missing.");
+   if(action==="dispatch-validation-recovery"){
+     need(f["confirm-spend"]==="exact_fal_validation_recovery","Exact validation recovery requires its spend token.");
+     need(recovery.status==="pending"&&!recovery.submissions.some(Boolean),"Validation recovery submission is not the next exact step.");
+     const result=await submitRows(ctx,recovery.plan.assignments,Math.min(2,ctx.contract.production_concurrency));
+     return console.log(JSON.stringify({status:"submitted",count:result.length,image_ids:recovery.plan.assignments.map(row=>row.image_id)},null,2));
+   }
+   if(action==="observe-validation-recovery"){
+     const rows=recovery.plan.assignments.filter((row,index)=>recovery.submissions[index]&&!recovery.results[index]&&!recovery.failures[index]&&!recovery.holds[index]);
+     need(rows.length,"No submitted validation recovery result awaits observation.");
+     const result=await observeRows(ctx,rows,Math.min(2,ctx.contract.production_concurrency));
+     return console.log(JSON.stringify({status:result.every(row=>row.complete)?"complete":"pending",checked:result.length,complete:result.filter(row=>row.complete).length},null,2));
+   }
+   if(action==="review-validation-recovery"){
+     need(recovery.status==="pending"&&recovery.results.every(Boolean),"Both exact recovery rasters must exist before visual review.");
+     const approved=String(f["approve-ids"]??"").split(",").filter(Boolean),rejected=String(f["reject-ids"]??"").split(",").filter(Boolean);
+     need(f.reviewer&&String(f.note??"").trim().length>20,"Visual recovery review requires actual reviewer and material note.");
+     need(approved.length+rejected.length===recovery.plan.assignments.length
+       &&new Set([...approved,...rejected]).size===recovery.plan.assignments.length
+       &&recovery.plan.assignments.every(row=>approved.includes(row.image_id)||rejected.includes(row.image_id)),
+     "Visual recovery review must disposition only the two exact IDs.");
+     const resultHashes={};
+     for(const row of recovery.plan.assignments){const receipt=await read(row.result_receipt_path);
+       need(receipt.output_sha256===await falFileSha256(receipt.output_path),`Recovery raster changed: ${row.image_id}`);
+       resultHashes[row.image_id]=await falFileSha256(row.result_receipt_path);}
+     const review={schema:"goldflow_fal_validation_recovery_review_v1",created_at:new Date().toISOString(),
+       correction_sha256:await falFileSha256(correction.paths.correction),recovery_plan_sha256:await falFileSha256(correction.paths.plan),
+       reviewer:f.reviewer,note:f.note,status:rejected.length?"failed":"passed",approved_ids:approved,rejected_ids:rejected,result_sha256_by_id:resultHashes};
+     await write(correction.paths.review,review);
+     return console.log(JSON.stringify(review,null,2));
+   }
+ }
  if(action==="billing-submit-reference"||action==="billing-observe-reference"){
    const plan=await read(path.join(ctx.root,"reference-plan.json"));const row=plan.assignments.find(item=>item.image_id===f["image-id"]);need(row,`Unknown exact Fal reference probe: ${f["image-id"]}`);
    if(action==="billing-submit-reference"){

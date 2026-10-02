@@ -8,7 +8,9 @@ export function falFailureReceiptPath(row) {
     : resultDir === "review-repair-result-receipts" ? "review-repair-failure-receipts"
     : resultDir === "review-repair-v3-result-receipts" ? "review-repair-v3-failure-receipts"
     : "failure-receipts";
-  return path.join(path.dirname(path.dirname(row.result_receipt_path)), failureDir, `${row.image_id}.json`);
+  const receiptName = resultDir === "review-repair-result-receipts"
+    ? path.basename(row.result_receipt_path) : `${row.image_id}.json`;
+  return path.join(path.dirname(path.dirname(row.result_receipt_path)), failureDir, receiptName);
 }
 
 export async function recordFalFailure(row, receipt, error) {

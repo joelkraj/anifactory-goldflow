@@ -37,6 +37,7 @@ import {
 } from "./lib/image-provider-policy.mjs";
 import { findSourceCompatibleHybridDeadletters } from "./hybrid-browser-image-pool.mjs";
 import { sha256File as streamSha256File } from "./lib/file-hash.mjs";
+import { reviewedBulkRepairRound } from "./lib/fal-reviewed-bulk-round.mjs";
 import {
   verifyCompletedInterruptedQwenRunner,
   verifyInterruptedQwenAdoptionReceipt,
@@ -1530,6 +1531,36 @@ async function finalQaComplete(episodeDir, episode, identity) {
   return { done: true, evidence: `${path.basename(reportPath)} status=passed; hashes=current` };
 }
 
+export async function reviewedBulkQaRepairStatusForTests(episodeDir, report, qaPath) {
+  const ids = report.critical_rejected_image_ids;
+  const ledger = await readJson(path.join(episodeDir, "cut_execution_ledger.json"), null);
+  if (!Array.isArray(ids) || !ids.length || new Set(ids).size !== ids.length || !Array.isArray(ledger?.cuts))
+    throw new Error("Blocked Fal image QA lacks exact unique IDs or the current cut ledger.");
+  const qaHash = await fileSha256(qaPath);
+  const root = path.join(episodeDir, "fal");
+  let assignedCount = 0, completeCount = 0;
+  for (const id of ids) {
+    const matches = ledger.cuts.filter(row => row.image_id === id);
+    if (matches.length !== 1 || !/^[a-f0-9]{64}$/.test(matches[0].image_sha256 ?? "")
+      || await fileSha256(matches[0].image_path) !== matches[0].image_sha256)
+      throw new Error(`Current rejected Fal cut is missing or changed: ${id}`);
+    const round = await reviewedBulkRepairRound({ root, imageId: id,
+      qaReportSha256: qaHash, rejectedImageSha256: matches[0].image_sha256 });
+    if (round.assignment) {
+      if (await exists(path.join(root, "bulk", "review-repair-failure-receipts", `${round.stem}.json`)))
+        throw new Error(`Current reviewed Fal repair has a provider failure receipt: ${id}`);
+      if (await exists(path.join(root, "bulk", "transport-holds", `${round.stem}.json`)))
+        throw new Error(`Current reviewed Fal repair has an unresolved transport hold: ${id}`);
+      assignedCount++;
+      if (await exists(round.assignment.result_receipt_path)) completeCount++;
+    }
+  }
+  const next = assignedCount === ids.length
+    ? completeCount === ids.length ? "finalize-reviewed-bulk" : "observe-reviewed-bulk"
+    : "repair-reviewed-bulk";
+  return { next, assignedCount, completeCount, totalCount: ids.length };
+}
+
 async function imageOutputQaComplete(episodeDir, episode, identity) {
   if (!imageOutputQaRequired(identity)) return { done: true, evidence: "skipped for legacy run identity; new preflights require output QA" };
   const reportPath = path.join(episodeDir, `image_output_qa_${episode}.json`);
@@ -1560,14 +1591,11 @@ async function imageOutputQaComplete(episodeDir, episode, identity) {
   }
   if (status === "passed") return { done: true, evidence: `${path.basename(reportPath)} passed; risk_cuts=${report.risk_cut_count ?? "?"}` };
   if (status === "blocked" && identity.image_provider === "fal_ai" && Array.isArray(report.critical_rejected_image_ids) && report.critical_rejected_image_ids.length) {
-    const ids = report.critical_rejected_image_ids;
-    const repairRoot = path.join(episodeDir, "fal", "bulk");
-    const assigned = await Promise.all(ids.map(id => exists(path.join(repairRoot, "review-repair-assignments", `${id}.json`))));
-    const complete = await Promise.all(ids.map(id => exists(path.join(repairRoot, "review-repair-result-receipts", `${id}.json`))));
-    const next = assigned.every(Boolean)
-      ? complete.every(Boolean) ? "finalize-reviewed-bulk" : "observe-reviewed-bulk"
-      : "repair-reviewed-bulk";
-    return { done: false, state: "blocked", evidence: `Fal exact-ID visual review repairs=${complete.filter(Boolean).length}/${ids.length}`,
+    let repair;
+    try { repair = await reviewedBulkQaRepairStatusForTests(episodeDir, report, reportPath); }
+    catch (error) { return { done: false, state: "blocked", evidence: `Fal exact-ID visual review hold: ${error.message}` }; }
+    const { next, completeCount, totalCount } = repair;
+    return { done: false, state: "blocked", evidence: `Fal exact-ID visual review repairs=${completeCount}/${totalCount}`,
       next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action ${next}${next === "repair-reviewed-bulk" ? " --directives <absolute_reviewed_bulk_repair_directives.json> --confirm-spend exact_fal_reviewed_bulk_repair" : ""}` };
   }
   return {

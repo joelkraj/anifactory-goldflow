@@ -517,9 +517,9 @@ export async function loadContractionRecoveryState({ episodeDir, episode,
   };
 }
 
-export async function validateAppliedContractionReview({ episodeDir, episode,
+async function validateAppliedContractionReviewMode({ episodeDir, episode,
   sourceScriptSha256, ttsReport, unitDelivery, providerOutput,
-  providerOutputPath,
+  providerOutputPath, blockedFullStreamQa = null,
 } = {}) {
   const proof = ttsReport?.automated_contraction_expansion;
   const candidates = (providerOutput?.units ?? []).filter(
@@ -550,9 +550,24 @@ export async function validateAppliedContractionReview({ episodeDir, episode,
         === proof.candidate_request_sha256
       && await sha256File(proof.candidate_result_path)
         === proof.candidate_result_sha256
-      && ["passed", "passed_with_warnings"].includes(ttsReport.status)
+      && ttsReport.source_script_hash === sourceScriptSha256
+      && unitDelivery.source_script_hash === sourceScriptSha256
+      && ttsReport.provider_output_manifest_path === providerOutputPath
+      && ttsReport.provider_output_manifest_sha256
+        === proof.manifest_file_sha256
+      && (blockedFullStreamQa
+        ? ttsReport.status === "blocked"
+          && ttsReport.full_stream_qa_status === "blocked"
+          && ["passed", "passed_with_warnings"].includes(ttsReport.unit_qa_status)
+          && blockedFullStreamQa.status === "blocked"
+          && blockedFullStreamQa.source_script_hash === sourceScriptSha256
+          && blockedFullStreamQa.provider_output_manifest_file_sha256
+            === proof.manifest_file_sha256
+          && blockedFullStreamQa.blockers?.length === 1
+        : ["passed", "passed_with_warnings"].includes(ttsReport.status)
+          && ["passed", "passed_with_warnings"].includes(ttsReport.full_stream_qa_status))
       && ["passed", "passed_with_warnings"].includes(unitDelivery.status)
-      && ["passed", "passed_with_warnings"].includes(ttsReport.full_stream_qa_status)
+      && Number(unitDelivery.blocked_unit_count) === 0
       && !(ttsReport.blockers ?? []).length
       && !(unitDelivery.blockers ?? []).length
       && !ttsReport.operator_narration_qa_waiver
@@ -569,9 +584,17 @@ export async function validateAppliedContractionReview({ episodeDir, episode,
       && recovered.candidate_request_file_sha256 === proof.candidate_request_sha256
       && recovered.candidate_result_file_sha256 === proof.candidate_result_sha256,
     "applied contraction candidate changed");
+    const stitchReport = await read(path.join(episodeDir,
+      `audio_stitch_report_${episode}-narration.json`));
+    need((blockedFullStreamQa ? stitchReport?.status === "blocked"
+      : ["passed", "passed_with_warnings"].includes(stitchReport?.status))
+      && (!blockedFullStreamQa
+        || stitchReport.output_sha256 === blockedFullStreamQa.audio_sha256
+          && ttsReport.mastering?.output_sha256 === blockedFullStreamQa.audio_sha256),
+    "applied contraction stitch status changed");
     const delivered = (unitDelivery.units ?? []).find(
       (row) => row.unit_id === proof.unit_id);
-    const segment = (ttsReport.segments ?? []).find(
+    const segment = (stitchReport.segments ?? []).find(
       (row) => row.unit_id === proof.unit_id);
     const candidate = candidates[0];
     need(delivered?.audio_sha256 === candidate.audio_sha256
@@ -588,6 +611,8 @@ export async function validateAppliedContractionReview({ episodeDir, episode,
         ["She", "had"])
       && !(delivered?.decision?.blockers ?? []).length,
     "applied contraction unit or caption mapping changed");
+    contractionSegmentReportFieldsForTests({ row: segment,
+      timing: segment, evidenceSha256: proof.evidence_sha256 });
     const confirmed = contractionCandidateAsrDecisionForTests({
       decision: delivered.decision, unitId: proof.unit_id,
       reviewedUnitId: proof.unit_id, expectedText: SOURCE_UNIT,
@@ -600,6 +625,16 @@ export async function validateAppliedContractionReview({ episodeDir, episode,
     "applied contraction dual-ASR is no longer exact");
     return true;
   } catch { return false; }
+}
+
+export async function validateAppliedContractionReview(args = {}) {
+  return validateAppliedContractionReviewMode(args);
+}
+
+export async function validateConsumedContractionForBlockedFullStream(args = {}) {
+  if (!args.ttsReport?.automated_contraction_expansion
+    || !args.blockedFullStreamQa) return false;
+  return validateAppliedContractionReviewMode(args);
 }
 
 export function contractionGuardAdmission(status, command, subcommand, flags = {}) {

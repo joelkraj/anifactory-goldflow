@@ -57,7 +57,8 @@ import { loadPronunciationRecoveryState } from "./lib/narration-pronunciation-ep
 import { loadAutomatedPronunciationState } from "./lib/narration-automated-pronunciation-episode.mjs";
 import { CONTRACTION_MODE, CONTRACTION_TARGET_UNIT_ID,
   loadContractionRecoveryState,
-  validateAppliedContractionReview } from "./lib/narration-contraction-repair.mjs";
+  validateAppliedContractionReview,
+  validateConsumedContractionForBlockedFullStream } from "./lib/narration-contraction-repair.mjs";
 import {
   PRONUNCIATION_MODE,
   AUTOMATED_PRONUNCIATION_MODE,
@@ -3904,6 +3905,46 @@ async function appendOnlyTailCompletionStatus({
   }
 }
 
+export async function consumedContractionFullStreamStatusForTests({
+  episodeDir, episode, currentScriptHash, ttsReport, unitDelivery,
+  fullQa, providerOutput, providerOutputPath,
+  validateApplied = validateConsumedContractionForBlockedFullStream,
+} = {}) {
+  if (!ttsReport?.automated_contraction_expansion) return null;
+  const hold = () => ({ kind: "hold", done: false, state: "blocked",
+    evidence: "The applied one-unit contraction candidate or its immutable prior snapshots are stale, or unit delivery has new blockers",
+    next_command_shape: "Operator hold: inspect the applied contraction lineage and current unit QA; do not synthesize again." });
+  const unitPassed = ["passed", "passed_with_warnings"].includes(unitDelivery?.status);
+  const fullBlocker = fullQa?.blockers?.[0];
+  if (ttsReport.status !== "blocked"
+    || !["passed", "passed_with_warnings"].includes(ttsReport.unit_qa_status)
+    || ttsReport.full_stream_qa_status !== "blocked"
+    || !unitPassed || Number(unitDelivery.blocked_unit_count) !== 0
+    || (unitDelivery.blockers ?? []).length !== 0
+    || (ttsReport.blockers ?? []).length !== 0
+    || fullQa?.status !== "blocked"
+    || fullQa.blockers?.length !== 1
+    || fullBlocker?.code !== "narration_confirmed_tts_transcript_protected_value_mismatch"
+    || fullBlocker.operations?.length !== 1
+    || fullBlocker.operations[0]?.type !== "substitution"
+    || fullBlocker.operations[0]?.intended !== "num:1"
+    || fullBlocker.operations[0]?.recognized !== "what"
+    || !Array.isArray(fullBlocker.unit_ids)
+    || !fullBlocker.unit_ids.includes("narr_voice_seg_08_u001-003_168f265ecf0e")
+    || !path.isAbsolute(String(providerOutputPath ?? ""))
+    || !path.resolve(providerOutputPath).startsWith(`${path.resolve(episodeDir)}${path.sep}`)) {
+    return hold();
+  }
+  try {
+    const valid = await validateApplied({
+      episodeDir, episode, sourceScriptSha256: currentScriptHash,
+      ttsReport, unitDelivery, blockedFullStreamQa: fullQa,
+      providerOutput, providerOutputPath,
+    });
+    return valid ? { kind: "consumed" } : hold();
+  } catch { return hold(); }
+}
+
 async function qwenExactBoundaryRepairStatus({
   episodeDir, episode, ttsReportPath, ttsReport, currentScriptHash,
 }) {
@@ -4761,24 +4802,43 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
             next_command_shape: `node bin/goldflow.mjs tts review-contraction --episode-dir ${episodeDir}` };
         }
       }
-      try {
-        const contraction = await loadContractionRecoveryState({
-          episodeDir, episode, sourceScriptSha256: currentScriptHash,
+      if (ttsReport.automated_contraction_expansion) {
+        // Finalization consumed the candidate and overwrote the active blocked
+        // report. Validate its immutable pre-candidate snapshots, then let a
+        // separate full-stream-only blocker reach exact-boundary triage.
+        const providerOutputPath = ttsReport.provider_output_manifest_path;
+        const [unitDelivery, fullQa, providerOutput] = await Promise.all([
+          readJson(path.join(episodeDir, `narration_unit_delivery_qa_${episode}.json`), null),
+          readJson(path.join(episodeDir, `narration_full_stream_qa_${episode}.json`), null),
+          providerOutputPath && path.isAbsolute(providerOutputPath)
+            && path.resolve(providerOutputPath).startsWith(`${path.resolve(episodeDir)}${path.sep}`)
+            ? readJson(providerOutputPath, null) : null,
+        ]);
+        const consumed = await consumedContractionFullStreamStatusForTests({
+          episodeDir, episode, currentScriptHash, ttsReport, unitDelivery,
+          fullQa, providerOutput, providerOutputPath,
         });
-        if (contraction?.kind === "evidence_reviewed") {
+        if (consumed?.kind === "hold") return consumed;
+      } else {
+        try {
+          const contraction = await loadContractionRecoveryState({
+            episodeDir, episode, sourceScriptSha256: currentScriptHash,
+          });
+          if (contraction?.kind === "evidence_reviewed") {
+            return { done: false, state: "blocked",
+              evidence: `One exact past-perfect TTS-only expansion is reviewed for ${contraction.unit_id}; source and captions stay unchanged`,
+              next_command_shape: `node bin/goldflow.mjs tts repair-contraction --episode-dir ${episodeDir} --evidence ${contraction.evidence_path}` };
+          }
+          if (contraction?.kind === "candidate_ready") {
+            return { done: false, state: "blocked",
+              evidence: `One exact contraction candidate is hash-bound for ${contraction.unit_id}; fresh dual-ASR, acoustic, voice, and full-stream QA remain required`,
+              next_command_shape: `node bin/goldflow.mjs tts finalize-provider --episode-dir ${episodeDir} --manifest ${contraction.candidate_manifest_path} --contraction-expansion-evidence ${contraction.evidence_path}` };
+          }
+        } catch (error) {
           return { done: false, state: "blocked",
-            evidence: `One exact past-perfect TTS-only expansion is reviewed for ${contraction.unit_id}; source and captions stay unchanged`,
-            next_command_shape: `node bin/goldflow.mjs tts repair-contraction --episode-dir ${episodeDir} --evidence ${contraction.evidence_path}` };
+            evidence: `Contraction expansion receipt is stale or incomplete: ${error.message}`,
+            next_command_shape: "Operator hold: inspect the one-unit contraction candidate; do not synthesize again." };
         }
-        if (contraction?.kind === "candidate_ready") {
-          return { done: false, state: "blocked",
-            evidence: `One exact contraction candidate is hash-bound for ${contraction.unit_id}; fresh dual-ASR, acoustic, voice, and full-stream QA remain required`,
-            next_command_shape: `node bin/goldflow.mjs tts finalize-provider --episode-dir ${episodeDir} --manifest ${contraction.candidate_manifest_path} --contraction-expansion-evidence ${contraction.evidence_path}` };
-        }
-      } catch (error) {
-        return { done: false, state: "blocked",
-          evidence: `Contraction expansion receipt is stale or incomplete: ${error.message}`,
-          next_command_shape: "Operator hold: inspect the one-unit contraction candidate; do not synthesize again." };
       }
     }
     if (ttsReport.status === "blocked" && policy.primary.provider === "qwen_local") {

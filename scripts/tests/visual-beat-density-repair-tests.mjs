@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { groupingLockHash } from "../lib/editorial-beat-director.mjs";
 import { commandStageFor } from "../lib/pipeline-stage-registry.mjs";
-import { reviewedChunkInputHash, splitReviewedVisualBeat, validateDensityRepairSpec,
+import { reviewedChunkInputHash, reviewedChunkPrompt, splitReviewedVisualBeat, validateDensityRepairSpec,
   visualBeatDensityRepairAdmission } from "../lib/visual-beat-density-repair.mjs";
 
 const hash = (value) => createHash("sha256").update(value).digest("hex");
@@ -112,8 +112,19 @@ assert.equal(split.beats[1].visual_information_delta.compared_to_previous,
 assert.equal(split.beats[2].audiovisual_intent.motion_role, original.audiovisual_intent.motion_role);
 assert.notEqual(groupingLockHash(split.beats), groupingLockHash(beats), "unapproved failed-plan split changes grouping only at target");
 assert.equal(reviewedChunkInputHash({ basePrompt: "exact packet", recoveryGeneration: 0 }), hash("exact packet"));
+assert.equal(reviewedChunkPrompt({ basePrompt: "exact packet" }), "exact packet");
 assert.equal(reviewedChunkInputHash({ basePrompt: "exact packet", recoveryGeneration: 1,
   priorError: "one error" }), hash("exact packet\n\nExact failed-atom recovery 1: the prior packet for only these atoms failed structural validation with: one error. Return one complete corrected JSON packet for these same atoms. Timing goals remain advisory; repair only structural coverage, ordering, transition, identity, evidence, or state-contract errors."));
+const sfxRecoveryPrompt = reviewedChunkPrompt({ basePrompt: "exact packet", recoveryGeneration: 2,
+  priorError: "visual_semantic_sfx_event_incomplete[row=17], visual_semantic_sfx_event_incomplete[row=19]" });
+assert.ok(sfxRecoveryPrompt.includes("event_id, physical_or_editorial_cause, timing, purpose"));
+assert.ok(sfxRecoveryPrompt.includes("Do not substitute cause/sound keys"));
+assert.equal(reviewedChunkInputHash({ basePrompt: "exact packet", recoveryGeneration: 2,
+  priorError: "visual_semantic_sfx_event_incomplete[row=17], visual_semantic_sfx_event_incomplete[row=19]" }), hash(sfxRecoveryPrompt));
+assert.ok(!reviewedChunkPrompt({ basePrompt: "exact packet", recoveryGeneration: 2,
+  priorError: "editorial_visual_beat_hard_max_exceeded[row=3]" }).includes("SFX schema repair"));
+assert.ok(!reviewedChunkPrompt({ basePrompt: "exact packet", recoveryGeneration: 1,
+  priorError: "visual_semantic_sfx_event_incomplete[row=5]" }).includes("SFX schema repair"));
 
 for (const mutate of [
   (value) => { value.run_identity_sha256 = "wrong"; },

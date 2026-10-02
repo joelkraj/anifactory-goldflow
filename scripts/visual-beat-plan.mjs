@@ -8,7 +8,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { getLLMModel, isLocalLLMRoute, localLLMAuthHeaders, localLLMChatCompletionURL } from "./lib/llm-router.mjs";
 import { isCodexCacheCompatible, readCodexCallMetadata, runCodexCli } from "./lib/codex-cli-runner.mjs";
 import { recordPlannerChunkCheckpoint } from "./lib/planner-chunk-ledger.mjs";
-import { reviewedChunkInputHash, splitReviewedVisualBeat, validateDensityRepairSpec } from "./lib/visual-beat-density-repair.mjs";
+import { reviewedChunkInputHash, reviewedChunkPrompt, splitReviewedVisualBeat, validateDensityRepairSpec } from "./lib/visual-beat-density-repair.mjs";
 import {
   buildEditorialDirectorPrompt,
   buildTranscriptAtoms,
@@ -1490,9 +1490,8 @@ async function directEditorialBeats(atoms, factLedger, timedScenes, options = {}
     const chunkId = descriptor.chunkId ?? `editorial_${String(index + 1).padStart(3, "0")}`;
     const ordinal = Number(descriptor.ordinal ?? index + 1);
     const recoveryGeneration = Math.max(0, Number(descriptor.recoveryGeneration ?? 0));
-    const prompt = recoveryGeneration > 0
-      ? `${basePrompt}\n\nExact failed-atom recovery ${recoveryGeneration}: the prior packet for only these atoms failed structural validation with: ${descriptor.priorError ?? "unknown structural error"}. Return one complete corrected JSON packet for these same atoms. Timing goals remain advisory; repair only structural coverage, ordering, transition, identity, evidence, or state-contract errors.`
-      : basePrompt;
+    const prompt = reviewedChunkPrompt({ basePrompt, recoveryGeneration,
+      priorError: descriptor.priorError ?? "unknown structural error" });
     const inputHash = sha256(prompt);
     try {
       let call = null;

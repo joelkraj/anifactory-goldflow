@@ -146,9 +146,16 @@ export function splitReviewedVisualBeat(beats, atoms, spec, episode, timingContr
 }
 
 export function reviewedChunkPrompt({ basePrompt, recoveryGeneration, priorError }) {
-  return recoveryGeneration > 0
-    ? `${basePrompt}\n\nExact failed-atom recovery ${recoveryGeneration}: the prior packet for only these atoms failed structural validation with: ${priorError}. Return one complete corrected JSON packet for these same atoms. Timing goals remain advisory; repair only structural coverage, ordering, transition, identity, evidence, or state-contract errors.`
-    : basePrompt;
+  if (!(recoveryGeneration > 0)) return basePrompt;
+  const structuralFeedback = `\n\nExact failed-atom recovery ${recoveryGeneration}: the prior packet for only these atoms failed structural validation with: ${priorError}. Return one complete corrected JSON packet for these same atoms. Timing goals remain advisory; repair only structural coverage, ordering, transition, identity, evidence, or state-contract errors.`;
+  // Generation-one outputs already in the immutable chunk ledger used the
+  // original prompt. Add field-level feedback only after that first recovery
+  // has itself failed, so their prompt hashes stay reproducible.
+  const sfxFeedback = recoveryGeneration >= 2
+    && String(priorError ?? "").includes("visual_semantic_sfx_event_incomplete")
+    ? "\n\nSFX schema repair for this packet: each audiovisual_intent.sfx_event must be null when no source-grounded sound is needed, or an object with exactly four nonempty string fields: event_id, physical_or_editorial_cause, timing, purpose. Do not substitute cause/sound keys for those fields. Anchor any non-null event to the grouped source action and say when the sound occurs relative to that action."
+    : "";
+  return `${basePrompt}${structuralFeedback}${sfxFeedback}`;
 }
 
 export function reviewedChunkInputHash(options) { return sha256(reviewedChunkPrompt(options)); }

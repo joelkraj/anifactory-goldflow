@@ -53,6 +53,19 @@ one cut. Add
 corrected row. All prose patches require exact before/after text; no ID, role,
 reference set, timing or other row may change.
 
+When a reviewed later beat no longer depicts one formerly carried object, the
+replacement may remove its stale `shot_manifest.equipment_contracts` entry
+with `equipment_contract_removal: { "owner": "<exact owner>", "item":
+"<exact item>", "expected_contract_sha256": "<SHA-256 of that contract's
+JSON.stringify(contract, null, 2) plus newline>" }`. The command requires
+exactly one matching current contract and preserves every other equipment
+contract. Correct the prompt and any staging/continuity/anatomy prose in the
+same reviewed spec so the removed object is not still depicted. This does not
+alter the source beat's projected state or permit reference changes.
+If the same object is listed in `shot_manifest.visible_props`, include
+`visible_prop_removal: "<exact current prop label>"`; it must match one and
+only one visible prop, leaving the other props untouched.
+
 Then execute `node bin/goldflow.mjs visual repair-prompt --episode-dir
 <episode-dir> --repair-spec <reviewed-json>`. The command checks the current
 status, every expected hash, the original row hash, all current source

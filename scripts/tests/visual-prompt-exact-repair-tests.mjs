@@ -109,6 +109,72 @@ test("face-donor repair clears contradictory wrist prose across prompt, slot, an
   } finally { await fs.rm(f.root, { recursive: true, force: true }); }
 });
 
+test("removes one reviewed stale equipment contract without changing other equipment or references", async () => {
+  const f = await fixture();
+  try {
+    const planPath = path.join(f.episodeDir, "section_image_prompts.json");
+    const plan = JSON.parse(await fs.readFile(planPath, "utf8"));
+    const row = plan.prompts[0];
+    const stale = { owner: "Tessa", item: "field radio", visible_count: 1, holder_state: "clipped to collar" };
+    const retained = { owner: "Tessa", item: "map", visible_count: 1, holder_state: "on table" };
+    row.shot_manifest.equipment_contracts = [stale, retained];
+    row.shot_manifest.visible_props = ["field radio at collar", "paper map"];
+    row.provider_prompt = row.image_prompt = "Tessa checks the map with a radio clipped to her collar.";
+    row.prompt_hash = hash(row.provider_prompt);
+    row.shot_manifest.continuity_notes = "Tessa keeps the radio clipped to her collar.";
+    await fs.writeFile(planPath, json(plan));
+    f.spec.expected.prompt_plan_sha256 = hash(json(plan));
+    f.spec.old_row_sha256 = hash(json(row));
+    f.spec.replacement.provider_prompt = f.spec.replacement.image_prompt = "Tessa checks the map in the later office scene.";
+    f.spec.replacement.manifest_text_patch = { continuity_notes: {
+      before: row.shot_manifest.continuity_notes,
+      to: "Tessa checks the map in the later office scene.",
+    } };
+    f.spec.replacement.equipment_contract_removal = {
+      owner: "Tessa", item: "field radio", expected_contract_sha256: hash(json(stale)),
+    };
+    f.spec.replacement.visible_prop_removal = "field radio at collar";
+    await fs.writeFile(f.specPath, json(f.spec));
+    await repairVisualPromptExact(f);
+    const corrected = JSON.parse(await fs.readFile(planPath, "utf8")).prompts[0];
+    assert.deepEqual(corrected.shot_manifest.equipment_contracts, [retained]);
+    assert.deepEqual(corrected.shot_manifest.visible_props, ["paper map"]);
+    assert.deepEqual(corrected.reference_requirements, f.original.reference_requirements);
+  } finally { await fs.rm(f.root, { recursive: true, force: true }); }
+});
+
+test("refuses stale or ambiguous equipment and prop removals without modifying the plan", async () => {
+  for (const variant of ["stale", "ambiguous", "prop"] ) {
+    const f = await fixture();
+    try {
+      const planPath = path.join(f.episodeDir, "section_image_prompts.json");
+      const plan = JSON.parse(await fs.readFile(planPath, "utf8"));
+      const contract = { owner: "Tessa", item: "field radio", visible_count: 1 };
+      plan.prompts[0].shot_manifest.equipment_contracts = variant === "stale" ? [contract] : [contract, contract];
+      if (variant === "prop") plan.prompts[0].shot_manifest.visible_props = ["field radio", "field radio"];
+      const before = json(plan);
+      await fs.writeFile(planPath, before);
+      f.spec.expected.prompt_plan_sha256 = hash(before);
+      f.spec.old_row_sha256 = hash(json(plan.prompts[0]));
+      f.spec.replacement.equipment_contract_removal = {
+        owner: "Tessa", item: "field radio",
+        expected_contract_sha256: variant === "stale" ? "0".repeat(64) : hash(json(contract)),
+      };
+      if (variant === "prop") {
+        plan.prompts[0].shot_manifest.equipment_contracts = [contract];
+        const revised = json(plan); await fs.writeFile(planPath, revised);
+        f.spec.expected.prompt_plan_sha256 = hash(revised);
+        f.spec.old_row_sha256 = hash(json(plan.prompts[0]));
+        f.spec.replacement.visible_prop_removal = "field radio";
+      }
+      await fs.writeFile(f.specPath, json(f.spec));
+      const unchanged = await fs.readFile(planPath);
+      await assert.rejects(repairVisualPromptExact(f), /missing, ambiguous, or changed|visible prop is missing or ambiguous/);
+      assert.deepEqual(await fs.readFile(planPath), unchanged);
+    } finally { await fs.rm(f.root, { recursive: true, force: true }); }
+  }
+});
+
 test("refuses stale row, changed approved refs, out-of-scope refs, and downstream work without modifying plan", async () => {
   for (const variant of ["row", "refs", "scope", "downstream"]) {
     const f = await fixture();

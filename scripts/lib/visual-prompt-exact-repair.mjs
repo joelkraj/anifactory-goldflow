@@ -37,7 +37,9 @@ export function exactVisualPromptRepairAdmission(status, flags) {
 
 export function applyExactPromptText(row, replacement) {
   if (!only(replacement, ["provider_prompt", "image_prompt", "staging_patch", "staging_patches", "manifest_text_patch",
-    "reference_text_patch", "anatomy_contract_patch", "anatomy_contract_patches", "assert_absent_terms"]) || !nonempty(replacement.provider_prompt)
+    "reference_text_patch", "anatomy_contract_patch", "anatomy_contract_patches", "equipment_contract_removal",
+    "visible_prop_removal",
+    "assert_absent_terms"]) || !nonempty(replacement.provider_prompt)
     || replacement.provider_prompt !== replacement.image_prompt || replacement.provider_prompt.length > 12000) {
     throw new Error("Replacement must contain the same nonempty provider_prompt and image_prompt, at most 12000 characters.");
   }
@@ -59,6 +61,32 @@ function exactTextPatch(value, patch, label) {
 
 function patchRowStructures(row, replacement) {
   const next = structuredClone(row);
+  if (replacement.visible_prop_removal !== undefined) {
+    const prop = replacement.visible_prop_removal;
+    if (!nonempty(prop) || !Array.isArray(next.shot_manifest?.visible_props)) {
+      throw new Error("Visible prop removal requires one exact current prop label.");
+    }
+    const matches = next.shot_manifest.visible_props
+      .map((value, index) => ({ value, index })).filter(({ value }) => value === prop);
+    if (matches.length !== 1) throw new Error("Reviewed visible prop is missing or ambiguous.");
+    next.shot_manifest.visible_props.splice(matches[0].index, 1);
+  }
+  if (replacement.equipment_contract_removal !== undefined) {
+    const removal = replacement.equipment_contract_removal;
+    if (!only(removal, ["owner", "item", "expected_contract_sha256"])
+      || !nonempty(removal.owner) || !nonempty(removal.item)
+      || !hashPattern.test(removal.expected_contract_sha256 ?? "")
+      || !Array.isArray(next.shot_manifest?.equipment_contracts)) {
+      throw new Error("Equipment removal requires an exact owner, item, and current contract hash.");
+    }
+    const matches = next.shot_manifest.equipment_contracts
+      .map((contract, index) => ({ contract, index }))
+      .filter(({ contract }) => contract.owner === removal.owner && contract.item === removal.item);
+    if (matches.length !== 1 || sha256(jsonBytes(matches[0].contract)) !== removal.expected_contract_sha256) {
+      throw new Error("Reviewed equipment contract is missing, ambiguous, or changed.");
+    }
+    next.shot_manifest.equipment_contracts.splice(matches[0].index, 1);
+  }
   if (replacement.staging_patch !== undefined && replacement.staging_patches !== undefined) {
     throw new Error("Use staging_patch or staging_patches, never both.");
   }

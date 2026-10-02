@@ -25,6 +25,80 @@ export async function validateFalValidationCorrection({ root, validationPlanPath
   const [request, plan, review] = await Promise.all([
     read(paths.request), read(validationPlanPath), read(validationReviewPath),
   ]);
+  if (request.schema === "goldflow_fal_failed_validation_recovery_request_v1") {
+    requireState(request.validation_plan_sha256 === await fileSha(validationPlanPath)
+      && request.previous_review_sha256 === await fileSha(validationReviewPath)
+      && review.schema === "goldflow_fal_validation_review_v1"
+      && review.status === "failed" && plan.assignments?.length === 8,
+    "Failed validation recovery is not bound to the current eight-shot plan and immutable failed review.");
+    const ids = plan.assignments.map(row => row.image_id);
+    const approved = review.approved_ids ?? [];
+    const rejected = review.rejected_ids ?? [];
+    requireState(ids.length === new Set(ids).size
+      && approved.length === 6 && rejected.length === 2
+      && new Set([...approved, ...rejected]).size === 8
+      && ids.every(id => approved.includes(id) || rejected.includes(id))
+      && approved.includes(ids[0])
+      && !Object.hasOwn(request, "move_to_rejected_id")
+      && !Object.hasOwn(request, "moved_result_sha256")
+      && !Object.hasOwn(request, "moved_output_sha256"),
+    "Failed validation recovery must preserve six approved shots, including the probe, and name exactly two reviewed rejects.");
+    requireState(Object.keys(request.reviewed_result_sha256_by_id ?? {}).length === 8
+      && Object.keys(request.reviewed_output_sha256_by_id ?? {}).length === 8
+      && ids.every(id => hex(request.reviewed_result_sha256_by_id[id])
+        && hex(request.reviewed_output_sha256_by_id[id])),
+    "Failed validation recovery must bind all eight reviewed result receipts and rasters.");
+    for (const original of plan.assignments) {
+      const receipt = await read(original.result_receipt_path);
+      requireState(request.reviewed_result_sha256_by_id[original.image_id] === await fileSha(original.result_receipt_path)
+        && request.reviewed_output_sha256_by_id[original.image_id] === receipt.output_sha256
+        && receipt.output_sha256 === await fileSha(receipt.output_path),
+      `Reviewed validation raster changed: ${original.image_id}`);
+    }
+    requireState(Array.isArray(request.recovery_prompts)
+      && request.recovery_prompts.length === 2
+      && new Set(request.recovery_prompts.map(row => row.image_id)).size === 2
+      && rejected.every(id => request.recovery_prompts.some(row => row.image_id === id)),
+    "Failed validation recovery prompts must cover only the two rejected shots.");
+    for (const entry of request.recovery_prompts) {
+      const original = plan.assignments.find(row => row.image_id === entry.image_id);
+      requireState(entry.previous_assignment_sha256 === original.assignment_sha256
+        && entry.previous_result_sha256 === request.reviewed_result_sha256_by_id[entry.image_id]
+        && entry.previous_output_sha256 === request.reviewed_output_sha256_by_id[entry.image_id]
+        && typeof entry.replacement_prompt === "string" && entry.replacement_prompt.length > 100
+        && sha(entry.replacement_prompt) === entry.replacement_prompt_sha256
+        && entry.replacement_prompt !== original.prompt
+        && typeof entry.reason === "string" && entry.reason.trim().length > 20,
+      `Failed validation replacement prompt or reviewed provenance changed: ${entry.image_id}`);
+    }
+    requireState(typeof request.reviewer === "string" && request.reviewer.trim()
+      && typeof request.note === "string" && request.note.trim().length > 20,
+    "Failed validation recovery requires an actual reviewer and material visual evidence.");
+    const expected = {
+      schema: "goldflow_fal_validation_review_correction_v2",
+      mode: "initial_failed_review",
+      request_sha256: await fileSha(paths.request),
+      validation_plan_sha256: request.validation_plan_sha256,
+      previous_review_sha256: request.previous_review_sha256,
+      reviewer: request.reviewer,
+      note: request.note,
+      status: "needs_exact_recovery",
+      approved_ids: approved,
+      rejected_ids: rejected,
+    };
+    if (await exists(paths.correction)) {
+      const saved = await read(paths.correction);
+      requireState(JSON.stringify(saved) === JSON.stringify(expected), "Failed validation recovery changed from its hash-bound request.");
+    }
+    if (bulkExists) {
+      const bulk = await read(bulkPath);
+      requireState(bulk.validation_review_correction_sha256 === await fileSha(paths.correction)
+        && await exists(paths.review)
+        && bulk.validation_recovery_review_sha256 === await fileSha(paths.review),
+      "Fal bulk plan is not bound to the completed failed-validation recovery review.");
+    }
+    return { paths, request, plan, review, expected, recorded: await exists(paths.correction) };
+  }
   requireState(request.schema === "goldflow_fal_validation_review_correction_request_v1"
     && request.validation_plan_sha256 === await fileSha(validationPlanPath)
     && request.previous_review_sha256 === await fileSha(validationReviewPath)

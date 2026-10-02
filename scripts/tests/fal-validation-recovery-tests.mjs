@@ -61,6 +61,33 @@ async function fixture() {
   return { dir, root, identity, planPath, reviewPath, requestPath, assignments };
 }
 
+async function failedReviewFixture() {
+  const f = await fixture();
+  const rejected = ["frame-6", "frame-7"];
+  await writeJson(f.reviewPath, { schema: "goldflow_fal_validation_review_v1", status: "failed",
+    approved_ids: f.assignments.map(row => row.image_id).filter(id => !rejected.includes(id)), rejected_ids: rejected });
+  const reviewedResultHashes = {}, reviewedOutputHashes = {};
+  for (const row of f.assignments) {
+    reviewedResultHashes[row.image_id] = await fileSha(row.result_receipt_path);
+    reviewedOutputHashes[row.image_id] = (await JSON.parse(await readFile(row.result_receipt_path))).output_sha256;
+  }
+  const recoveryPrompts = [];
+  for (const imageId of rejected) {
+    const original = f.assignments.find(row => row.image_id === imageId);
+    const prompt = `Source-exact replacement for the visually rejected ${imageId}. ` + "C".repeat(120);
+    recoveryPrompts.push({ image_id: imageId, previous_assignment_sha256: original.assignment_sha256,
+      previous_result_sha256: reviewedResultHashes[imageId], previous_output_sha256: reviewedOutputHashes[imageId],
+      replacement_prompt: prompt, replacement_prompt_sha256: sha(prompt),
+      reason: "The original full-resolution raster visibly changed a required source action and must be replaced." });
+  }
+  await writeJson(f.requestPath, { schema: "goldflow_fal_failed_validation_recovery_request_v1",
+    validation_plan_sha256: await fileSha(f.planPath), previous_review_sha256: await fileSha(f.reviewPath),
+    reviewed_result_sha256_by_id: reviewedResultHashes, reviewed_output_sha256_by_id: reviewedOutputHashes,
+    reviewer: "Codex", note: "The six accepted images were reviewed and the two rejected images changed essential source details.",
+    recovery_prompts: recoveryPrompts });
+  return f;
+}
+
 test("additive correction keeps first review immutable and routes exactly two rejected shots", async () => {
   const f = await fixture();
   try {
@@ -135,4 +162,79 @@ test("validation correction fails closed on altered review or selected raster", 
     await assert.rejects(validateFalValidationCorrection({ root: g.root, validationPlanPath: g.planPath, validationReviewPath: g.reviewPath }),
       /selected visual result/);
   } finally { await rm(g.dir, { recursive: true, force: true }); }
+});
+
+test("failed first validation review admits only its two rejected IDs for exact recovery", async () => {
+  const f = await failedReviewFixture();
+  try {
+    const reviewHash = await fileSha(f.reviewPath);
+    assert.match((await falProductionStageStates({ episodeDir: f.dir, identity: f.identity })).stageStates.image_generation.next_command_shape,
+      /--action correct-validation-review$/);
+    const script = path.resolve("scripts/fal-production.mjs");
+    await exec(process.execPath, [script, "--episode-dir", f.dir, "--action", "correct-validation-review"]);
+    const correction = await validateFalValidationCorrection({ root: f.root, validationPlanPath: f.planPath, validationReviewPath: f.reviewPath });
+    assert.equal(correction.expected.mode, "initial_failed_review");
+    assert.deepEqual(correction.expected.approved_ids, ["frame-0", "frame-1", "frame-2", "frame-3", "frame-4", "frame-5"]);
+    assert.deepEqual(correction.expected.rejected_ids, ["frame-6", "frame-7"]);
+    assert.equal(await fileSha(f.reviewPath), reviewHash);
+    await exec(process.execPath, [script, "--episode-dir", f.dir, "--action", "prepare-validation-recovery"]);
+    const recovery = await validateFalValidationRecovery({ root: f.root, correction });
+    assert.deepEqual(recovery.plan.assignments.map(row => row.image_id), ["frame-6", "frame-7"]);
+    assert.match((await falProductionStageStates({ episodeDir: f.dir, identity: f.identity })).stageStates.image_generation.next_command_shape,
+      /--action dispatch-validation-recovery --confirm-spend exact_fal_validation_recovery$/);
+    for (const row of recovery.plan.assignments) {
+      await writeJson(row.submission_receipt_path, { schema: "goldflow_fal_submission_receipt_v1", image_id: row.image_id,
+        assignment_sha256: row.assignment_sha256, request_id: `recovery-${row.image_id}` });
+      await mkdir(path.dirname(row.output_path), { recursive: true });
+      await writeFile(row.output_path, `recovered ${row.image_id}`);
+      await writeJson(row.result_receipt_path, { schema: "goldflow_fal_result_receipt_v1", request_id: `recovery-${row.image_id}`,
+        output_path: row.output_path, output_sha256: await fileSha(row.output_path) });
+    }
+    await exec(process.execPath, [script, "--episode-dir", f.dir, "--action", "review-validation-recovery", "--reviewer", "Codex",
+      "--note", "Both rejected source facts are now shown faithfully in the two replacement rasters.",
+      "--approve-ids", "frame-6,frame-7", "--reject-ids", ""]);
+    assert.equal((await validateFalValidationRecovery({ root: f.root, correction })).status, "passed");
+    await writeJson(path.join(f.dir, "section_image_prompts_hardened.json"), { prompts: f.assignments.map((row, index) => ({
+      image_id: row.image_id, provider_prompt: row.prompt, image_generation_required: true,
+      reference_requirements: [], start_sec: index, duration_sec: 1,
+    })) });
+    await writeJson(path.join(f.dir, "visual_reference_approval_ep_01.json"), { status: "approved", reference_hash_by_ref_id: {} });
+    await writeJson(path.join(f.dir, "visual_reference_plan.json"), { reference_targets: [] });
+    await writeJson(path.join(f.root, "reference-plan.json"), { assignments: [] });
+    assert.match((await falProductionStageStates({ episodeDir: f.dir, identity: f.identity })).stageStates.image_generation.next_command_shape,
+      /--action prepare-bulk --image-ids all$/);
+    await exec(process.execPath, [script, "--episode-dir", f.dir, "--action", "prepare-bulk", "--image-ids", "all"]);
+    const bulk = JSON.parse(await readFile(path.join(f.root, "bulk-plan.json"), "utf8"));
+    assert.equal(bulk.assignments.length, 8);
+    assert.equal(bulk.assignments.every(row => row.reused_validation_shot), true);
+    assert.equal(bulk.validation_review_correction_sha256, await fileSha(correction.paths.correction));
+    assert.equal(bulk.validation_recovery_review_sha256, await fileSha(correction.paths.review));
+    assert.equal(await fileSha(f.reviewPath), reviewHash);
+  } finally { await rm(f.dir, { recursive: true, force: true }); }
+});
+
+test("failed validation recovery rejects stale, broader, or unproven requests", async () => {
+  const cases = [
+    ["changed review", async f => await writeJson(f.reviewPath, { schema: "goldflow_fal_validation_review_v1", status: "failed",
+      approved_ids: ["frame-0"], rejected_ids: ["frame-1"] })],
+    ["changed plan", async f => await writeJson(f.planPath, { schema: "goldflow_fal_validation_plan_v1", assignments: f.assignments.slice(1) })],
+    ["accepted raster changed", async f => await writeFile(f.assignments[1].output_path, "tampered")],
+    ["rejected raster changed", async f => await writeFile(f.assignments[6].output_path, "tampered")],
+    ["unchanged prompt", async f => { const q = JSON.parse(await readFile(f.requestPath)); q.recovery_prompts[0].replacement_prompt = f.assignments[6].prompt;
+      q.recovery_prompts[0].replacement_prompt_sha256 = sha(f.assignments[6].prompt); await writeJson(f.requestPath, q); }],
+    ["extra ID", async f => { const q = JSON.parse(await readFile(f.requestPath)); q.recovery_prompts.push({ ...q.recovery_prompts[0], image_id: "frame-5" }); await writeJson(f.requestPath, q); }],
+    ["missing accepted hash", async f => { const q = JSON.parse(await readFile(f.requestPath)); delete q.reviewed_output_sha256_by_id["frame-4"]; await writeJson(f.requestPath, q); }],
+    ["moved shot", async f => { const q = JSON.parse(await readFile(f.requestPath)); q.move_to_rejected_id = "frame-5"; await writeJson(f.requestPath, q); }],
+    ["probe rejected", async f => { const review = JSON.parse(await readFile(f.reviewPath)); review.approved_ids = ["frame-1", "frame-2", "frame-3", "frame-4", "frame-5", "frame-6"];
+      review.rejected_ids = ["frame-0", "frame-7"]; await writeJson(f.reviewPath, review); const q = JSON.parse(await readFile(f.requestPath)); q.previous_review_sha256 = await fileSha(f.reviewPath); await writeJson(f.requestPath, q); }],
+    ["post-bulk", async f => await writeJson(path.join(f.root, "bulk-plan.json"), {})],
+  ];
+  for (const [name, mutate] of cases) {
+    const f = await failedReviewFixture();
+    try {
+      await mutate(f);
+      await assert.rejects(validateFalValidationCorrection({ root: f.root, validationPlanPath: f.planPath, validationReviewPath: f.reviewPath }),
+        undefined, name);
+    } finally { await rm(f.dir, { recursive: true, force: true }); }
+  }
 });

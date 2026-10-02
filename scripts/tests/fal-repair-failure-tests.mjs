@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { falFailureReceiptPath, recordFalFailure } from "../lib/fal-failure-receipt.mjs";
 import { falBlockedStageRecoveryAdmission, falProductionStageStates } from "../lib/fal-production-state.mjs";
+import "./fal-reviewed-reference-success-repair-tests.mjs";
 
 test("failed Fal repair keeps the original receipt and blocks on exact-ID triage", async () => {
   const episodeDir = await mkdtemp(path.join(os.tmpdir(), "goldflow-fal-repair-failure-"));

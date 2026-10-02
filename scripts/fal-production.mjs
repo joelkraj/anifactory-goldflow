@@ -10,6 +10,7 @@ import { chooseNativeValidationRows } from "./lib/fal-validation-selector.mjs";
 import { falAdjudicationPath, validateFalNoJobAdjudication } from "./lib/fal-ambiguous-adjudication.mjs";
 import { falFailureReceiptPath, recordFalFailure } from "./lib/fal-failure-receipt.mjs";
 import { validateFalValidationCorrection, validateFalValidationRecovery } from "./lib/fal-validation-recovery.mjs";
+import { validateFalReviewedReferenceSuccessRepair } from "./lib/fal-reviewed-reference-success-repair.mjs";
 
 const digest = value => createHash("sha256").update(value).digest("hex");
 const bytes = value => `${JSON.stringify(value, null, 2)}\n`;
@@ -558,6 +559,48 @@ async function main(){
    await write(path.join(ctx.root,"reference","review-repair-v3-assignments",`${id}.json`),row);
    const result=await submitRows(ctx,[row],1);
    return console.log(JSON.stringify({status:"reviewed_reference_v3_submitted",image_id:id,count:result.length},null,2));
+ }
+ if(action==="repair-successful-reviewed-references"){
+   need(f["confirm-spend"]==="exact_fal_reviewed_reference_success_v3",
+     "Successful reviewed-reference repair requires exact spend token.");
+   const directivesPath=String(f.directives??"");
+   need(path.isAbsolute(directivesPath),"Successful reviewed-reference repair requires an absolute directive file.");
+   const validated=await validateFalReviewedReferenceSuccessRepair({episodeDir:ctx.episodeDir,directivesPath});
+   await preflightPaidRepair(ctx,"reference/review-repair-v3-submission-receipts",validated.ids);
+   const repairs=[];
+   for(const {row,v2Assignment,v2Result,source} of validated.checked){
+     const sourcePath=source.reference_image_path;
+     const core={...v2Assignment,endpoint:FAL_ENDPOINTS.primary_edit,
+       prompt:row.replacement_prompt,prompt_sha256:digest(row.replacement_prompt),
+       reference_mode:"separate_ordered_references",
+       reference_asset_ids:[falPortableAssetId(ctx.identity.series_slug,{ref_id:source.ref_id,kind:source.kind??"asset"})],
+       reference_hashes:[row.reference_sha256],board_path:sourcePath,board_sha256:row.reference_sha256,
+       previous_assignment_sha256:v2Assignment.assignment_sha256,
+       rejected_image_sha256:v2Result.output_sha256,repair_reason:row.finding,
+       visual_review_path:directivesPath,
+       output_path:path.join(ctx.episodeDir,"assets","images","reference-repairs",`${row.image_id}-v3.png`)};
+     for(const key of ["assignment_sha256","assignment_path","submission_receipt_path","result_receipt_path","upload_receipt_path"])delete core[key];
+     const repair={...core,assignment_sha256:falObjectSha256(JSON.stringify(core)),
+       submission_receipt_path:path.join(ctx.root,"reference","review-repair-v3-submission-receipts",`${row.image_id}.json`),
+       result_receipt_path:path.join(ctx.root,"reference","review-repair-v3-result-receipts",`${row.image_id}.json`),
+       upload_receipt_path:path.join(ctx.root,"reference","review-repair-v3-upload-receipts",`${row.image_id}.json`)};
+     await write(path.join(ctx.root,"reference","review-repair-v3-assignments",`${row.image_id}.json`),repair);
+     repairs.push(repair);
+   }
+   const submitted=await submitRows(ctx,repairs,Math.min(ctx.contract.production_concurrency,repairs.length));
+   return console.log(JSON.stringify({status:"reviewed_reference_success_v3_submitted",count:submitted.length,image_ids:validated.ids},null,2));
+ }
+ if(action==="observe-successful-reviewed-references"){
+   const directivesPath=path.join(ctx.root,"reference","review-success-v3.json");
+   const directive=await read(directivesPath);
+   const rows=await Promise.all(directive.repairs.map(row=>read(path.join(ctx.root,"reference","review-repair-v3-assignments",`${row.image_id}.json`))));
+   const pending=[];
+   for(const row of rows)if(!await fs.access(row.result_receipt_path).then(()=>true,()=>false)
+     &&!await fs.access(falFailureReceiptPath(row)).then(()=>true,()=>false))pending.push(row);
+   const observed=await observeRows(ctx,pending,Math.min(ctx.contract.production_concurrency,Math.max(1,pending.length)));
+   return console.log(JSON.stringify({status:observed.every(row=>row.complete)?"complete":"pending",
+     checked:observed.length,complete:observed.filter(row=>row.complete).length,
+     failed:observed.filter(row=>row.failed).length},null,2));
  }
  if(action==="observe-failed-reviewed-reference"){
    const id=String(f["image-id"]??"");

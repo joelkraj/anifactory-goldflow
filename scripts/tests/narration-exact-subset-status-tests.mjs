@@ -160,6 +160,44 @@ try {
   await fs.writeFile(secondAudioPath, "corrupted superseded second take");
   assert.match((await superseded()).next_command_shape, /^Operator hold:/);
   await fs.writeFile(secondAudioPath, "selected exact second take");
+  const secondBoundaryDir = path.join(temp, "second-exact-boundary");
+  await fs.mkdir(secondBoundaryDir);
+  const secondBoundaryPriorManifestPath = path.join(secondBoundaryDir, "prior_manifest.json");
+  const secondBoundaryPriorReportPath = path.join(secondBoundaryDir, "prior_report.json");
+  await fs.writeFile(secondBoundaryPriorManifestPath,
+    JSON.stringify({ units: [supersededReport.results[0]] }));
+  await fs.writeFile(secondBoundaryPriorReportPath, JSON.stringify(supersededReport));
+  const secondBoundaryRequestPath = path.join(secondBoundaryDir, "request.json");
+  const secondBoundaryResultPath = path.join(secondBoundaryDir, "repair-result.json");
+  await fs.writeFile(secondBoundaryRequestPath,
+    JSON.stringify({ request_sha256: sha("second boundary request"),
+      prior_manifest_file_sha256: sha(await fs.readFile(secondBoundaryPriorManifestPath)),
+      prior_report_file_sha256: sha(await fs.readFile(secondBoundaryPriorReportPath)) }));
+  await fs.writeFile(secondBoundaryResultPath, "completed second boundary result");
+  const secondCompositePath = path.join(secondBoundaryDir, "composite.wav");
+  await fs.writeFile(secondCompositePath, "selected second boundary composite");
+  const nestedReport = { ...supersededReport, results: [{ ...supersededReport.results[0],
+    audio_path: secondCompositePath, audio_sha256: sha("selected second boundary composite"),
+    recovery_provenance: {
+      schema: "goldflow_tts_exact_boundary_repair_provenance_v1",
+      request_path: secondBoundaryRequestPath, request_sha256: sha("second boundary request"),
+      result_path: secondBoundaryResultPath,
+      result_sha256: sha("completed second boundary result"),
+      prior_audio_sha256: supersededReport.results[0].audio_sha256,
+      prior_synthesis_identity_sha256: supersededReport.results[0].synthesis_identity_sha256,
+    } }, second] };
+  await fs.writeFile(reportPath, JSON.stringify(nestedReport));
+  const nested = () => reviewedAutomatedRetryStatusForTests({
+    episodeDir: temp, episode, ttsReport: nestedReport,
+    ttsReportPath: reportPath, currentScriptHash: sourceHash,
+  });
+  assert.equal(await nested(), null);
+  await fs.writeFile(compositePath, "corrupted intermediate composite");
+  assert.match((await nested()).next_command_shape, /^Operator hold:/);
+  await fs.writeFile(compositePath, "selected boundary composite");
+  await fs.writeFile(secondAudioPath, "corrupted nested second take");
+  assert.match((await nested()).next_command_shape, /^Operator hold:/);
+  await fs.writeFile(secondAudioPath, "selected exact second take");
   await fs.writeFile(reportPath, originalReportBytes);
   await fs.writeFile(audioPath, "mutated");
   assert.match((await status()).next_command_shape, /^Operator hold:/);

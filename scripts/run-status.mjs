@@ -3997,31 +3997,38 @@ export async function reviewedAutomatedRetryStatusForTests({
       for (const reviewed of evidence.confirmed_units) {
         const current = selected.get(reviewed.unit_id);
         let priorSelected = current;
-        if (current?.recovery_provenance?.schema
-          === "goldflow_tts_exact_boundary_repair_provenance_v1") {
-          const boundary = current.recovery_provenance;
+        const seenBoundaryRequests = new Set();
+        for (let depth = 0; priorSelected?.recovery_provenance?.schema
+          === "goldflow_tts_exact_boundary_repair_provenance_v1"; depth += 1) {
+          if (depth >= 8) throw new Error(`boundary ancestry is too deep for ${reviewed.unit_id}`);
+          const boundary = priorSelected.recovery_provenance;
           const inside = (target) => path.isAbsolute(String(target ?? ""))
             && path.resolve(target).startsWith(`${path.resolve(episodeDir)}${path.sep}`);
           if (!inside(boundary.request_path) || !inside(boundary.result_path)
-            || await fileSha256(boundary.result_path) !== boundary.result_sha256) {
+            || seenBoundaryRequests.has(boundary.request_path)
+            || await fileSha256(boundary.result_path) !== boundary.result_sha256
+            || !inside(priorSelected.audio_path)
+            || await fileSha256(priorSelected.audio_path) !== priorSelected.audio_sha256) {
             throw new Error(`superseding boundary provenance is stale for ${reviewed.unit_id}`);
           }
+          seenBoundaryRequests.add(boundary.request_path);
           const repairDir = path.dirname(boundary.request_path);
           const request = await readJson(boundary.request_path, null);
           const priorManifestPath = path.join(repairDir, "prior_manifest.json");
           const priorManifest = await readJson(priorManifestPath, null);
-          priorSelected = (priorManifest?.units ?? []).find((row) => row.unit_id === reviewed.unit_id);
+          const earlier = (priorManifest?.units ?? []).find((row) => row.unit_id === reviewed.unit_id);
           if (request?.request_sha256 !== boundary.request_sha256
             || request?.prior_manifest_file_sha256 !== await fileSha256(priorManifestPath)
             || request?.prior_report_file_sha256 !== await fileSha256(
               path.join(repairDir, "prior_report.json"))
-            || boundary.prior_audio_sha256 !== priorSelected?.audio_sha256
+            || boundary.prior_audio_sha256 !== earlier?.audio_sha256
             || boundary.prior_synthesis_identity_sha256
-              !== priorSelected?.synthesis_identity_sha256
-            || !inside(priorSelected?.audio_path)
-            || await fileSha256(priorSelected.audio_path) !== priorSelected.audio_sha256) {
+              !== earlier?.synthesis_identity_sha256
+            || !inside(earlier?.audio_path)
+            || await fileSha256(earlier.audio_path) !== earlier.audio_sha256) {
             throw new Error(`superseding boundary input is stale for ${reviewed.unit_id}`);
           }
+          priorSelected = earlier;
         }
         const recovery = priorSelected?.recovery_provenance;
         if (recovery?.evidence_basis !== "reviewed_automated_delivery_qa"

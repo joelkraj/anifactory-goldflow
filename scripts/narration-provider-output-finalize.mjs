@@ -81,7 +81,10 @@ import { loadAutomatedPronunciationState } from "./lib/narration-automated-pronu
 import { CONTRACTION_ALIAS, CONTRACTION_MODE, CONTRACTION_SOURCE_UNIT,
   contractionCandidateAsrDecisionForTests,
   contractionSegmentReportFieldsForTests,
-  loadContractionRecoveryState } from "./lib/narration-contraction-repair.mjs";
+  loadContractionRecoveryState,
+  loadContractionDescendantManifest,
+  validateConsumedContractionForBlockedFullStream,
+} from "./lib/narration-contraction-repair.mjs";
 import {
   applyPronunciationCandidateReviewForTests,
   applyAutomatedPronunciationCandidateForTests,
@@ -1565,7 +1568,53 @@ export async function finalizeNarrationProviderOutput(
   const hasContractionCandidate = manifest.units.some(
     (row) => row.synthesis_mode === CONTRACTION_MODE,
   );
-  if (hasContractionCandidate !== Boolean(contractionEvidencePath)) {
+  let inheritedContractionReview = null;
+  if (hasContractionCandidate && !contractionEvidencePath) {
+    if (phaseContext || policy.primary.provider !== "qwen_local"
+      || !narrationUsesAutomatedAsrAcceptance(qualityContract)
+      || acceptAsrDeliveryBlockers || acceptReviewWarnings
+      || pronunciationReviewEvidencePath || automatedPronunciationEvidencePath
+      || fullStreamReviewEvidencePath || flags["manual-review-evidence"]
+      || flags["contextual-asr-evidence"]
+      || flags["full-stream-spacing-bridge-evidence"]
+      || flags["asr-orthography-evidence"]) {
+      throw new Error("A retained contraction requires ordinary Qwen QA without another review or waiver route.");
+    }
+    const activeReport = await readJson(path.join(episodeDir,
+      `narration_tts_report_${episode}.json`));
+    const activeDelivery = await readJson(path.join(episodeDir,
+      `narration_unit_delivery_qa_${episode}.json`));
+    const activeFullQa = await readJson(path.join(episodeDir,
+      `narration_full_stream_qa_${episode}.json`));
+    const activeManifestPath = activeReport?.provider_output_manifest_path;
+    if (!activeManifestPath || !path.isAbsolute(activeManifestPath)
+      || !path.resolve(activeManifestPath).startsWith(`${episodeDir}${path.sep}`)) {
+      throw new Error("Retained contraction root manifest escaped the episode.");
+    }
+    const activeManifest = await readJson(activeManifestPath);
+    const consumed = await validateConsumedContractionForBlockedFullStream({
+      episodeDir, episode, sourceScriptSha256: actualSourceScriptSha256,
+      ttsReport: activeReport, unitDelivery: activeDelivery,
+      blockedFullStreamQa: activeFullQa, providerOutput: activeManifest,
+      providerOutputPath: activeManifestPath,
+    });
+    if (!consumed) {
+      throw new Error("Retained contraction root candidate or current full-stream blocker is stale.");
+    }
+    const proof = activeReport.automated_contraction_expansion;
+    const descendant = await loadContractionDescendantManifest({
+      episodeDir, episode, sourceScriptSha256: actualSourceScriptSha256,
+      proof, derivedManifest: manifest, derivedManifestPath: manifestPath,
+    });
+    inheritedContractionReview = {
+      kind: "descendant_ready", unit_id: proof.unit_id,
+      evidence_path: proof.evidence_path,
+      evidence_file_sha256: proof.evidence_sha256,
+      prior_proof: proof, descendant,
+    };
+  }
+  if (hasContractionCandidate
+    !== Boolean(contractionEvidencePath || inheritedContractionReview)) {
     throw new Error("Exact contraction candidate and its hash-bound evidence must be selected together.");
   }
   if (hasPronunciationCandidate && !pronunciationReviewEvidencePath) {
@@ -1620,7 +1669,7 @@ export async function finalizeNarrationProviderOutput(
       throw new Error("Automated pronunciation evidence does not bind this exact candidate manifest.");
     }
   }
-  let contractionReview = null;
+  let contractionReview = inheritedContractionReview;
   if (contractionEvidencePath) {
     if (phaseContext || policy.primary.provider !== "qwen_local"
       || !narrationUsesAutomatedAsrAcceptance(qualityContract)
@@ -1640,7 +1689,18 @@ export async function finalizeNarrationProviderOutput(
     }
   }
   let pronunciationSnapshots = null;
-  if (pronunciationReview || automatedPronunciationReview || contractionReview) {
+  if (contractionReview?.kind === "descendant_ready") {
+    pronunciationSnapshots = {
+      prior_report: {
+        path: contractionReview.prior_proof.prior_report_snapshot_path,
+        sha256: contractionReview.prior_proof.prior_report_snapshot_sha256,
+      },
+      prior_delivery: {
+        path: contractionReview.prior_proof.prior_delivery_snapshot_path,
+        sha256: contractionReview.prior_proof.prior_delivery_snapshot_sha256,
+      },
+    };
+  } else if (pronunciationReview || automatedPronunciationReview || contractionReview) {
     for (const row of manifest.units) {
       if (await sha256File(row.audio_path) !== row.audio_sha256) {
         throw new Error(`Provider audio hash is stale for ${row.unit_id}.`);
@@ -1703,7 +1763,9 @@ export async function finalizeNarrationProviderOutput(
       acceptance_basis: "fresh_independent_dual_asr_and_normal_audio_qa",
     },
   } : {};
-  const contractionProvenance = contractionReview ? {
+  const contractionProvenance = contractionReview?.kind === "descendant_ready"
+    ? { automated_contraction_expansion: contractionReview.prior_proof }
+    : contractionReview ? {
     automated_contraction_expansion: {
       schema: "goldflow_tts_reviewed_contraction_expansion_v1",
       unit_id: contractionReview.unit_id,
@@ -1785,6 +1847,9 @@ export async function finalizeNarrationProviderOutput(
   };
   checkpoint.units ??= {};
   checkpoint.stages ??= {};
+  if (contractionReview?.kind === "descendant_ready") {
+    delete checkpoint.stages.full_stream_delivery_qa;
+  }
   if (reviewContinuation) {
     // The operator reviewed the old raw stream, not a new master. Only exact
     // unit QA and the semantic stitch are reusable across this boundary.

@@ -5,6 +5,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { sha256File } from "./file-hash.mjs";
 import { pcm, pcmInfo } from "./narration-full-stream-contextual-asr.mjs";
+import { fullStreamReviewScope } from "./narration-full-stream-manual-review.mjs";
 import {
   narrationProviderOutputManifestSha256,
   narrationSynthesisIdentitySha256,
@@ -17,6 +18,7 @@ export const CONTRACTION_REQUEST_SCHEMA = "goldflow_tts_exact_contraction_reques
 export const CONTRACTION_RESULT_SCHEMA = "goldflow_tts_exact_contraction_result_v1";
 export const CONTRACTION_MODE = "exact_past_perfect_contraction_expansion_v1";
 export const CONTRACTION_TARGET_UNIT_ID = "narr_voice_seg_84_u001-002_3193dd7890af";
+export const CONTRACTION_FOLLOWON_UNIT_ID = "narr_voice_seg_08_u001-003_168f265ecf0e";
 export const CONTRACTION_ALIAS = Object.freeze({
   from: "She’d looked at me", to: "She had looked at me",
 });
@@ -517,6 +519,206 @@ export async function loadContractionRecoveryState({ episodeDir, episode,
   };
 }
 
+export function validateContractionDescendantManifestForTests({ rootManifest,
+  derivedManifest, request, result, proof,
+} = {}) {
+  const oldRows = rootManifest?.units ?? [];
+  const nextRows = derivedManifest?.units ?? [];
+  const oldTarget = oldRows.find((row) => row.unit_id === CONTRACTION_TARGET_UNIT_ID);
+  const nextTarget = nextRows.find((row) => row.unit_id === CONTRACTION_TARGET_UNIT_ID);
+  const oldRepair = oldRows.find((row) => row.unit_id === CONTRACTION_FOLLOWON_UNIT_ID);
+  const nextRepair = nextRows.find((row) => row.unit_id === CONTRACTION_FOLLOWON_UNIT_ID);
+  const repair = nextRepair?.recovery_provenance;
+  const requested = request?.units?.[0];
+  const produced = result?.units?.[0];
+  const latestHistory = derivedManifest?.repair_history?.at(-1);
+  const execution = derivedManifest?.provider_execution?.exact_boundary_repair;
+  need(rootManifest?.status === "passed"
+    && derivedManifest?.status === "passed"
+    && rootManifest.manifest_sha256 === narrationProviderOutputManifestSha256(rootManifest)
+    && derivedManifest.manifest_sha256
+      === narrationProviderOutputManifestSha256(derivedManifest)
+    && oldRows.length === nextRows.length && oldRows.length > 1
+    && oldTarget?.synthesis_mode === CONTRACTION_MODE
+    && oldTarget.unit_id === proof?.unit_id
+    && same(oldTarget, nextTarget)
+    && oldRepair && nextRepair
+    && nextRepair.audio_sha256 !== oldRepair.audio_sha256
+    && nextRepair.synthesis_mode === "exact_sentence_boundary_composite_v1"
+    && repair?.schema === "goldflow_tts_exact_boundary_repair_provenance_v1"
+    && repair.prior_audio_sha256 === oldRepair.audio_sha256
+    && repair.prior_synthesis_identity_sha256
+      === oldRepair.synthesis_identity_sha256
+    && request?.schema === "goldflow_tts_exact_boundary_repair_request_v1"
+    && request.prior_manifest_sha256 === rootManifest.manifest_sha256
+    && request.units?.length === 1
+    && requested?.unit_id === CONTRACTION_FOLLOWON_UNIT_ID
+    && requested.prior_audio_sha256 === oldRepair.audio_sha256
+    && requested.prior_synthesis_identity_sha256
+      === oldRepair.synthesis_identity_sha256
+    && requested.spoken_text_sha256 === oldRepair.spoken_text_sha256
+    && requested.fragments?.length >= 2
+    && requested.fragments.join(" ") === requested.spoken_text
+    && requested.prior_blocker_codes?.length === 1
+    && requested.prior_blocker_codes[0]
+      === "narration_confirmed_tts_transcript_protected_value_mismatch"
+    && request.full_stream_targets?.length === 1
+    && request.full_stream_targets[0]?.unit_id === CONTRACTION_FOLLOWON_UNIT_ID
+    && result?.schema === "goldflow_tts_exact_boundary_repair_result_v1"
+    && result.request_sha256 === request.request_sha256
+    && result.units?.length === 1
+    && produced?.unit_id === CONTRACTION_FOLLOWON_UNIT_ID
+    && produced.audio_sha256 === nextRepair.audio_sha256
+    && produced.audio_path === nextRepair.audio_path
+    && latestHistory?.mode === "exact_sentence_boundary_composite_v1"
+    && latestHistory.prior_manifest_sha256 === rootManifest.manifest_sha256
+    && latestHistory.request_sha256 === request.request_sha256
+    && execution?.request_sha256 === request.request_sha256
+    && same(execution.repaired_unit_ids, [CONTRACTION_FOLLOWON_UNIT_ID])
+    && Number(execution.preserved_unit_count) === oldRows.length - 1,
+  "derived manifest is not the exact one-unit follow-on to the reviewed contraction");
+  for (let index = 0; index < oldRows.length; index += 1) {
+    need(oldRows[index].unit_id === nextRows[index].unit_id
+      && (oldRows[index].unit_id === CONTRACTION_FOLLOWON_UNIT_ID
+        || same(oldRows[index], nextRows[index])),
+    `derived manifest changed preserved unit ${oldRows[index].unit_id}`);
+  }
+  return true;
+}
+
+export async function loadContractionDescendantManifest({ episodeDir, episode,
+  sourceScriptSha256, proof, derivedManifest, derivedManifestPath,
+} = {}) {
+  need(inside(episodeDir, derivedManifestPath)
+    && inside(episodeDir, proof?.manifest_path)
+    && derivedManifestPath !== proof.manifest_path,
+  "derived manifest or root candidate escaped the episode");
+  const rootManifest = await read(proof.manifest_path);
+  const rootHash = await sha256File(proof.manifest_path);
+  const derivedHash = await sha256File(derivedManifestPath);
+  const recovered = await loadContractionRecoveryState({ episodeDir, episode,
+    sourceScriptSha256,
+    priorReportPath: proof.prior_report_snapshot_path,
+    priorDeliveryPath: proof.prior_delivery_snapshot_path,
+  });
+  need(rootHash === proof.manifest_file_sha256
+    && recovered?.kind === "candidate_ready"
+    && recovered.candidate_manifest_path === proof.manifest_path
+    && recovered.candidate_manifest_file_sha256 === rootHash
+    && derivedManifest.manifest_sha256
+      === narrationProviderOutputManifestSha256(derivedManifest),
+  "reviewed contraction root candidate is stale");
+  const planPath = path.join(episodeDir, "narration_generation_plan.json");
+  const identityPath = path.join(episodeDir, "run_identity.json");
+  const [plan, planHash, identityHash] = await Promise.all([
+    read(planPath), sha256File(planPath), sha256File(identityPath),
+  ]);
+  const chain = [];
+  const seen = new Set();
+  let currentManifest = derivedManifest;
+  let currentPath = derivedManifestPath;
+  for (let depth = 0; path.resolve(currentPath) !== path.resolve(proof.manifest_path);
+    depth += 1) {
+    need(depth < 8 && !seen.has(currentPath),
+    "follow-on boundary ancestry has a cycle or exceeds eight repairs");
+    seen.add(currentPath);
+    const repairDir = path.dirname(currentPath);
+    const requestPath = path.join(repairDir, "request.json");
+    const resultPath = path.join(repairDir, "repair-result.json");
+    const archivePaths = Object.fromEntries(
+      ["prior_manifest", "prior_report", "prior_delivery", "prior_full_stream"]
+        .map((name) => [name, path.join(repairDir, `${name}.json`)]));
+    const [request, result, oldManifest, oldReport, oldDelivery, oldFullQa,
+      requestHash, resultHash, archiveManifestHash, archiveReportHash,
+      archiveDeliveryHash, archiveFullHash, currentHash,
+      currentFile] = await Promise.all([
+      read(requestPath), read(resultPath), read(archivePaths.prior_manifest),
+      read(archivePaths.prior_report), read(archivePaths.prior_delivery),
+      read(archivePaths.prior_full_stream),
+      sha256File(requestPath), sha256File(resultPath),
+      sha256File(archivePaths.prior_manifest), sha256File(archivePaths.prior_report),
+      sha256File(archivePaths.prior_delivery), sha256File(archivePaths.prior_full_stream),
+      sha256File(currentPath), read(currentPath),
+    ]);
+    const requestPayload = Object.fromEntries(Object.entries(request)
+      .filter(([key]) => key !== "request_sha256"));
+    const priorPath = request.prior_manifest_path;
+    need(inside(episodeDir, priorPath) && priorPath !== currentPath,
+    "follow-on request has no episode-local prior manifest");
+    const [priorManifest, priorHash, specHash, spec] = await Promise.all([
+      read(priorPath), sha256File(priorPath),
+      inside(episodeDir, request.spec_path)
+        ? sha256File(request.spec_path) : Promise.resolve(null),
+      inside(episodeDir, request.spec_path)
+        ? read(request.spec_path) : Promise.resolve(null),
+    ]);
+    const repair = currentManifest.units.find(
+      (row) => row.unit_id === CONTRACTION_FOLLOWON_UNIT_ID)?.recovery_provenance;
+    const fullScope = fullStreamReviewScope(oldFullQa);
+    need(same(currentFile, currentManifest)
+      && request.schema === "goldflow_tts_exact_boundary_repair_request_v1"
+      && request.episode_dir === episodeDir
+      && request.identity_sha256 === identityHash
+      && request.plan_sha256 === plan.plan_sha256
+      && request.plan_file_sha256 === planHash
+      && request.request_sha256 === sha(JSON.stringify(canonical(requestPayload)))
+      && result.request_file_sha256 === requestHash
+      && request.prior_manifest_file_sha256 === priorHash
+      && request.prior_manifest_sha256 === priorManifest.manifest_sha256
+      && request.prior_report_file_sha256 === archiveReportHash
+      && request.prior_delivery_file_sha256 === archiveDeliveryHash
+      && request.prior_full_stream_file_sha256 === archiveFullHash
+      && request.spec_file_sha256 === specHash
+      && same(spec?.full_stream_targets, request.full_stream_targets)
+      && same(spec?.units?.map((row) => ({ unit_id: row.unit_id,
+        fragments: row.fragments })), request.units?.map((row) => ({
+        unit_id: row.unit_id, fragments: row.fragments })))
+      && archiveManifestHash === priorHash && same(oldManifest, priorManifest)
+      && oldReport?.status === "blocked"
+      && oldReport.source_script_hash === sourceScriptSha256
+      && oldReport.provider_output_manifest_path === priorPath
+      && oldReport.provider_output_manifest_sha256 === priorHash
+      && same(oldReport.automated_contraction_expansion, proof)
+      && ["passed", "passed_with_warnings"].includes(oldDelivery?.status)
+      && Number(oldDelivery.blocked_unit_count) === 0
+      && oldDelivery.automated_contraction_expansion?.evidence_sha256
+        === proof.evidence_sha256
+      && oldFullQa?.status === "blocked"
+      && oldFullQa.source_script_hash === sourceScriptSha256
+      && oldFullQa.provider_output_manifest_file_sha256 === priorHash
+      && oldFullQa.blockers?.length === 1
+      && oldFullQa.blockers[0].code
+        === "narration_confirmed_tts_transcript_protected_value_mismatch"
+      && fullScope.length === 1
+      && request.full_stream_targets?.[0]?.finding_sha256
+        === fullScope[0].finding_sha256
+      && fullScope[0].finding.unit_ids?.includes(CONTRACTION_FOLLOWON_UNIT_ID)
+      && repair?.request_path === requestPath
+      && repair?.request_sha256 === request.request_sha256
+      && repair?.result_path === resultPath
+      && repair?.result_sha256 === resultHash
+      && result.request_sha256 === request.request_sha256,
+    "follow-on request or immutable prior snapshots are stale");
+    validateContractionDescendantManifestForTests({ rootManifest: priorManifest,
+      derivedManifest: currentManifest, request, result, proof });
+    const changed = currentManifest.units.find(
+      (row) => row.unit_id === CONTRACTION_FOLLOWON_UNIT_ID);
+    need(inside(episodeDir, changed.audio_path)
+      && await sha256File(changed.audio_path) === changed.audio_sha256,
+    "follow-on selected WAV changed");
+    chain.push({ manifest_path: currentPath, manifest_file_sha256: currentHash,
+      request_path: requestPath, request_file_sha256: requestHash,
+      result_path: resultPath, result_file_sha256: resultHash });
+    currentManifest = priorManifest;
+    currentPath = priorPath;
+  }
+  need(chain.length > 0 && await sha256File(currentPath) === rootHash
+    && same(currentManifest, rootManifest),
+  "follow-on boundary ancestry does not reach the reviewed root candidate");
+  return { root_manifest: rootManifest, root_manifest_file_sha256: rootHash,
+    derived_manifest_file_sha256: derivedHash, ancestry: chain };
+}
+
 async function validateAppliedContractionReviewMode({ episodeDir, episode,
   sourceScriptSha256, ttsReport, unitDelivery, providerOutput,
   providerOutputPath, blockedFullStreamQa = null,
@@ -526,14 +728,16 @@ async function validateAppliedContractionReviewMode({ episodeDir, episode,
     (row) => row.synthesis_mode === CONTRACTION_MODE);
   if (!proof) return candidates.length === 0;
   try {
+    const descendant = proof.manifest_path !== providerOutputPath;
+    const currentManifestHash = await sha256File(providerOutputPath);
     need(proof.schema === CONTRACTION_EVIDENCE_SCHEMA
       && proof.unit_id === CONTRACTION_TARGET_UNIT_ID
       && proof.human_listening_performed === false
       && proof.acceptance_basis === "fresh_independent_dual_asr_and_normal_audio_qa"
       && proof.source_phrase === FIRST && proof.tts_only_spoken_phrase === EXPANDED
       && candidates.length === 1
-      && proof.manifest_path === providerOutputPath
-      && proof.manifest_file_sha256 === await sha256File(providerOutputPath)
+      && inside(episodeDir, proof.manifest_path)
+      && proof.manifest_file_sha256 === await sha256File(proof.manifest_path)
       && unitDelivery?.automated_contraction_expansion?.evidence_sha256
         === proof.evidence_sha256
       && inside(episodeDir, proof.prior_report_snapshot_path)
@@ -554,7 +758,7 @@ async function validateAppliedContractionReviewMode({ episodeDir, episode,
       && unitDelivery.source_script_hash === sourceScriptSha256
       && ttsReport.provider_output_manifest_path === providerOutputPath
       && ttsReport.provider_output_manifest_sha256
-        === proof.manifest_file_sha256
+        === currentManifestHash
       && (blockedFullStreamQa
         ? ttsReport.status === "blocked"
           && ttsReport.full_stream_qa_status === "blocked"
@@ -562,7 +766,7 @@ async function validateAppliedContractionReviewMode({ episodeDir, episode,
           && blockedFullStreamQa.status === "blocked"
           && blockedFullStreamQa.source_script_hash === sourceScriptSha256
           && blockedFullStreamQa.provider_output_manifest_file_sha256
-            === proof.manifest_file_sha256
+            === currentManifestHash
           && blockedFullStreamQa.blockers?.length === 1
         : ["passed", "passed_with_warnings"].includes(ttsReport.status)
           && ["passed", "passed_with_warnings"].includes(ttsReport.full_stream_qa_status))
@@ -579,11 +783,14 @@ async function validateAppliedContractionReviewMode({ episodeDir, episode,
       priorDeliveryPath: proof.prior_delivery_snapshot_path,
     });
     need(recovered?.kind === "candidate_ready"
-      && recovered.candidate_manifest_path === providerOutputPath
+      && recovered.candidate_manifest_path === proof.manifest_path
       && recovered.candidate_manifest_file_sha256 === proof.manifest_file_sha256
       && recovered.candidate_request_file_sha256 === proof.candidate_request_sha256
       && recovered.candidate_result_file_sha256 === proof.candidate_result_sha256,
     "applied contraction candidate changed");
+    if (descendant) await loadContractionDescendantManifest({ episodeDir,
+      episode, sourceScriptSha256, proof, derivedManifest: providerOutput,
+      derivedManifestPath: providerOutputPath });
     const stitchReport = await read(path.join(episodeDir,
       `audio_stitch_report_${episode}-narration.json`));
     need((blockedFullStreamQa ? stitchReport?.status === "blocked"

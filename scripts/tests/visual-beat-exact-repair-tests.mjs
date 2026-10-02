@@ -7,7 +7,7 @@ import { groupingLockHash } from "../lib/editorial-beat-director.mjs";
 import { CURRENT_VISUAL_BEAT_CONTRACT_VERSION } from "../lib/visual-beat-contract.mjs";
 import { commandStageFor } from "../lib/pipeline-stage-registry.mjs";
 import { beginStageExecution, finishStageExecution } from "../lib/execution-provenance.mjs";
-import { applyVisualBeatExactRepair, visualBeatExactRepairAdmission } from "../lib/visual-beat-exact-repair.mjs";
+import { applyVisualBeatExactRepair, repairVisualBeatPlan, visualBeatExactRepairAdmission } from "../lib/visual-beat-exact-repair.mjs";
 
 const hash = (value) => createHash("sha256").update(value).digest("hex");
 const bytes = (value) => Buffer.from(`${JSON.stringify(value, null, 2)}\n`);
@@ -234,5 +234,65 @@ await withFixture(async ({ episodeDir, status, ids, specPath, planBytes }) => {
   await assert.rejects(applyVisualBeatExactRepair({ episodeDir, specPath, beatIds: ids, status }),
     /Downstream stage already started/);
   assert.deepEqual(await fs.readFile(path.join(episodeDir, "visual_beat_plan.json")), planBytes);
+});
+
+await withFixture(async ({ plan }) => {
+  const memory = structuredClone(plan);
+  const target = memory.beats[0];
+  target.depiction_mode = "memory_or_flashback";
+  target.visual_beat_script_excerpt = "Word zero recalls the original bedroom reset.";
+  target.active_state_constraints = { location_id: "home_desk", entities: {
+    joey: { status: "Future level", wardrobe: "Future coat" },
+    caleb: { wardrobe: "Future quarry coat" },
+  }, applied_through_source_word_index: target.source_word_end_index };
+  target.visible_entities.push({ entity_id: "caleb", display_name: "Caleb", kind: "person" });
+  target.physically_visible_entity_ids = [];
+  target.preview_visible_entity_ids = ["joey", "caleb"];
+  target.preview_visible_characters = ["Joey", "Caleb"];
+  target.ref_needs[1].ref_id = "future_room_ref";
+  target.beat_ref_requirements = structuredClone(target.ref_needs);
+  const lock = groupingLockHash(memory.beats);
+  memory.editorial_director.grouping_lock_sha256 = lock;
+  const change = { visual_beat_id: target.visual_beat_id, source_atom_ids: target.source_atom_ids,
+    evidence_note: "The approved source recalls the original bedroom reset, before later gear exists.",
+    visibility_corrections: [
+      { entity_id: "joey", from: "preview", to: "physical" },
+      { entity_id: "caleb", from: "preview", to: "physical" },
+    ],
+    memory_state: { before: structuredClone(target.active_state_constraints),
+      to: { location_id: "home_desk", entities: {
+        joey: { status: "At the original reset", wardrobe: "Original clothes" },
+        caleb: { wardrobe: "Original clothes" },
+      }, applied_through_source_word_index: target.source_word_end_index },
+      source_quote: "original bedroom reset" },
+    location_ref_removals: [{ ref_id: "future_room_ref", subject: "Home desk" }] };
+  const spec = { grouping_lock_sha256: lock, repairs: [change] };
+  const facts = { canonical_locations: [{ location_id: "home_desk" }] };
+  const repaired = repairVisualBeatPlan(memory, spec, facts);
+  const fixed = repaired.plan.beats[0];
+  assert.deepEqual(fixed.active_state_constraints, change.memory_state.to);
+  assert.deepEqual(fixed.preview_visible_entity_ids, []);
+  assert.deepEqual(fixed.physically_visible_entity_ids, ["joey", "caleb"]);
+  assert.deepEqual(fixed.ref_needs, [{ kind: "character", ref_id: "joey", subject: "Joey" }]);
+  assert.deepEqual(fixed.beat_ref_requirements, fixed.ref_needs);
+  assert.deepEqual(repaired.plan.beats.slice(1), memory.beats.slice(1));
+  assert.equal(groupingLockHash(repaired.plan.beats), lock);
+  assert.equal(repaired.changes.filter((row) => row.field === "visibility").length, 2);
+  const wrongState = structuredClone(spec);
+  wrongState.repairs[0].memory_state.before.entities.joey.status = "Wrong";
+  assert.throws(() => repairVisualBeatPlan(memory, wrongState, facts), /Historical memory state/);
+  const wrongRef = structuredClone(spec);
+  wrongRef.repairs[0].location_ref_removals[0].ref_id = "unrelated_ref";
+  assert.throws(() => repairVisualBeatPlan(memory, wrongRef, facts), /Historical location-reference mismatch/);
+  const movedMemory = structuredClone(spec);
+  movedMemory.repairs[0].location = { before_location_id: "home_desk", before_location: "Home desk",
+    to_location_id: null, to_location: "Earlier training passage" };
+  movedMemory.repairs[0].memory_state.to.location_id = null;
+  delete movedMemory.repairs[0].location_ref_removals;
+  const relocated = repairVisualBeatPlan(memory, movedMemory, facts).plan.beats[0];
+  assert.equal(relocated.location, "Earlier training passage");
+  assert.equal(relocated.location_id, null);
+  assert.equal(relocated.active_state_constraints.location_id, null);
+  assert.deepEqual(relocated.ref_needs, [{ kind: "character", ref_id: "joey", subject: "Joey" }]);
 });
 console.log("visual-beat-exact-repair-tests passed");

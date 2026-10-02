@@ -64,11 +64,11 @@ function assertSpec(spec, ids) {
   const specIds = spec.repairs.map((repair) => repair?.visual_beat_id);
   if (!same(specIds, ids)) throw new Error("Repair spec beat IDs must exactly match ordered --beat-ids.");
   for (const repair of spec.repairs) {
-    if (!keysOnly(repair, ["visual_beat_id", "source_atom_ids", "evidence_note", "location", "focus", "continuity_note", "visibility"])
+    if (!keysOnly(repair, ["visual_beat_id", "source_atom_ids", "evidence_note", "location", "focus", "continuity_note", "visibility", "visibility_corrections", "memory_state", "location_ref_removals"])
       || !Array.isArray(repair.source_atom_ids) || !repair.source_atom_ids.length
       || !unique(repair.source_atom_ids) || repair.source_atom_ids.some((id) => !/^atom_w\d{6}_w\d{6}$/.test(id))
       || !text(repair.evidence_note, 1500)
-      || !["location", "focus", "continuity_note", "visibility"].some((key) => own(repair, key))) {
+      || !["location", "focus", "continuity_note", "visibility", "visibility_corrections", "memory_state", "location_ref_removals"].some((key) => own(repair, key))) {
       throw new Error(`Invalid exact beat repair: ${repair?.visual_beat_id ?? "missing ID"}.`);
     }
     if (own(repair, "location") && (!keysOnly(repair.location, ["before_location_id", "before_location", "to_location_id", "to_location"])
@@ -87,6 +87,30 @@ function assertSpec(spec, ids) {
       || !/^[a-z][a-z0-9_]*$/.test(repair.visibility.entity_id)
       || repair.visibility.from !== "preview" || repair.visibility.to !== "physical")) {
       throw new Error(`Invalid visibility correction: ${repair.visual_beat_id}.`);
+    }
+    if (own(repair, "visibility_corrections") && (own(repair, "visibility")
+      || !Array.isArray(repair.visibility_corrections) || !repair.visibility_corrections.length
+      || repair.visibility_corrections.length > 4
+      || !unique(repair.visibility_corrections.map((item) => item?.entity_id))
+      || repair.visibility_corrections.some((item) => !keysOnly(item, ["entity_id", "from", "to"])
+        || !/^[a-z][a-z0-9_]*$/.test(item.entity_id)
+        || item.from !== "preview" || item.to !== "physical"))) {
+      throw new Error(`Invalid bounded visibility corrections: ${repair.visual_beat_id}.`);
+    }
+    if (own(repair, "memory_state") && (!keysOnly(repair.memory_state, ["before", "to", "source_quote"])
+      || !object(repair.memory_state.before) || !object(repair.memory_state.to)
+      || !text(repair.memory_state.source_quote, 350)
+      || !keysOnly(repair.memory_state.to, ["location_id", "entities", "applied_through_source_word_index"])
+      || !own(repair.memory_state.to, "location_id") || !object(repair.memory_state.to.entities)
+      || !Number.isInteger(repair.memory_state.to.applied_through_source_word_index))) {
+      throw new Error(`Invalid historical memory state correction: ${repair.visual_beat_id}.`);
+    }
+    if (own(repair, "location_ref_removals") && (!Array.isArray(repair.location_ref_removals)
+      || !repair.location_ref_removals.length || repair.location_ref_removals.length > 4
+      || !unique(repair.location_ref_removals.map((item) => item?.ref_id))
+      || repair.location_ref_removals.some((item) => !keysOnly(item, ["ref_id", "subject"])
+        || !text(item.ref_id, 200) || !text(item.subject, 300)))) {
+      throw new Error(`Invalid historical location-reference removal: ${repair.visual_beat_id}.`);
     }
   }
 }
@@ -129,6 +153,7 @@ export function repairVisualBeatPlan(plan, spec, factLedger) {
     if (!beat || !same(beat.source_atom_ids, repair.source_atom_ids)) {
       throw new Error(`Exact beat ID or source atoms changed: ${repair.visual_beat_id}.`);
     }
+    const originalState = structuredClone(beat.active_state_constraints);
     if (own(repair, "location")) {
       const item = repair.location;
       const beforeTimelineLabel = `${timestamp(beat.start_sec)} ${item.before_location}`;
@@ -193,8 +218,9 @@ export function repairVisualBeatPlan(plan, spec, factLedger) {
       changes.push({ visual_beat_id: repair.visual_beat_id, field: "continuity_note",
         before: repair.continuity_note.before, after: repair.continuity_note.to });
     }
-    if (own(repair, "visibility")) {
-      const id = repair.visibility.entity_id;
+    for (const correction of own(repair, "visibility_corrections")
+      ? repair.visibility_corrections : (own(repair, "visibility") ? [repair.visibility] : [])) {
+      const id = correction.entity_id;
       const entity = (beat.visible_entities ?? []).find((row) => row.entity_id === id);
       const name = entity?.display_name;
       if (!name || !Array.isArray(beat.preview_visible_entity_ids)
@@ -211,6 +237,42 @@ export function repairVisualBeatPlan(plan, spec, factLedger) {
       beat.physically_visible_entity_ids.push(id);
       changes.push({ visual_beat_id: repair.visual_beat_id, field: "visibility",
         entity_id: id, display_name: name, before: "preview", after: "physical" });
+    }
+    if (own(repair, "memory_state")) {
+      const item = repair.memory_state;
+      if (beat.depiction_mode !== "memory_or_flashback"
+        || !same(originalState, item.before)
+        || !beat.visual_beat_script_excerpt?.includes(item.source_quote)
+        || item.to.location_id !== beat.location_id
+        || item.to.applied_through_source_word_index !== beat.source_word_end_index
+        || !object(item.before.entities)
+        || Object.keys(item.to.entities).some((id) => !own(item.before.entities, id))
+        || Object.entries(item.to.entities).some(([id, state]) => !object(state)
+          || Object.keys(state).some((key) => !["status", "injury", "possession", "wardrobe", "location", "state_evidence"].includes(key)))
+        || same(item.before, item.to)) {
+        throw new Error(`Historical memory state does not match approved source and beat: ${repair.visual_beat_id}.`);
+      }
+      beat.active_state_constraints = structuredClone(item.to);
+      changes.push({ visual_beat_id: repair.visual_beat_id, field: "memory_state", before: originalState,
+        after: structuredClone(beat.active_state_constraints), source_quote: item.source_quote });
+    }
+    if (own(repair, "location_ref_removals")) {
+      if (beat.depiction_mode !== "memory_or_flashback"
+        || !Array.isArray(beat.ref_needs) || !same(beat.ref_needs, beat.beat_ref_requirements)) {
+        throw new Error(`Historical reference mirrors are inconsistent: ${repair.visual_beat_id}.`);
+      }
+      for (const item of repair.location_ref_removals) {
+        const matching = beat.ref_needs.filter((need) => need.kind === "location"
+          && need.ref_id === item.ref_id && need.subject === item.subject);
+        if (matching.length !== 1 || item.ref_id === beat.location_id
+          || item.subject !== beat.location) {
+          throw new Error(`Historical location-reference mismatch is unproven: ${repair.visual_beat_id}.`);
+        }
+        beat.ref_needs = beat.ref_needs.filter((need) => need !== matching[0]);
+        beat.beat_ref_requirements = structuredClone(beat.ref_needs);
+        changes.push({ visual_beat_id: repair.visual_beat_id, field: "location_ref_removal",
+          removed: structuredClone(matching[0]) });
+      }
     }
   }
   output.location_timeline = locationTimeline(output.beats);
@@ -279,6 +341,11 @@ export async function applyVisualBeatExactRepair({ episodeDir, specPath, beatIds
     const identity = JSON.parse(identityBytes);
     const factLedger = JSON.parse(factBytes);
     assertSpec(spec, requestedIds);
+    for (const repair of spec.repairs) {
+      if (repair.memory_state && !scriptBytes.toString("utf8").includes(repair.memory_state.source_quote)) {
+        throw new Error(`Historical memory quote is absent from approved script: ${repair.visual_beat_id}.`);
+      }
+    }
     if (path.resolve(spec.episode_dir) !== episodeDir || sha256(identityBytes) !== spec.run_identity_sha256
       || sha256(scriptBytes) !== spec.source_script_sha256
       || sha256(planBytes) !== spec.base_visual_beat_plan_sha256

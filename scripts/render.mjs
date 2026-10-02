@@ -825,12 +825,24 @@ function buildSubtitleEvents(wordTiming, audioStitchReport = null, visualBeatPla
   }
   if ((audioStitchReport?.segments ?? []).some(
     (segment) => segment.tts_only_contraction_expansion)) {
+    const spokenWords = wordTiming.words ?? [];
     const mappedWords = captionWordsWithContractionExpansionForTests(
-      wordTiming.words ?? [], audioStitchReport);
+      spokenWords, audioStitchReport);
     const span = contractionCaptionWordSpanForTests({
-      segments: audioStitchReport.segments, words: wordTiming.words ?? [],
+      segments: audioStitchReport.segments, words: spokenWords,
     });
-    const beatEvents = subtitleEventsFromVisualBeats(mappedWords, visualBeatPlan);
+    // Editorial beats may have been locked against the raw Whisper word
+    // indices (including spoken "had") or against source-word indices. Use
+    // only the index domain the complete approved beat plan declares.
+    const beatEndIndices = (visualBeatPlan?.beats ?? []).map((beat) =>
+      Number(beat.source_word_end_index));
+    const beatEndIndex = beatEndIndices.length
+      ? Math.max(...beatEndIndices) : Number.NaN;
+    const beatWords = beatEndIndex === spokenWords.length - 1
+      ? spokenWords : beatEndIndex === mappedWords.length - 1
+        ? mappedWords : null;
+    const beatEvents = beatWords
+      ? subtitleEventsFromVisualBeats(beatWords, visualBeatPlan) : null;
     if (!beatEvents?.length || !beatEvents.some((event) =>
       /\bShe’d\b/u.test(event.text)
       && Number(event.start_sec) <= span.start_sec + 0.05

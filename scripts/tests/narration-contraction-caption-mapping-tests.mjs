@@ -87,6 +87,24 @@ assert.ok(contractionEvent.start_sec <= span.start_sec + 0.05);
 assert.ok(contractionEvent.end_sec >= span.end_sec - 0.05);
 assert.ok(captions.events.every((row) => row.end_sec > row.start_sec));
 
+// Fresh visual plans derive beat ranges from raw Whisper indices, so they
+// include the extra spoken auxiliary even though the caption omits it.
+const rawBeatRanges = { status: "passed", beats: [
+  beats.beats[0],
+  { ...beats.beats[1], source_word_end_index: words.length - 1 },
+] };
+const rawIndexedCaptions = buildSubtitleEventsForTests({ words }, stitch,
+  rawBeatRanges);
+assert.equal(rawIndexedCaptions.source,
+  "approved_visual_beat_script_text_with_exact_source_contraction");
+assert.equal(rawIndexedCaptions.events.map((row) => row.text).join(" "),
+  `Before this ${CONTRACTION_SOURCE_UNIT}`);
+const rawContractionEvent = rawIndexedCaptions.events.find((row) =>
+  row.text.includes("She’d"));
+assert.ok(rawContractionEvent);
+assert.ok(rawContractionEvent.start_sec <= span.start_sec + 0.05);
+assert.ok(rawContractionEvent.end_sec >= span.end_sec - 0.05);
+
 // An absent or incomplete approved beat plan must fail instead of silently
 // switching the complete episode to Whisper-recognized caption text.
 for (const invalidBeats of [null, { status: "blocked", beats: beats.beats },

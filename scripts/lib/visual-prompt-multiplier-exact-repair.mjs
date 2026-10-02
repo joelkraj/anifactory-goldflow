@@ -7,7 +7,7 @@ const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const jsonBytes = (value) => Buffer.from(`${JSON.stringify(value, null, 2)}\n`);
 const hashPattern = /^[a-f0-9]{64}$/;
 const multiplierPattern = /^×(?:2|4|8|16|32|64|128|256)$/;
-const fieldPattern = /^(?:provider_prompt|image_prompt|modelslab_image_prompt|codex_image_prompt|narrative_overlays\[\d+\]\.(?:text|information_delta)|shot_manifest\.ui_elements\[\d+\])$/;
+const fieldPattern = /^(?:provider_prompt|image_prompt|modelslab_image_prompt|codex_image_prompt|narrative_overlays\[\d+\]\.(?:text|information_delta)|narrative_overlay_findings\[\d+\]\.message|shot_manifest\.ui_elements\[\d+\]|ui_text_on_screen\[\d+\])$/;
 const fileNames = {
   run_identity_sha256: "run_identity.json",
   source_script_sha256: "script_clean.md",

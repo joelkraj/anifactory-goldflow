@@ -34,7 +34,8 @@ async function fixture() {
   const makeRow = (index, phrase) => ({ image_id: beats[index].image_id_hint, visual_beat_id: beats[index].visual_beat_id,
     provider_prompt: phrase, image_prompt: phrase, prompt_hash: hash(phrase),
     narrative_overlays: [{ text: "×256 ACTIVE", information_delta: "×256 is active" }],
-    shot_manifest: { ui_elements: ["Experience", "×256 ACTIVE"] } });
+    narrative_overlay_findings: [{ message: "Graphic copy ×256 ACTIVE duplicates literal UI." }],
+    shot_manifest: { ui_elements: ["Experience", "×256 ACTIVE"] }, ui_text_on_screen: ["Experience", "×256 ACTIVE"] });
   const rows = [makeRow(0, "The panel shows ×256."), makeRow(1, "The wrist shows ×256."),
     { image_id: beats[2].image_id_hint, visual_beat_id: beats[2].visual_beat_id,
       provider_prompt: "An untouched scene.", image_prompt: "An untouched scene.", shot_manifest: { ui_elements: [] } }];
@@ -46,7 +47,9 @@ async function fixture() {
       { path: "provider_prompt", before: row.provider_prompt }, { path: "image_prompt", before: row.image_prompt },
       { path: "narrative_overlays[0].text", before: row.narrative_overlays[0].text },
       { path: "narrative_overlays[0].information_delta", before: row.narrative_overlays[0].information_delta },
+      { path: "narrative_overlay_findings[0].message", before: row.narrative_overlay_findings[0].message },
       { path: "shot_manifest.ui_elements[1]", before: row.shot_manifest.ui_elements[1] },
+      { path: "ui_text_on_screen[1]", before: row.ui_text_on_screen[1] },
     ] });
   const spec = { schema: "goldflow_visual_prompt_multiplier_exact_repair_v1", episode: "ep_01", expected,
     rows: [repairFor(rows[0], quoteA, "×64"), repairFor(rows[1], quoteB, "×128")],
@@ -77,6 +80,8 @@ test("repairs only reviewed prompt/UI/overlay fields across two exact rows with 
       assert.equal(row.prompt_hash, hash(row.provider_prompt));
       assert.equal(row.narrative_overlays[0].text, `${token} ACTIVE`);
       assert.equal(row.shot_manifest.ui_elements[1], `${token} ACTIVE`);
+      assert.equal(row.ui_text_on_screen[1], `${token} ACTIVE`);
+      assert.ok(row.narrative_overlay_findings[0].message.includes(token));
       assert.equal(JSON.stringify(row).includes("×256"), false);
     }
     const receipt = JSON.parse(await fs.readFile(result.receipt_path, "utf8"));

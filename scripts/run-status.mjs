@@ -826,6 +826,14 @@ export function transitionRecoveryCommandForTests(artifact, identity) {
   return `${base} --boundary-ids ${failedBoundaryIds.join(",")}`;
 }
 
+export function blockedTransitionRecoveryStageForTests(next, artifact, identity) {
+  const exactCommand = transitionRecoveryCommandForTests(artifact, identity);
+  return next?.stage === "transition_edit_plan"
+    && next?.state === "blocked"
+    && Boolean(exactCommand)
+    && next.next_command_shape === exactCommand;
+}
+
 function inferredState(validation = {}) {
   if (validation.state) return validation.state;
   if (validation.done) return "passed";
@@ -6425,6 +6433,8 @@ async function main() {
     ? ["visual_prompt_plan"]
     : next?.stage === "visual_prompt_harden" && next?.state === "blocked"
     ? ["visual_prompt_harden", "visual_prompt_blocker_repair"]
+    : blockedTransitionRecoveryStageForTests(next, transitionPlanArtifact, identity)
+    ? ["transition_edit_plan"]
     : next?.stage === "qwen_tts_stitch"
       && next?.state === "blocked"
       && /tts (?:approve-listen|narrate|finalize-provider|repair-boundary)\b/.test(String(next.next_command_shape ?? ""))

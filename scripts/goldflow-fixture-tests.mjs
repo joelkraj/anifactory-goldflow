@@ -281,6 +281,7 @@ import {
   validateNarrationTtsPolicyForTests,
 } from "./narration-tts-episode.mjs";
 import {
+  blockedTransitionRecoveryStageForTests,
   hybridDeadletteredAssetIdsForTests,
   qwenLiamBoundaryContractFindingsForTests,
   runIdentityPlanningCompleteForTests,
@@ -1395,6 +1396,23 @@ function testScopedOnlyPlannerRerunPolicy() {
     episode: "ep_01",
     audio_target: "narrator_only",
   }), /--boundary-ids boundary_003,boundary_002$/);
+  const transitionIdentity = {
+    channel: "test", series_slug: "series", week: "week", episode: "ep_01", audio_target: "narrator_only",
+  };
+  const blockedTransition = { status: "blocked", failed_boundary_ids: ["boundary_003", "boundary_002"] };
+  const exactTransitionCommand = transitionRecoveryCommandForTests(blockedTransition, transitionIdentity);
+  assert.equal(blockedTransitionRecoveryStageForTests({
+    stage: "transition_edit_plan", state: "blocked", next_command_shape: exactTransitionCommand,
+  }, blockedTransition, transitionIdentity), true);
+  assert.equal(blockedTransitionRecoveryStageForTests({
+    stage: "transition_edit_plan", state: "blocked", next_command_shape: exactTransitionCommand.replace("boundary_003,boundary_002", "boundary_003"),
+  }, blockedTransition, transitionIdentity), false);
+  assert.equal(blockedTransitionRecoveryStageForTests({
+    stage: "transition_edit_plan", state: "passed", next_command_shape: exactTransitionCommand,
+  }, blockedTransition, transitionIdentity), false);
+  assert.equal(blockedTransitionRecoveryStageForTests({
+    stage: "transition_edit_plan", state: "blocked", next_command_shape: exactTransitionCommand,
+  }, { status: "blocked", failed_boundary_ids: [] }, transitionIdentity), false);
   assert.equal(plannerRerunDecision({
     stage: "visual_prompt_plan",
     flags: { "resume-incomplete-chunks": "true" },

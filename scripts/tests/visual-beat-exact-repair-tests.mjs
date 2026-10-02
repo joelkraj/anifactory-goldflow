@@ -12,6 +12,11 @@ import { applyVisualBeatExactRepair, repairVisualBeatPlan, visualBeatExactRepair
 const hash = (value) => createHash("sha256").update(value).digest("hex");
 const bytes = (value) => Buffer.from(`${JSON.stringify(value, null, 2)}\n`);
 const read = async (file) => JSON.parse(await fs.readFile(file));
+const excerpts = [
+  "Joey checks the bank balance.",
+  "Joey studies an unopened box at the counter.",
+  "Joey leaves the box on the counter.",
+];
 const beat = (number, place, id) => ({
   visual_beat_id: `beat_w${String(number).padStart(6, "0")}_w${String(number).padStart(6, "0")}`,
   image_id_hint: `ep_01-w${String(number).padStart(6, "0")}-w${String(number).padStart(6, "0")}`,
@@ -21,7 +26,9 @@ const beat = (number, place, id) => ({
   start_sec: number,
   end_sec: number + 1,
   parent_scene_id: "scene_01",
-  visual_beat_script_excerpt: `Word ${number}`,
+  visual_beat_script_excerpt: excerpts[number],
+  visual_beat_action: "Joey looks at the box.",
+  visual_beat_action_evidence: "Joey studies",
   location_id: id,
   location: place,
   local_location: place,
@@ -51,7 +58,7 @@ async function fixture() {
   const identity = { schema: "goldflow_run_identity_v2", channel: "c", series_slug: "s",
     week: "w", episode: "ep_01", content_profile: "manhwa_recap_v1", media_workflow: "generated_visuals_v1" };
   const identityBytes = bytes(identity);
-  const scriptBytes = Buffer.from("Word zero. Word one. Word two.\n");
+  const scriptBytes = Buffer.from(`${excerpts.join(" ")}\n`);
   const facts = { canonical_locations: [
     { location_id: "home_desk", display_name: "Home desk" },
     { location_id: "alder_mill", display_name: "Alder Mill" },
@@ -203,6 +210,109 @@ await withFixture(async ({ episodeDir, status, ids, specPath, plan, planBytes, a
     /stale against episode/,
     "same spec cannot be applied twice",
   );
+});
+
+await withFixture(async ({ episodeDir, status, ids, spec, specPath, plan, planBytes, approvalBytes }) => {
+  const id = ids[0];
+  const before = plan.beats[1];
+  spec.repairs = [{ visual_beat_id: id, source_atom_ids: before.source_atom_ids,
+    evidence_note: "The beat depicts examining an unopened box, before any purchase is complete.",
+    action: { before: before.visual_beat_action, to: "Joey examines the unopened box at the counter." },
+    action_evidence: { before: before.visual_beat_action_evidence,
+      to: "Joey studies an unopened box at the counter" } }];
+  await fs.writeFile(specPath, bytes(spec));
+  const result = await applyVisualBeatExactRepair({ episodeDir, specPath, beatIds: [id], status });
+  const after = await read(path.join(episodeDir, "visual_beat_plan.json"));
+  const approval = await read(path.join(episodeDir, "visual_beat_approval.json"));
+  assert.equal(after.beats[1].visual_beat_action, spec.repairs[0].action.to);
+  assert.equal(after.beats[1].visual_beat_action_evidence, spec.repairs[0].action_evidence.to);
+  assert.deepEqual(after.beats[0], plan.beats[0]);
+  assert.deepEqual(after.beats[2], plan.beats[2]);
+  for (const field of ["source_atom_ids", "source_word_start_index", "source_word_end_index",
+    "start_sec", "end_sec", "visual_beat_id", "image_id_hint", "visual_beat_script_excerpt"])
+    assert.deepEqual(after.beats[1][field], before[field], `${field} is locked`);
+  const unchanged = structuredClone(after.beats[1]);
+  unchanged.visual_beat_action = before.visual_beat_action;
+  unchanged.visual_beat_action_evidence = before.visual_beat_action_evidence;
+  assert.deepEqual(unchanged, before, "only the reviewed action and quote changed on the target beat");
+  const unchangedPlan = structuredClone(after);
+  unchangedPlan.beats[1] = before;
+  unchangedPlan.updated_at = plan.updated_at;
+  assert.deepEqual(unchangedPlan, plan, "action repair preserves every other plan field");
+  assert.equal(groupingLockHash(after.beats), groupingLockHash(plan.beats));
+  assert.equal(approval.visual_beat_plan_sha256,
+    hash(await fs.readFile(path.join(episodeDir, "visual_beat_plan.json"))));
+  assert.equal(approval.grouping_lock_sha256, groupingLockHash(plan.beats));
+  assert.equal(approval.previous_visual_beat_plan_sha256, hash(planBytes));
+  assert.equal(approval.previous_visual_beat_approval_sha256, hash(approvalBytes));
+  const receipt = await read(result.receipt_path);
+  assert.equal(receipt.changes.find((row) => row.field === "visual_beat_action")?.source_quote,
+    spec.repairs[0].action_evidence.to);
+  assert.equal(receipt.changes.find((row) => row.field === "visual_beat_action_evidence")?.before,
+    before.visual_beat_action_evidence);
+  assert.deepEqual(await fs.readFile(path.join(path.dirname(result.receipt_path), "before_plan.json")), planBytes);
+  assert.deepEqual(await fs.readFile(path.join(path.dirname(result.receipt_path), "before_approval.json")), approvalBytes);
+});
+
+await withFixture(async ({ episodeDir, status, ids, spec, specPath, plan }) => {
+  const before = plan.beats[1];
+  spec.repairs = [{ visual_beat_id: ids[0], source_atom_ids: before.source_atom_ids,
+    evidence_note: "The existing source quote already supports the revised action.",
+    action: { before: before.visual_beat_action, to: "Joey studies the box." } }];
+  await fs.writeFile(specPath, bytes(spec));
+  await applyVisualBeatExactRepair({ episodeDir, specPath, beatIds: [ids[0]], status });
+  const after = await read(path.join(episodeDir, "visual_beat_plan.json"));
+  assert.equal(after.beats[1].visual_beat_action, spec.repairs[0].action.to);
+  assert.equal(after.beats[1].visual_beat_action_evidence, before.visual_beat_action_evidence);
+});
+
+for (const [name, change, pattern] of [
+  ["stale action before", (repair) => { repair.action.before = "stale"; }, /Action before-value changed/],
+  ["action no-op", (repair) => { repair.action.to = repair.action.before; }, /Action correction is a no-op/],
+  ["stale evidence before", (repair) => { repair.action_evidence.before = "stale"; }, /Action evidence before-value changed/],
+  ["evidence no-op", (repair) => { repair.action_evidence.to = repair.action_evidence.before; }, /Action evidence correction is a no-op/],
+  ["unsupported action field", (repair) => { repair.action.extra = "unreviewed"; }, /Invalid action correction/],
+  ["malformed evidence", (repair) => { repair.action_evidence.to = ""; }, /Invalid action_evidence correction/],
+  ["unsubstantiated evidence", (repair) => { repair.action_evidence.to = "Joey buys the box"; }, /Action evidence is absent/],
+  ["evidence without action", (repair) => { delete repair.action; }, /Invalid exact beat repair/],
+]) {
+  await withFixture(async ({ episodeDir, status, ids, spec, specPath, plan, planBytes, approvalBytes }) => {
+    const before = plan.beats[1];
+    spec.repairs = [{ visual_beat_id: ids[0], source_atom_ids: before.source_atom_ids,
+      evidence_note: `Rejected ${name} correction.`,
+      action: { before: before.visual_beat_action, to: "Joey examines the unopened box." },
+      action_evidence: { before: before.visual_beat_action_evidence,
+        to: "Joey studies an unopened box" } }];
+    change(spec.repairs[0]);
+    await fs.writeFile(specPath, bytes(spec));
+    await assert.rejects(applyVisualBeatExactRepair({ episodeDir, specPath,
+      beatIds: [ids[0]], status }), pattern, name);
+    assert.deepEqual(await fs.readFile(path.join(episodeDir, "visual_beat_plan.json")), planBytes);
+    assert.deepEqual(await fs.readFile(path.join(episodeDir, "visual_beat_approval.json")), approvalBytes);
+  });
+}
+
+await withFixture(async ({ episodeDir, status, ids, spec, specPath, plan }) => {
+  plan.beats[1].visual_beat_script_excerpt += " A receipt appears.";
+  const planBytes = bytes(plan);
+  await fs.writeFile(path.join(episodeDir, "visual_beat_plan.json"), planBytes);
+  const approvalPath = path.join(episodeDir, "visual_beat_approval.json");
+  const approval = await read(approvalPath);
+  approval.visual_beat_plan_sha256 = hash(planBytes);
+  const approvalBytes = bytes(approval);
+  await fs.writeFile(approvalPath, approvalBytes);
+  spec.base_visual_beat_plan_sha256 = hash(planBytes);
+  spec.base_visual_beat_approval_sha256 = hash(approvalBytes);
+  spec.repairs = [{ visual_beat_id: ids[0], source_atom_ids: plan.beats[1].source_atom_ids,
+    evidence_note: "This purported receipt has no approved source support.",
+    action: { before: plan.beats[1].visual_beat_action, to: "Joey examines a receipt." },
+    action_evidence: { before: plan.beats[1].visual_beat_action_evidence,
+      to: "A receipt appears" } }];
+  await fs.writeFile(specPath, bytes(spec));
+  await assert.rejects(applyVisualBeatExactRepair({ episodeDir, specPath,
+    beatIds: [ids[0]], status }), /Action evidence is absent from approved script/);
+  assert.deepEqual(await fs.readFile(path.join(episodeDir, "visual_beat_plan.json")), planBytes);
+  assert.deepEqual(await fs.readFile(approvalPath), approvalBytes);
 });
 
 for (const change of [

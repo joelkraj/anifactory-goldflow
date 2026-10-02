@@ -16,6 +16,10 @@ const readJson = async (file) => JSON.parse(await fs.readFile(file, "utf8"));
 const jsonBytes = (value) => Buffer.from(`${JSON.stringify(value, null, 2)}\n`, "utf8");
 const text = (value, max = 700) => typeof value === "string" && value.trim() === value
   && value.length > 0 && value.length <= max && !/[\u0000-\u0008\u000e-\u001f]/u.test(value);
+const evidenceText = (value) => String(value ?? "").toLowerCase()
+  .replace(/[\p{P}\p{S}]+/gu, " ").replace(/\s+/gu, " ").trim();
+const containsEvidence = (source, quote) => Boolean(evidenceText(quote))
+  && ` ${evidenceText(source)} `.includes(` ${evidenceText(quote)} `);
 const same = (left, right) => JSON.stringify(left) === JSON.stringify(right);
 const timestamp = (seconds) => {
   const value = Math.max(0, Number(seconds) || 0);
@@ -64,11 +68,12 @@ function assertSpec(spec, ids) {
   const specIds = spec.repairs.map((repair) => repair?.visual_beat_id);
   if (!same(specIds, ids)) throw new Error("Repair spec beat IDs must exactly match ordered --beat-ids.");
   for (const repair of spec.repairs) {
-    if (!keysOnly(repair, ["visual_beat_id", "source_atom_ids", "evidence_note", "location", "focus", "continuity_note", "visibility", "visibility_corrections", "memory_state", "location_ref_removals"])
+    if (!keysOnly(repair, ["visual_beat_id", "source_atom_ids", "evidence_note", "location", "focus", "continuity_note", "action", "action_evidence", "visibility", "visibility_corrections", "memory_state", "location_ref_removals"])
       || !Array.isArray(repair.source_atom_ids) || !repair.source_atom_ids.length
       || !unique(repair.source_atom_ids) || repair.source_atom_ids.some((id) => !/^atom_w\d{6}_w\d{6}$/.test(id))
       || !text(repair.evidence_note, 1500)
-      || !["location", "focus", "continuity_note", "visibility", "visibility_corrections", "memory_state", "location_ref_removals"].some((key) => own(repair, key))) {
+      || !["location", "focus", "continuity_note", "action", "visibility", "visibility_corrections", "memory_state", "location_ref_removals"].some((key) => own(repair, key))
+      || (own(repair, "action_evidence") && !own(repair, "action"))) {
       throw new Error(`Invalid exact beat repair: ${repair?.visual_beat_id ?? "missing ID"}.`);
     }
     if (own(repair, "location") && (!keysOnly(repair.location, ["before_location_id", "before_location", "to_location_id", "to_location"])
@@ -80,6 +85,13 @@ function assertSpec(spec, ids) {
     for (const field of ["focus", "continuity_note"]) {
       if (own(repair, field) && (!keysOnly(repair[field], ["before", "to"])
         || !own(repair[field], "before") || !text(repair[field].to, 700))) {
+        throw new Error(`Invalid ${field} correction: ${repair.visual_beat_id}.`);
+      }
+    }
+    for (const field of ["action", "action_evidence"]) {
+      if (own(repair, field) && (!keysOnly(repair[field], ["before", "to"])
+        || !text(repair[field].before, field === "action" ? 700 : 350)
+        || !text(repair[field].to, field === "action" ? 700 : 350))) {
         throw new Error(`Invalid ${field} correction: ${repair.visual_beat_id}.`);
       }
     }
@@ -218,6 +230,34 @@ export function repairVisualBeatPlan(plan, spec, factLedger) {
       changes.push({ visual_beat_id: repair.visual_beat_id, field: "continuity_note",
         before: repair.continuity_note.before, after: repair.continuity_note.to });
     }
+    if (own(repair, "action")) {
+      if (beat.visual_beat_action !== repair.action.before) {
+        throw new Error(`Action before-value changed: ${repair.visual_beat_id}.`);
+      }
+      if (repair.action.before === repair.action.to) {
+        throw new Error(`Action correction is a no-op: ${repair.visual_beat_id}.`);
+      }
+      if (own(repair, "action_evidence")) {
+        if (beat.visual_beat_action_evidence !== repair.action_evidence.before) {
+          throw new Error(`Action evidence before-value changed: ${repair.visual_beat_id}.`);
+        }
+        if (repair.action_evidence.before === repair.action_evidence.to) {
+          throw new Error(`Action evidence correction is a no-op: ${repair.visual_beat_id}.`);
+        }
+      }
+      const finalEvidence = repair.action_evidence?.to ?? beat.visual_beat_action_evidence;
+      if (!containsEvidence(beat.visual_beat_script_excerpt, finalEvidence)) {
+        throw new Error(`Action evidence is absent from exact beat excerpt: ${repair.visual_beat_id}.`);
+      }
+      beat.visual_beat_action = repair.action.to;
+      changes.push({ visual_beat_id: repair.visual_beat_id, field: "visual_beat_action",
+        before: repair.action.before, after: repair.action.to, source_quote: finalEvidence });
+      if (own(repair, "action_evidence")) {
+        beat.visual_beat_action_evidence = repair.action_evidence.to;
+        changes.push({ visual_beat_id: repair.visual_beat_id, field: "visual_beat_action_evidence",
+          before: repair.action_evidence.before, after: repair.action_evidence.to });
+      }
+    }
     for (const correction of own(repair, "visibility_corrections")
       ? repair.visibility_corrections : (own(repair, "visibility") ? [repair.visibility] : [])) {
       const id = correction.entity_id;
@@ -275,8 +315,8 @@ export function repairVisualBeatPlan(plan, spec, factLedger) {
       }
     }
   }
-  output.location_timeline = locationTimeline(output.beats);
   if (spec.repairs.some((repair) => own(repair, "location"))) {
+    output.location_timeline = locationTimeline(output.beats);
     const locationCodes = new Set(["location_mention_not_in_beat_location",
       "repeated_location_visual_job_run", "long_same_location_beat_span"]);
     const beforeQuality = output.visual_beat_quality_findings ?? [];
@@ -344,6 +384,13 @@ export async function applyVisualBeatExactRepair({ episodeDir, specPath, beatIds
     for (const repair of spec.repairs) {
       if (repair.memory_state && !scriptBytes.toString("utf8").includes(repair.memory_state.source_quote)) {
         throw new Error(`Historical memory quote is absent from approved script: ${repair.visual_beat_id}.`);
+      }
+      if (repair.action) {
+        const quote = repair.action_evidence?.to
+          ?? plan.beats.find((beat) => beat.visual_beat_id === repair.visual_beat_id)?.visual_beat_action_evidence;
+        if (!containsEvidence(scriptBytes.toString("utf8"), quote)) {
+          throw new Error(`Action evidence is absent from approved script: ${repair.visual_beat_id}.`);
+        }
       }
     }
     if (path.resolve(spec.episode_dir) !== episodeDir || sha256(identityBytes) !== spec.run_identity_sha256

@@ -4017,7 +4017,9 @@ export async function reviewedAutomatedRetryStatusForTests({
               path.join(repairDir, "prior_report.json"))
             || boundary.prior_audio_sha256 !== priorSelected?.audio_sha256
             || boundary.prior_synthesis_identity_sha256
-              !== priorSelected?.synthesis_identity_sha256) {
+              !== priorSelected?.synthesis_identity_sha256
+            || !inside(priorSelected?.audio_path)
+            || await fileSha256(priorSelected.audio_path) !== priorSelected.audio_sha256) {
             throw new Error(`superseding boundary input is stale for ${reviewed.unit_id}`);
           }
         }

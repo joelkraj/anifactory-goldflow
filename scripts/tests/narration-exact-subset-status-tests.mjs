@@ -156,6 +156,10 @@ try {
   assert.equal(await superseded(), null);
   await fs.writeFile(boundaryResultPath, "corrupted boundary result");
   assert.match((await superseded()).next_command_shape, /^Operator hold:/);
+  await fs.writeFile(boundaryResultPath, "completed boundary result");
+  await fs.writeFile(secondAudioPath, "corrupted superseded second take");
+  assert.match((await superseded()).next_command_shape, /^Operator hold:/);
+  await fs.writeFile(secondAudioPath, "selected exact second take");
   await fs.writeFile(reportPath, originalReportBytes);
   await fs.writeFile(audioPath, "mutated");
   assert.match((await status()).next_command_shape, /^Operator hold:/);

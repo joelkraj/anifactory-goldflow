@@ -51,6 +51,10 @@ async function pcmInfo(file) {
   } finally { await handle.close(); }
 }
 
+// Shared by narrowly scoped retained-audio reviews. Exporting these does not
+// change the existing contextual-omission decision or its evidence contract.
+export { pcmInfo };
+
 async function pcm(file, start, count, info = null) {
   const meta = info ?? await pcmInfo(file);
   need(Number.isInteger(start) && Number.isInteger(count) && start >= 0
@@ -63,6 +67,7 @@ async function pcm(file, start, count, info = null) {
     return bytes;
   } finally { await handle.close(); }
 }
+export { pcm };
 
 function correlation(a, b) {
   need(a.length === b.length && a.length % 2 === 0, "PCM correlation length mismatch");
@@ -75,6 +80,7 @@ function correlation(a, b) {
   const left = aa - ax * ax / n; const right = bb - by * by / n;
   return left > 0 && right > 0 ? (ab - ax * by / n) / Math.sqrt(left * right) : 0;
 }
+export { correlation };
 
 export async function loadContextualAsrReconciliation({ evidencePath, currentReportPath,
   currentStitchReportPath = null, currentUnitDeliveryPath = null,

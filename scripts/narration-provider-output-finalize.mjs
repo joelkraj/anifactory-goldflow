@@ -73,6 +73,7 @@ import { loadNarrationSourceStructure } from "./lib/narration-source-structure.m
 import { applyLowMarginDisposition, assertLowMarginActiveBindings, loadLowMarginDisposition } from "./lib/narration-low-margin-disposition.mjs";
 import { applyFullStreamManualReview, loadFullStreamManualReview } from "./lib/narration-full-stream-manual-review.mjs";
 import { applyContextualAsrReconciliation, loadContextualAsrReconciliation } from "./lib/narration-full-stream-contextual-asr.mjs";
+import { applyFullStreamSpacingBridge, loadFullStreamSpacingBridge } from "./lib/narration-full-stream-spacing-bridge.mjs";
 import { applyAsrOrthographyReviewForTests, loadAsrOrthographyReview } from "./lib/narration-asr-orthography-review.mjs";
 import { providerNeutralRetryReportFieldsForTests, verifiedStructuralRecoveryFromManifest } from "./lib/narration-structural-finalizer-provenance.mjs";
 import { loadPronunciationRecoveryState } from "./lib/narration-pronunciation-episode.mjs";
@@ -1348,14 +1349,20 @@ export async function finalizeNarrationProviderOutput(
     ? path.resolve(flags["full-stream-review-evidence"]) : null;
   const contextualAsrEvidencePath = String(flags["contextual-asr-evidence"] ?? "").trim()
     ? path.resolve(flags["contextual-asr-evidence"]) : null;
+  const spacingBridgeEvidencePath = String(flags["full-stream-spacing-bridge-evidence"] ?? "").trim()
+    ? path.resolve(flags["full-stream-spacing-bridge-evidence"]) : null;
   const acceptReviewWarnings = boolFlag(flags["accept-review-warnings"]);
   const skipSubjectiveReview = boolFlag(flags["skip-subjective-review"]);
   if (fullStreamReviewEvidencePath && acceptAsrDeliveryBlockers) {
     throw new Error("Exact full-stream review cannot be combined with --accept-asr-delivery-blockers.");
   }
-  if (contextualAsrEvidencePath && (fullStreamReviewEvidencePath
+  if (contextualAsrEvidencePath && (spacingBridgeEvidencePath || fullStreamReviewEvidencePath
     || acceptAsrDeliveryBlockers || acceptReviewWarnings || skipSubjectiveReview)) {
     throw new Error("Exact contextual ASR evidence cannot be combined with a review or waiver.");
+  }
+  if (spacingBridgeEvidencePath && (fullStreamReviewEvidencePath
+    || acceptAsrDeliveryBlockers || acceptReviewWarnings || skipSubjectiveReview)) {
+    throw new Error("Exact full-stream spacing evidence cannot be combined with a review or waiver.");
   }
   const deliveryWaiverReason = String(
     flags["delivery-waiver-reason"] ?? "",
@@ -1466,9 +1473,21 @@ export async function finalizeNarrationProviderOutput(
       currentUnitDeliveryPath: path.join(episodeDir,
         `narration_unit_delivery_qa_${episode}.json`),
     }) : null;
+  const spacingBridge = spacingBridgeEvidencePath
+    ? await loadFullStreamSpacingBridge({
+      evidencePath: spacingBridgeEvidencePath, currentReportPath: fullStreamPath,
+      currentStitchReportPath: path.join(episodeDir,
+        `audio_stitch_report_${episode}-narration.json`),
+      currentUnitDeliveryPath: path.join(episodeDir,
+        `narration_unit_delivery_qa_${episode}.json`),
+    }) : null;
   if (contextualAsrReconciliation
     && contextualAsrReconciliation.prior.provider_output_manifest_file_sha256 !== manifestFileSha256) {
     throw new Error("Contextual ASR evidence does not bind the selected provider manifest.");
+  }
+  if (spacingBridge
+    && spacingBridge.prior.provider_output_manifest_file_sha256 !== manifestFileSha256) {
+    throw new Error("Full-stream spacing evidence does not bind the selected provider manifest.");
   }
   const scopeFields = pilotFinalization ? { finalization_scope: pilotFinalization.scope } : {};
   const operatorNarrationWaiver = {
@@ -1873,6 +1892,9 @@ export async function finalizeNarrationProviderOutput(
   if (contextualAsrReconciliation && primaryNeeds.length) {
     throw new Error("Contextual ASR reconciliation requires retained unit ASR; refresh QA separately.");
   }
+  if (spacingBridge && primaryNeeds.length) {
+    throw new Error("Full-stream spacing bridge requires retained unit ASR; refresh QA separately.");
+  }
   const [acousticQa, freshPrimaryMap, voiceContinuity] = await Promise.all([
     helpers.runUnitOutputQaForDiagnostics(rows, {
       reuseHashValidQa: true,
@@ -1972,6 +1994,9 @@ export async function finalizeNarrationProviderOutput(
   }
   if (contextualAsrReconciliation && confirmationCandidates.length) {
     throw new Error("Contextual ASR reconciliation requires retained unit confirmation ASR.");
+  }
+  if (spacingBridge && confirmationCandidates.length) {
+    throw new Error("Full-stream spacing bridge requires retained unit confirmation ASR.");
   }
   for (const row of rows) {
     const primary = primaryById.get(String(row.unit_id));
@@ -2511,7 +2536,9 @@ export async function finalizeNarrationProviderOutput(
     }
   }
   if (!stitch) {
-    if (fullStreamManualReview) throw new Error("Exact full-stream review requires the retained stitch; media rebuilding is forbidden.");
+    if (fullStreamManualReview || contextualAsrReconciliation || spacingBridge) {
+      throw new Error("Exact full-stream evidence requires the retained stitch; media rebuilding is forbidden.");
+    }
     if (reviewContinuation) {
       throw new Error("Reviewed continuation lost its exact cached raw stitch; restitching is forbidden.");
     }
@@ -2569,7 +2596,9 @@ export async function finalizeNarrationProviderOutput(
       )) {
       mastering = cachedMastering;
     } else {
-      if (fullStreamManualReview) throw new Error("Exact full-stream review requires the retained master; media rebuilding is forbidden.");
+      if (fullStreamManualReview || contextualAsrReconciliation || spacingBridge) {
+        throw new Error("Exact full-stream evidence requires the retained master; media rebuilding is forbidden.");
+      }
       mastering = await masterNarrationTwoPass({
         inputPath: rawWav,
         outputPath: masteredPath,
@@ -2698,6 +2727,11 @@ export async function finalizeNarrationProviderOutput(
   )) {
     throw new Error("Contextual ASR reconciliation requires current retained full-stream ASR.");
   }
+  if (spacingBridge && !narrationFullStreamDerivedDecisionsCurrent(
+    cachedFullStream, helpers.TRANSCRIPT_QA_COMPARISON_VERSION,
+  )) {
+    throw new Error("Full-stream spacing bridge requires current retained full-stream ASR.");
+  }
   const rawFullStream = narrationFullStreamDerivedDecisionsCurrent(
     cachedFullStream, helpers.TRANSCRIPT_QA_COMPARISON_VERSION,
   )
@@ -2757,6 +2791,15 @@ export async function finalizeNarrationProviderOutput(
         fullStream.full_stream_contextual_asr),
       status: fullStream.decision.status === "blocked" ? "blocked" : "passed",
       payload: fullStream.full_stream_contextual_asr,
+    };
+  }
+  if (spacingBridge) {
+    fullStream = applyFullStreamSpacingBridge({ fullStream, bridge: spacingBridge });
+    checkpoint.stages.full_stream_spacing_bridge = {
+      input_key: narrationFinalizationStageKey("full_stream_spacing_bridge",
+        fullStream.full_stream_spacing_bridge),
+      status: fullStream.decision.status === "blocked" ? "blocked" : "passed",
+      payload: fullStream.full_stream_spacing_bridge,
     };
   }
   const originalFullStreamBlockers = [
@@ -2828,6 +2871,7 @@ export async function finalizeNarrationProviderOutput(
     manual_review_rejected_unit_ids: manualReview?.rejected_unit_ids ?? [],
     full_stream_manual_review: fullStream.full_stream_manual_review ?? null,
     full_stream_contextual_asr: fullStream.full_stream_contextual_asr ?? null,
+    full_stream_spacing_bridge: fullStream.full_stream_spacing_bridge ?? null,
     operator_narration_qa_waiver:
       acceptAsrDeliveryBlockers || acceptReviewWarnings
         ? operatorNarrationWaiver
@@ -2860,7 +2904,9 @@ export async function finalizeNarrationProviderOutput(
   );
   let finalM4aSha256 = cachedEncodeStage?.payload?.final_m4a_sha256 ?? null;
   if (!(await fileMatchesSha256(finalM4a, finalM4aSha256))) {
-    if (fullStreamManualReview) throw new Error("Exact full-stream review requires the retained encode; media rebuilding is forbidden.");
+    if (fullStreamManualReview || contextualAsrReconciliation || spacingBridge) {
+      throw new Error("Exact full-stream evidence requires the retained encode; media rebuilding is forbidden.");
+    }
     finalM4aSha256 = await encodeM4a(canonicalWav, finalM4a);
   }
   checkpoint.stages.encode_m4a = {
@@ -2953,6 +2999,7 @@ export async function finalizeNarrationProviderOutput(
     full_stream_qa_path: fullStreamPath,
     full_stream_manual_review: fullStream.full_stream_manual_review ?? null,
     full_stream_contextual_asr: fullStream.full_stream_contextual_asr ?? null,
+    full_stream_spacing_bridge: fullStream.full_stream_spacing_bridge ?? null,
     boundary_qa: stitch.boundary_qa,
     boundaries: stitch.boundaries,
     join_qa: joinQa,
@@ -2988,6 +3035,7 @@ export async function finalizeNarrationProviderOutput(
     schema: "goldflow_provider_neutral_narration_tts_report_v2",
     full_stream_manual_review: fullStream.full_stream_manual_review ?? null,
     full_stream_contextual_asr: fullStream.full_stream_contextual_asr ?? null,
+    full_stream_spacing_bridge: fullStream.full_stream_spacing_bridge ?? null,
     status: ttsStatus,
     source_script_hash: sourceHash,
     narration_generation_plan_path: planPath,

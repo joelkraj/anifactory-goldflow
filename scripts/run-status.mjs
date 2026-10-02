@@ -70,6 +70,7 @@ import {
 } from "./lib/narration-cross-level-asr.mjs";
 import { validateAppliedFullStreamManualReview } from "./lib/narration-full-stream-manual-review.mjs";
 import { loadContextualAsrReconciliation, validateAppliedContextualAsrReconciliation } from "./lib/narration-full-stream-contextual-asr.mjs";
+import { loadFullStreamSpacingBridge, validateAppliedFullStreamSpacingBridge } from "./lib/narration-full-stream-spacing-bridge.mjs";
 import {
   EXTERNAL_NARRATION_TTS_PROVIDERS,
   hasExplicitLegacyQwenIdentity,
@@ -2299,6 +2300,30 @@ async function synthesizedNarrationArtifactsComplete({
   } catch (error) {
     add(error.message);
   }
+  try {
+    await validateAppliedFullStreamSpacingBridge(fullQa);
+    if (fullQa?.full_stream_spacing_bridge) {
+      const receipt = fullQa.full_stream_spacing_bridge;
+      if (receipt.unit_delivery_sha256 !== await fileSha256(path.join(episodeDir,
+        `narration_unit_delivery_qa_${episode}.json`))) {
+        add("full-stream spacing bridge unit delivery hash is stale");
+      }
+      // The receipt binds the immutable pre-review stitch report. Finalization
+      // adds this receipt to the canonical report, so its file hash must change.
+      const manifestPath = ttsReport?.provider_output_manifest_path;
+      if (!manifestPath || fullQa.provider_output_manifest_file_sha256
+        !== await fileSha256(manifestPath)) {
+        add("full-stream spacing bridge provider manifest hash is stale");
+      }
+      for (const report of [ttsReport, stitchReport]) {
+        if (JSON.stringify(report?.full_stream_spacing_bridge) !== JSON.stringify(receipt)) {
+          add("full-stream spacing bridge provenance differs across narration reports");
+        }
+      }
+    }
+  } catch (error) {
+    add(error.message);
+  }
 
   const planBoundArtifacts = [
     ["TTS report", ttsReport],
@@ -4494,6 +4519,30 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
           return { done: false, state: "blocked",
             evidence: `Contextual ASR evidence is stale or invalid: ${error.message}`,
             next_command_shape: "Operator hold: repair only the exact contextual ASR evidence; do not rerun narration." };
+        }
+      }
+      const spacingEvidencePath = path.join(episodeDir,
+        `narration_full_stream_spacing_bridge_evidence_${episode}.json`);
+      if (await exists(spacingEvidencePath)) {
+        try {
+          const resolved = await loadFullStreamSpacingBridge({
+            evidencePath: spacingEvidencePath,
+            currentReportPath: path.join(episodeDir,
+              `narration_full_stream_qa_${episode}.json`),
+            currentUnitDeliveryPath: unitDeliveryPath,
+            currentStitchReportPath: path.join(episodeDir,
+              `audio_stitch_report_${episode}-narration.json`),
+          });
+          if (resolved.scope.length !== 2 || reportBoundValidation.status !== "passed") {
+            throw new Error("other unresolved full-stream blockers remain");
+          }
+          return { done: false, state: "blocked",
+            evidence: "The sole paired full-stream spacing discrepancy is bound to an accepted exact-unit review and retained PCM; re-adjudicate retained audio without synthesis",
+            next_command_shape: `node bin/goldflow.mjs tts finalize-provider --episode-dir ${episodeDir} --manifest ${reportBoundManifestPath} --full-stream-spacing-bridge-evidence ${spacingEvidencePath}` };
+        } catch (error) {
+          return { done: false, state: "blocked",
+            evidence: `Full-stream spacing evidence is stale or invalid: ${error.message}`,
+            next_command_shape: "Operator hold: repair only the exact full-stream spacing evidence; do not rerun narration." };
         }
       }
     }

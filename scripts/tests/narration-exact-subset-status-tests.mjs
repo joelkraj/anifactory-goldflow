@@ -124,6 +124,38 @@ try {
   await fs.writeFile(secondAudioPath, "mutated second take");
   assert.match((await consumed()).next_command_shape, /^Operator hold:/);
   await fs.writeFile(secondAudioPath, "selected exact second take");
+  const boundaryDir = path.join(temp, "exact-boundary");
+  await fs.mkdir(boundaryDir);
+  const boundaryPriorManifestPath = path.join(boundaryDir, "prior_manifest.json");
+  const boundaryPriorReportPath = path.join(boundaryDir, "prior_report.json");
+  await fs.writeFile(boundaryPriorManifestPath, JSON.stringify({ units: [secondReport.results[0]] }));
+  await fs.writeFile(boundaryPriorReportPath, JSON.stringify(secondReport));
+  const boundaryRequestPath = path.join(boundaryDir, "request.json");
+  const boundaryResultPath = path.join(boundaryDir, "repair-result.json");
+  await fs.writeFile(boundaryRequestPath, JSON.stringify({ request_sha256: sha("boundary request"),
+    prior_manifest_file_sha256: sha(await fs.readFile(boundaryPriorManifestPath)),
+    prior_report_file_sha256: sha(await fs.readFile(boundaryPriorReportPath)) }));
+  await fs.writeFile(boundaryResultPath, "completed boundary result");
+  const compositePath = path.join(boundaryDir, "composite.wav");
+  await fs.writeFile(compositePath, "selected boundary composite");
+  const supersededReport = { ...secondReport, results: [{ ...secondReport.results[0],
+    audio_path: compositePath, audio_sha256: sha("selected boundary composite"),
+    recovery_provenance: {
+      schema: "goldflow_tts_exact_boundary_repair_provenance_v1",
+      request_path: boundaryRequestPath, request_sha256: sha("boundary request"),
+      result_path: boundaryResultPath,
+      result_sha256: sha("completed boundary result"),
+      prior_audio_sha256: secondReport.results[0].audio_sha256,
+      prior_synthesis_identity_sha256: secondReport.results[0].synthesis_identity_sha256,
+    } }, second] };
+  await fs.writeFile(reportPath, JSON.stringify(supersededReport));
+  const superseded = () => reviewedAutomatedRetryStatusForTests({
+    episodeDir: temp, episode, ttsReport: supersededReport,
+    ttsReportPath: reportPath, currentScriptHash: sourceHash,
+  });
+  assert.equal(await superseded(), null);
+  await fs.writeFile(boundaryResultPath, "corrupted boundary result");
+  assert.match((await superseded()).next_command_shape, /^Operator hold:/);
   await fs.writeFile(reportPath, originalReportBytes);
   await fs.writeFile(audioPath, "mutated");
   assert.match((await status()).next_command_shape, /^Operator hold:/);

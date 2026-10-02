@@ -206,6 +206,12 @@ export async function main(parts = process.argv.slice(2)) {
     firstAudioFileSha256, firstSidecar, firstSidecarFileSha256,
     remainderAudioFileSha256, remainderSidecar, remainderSidecarFileSha256,
   });
+  for (const row of manifest.units) {
+    if (!within(episodeDir, row.audio_path)
+      || await fileHash(row.audio_path) !== row.audio_sha256) {
+      throw new Error(`Contraction review preserved WAV hash changed: ${row.unit_id}.`);
+    }
+  }
   await fs.writeFile(evidencePath, `${JSON.stringify(evidence, null, 2)}\n`, { flag: "wx" });
   process.stdout.write(`${JSON.stringify({
     status: "contraction_reviewed_automated_qa",

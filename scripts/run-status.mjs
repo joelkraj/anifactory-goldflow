@@ -55,6 +55,9 @@ import { projectVerifiedStructuralRecoveryReport, structuralProjectionManifestFo
 import { validateConfirmedRetryEvidenceForTests } from "./narration-tts-episode.mjs";
 import { loadPronunciationRecoveryState } from "./lib/narration-pronunciation-episode.mjs";
 import { loadAutomatedPronunciationState } from "./lib/narration-automated-pronunciation-episode.mjs";
+import { CONTRACTION_MODE, CONTRACTION_TARGET_UNIT_ID,
+  loadContractionRecoveryState,
+  validateAppliedContractionReview } from "./lib/narration-contraction-repair.mjs";
 import {
   PRONUNCIATION_MODE,
   AUTOMATED_PRONUNCIATION_MODE,
@@ -2810,6 +2813,24 @@ async function synthesizedNarrationArtifactsComplete({
           }
         }
         if (!valid) add(`unit ${planned.unit_id} exact-boundary composite provenance is missing or stale`);
+      } else if (mode === CONTRACTION_MODE) {
+        const proof = ttsReport?.automated_contraction_expansion;
+        const provenance = result.recovery_provenance;
+        if (proof?.unit_id !== planned.unit_id
+          || proof.human_listening_performed !== false
+          || provenance?.schema !== "goldflow_tts_exact_contraction_candidate_provenance_v1"
+          || provenance?.prior_selected?.audio_sha256
+            !== synthesisIdentity.prior_audio_sha256
+          || synthesisIdentity.schema
+            !== "goldflow_tts_exact_contraction_composite_identity_v1"
+          || result.synthesis_identity_sha256
+            !== narrationSynthesisIdentitySha256(synthesisIdentity)
+          || synthesisIdentity.unit_id !== planned.unit_id
+          || synthesisIdentity.spoken_text_sha256 !== planned.spoken_text_sha256
+          || synthesisIdentity.composite_audio_sha256 !== result.audio_sha256
+          || synthesisIdentity.request_sha256 !== provenance?.request_sha256) {
+          add(`unit ${planned.unit_id} exact contraction expansion provenance is missing or stale`);
+        }
       } else if (mode === APPEND_ONLY_TAIL_MODE) {
         try {
           if (!verifiedAppendOnlyTail) {
@@ -3997,6 +4018,23 @@ export async function reviewedAutomatedRetryStatusForTests({
       for (const reviewed of evidence.confirmed_units) {
         const current = selected.get(reviewed.unit_id);
         let priorSelected = current;
+        if (priorSelected?.recovery_provenance?.schema
+          === "goldflow_tts_exact_contraction_candidate_provenance_v1") {
+          const contraction = priorSelected.recovery_provenance;
+          const within = (target) => path.isAbsolute(String(target ?? ""))
+            && path.resolve(target).startsWith(`${path.resolve(episodeDir)}${path.sep}`);
+          const prior = contraction.prior_selected;
+          if (!within(contraction.request_path) || !within(contraction.result_path)
+            || !within(prior?.audio_path)
+            || await fileSha256(contraction.result_path) !== contraction.result_sha256
+            || await fileSha256(prior.audio_path) !== prior.audio_sha256
+            || contraction.prior_audio_sha256 !== prior.audio_sha256
+            || contraction.prior_synthesis_identity_sha256
+              !== prior.synthesis_identity_sha256) {
+            throw new Error(`superseding contraction provenance is stale for ${reviewed.unit_id}`);
+          }
+          priorSelected = prior;
+        }
         const seenBoundaryRequests = new Set();
         for (let depth = 0; priorSelected?.recovery_provenance?.schema
           === "goldflow_tts_exact_boundary_repair_provenance_v1"; depth += 1) {
@@ -4704,6 +4742,46 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
       }
     }
     if (ttsReport.status === "blocked" && policy.primary.provider === "qwen_local") {
+      const receiptPath = path.join(episodeDir,
+        `narration_automated_contraction_expansion_${episode}.json`);
+      if (!(await exists(receiptPath))
+        && ttsReport.blockers?.length === 1
+        && ttsReport.blockers[0]?.unit_id === CONTRACTION_TARGET_UNIT_ID
+        && ttsReport.blockers[0]?.code
+          === "narration_confirmed_opening_token_mismatch") {
+        const selectedManifest = await readJson(
+          ttsReport.provider_output_manifest_path, null);
+        const selected = (selectedManifest?.units ?? []).find(
+          (row) => row.unit_id === CONTRACTION_TARGET_UNIT_ID);
+        if (selected?.synthesis_mode === "exact_sentence_boundary_composite_v1"
+          && selected.recovery_provenance?.schema
+            === "goldflow_tts_exact_boundary_repair_provenance_v1") {
+          return { done: false, state: "blocked",
+            evidence: `The sole blocked unit ${CONTRACTION_TARGET_UNIT_ID} has the exact past-perfect opening and a selected two-fragment boundary composite; prepare a machine-validated TTS-only expansion receipt`,
+            next_command_shape: `node bin/goldflow.mjs tts review-contraction --episode-dir ${episodeDir}` };
+        }
+      }
+      try {
+        const contraction = await loadContractionRecoveryState({
+          episodeDir, episode, sourceScriptSha256: currentScriptHash,
+        });
+        if (contraction?.kind === "evidence_reviewed") {
+          return { done: false, state: "blocked",
+            evidence: `One exact past-perfect TTS-only expansion is reviewed for ${contraction.unit_id}; source and captions stay unchanged`,
+            next_command_shape: `node bin/goldflow.mjs tts repair-contraction --episode-dir ${episodeDir} --evidence ${contraction.evidence_path}` };
+        }
+        if (contraction?.kind === "candidate_ready") {
+          return { done: false, state: "blocked",
+            evidence: `One exact contraction candidate is hash-bound for ${contraction.unit_id}; fresh dual-ASR, acoustic, voice, and full-stream QA remain required`,
+            next_command_shape: `node bin/goldflow.mjs tts finalize-provider --episode-dir ${episodeDir} --manifest ${contraction.candidate_manifest_path} --contraction-expansion-evidence ${contraction.evidence_path}` };
+        }
+      } catch (error) {
+        return { done: false, state: "blocked",
+          evidence: `Contraction expansion receipt is stale or incomplete: ${error.message}`,
+          next_command_shape: "Operator hold: inspect the one-unit contraction candidate; do not synthesize again." };
+      }
+    }
+    if (ttsReport.status === "blocked" && policy.primary.provider === "qwen_local") {
       try {
         const pronunciation = await loadPronunciationRecoveryState({
           episodeDir, episode, sourceScriptSha256: currentScriptHash,
@@ -4829,6 +4907,10 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
       plan, planFileSha256, ttsReport, unitDelivery,
       providerOutput, providerOutputPath,
     })) v2Findings.push("automated_pronunciation_review_stale_or_missing");
+    if (!await validateAppliedContractionReview({
+      episodeDir, episode, sourceScriptSha256: currentScriptHash,
+      ttsReport, unitDelivery, providerOutput, providerOutputPath,
+    })) v2Findings.push("contraction_expansion_review_stale_or_missing");
     try {
       await loadLowMarginDisposition({ episodeDir, episode,
         expectedBinding: unitDelivery?.voice_low_margin_disposition ?? null });
@@ -6551,7 +6633,7 @@ async function main() {
     ? ["transition_edit_plan"]
     : next?.stage === "qwen_tts_stitch"
       && next?.state === "blocked"
-      && /tts (?:approve-listen|narrate|finalize-provider|repair-boundary)\b/.test(String(next.next_command_shape ?? ""))
+      && /tts (?:approve-listen|narrate|finalize-provider|repair-boundary|review-contraction|repair-contraction)\b/.test(String(next.next_command_shape ?? ""))
       ? ["qwen_tts_stitch"]
     : ["reference_generation", "image_generation"].includes(next?.stage)
       && next?.state === "blocked"

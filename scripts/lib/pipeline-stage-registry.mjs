@@ -133,6 +133,8 @@ const stages = [
       "tts complete-tail",
       "tts repair-pronunciation",
       "tts repair-pronunciation-auto",
+      "tts review-contraction",
+      "tts repair-contraction",
       "tts approve-listen",
       "tts source-structure",
       "tts low-margin-disposition",

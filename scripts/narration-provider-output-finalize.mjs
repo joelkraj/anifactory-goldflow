@@ -78,6 +78,10 @@ import { applyAsrOrthographyReviewForTests, loadAsrOrthographyReview } from "./l
 import { providerNeutralRetryReportFieldsForTests, verifiedStructuralRecoveryFromManifest } from "./lib/narration-structural-finalizer-provenance.mjs";
 import { loadPronunciationRecoveryState } from "./lib/narration-pronunciation-episode.mjs";
 import { loadAutomatedPronunciationState } from "./lib/narration-automated-pronunciation-episode.mjs";
+import { CONTRACTION_ALIAS, CONTRACTION_MODE, CONTRACTION_SOURCE_UNIT,
+  contractionCandidateAsrDecisionForTests,
+  contractionSegmentReportFieldsForTests,
+  loadContractionRecoveryState } from "./lib/narration-contraction-repair.mjs";
 import {
   applyPronunciationCandidateReviewForTests,
   applyAutomatedPronunciationCandidateForTests,
@@ -1555,6 +1559,15 @@ export async function finalizeNarrationProviderOutput(
   const automatedPronunciationEvidencePath = String(
     flags["automated-pronunciation-evidence"] ?? "",
   ).trim() ? path.resolve(flags["automated-pronunciation-evidence"]) : null;
+  const contractionEvidencePath = String(
+    flags["contraction-expansion-evidence"] ?? "",
+  ).trim() ? path.resolve(flags["contraction-expansion-evidence"]) : null;
+  const hasContractionCandidate = manifest.units.some(
+    (row) => row.synthesis_mode === CONTRACTION_MODE,
+  );
+  if (hasContractionCandidate !== Boolean(contractionEvidencePath)) {
+    throw new Error("Exact contraction candidate and its hash-bound evidence must be selected together.");
+  }
   if (hasPronunciationCandidate && !pronunciationReviewEvidencePath) {
     throw new Error("A phonetic-word candidate cannot be selected without exact user listening approval.");
   }
@@ -1563,6 +1576,13 @@ export async function finalizeNarrationProviderOutput(
   }
   if (pronunciationReviewEvidencePath && automatedPronunciationEvidencePath) {
     throw new Error("User listening and automated pronunciation reviews cannot be combined.");
+  }
+  if (contractionEvidencePath && (pronunciationReviewEvidencePath
+    || automatedPronunciationEvidencePath || fullStreamReviewEvidencePath
+    || flags["manual-review-evidence"]
+    || flags["contextual-asr-evidence"] || flags["full-stream-spacing-bridge-evidence"]
+    || flags["asr-orthography-evidence"])) {
+    throw new Error("Exact contraction expansion cannot combine with another explicit review route.");
   }
   let pronunciationReview = null;
   if (pronunciationReviewEvidencePath) {
@@ -1600,8 +1620,27 @@ export async function finalizeNarrationProviderOutput(
       throw new Error("Automated pronunciation evidence does not bind this exact candidate manifest.");
     }
   }
+  let contractionReview = null;
+  if (contractionEvidencePath) {
+    if (phaseContext || policy.primary.provider !== "qwen_local"
+      || !narrationUsesAutomatedAsrAcceptance(qualityContract)
+      || acceptAsrDeliveryBlockers || acceptReviewWarnings
+      || pronunciationReview || automatedPronunciationReview) {
+      throw new Error("Exact contraction expansion requires ordinary automated Qwen QA without waivers.");
+    }
+    contractionReview = await loadContractionRecoveryState({
+      episodeDir, episode, sourceScriptSha256: actualSourceScriptSha256,
+    });
+    if (contractionReview?.kind !== "candidate_ready"
+      || contractionReview.evidence_path !== contractionEvidencePath
+      || contractionReview.candidate_manifest_path !== manifestPath
+      || contractionReview.candidate_manifest_file_sha256 !== manifestFileSha256
+      || manifest.units.filter((row) => row.synthesis_mode === CONTRACTION_MODE).length !== 1) {
+      throw new Error("Contraction evidence does not bind this exact one-unit candidate manifest.");
+    }
+  }
   let pronunciationSnapshots = null;
-  if (pronunciationReview || automatedPronunciationReview) {
+  if (pronunciationReview || automatedPronunciationReview || contractionReview) {
     for (const row of manifest.units) {
       if (await sha256File(row.audio_path) !== row.audio_sha256) {
         throw new Error(`Provider audio hash is stale for ${row.unit_id}.`);
@@ -1610,7 +1649,8 @@ export async function finalizeNarrationProviderOutput(
     const snapshotDir = path.join(episodeDir,
       "assets/audio/narration_tts/pronunciation_reviews",
       pronunciationReview?.review_file_sha256
-        ?? automatedPronunciationReview.evidence_file_sha256);
+        ?? automatedPronunciationReview?.evidence_file_sha256
+        ?? contractionReview.evidence_file_sha256);
     const copyImmutable = async (sourcePath, basename) => {
       const targetPath = path.join(snapshotDir, basename);
       const bytes = await fs.readFile(sourcePath);
@@ -1659,6 +1699,28 @@ export async function finalizeNarrationProviderOutput(
       prior_delivery_snapshot_sha256: pronunciationSnapshots.prior_delivery.sha256,
       expected_word: automatedPronunciationReview.expected_word,
       phonetic_word: automatedPronunciationReview.phonetic_word,
+      human_listening_performed: false,
+      acceptance_basis: "fresh_independent_dual_asr_and_normal_audio_qa",
+    },
+  } : {};
+  const contractionProvenance = contractionReview ? {
+    automated_contraction_expansion: {
+      schema: "goldflow_tts_reviewed_contraction_expansion_v1",
+      unit_id: contractionReview.unit_id,
+      evidence_path: contractionReview.evidence_path,
+      evidence_sha256: contractionReview.evidence_file_sha256,
+      manifest_path: manifestPath,
+      manifest_file_sha256: manifestFileSha256,
+      candidate_request_path: contractionReview.candidate_request_path,
+      candidate_request_sha256: contractionReview.candidate_request_file_sha256,
+      candidate_result_path: contractionReview.candidate_result_path,
+      candidate_result_sha256: contractionReview.candidate_result_file_sha256,
+      prior_report_snapshot_path: pronunciationSnapshots.prior_report.path,
+      prior_report_snapshot_sha256: pronunciationSnapshots.prior_report.sha256,
+      prior_delivery_snapshot_path: pronunciationSnapshots.prior_delivery.path,
+      prior_delivery_snapshot_sha256: pronunciationSnapshots.prior_delivery.sha256,
+      source_phrase: CONTRACTION_ALIAS.from,
+      tts_only_spoken_phrase: CONTRACTION_ALIAS.to,
       human_listening_performed: false,
       acceptance_basis: "fresh_independent_dual_asr_and_normal_audio_qa",
     },
@@ -1734,6 +1796,12 @@ export async function finalizeNarrationProviderOutput(
   const rows = units.map((unit, orderIndex) => {
     const output = manifestById.get(String(unit.unit_id));
     const spokenText = String(unit.spoken_text ?? unit.tts_spoken_text ?? "");
+    if (String(unit.unit_id) === contractionReview?.unit_id
+      && (unit.source_text !== CONTRACTION_SOURCE_UNIT
+        || unit.caption_text !== CONTRACTION_SOURCE_UNIT
+        || unit.caption_text_sha256 !== sha256(CONTRACTION_SOURCE_UNIT))) {
+      throw new Error("Exact contraction candidate lost the locked source caption.");
+    }
     return {
       ...unit,
       order_index: orderIndex,
@@ -1766,6 +1834,17 @@ export async function finalizeNarrationProviderOutput(
       provider_receipt: output.provider_receipt,
       provider_unit_qa: output.provider_unit_qa ?? null,
       provider_unit_qa_sha256: output.provider_unit_qa_sha256 ?? null,
+      ...(String(unit.unit_id) === contractionReview?.unit_id ? {
+        caption_text: unit.caption_text,
+        caption_text_sha256: unit.caption_text_sha256,
+        asr_equivalent_phrases: [CONTRACTION_ALIAS],
+        tts_only_contraction_expansion: {
+          source_token: "She’d", spoken_words: ["She", "had"],
+          source_phrase: CONTRACTION_ALIAS.from,
+          spoken_phrase: CONTRACTION_ALIAS.to,
+          evidence_sha256: contractionReview.evidence_file_sha256,
+        },
+      } : {}),
       unit_qa: output.provider_unit_qa
         ? waveformQaWithoutVoiceAggregate(output.provider_unit_qa)
         : null,
@@ -1783,7 +1862,8 @@ export async function finalizeNarrationProviderOutput(
       voiceSha256: manifest.voice_sha256,
       voiceContinuityContract: manifest.voice_continuity_contract,
     });
-    const cached = reusableNarrationFinalizationUnit(
+    const cached = String(row.unit_id) === contractionReview?.unit_id ? null
+      : reusableNarrationFinalizationUnit(
       checkpoint,
       row.unit_id,
       row.finalization_unit_key,
@@ -1812,7 +1892,8 @@ export async function finalizeNarrationProviderOutput(
     computeType: "int8_float32",
   });
   for (const row of rows) {
-    const cached = reusableNarrationFinalizationUnit(
+    const cached = String(row.unit_id) === contractionReview?.unit_id ? null
+      : reusableNarrationFinalizationUnit(
       checkpoint,
       row.unit_id,
       row.finalization_unit_key,
@@ -1971,7 +2052,8 @@ export async function finalizeNarrationProviderOutput(
       contract: qualityContract,
     });
     primaryById.set(String(row.unit_id), { recognized, transcriptQa, decision });
-    const cached = reusableNarrationFinalizationUnit(
+    const cached = String(row.unit_id) === contractionReview?.unit_id ? null
+      : reusableNarrationFinalizationUnit(
       checkpoint,
       row.unit_id,
       row.finalization_unit_key,
@@ -1982,7 +2064,8 @@ export async function finalizeNarrationProviderOutput(
       cachedConfirmationMap.set(String(row.unit_id), cached.confirmation_recognition);
     }
     if (narrationDeliveryNeedsConfirmation(transcriptQa, decision)
-      || String(row.unit_id) === automatedPronunciationReview?.unit_id) {
+      || String(row.unit_id) === automatedPronunciationReview?.unit_id
+      || String(row.unit_id) === contractionReview?.unit_id) {
       confirmationRequiredIds.add(String(row.unit_id));
       if (!cached?.confirmation_recognition) {
         confirmationCandidates.push({ unit_id: row.unit_id, wav: row.wav });
@@ -2000,7 +2083,8 @@ export async function finalizeNarrationProviderOutput(
   }
   for (const row of rows) {
     const primary = primaryById.get(String(row.unit_id));
-    const cached = reusableNarrationFinalizationUnit(
+    const cached = String(row.unit_id) === contractionReview?.unit_id ? null
+      : reusableNarrationFinalizationUnit(
       checkpoint,
       row.unit_id,
       row.finalization_unit_key,
@@ -2105,6 +2189,22 @@ export async function finalizeNarrationProviderOutput(
         confirmationTranscriptQa: confirmationQa,
       });
     }
+    if (contractionReview) {
+      if (String(row.unit_id) === contractionReview.unit_id
+        && (primaryRecognitionSourceById.get(String(row.unit_id))
+          !== "fresh_finalizer_small_asr"
+          || !freshConfirmationMap.has(String(row.unit_id)))) {
+        throw new Error("Contraction candidate requires fresh independent Small and Medium ASR.");
+      }
+      decision = contractionCandidateAsrDecisionForTests({
+        decision, unitId: String(row.unit_id),
+        reviewedUnitId: contractionReview.unit_id,
+        expectedText: row.text,
+        primaryText: primary.recognized?.text,
+        confirmationText: confirmation?.text,
+        evidenceSha256: contractionReview.evidence_file_sha256,
+      });
+    }
     const reviewedSpelling = orthographyReview?.rows_by_id.get(String(row.unit_id));
     if (reviewedSpelling) {
       if (primary.recognized?.text !== reviewedSpelling.primary_recognized_text
@@ -2160,6 +2260,10 @@ export async function finalizeNarrationProviderOutput(
       acoustic_qa: row.unit_qa,
       voice_continuity: continuity,
       decision,
+      ...(row.tts_only_contraction_expansion ? {
+        asr_equivalent_phrases: row.asr_equivalent_phrases,
+        tts_only_contraction_expansion: row.tts_only_contraction_expansion,
+      } : {}),
     };
     deliveryRows.push(deliveryRow);
     blockers.push(...(decision.blockers ?? []).map((finding) => ({
@@ -2283,6 +2387,7 @@ export async function finalizeNarrationProviderOutput(
     ...orthographyProvenance,
     ...pronunciationProvenance,
     ...automatedPronunciationProvenance,
+    ...contractionProvenance,
     schema: "goldflow_narration_unit_delivery_qa_v2",
     transcript_comparison_version: helpers.TRANSCRIPT_QA_COMPARISON_VERSION,
     status: blockers.length
@@ -2419,6 +2524,7 @@ export async function finalizeNarrationProviderOutput(
       ...orthographyProvenance,
       ...pronunciationProvenance,
       ...automatedPronunciationProvenance,
+      ...contractionProvenance,
       ...scopeFields,
       schema: "goldflow_narration_tts_report_v1",
       status: "blocked",
@@ -2918,6 +3024,18 @@ export async function finalizeNarrationProviderOutput(
     },
   };
   const sourceHash = sourceScriptHash(plan);
+  const contractionTimeline = contractionReview
+    ? narrationUnitTimeline({ plan, stitch, sampleRateHz: CANONICAL_SAMPLE_RATE_HZ })
+    : null;
+  const contractionTiming = contractionTimeline?.rows.find(
+    (row) => row.unit_id === contractionReview?.unit_id) ?? null;
+  if (contractionReview && (!contractionTiming
+    || contractionTimeline.rows.length !== rows.length
+    || contractionTimeline.total_sample_count
+      !== Number(stitch.sample_accounting?.actual_sample_count
+        ?? stitch.final_qa?.metrics?.sample_count))) {
+    throw new Error("Contraction caption timing does not match exact stitched sample accounting.");
+  }
   const primary = {
     ...policy.primary,
     provider: manifest.provider,
@@ -2937,6 +3055,9 @@ export async function finalizeNarrationProviderOutput(
     voice_sha256: row.voice_sha256,
     voice_continuity_contract: row.voice_continuity_contract,
     text: row.text,
+    ...(row.tts_only_contraction_expansion
+      ? contractionSegmentReportFieldsForTests({ row, timing: contractionTiming,
+        evidenceSha256: contractionReview.evidence_file_sha256 }) : {}),
     spoken_text_sha256: row.spoken_text_sha256,
     synthesis_identity_sha256: row.synthesis_identity_sha256,
     synthesis_identity: row.synthesis_identity,
@@ -3030,6 +3151,7 @@ export async function finalizeNarrationProviderOutput(
     ...orthographyProvenance,
     ...pronunciationProvenance,
     ...automatedPronunciationProvenance,
+    ...contractionProvenance,
     ...scopeFields,
     ...(pilotFinalization?.phaseBatchPlans ? { phase_batch_plans: pilotFinalization.phaseBatchPlans } : {}),
     schema: "goldflow_provider_neutral_narration_tts_report_v2",

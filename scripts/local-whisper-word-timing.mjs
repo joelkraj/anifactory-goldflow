@@ -33,6 +33,7 @@ import {
 import {
   validateLocalWhisperTimingCandidate,
 } from "./lib/local-whisper-timing-candidate.mjs";
+import { contractionCaptionWordSpanForTests } from "./lib/narration-contraction-repair.mjs";
 
 const execFile = promisify(execFileCb);
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
@@ -700,6 +701,9 @@ async function main() {
         : null,
     },
   };
+  const captionSpokenExpansionAlignment = contractionCaptionWordSpanForTests({
+    segments: qwenReport.segments, words,
+  });
   const report = {
     ...(!revalidateExisting || existingTiming?.schema
       ? {
@@ -762,6 +766,9 @@ async function main() {
     ].filter(([, value]) => Boolean(value))),
     full_stream_transcript_qa: fullStreamTranscriptQa,
     word_timing_qa: wordTimingQa,
+    ...(captionSpokenExpansionAlignment ? {
+      caption_spoken_expansion_alignment: captionSpokenExpansionAlignment,
+    } : {}),
     words,
     updated_at: nowIso(),
   };

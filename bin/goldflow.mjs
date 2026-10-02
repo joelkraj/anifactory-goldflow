@@ -39,6 +39,7 @@ import { interruptedQwenGuardAdmission } from "../scripts/lib/qwen-interrupted-g
 import { exactBlockedNarrationRetakeAdmission } from "../scripts/lib/narration-exact-retake-guard.mjs";
 import { asrOrthographyGuardAdmission } from "../scripts/lib/narration-asr-orthography-review.mjs";
 import { pronunciationGuardAdmission } from "../scripts/lib/narration-pronunciation-repair.mjs";
+import { contractionGuardAdmission } from "../scripts/lib/narration-contraction-repair.mjs";
 import { appendOnlyTailGuardAdmission } from "../scripts/lib/narration-append-only-tail.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -169,6 +170,17 @@ function enforceWorkflowGuard(commandName, subcommandName, scriptArgs, episodeDi
   if (pronunciation.applicable) {
     if (!pronunciation.allowed) {
       console.error(`Workflow guard blocked pronunciation recovery: ${pronunciation.reason}`);
+      if (result.next_command_shape) console.error(`Next valid command shape: ${result.next_command_shape}`);
+      process.exit(1);
+    }
+    return;
+  }
+  const contraction = contractionGuardAdmission(
+    result, commandName, subcommandName, parsedFlags,
+  );
+  if (contraction.applicable) {
+    if (!contraction.allowed) {
+      console.error(`Workflow guard blocked contraction expansion: ${contraction.reason}`);
       if (result.next_command_shape) console.error(`Next valid command shape: ${result.next_command_shape}`);
       process.exit(1);
     }
@@ -565,6 +577,8 @@ ${registryCommands}
   goldflow tts complete-tail       Append bounded silence to reviewed intact raw Qwen tails; no synthesis
   goldflow tts repair-pronunciation  Create one user-heard phonetic-word candidate; require a second listen before selection
   goldflow tts repair-pronunciation-auto  Create one reviewed automated-ASR phonetic-word candidate; select only after dual-ASR QA
+  goldflow tts review-contraction  Prepare exact one-unit TTS-only past-perfect expansion evidence
+  goldflow tts repair-contraction  Create one exact first-fragment expansion candidate; select only after fresh QA
   goldflow tts adopt-interrupted   QA and adopt only hash-bound completed Qwen cohorts from an interrupted invocation
   goldflow tts approve-listen      Record hash-bound decisions for exact narration listen items
   goldflow tts approve-subjective  Approve the mandatory hash-bound whole-episode narration sample manifest
@@ -771,6 +785,10 @@ if (command === "crime-proof" && !helpRequested) {
   run("tts-pronunciation-candidate.mjs", flags);
 } else if (command === "tts" && subcommand === "repair-pronunciation-auto") {
   run("tts-pronunciation-candidate.mjs", ["--automated", "true", ...flags]);
+} else if (command === "tts" && subcommand === "review-contraction") {
+  run("tts-contraction-review.mjs", flags);
+} else if (command === "tts" && subcommand === "repair-contraction") {
+  run("tts-contraction-candidate.mjs", flags);
 } else if (command === "tts" && subcommand === "approve-listen") {
   run("narration-exact-listen-review.mjs", flags);
 } else if (command === "tts" && subcommand === "approve-subjective") {

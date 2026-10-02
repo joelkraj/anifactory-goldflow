@@ -3967,6 +3967,49 @@ export async function reviewedAutomatedRetryStatusForTests({
     const plan = await readJson(planPath, null);
     const planFileSha256 = await fileSha256(planPath);
     const reportSha256 = await fileSha256(ttsReportPath);
+    const selected = new Map((ttsReport.results ?? [])
+      .map((row) => [String(row.unit_id), row]));
+    // A completed exact retake keeps its immutable authorization at this
+    // path. Once every reviewed unit is selected as attempt two, validate its
+    // lineage and let the current blockers proceed to exact-boundary triage.
+    // Otherwise the historical receipt looks like a stale new retry request.
+    if (requestedIds.length && requestedIds.every((id) => Number(selected.get(id)?.attempt) === 2)) {
+      const archivePath = evidence.pre_retry_narration_report_path;
+      const archiveInside = path.isAbsolute(String(archivePath ?? ""))
+        && path.resolve(archivePath).startsWith(`${path.resolve(episodeDir)}${path.sep}`)
+        && path.resolve(archivePath) !== path.resolve(ttsReportPath);
+      const archive = archiveInside ? await readJson(archivePath, null) : null;
+      const archiveSha256 = archiveInside ? await fileSha256(archivePath) : null;
+      if (evidence.evidence_basis !== "reviewed_automated_delivery_qa"
+        || evidence.source_script_sha256 !== currentScriptHash
+        || evidence.narration_generation_plan_sha256 !== plan?.plan_sha256
+        || evidence.narration_generation_plan_file_sha256 !== planFileSha256
+        || archiveSha256 !== evidence.pre_retry_narration_report_sha256
+        || !archive) throw new Error("consumed retake receipt has stale source, plan or immutable report");
+      validateConfirmedRetryEvidenceForTests({
+        evidence, requestedUnitIds: requestedIds,
+        planSha256: plan.plan_sha256, priorReport: archive,
+        priorReportSha256: archiveSha256,
+        currentCandidates: archive.results ?? [],
+        sourceScriptSha256: currentScriptHash, planFileSha256,
+      });
+      const receiptSha256 = await fileSha256(evidencePath);
+      for (const reviewed of evidence.confirmed_units) {
+        const current = selected.get(reviewed.unit_id);
+        const recovery = current?.recovery_provenance;
+        if (recovery?.evidence_basis !== "reviewed_automated_delivery_qa"
+          || recovery.confirmed_evidence_path !== evidencePath
+          || recovery.confirmed_evidence_sha256 !== receiptSha256
+          || recovery.origin_audio_sha256 !== reviewed.audio_sha256
+          || recovery.origin_synthesis_identity_sha256 !== reviewed.synthesis_identity_sha256
+          || !path.isAbsolute(String(current.audio_path ?? ""))
+          || !path.resolve(current.audio_path).startsWith(`${path.resolve(episodeDir)}${path.sep}`)
+          || await fileSha256(current.audio_path) !== current.audio_sha256) {
+          throw new Error(`consumed retake provenance is stale for ${reviewed.unit_id}`);
+        }
+      }
+      return null;
+    }
     if (ttsReport?.status !== "blocked"
       || evidence.evidence_basis !== "reviewed_automated_delivery_qa"
       || !requestedIds.length || requestedIds.some((id) => !blockedIds.has(id))
@@ -3991,8 +4034,6 @@ export async function reviewedAutomatedRetryStatusForTests({
       currentCandidates: ttsReport.results ?? [],
       sourceScriptSha256: currentScriptHash, planFileSha256,
     });
-    const selected = new Map((ttsReport.results ?? [])
-      .map((row) => [String(row.unit_id), row]));
     for (const id of requestedIds) {
       const audio = selected.get(id);
       if (!path.isAbsolute(String(audio?.audio_path ?? ""))

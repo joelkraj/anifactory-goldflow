@@ -102,6 +102,29 @@ try {
     episode_dir: temp, current_stage: "qwen_tts_stitch",
     current_stage_state: "blocked", next_command_shape: "Operator hold",
   }, "tts", "narrate", { "episode-dir": temp }).allowed, false);
+  const secondAudioPath = path.join(temp, "unit-second.wav");
+  await fs.writeFile(secondAudioPath, "selected exact second take");
+  const secondReport = { ...report,
+    blockers: [{ unit_id: "u2", code: "narration_confirmed_word_omission" }],
+    results: [{ ...first, attempt: 2, audio_path: secondAudioPath,
+      audio_sha256: sha("selected exact second take"),
+      synthesis_identity_sha256: sha("second take identity"),
+      recovery_provenance: { evidence_basis: "reviewed_automated_delivery_qa",
+        confirmed_evidence_path: evidencePath,
+        confirmed_evidence_sha256: sha(await fs.readFile(evidencePath)),
+        origin_audio_sha256: first.audio_sha256,
+        origin_synthesis_identity_sha256: first.synthesis_identity_sha256 } }, second] };
+  const originalReportBytes = await fs.readFile(reportPath);
+  await fs.writeFile(reportPath, JSON.stringify(secondReport));
+  const consumed = () => reviewedAutomatedRetryStatusForTests({
+    episodeDir: temp, episode, ttsReport: secondReport,
+    ttsReportPath: reportPath, currentScriptHash: sourceHash,
+  });
+  assert.equal(await consumed(), null);
+  await fs.writeFile(secondAudioPath, "mutated second take");
+  assert.match((await consumed()).next_command_shape, /^Operator hold:/);
+  await fs.writeFile(secondAudioPath, "selected exact second take");
+  await fs.writeFile(reportPath, originalReportBytes);
   await fs.writeFile(audioPath, "mutated");
   assert.match((await status()).next_command_shape, /^Operator hold:/);
   await fs.writeFile(audioPath, "immutable first take");

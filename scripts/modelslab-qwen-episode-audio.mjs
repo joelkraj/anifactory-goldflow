@@ -1756,7 +1756,7 @@ function transcriptInputText(value) {
     : String(value ?? "");
 }
 
-export const TRANSCRIPT_QA_COMPARISON_VERSION = "unicode_words_exact_im_numeric_currency_cents_half_scale_v9";
+export const TRANSCRIPT_QA_COMPARISON_VERSION = "unicode_words_exact_im_numeric_currency_cents_half_scale_v10";
 
 const TRANSCRIPT_PUNCTUATION = new Set([".", ",", ";", ":", "!", "?", "…"]);
 
@@ -1837,6 +1837,11 @@ function parseNumberAt(tokens, start) {
   if (direct) {
     let value = Number(direct[1]);
     let end = start + 1;
+    if (!direct[2] && tokens[end] === "and" && tokens[end + 1] === "a"
+      && tokens[end + 2] === "half" && NUMBER_SCALES.has(tokens[end + 3])) {
+      value += 0.5;
+      end += 3;
+    }
     if (!direct[2] && NUMBER_SCALES.has(tokens[end])) {
       value *= NUMBER_SCALES.get(tokens[end]);
       end += 1;

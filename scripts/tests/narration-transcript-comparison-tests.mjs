@@ -113,6 +113,7 @@ for (const [intended, recognized] of [
   ["one hundred nineteen dollars and ninety-nine cents", "$119.99"],
   ["two hundred forty-eight dollars and sixty-nine cents", "$248.69"],
   ["nineteen and a half million dollars", "$19.5 million"],
+  ["nineteen and a half million dollars", "19 and a half million dollars"],
   ["The price was nineteen and a half million dollars. Thirty-nine million dollars returned.",
     "The price was $19.5 million. $39 million returned."],
   ["I picked one dollar. Dollars mattered.", "I picked $1. Dollars mattered."],

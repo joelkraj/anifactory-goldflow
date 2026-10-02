@@ -107,6 +107,14 @@ for (const [intended, recognized] of [
   ["minus one hundred dollars", "$−100"],
   ["minus one hundred dollars", "−$100"],
   ["one dollar and two dollars", "$1 and $2"],
+  ["nine dollars and fifty cents", "$9.50"],
+  ["sixty-one dollars and twenty cents", "$61.20"],
+  ["one hundred twenty-two dollars and forty cents", "$122.40"],
+  ["one hundred nineteen dollars and ninety-nine cents", "$119.99"],
+  ["two hundred forty-eight dollars and sixty-nine cents", "$248.69"],
+  ["nineteen and a half million dollars", "$19.5 million"],
+  ["The price was nineteen and a half million dollars. Thirty-nine million dollars returned.",
+    "The price was $19.5 million. $39 million returned."],
   ["I picked one dollar. Dollars mattered.", "I picked $1. Dollars mattered."],
   ["S. E. C. filed it.", "SEC filed it."],
 ]) {
@@ -133,6 +141,11 @@ for (const [intended, recognized] of [
   ["twelve hundred and sixty dollars", "$1,620"],
   ["twenty-five hundred", "2600"],
   ["one dollar and two dollars", "$2 and $1"],
+  ["nine dollars and fifty cents", "$9.05"],
+  ["nine dollars and fifty cents", "$9.51"],
+  ["one hundred nineteen dollars and ninety-nine cents", "$119.90"],
+  ["nineteen and a half million dollars", "$19 million"],
+  ["nineteen and a half million dollars", "$19.6 million"],
 ]) {
   assert.ok(consensus(intended, recognized).blockers.some((finding) => finding.code.includes("protected_value")),
     `${intended} / ${recognized}`);

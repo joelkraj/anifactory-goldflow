@@ -1756,7 +1756,7 @@ function transcriptInputText(value) {
     : String(value ?? "");
 }
 
-export const TRANSCRIPT_QA_COMPARISON_VERSION = "unicode_words_exact_im_numeric_article_contraction_phonetic_v8";
+export const TRANSCRIPT_QA_COMPARISON_VERSION = "unicode_words_exact_im_numeric_currency_cents_half_scale_v9";
 
 const TRANSCRIPT_PUNCTUATION = new Set([".", ",", ";", ":", "!", "?", "…"]);
 
@@ -1884,6 +1884,13 @@ function parseNumberAt(tokens, start) {
         end = cursor;
       }
     }
+    // A fractional scale such as "nineteen and a half million" is one
+    // amount. Require the scale so unrelated adjacent numbers remain separate.
+    if (tokens[end] === "and" && tokens[end + 1] === "a"
+      && tokens[end + 2] === "half" && NUMBER_SCALES.has(tokens[end + 3])) {
+      value += 0.5;
+      end += 3;
+    }
     const scale = NUMBER_SCALES.get(tokens[end]) ?? 1;
     if (scale >= previousScale || value * scale >= previousScale) break;
     total += value * scale;
@@ -1960,9 +1967,19 @@ function canonicalTranscriptTokensWithoutAliases(value, preserveBoundaries = fal
       if (compounds[index - 1] === "the" && output.at(-1) === "the") {
         output[output.length - 1] = "numeric_article:the";
       }
-      const ratioMarker = compounds[parsed.end] === "/" || (
+      const dollarWord = /^dollars?$/.test(compounds[parsed.end] ?? "")
+        ? compounds[parsed.end] : null;
+      const cents = dollarWord && compounds[parsed.end + 1] === "and"
+        ? parseNumberAt(compounds, parsed.end + 2) : null;
+      const dollarCents = cents && compounds[cents.end] === "cents"
+        && !cents.suffix && Number.isInteger(Number(cents.value))
+        && Number(cents.value) > 0 && Number(cents.value) < 100
+        ? { value: normalizedNumberString(Number(parsed.value) + Number(cents.value) / 100),
+          end: cents.end + 1 } : null;
+      const amountValue = dollarCents?.value ?? parsed.value;
+      const ratioMarker = !dollarCents && (compounds[parsed.end] === "/" || (
         compounds[parsed.end] === "out" && compounds[parsed.end + 1] === "of"
-      );
+      ));
       const ratioStart = compounds[parsed.end] === "/" ? parsed.end + 1 : parsed.end + 2;
       const right = ratioMarker ? parseNumberAt(compounds, ratioStart) : null;
       if (right?.value != null) {
@@ -1974,16 +1991,21 @@ function canonicalTranscriptTokensWithoutAliases(value, preserveBoundaries = fal
         ?? (compounds[parsed.end] === "%" || compounds[parsed.end] === "percent" ? "percent" : null)
         ?? (compounds[parsed.end] === "times" ? "times" : null);
       const numberToken = suffix === "%" || suffix === "percent"
-        ? `pct:${parsed.value}`
+        ? `pct:${amountValue}`
         : suffix === "x" || suffix === "times"
-        ? `times:${parsed.value}`
+        ? `times:${amountValue}`
         : suffix === "ordinal"
-        ? `ord:${parsed.value}`
+        ? `ord:${amountValue}`
         : suffix === "decade"
-        ? `decade:${parsed.value}`
-        : `${dollarSymbol ? "usd" : "num"}:${parsed.value}`;
+        ? `decade:${amountValue}`
+        : `${dollarSymbol ? "usd" : "num"}:${amountValue}`;
       output.push(parsed.implicit_article ? `implicit_article:${numberToken}` : numberToken);
       index = parsed.end + (parsed.suffix ? 0 : suffix ? 1 : 0);
+      if (dollarCents) {
+        output.push(`currency_unit:${dollarWord}`);
+        index = dollarCents.end;
+        continue;
+      }
       // Retain source adjacency before punctuation is discarded. An unrelated
       // "Dollars" in the following sentence cannot supply this amount's unit.
       if (!suffix && /^dollars?$/.test(compounds[index] ?? "")) {

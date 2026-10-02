@@ -20,7 +20,7 @@ import {
   scenePromptProductionContractFindingsForTests,
 } from "../imagegen.mjs";
 import { contentStatusIdentityFields } from "../run-status.mjs";
-import { minimumPauseEventsForProfile } from "../voice-direction-gate.mjs";
+import { countProviderPauseEvents, minimumPauseEventsForProfile } from "../voice-direction-gate.mjs";
 
 export async function runContentProfileTests() {
   assert.equal(
@@ -90,6 +90,18 @@ export async function runContentProfileTests() {
   );
   assert.equal(minimumPauseEventsForProfile(documentary.config), 0);
   assert.equal(minimumPauseEventsForProfile(manhwa.config), 2);
+  assert.equal(minimumPauseEventsForProfile(manhwa.config, { isTestSlice: true, maxDurationSec: 45 }), 0);
+  assert.equal(minimumPauseEventsForProfile(manhwa.config, { isTestSlice: true, maxDurationSec: 80 }), 1);
+  const pauseSegments = [{ fish_generation_required: true, delivery_mode: "narration", pause_plan: [{ tag: "[short pause]" }] }];
+  const qwenPausePlan = { units: [
+    { unit_id: "a", boundary_after: "reveal" },
+    { unit_id: "b", boundary_after: "reveal" },
+    { unit_id: "c", boundary_after: "paragraph" },
+    { unit_id: "b", boundary_after: "reveal" },
+  ] };
+  assert.equal(countProviderPauseEvents(pauseSegments, { ttsProvider: "qwen_local", narrationGenerationPlan: qwenPausePlan }), 2);
+  assert.equal(countProviderPauseEvents(pauseSegments, { ttsProvider: "qwen_local", narrationGenerationPlan: { units: qwenPausePlan.units.slice(0, 1) } }), 1);
+  assert.equal(countProviderPauseEvents(pauseSegments, { ttsProvider: "fish_audio", narrationGenerationPlan: qwenPausePlan }), 1);
 
   const ledger = {
     schema: "goldflow_factual_evidence_ledger_v1",

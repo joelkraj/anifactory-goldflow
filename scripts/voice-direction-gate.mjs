@@ -2334,9 +2334,26 @@ export function minimumPauseEventsForProfile(contentProfile = {}, {
   return longformMinimum;
 }
 
+export function countProviderPauseEvents(segments, {
+  ttsProvider = "qwen_local",
+  narrationGenerationPlan = null,
+} = {}) {
+  if (isQwenLocalProvider(ttsProvider)) {
+    // Qwen Base ICL cannot perform Fish pause tags. Reveal boundaries are
+    // realized by the semantic stitch as 450–800 ms holds; count each unit once.
+    return new Set((narrationGenerationPlan?.units ?? [])
+      .filter((unit) => unit.boundary_after === "reveal")
+      .map((unit) => unit.unit_id)).size;
+  }
+  return segments
+    .filter((segment) => segment.fish_generation_required !== false && segment.delivery_mode !== "sound_design")
+    .reduce((sum, segment) => sum + (segment.pause_plan?.length ?? 0), 0);
+}
+
 function qualityReport(segments, {
   ttsProvider = "qwen_local",
   contentProfile = {},
+  narrationGenerationPlan = null,
 } = {}) {
   const unitBasedNarrator = isUnitBasedNarratorProvider(ttsProvider);
   const voicedSegments = segments.filter((segment) => segment.fish_generation_required !== false && segment.delivery_mode !== "sound_design");
@@ -2353,7 +2370,7 @@ function qualityReport(segments, {
   }
   const midSentenceTags = voicedSegments.filter((segment) => /[a-z0-9],?\s+\[[^\]]+\]\s+[a-z0-9]/.test(segment.text)).length;
   const physicalTags = voicedSegments.reduce((sum, segment) => sum + (segment.physical_tags?.length ?? 0), 0);
-  const pauseEvents = voicedSegments.reduce((sum, segment) => sum + (segment.pause_plan?.length ?? 0), 0);
+  const pauseEvents = countProviderPauseEvents(segments, { ttsProvider, narrationGenerationPlan });
   const dialogueSegments = voicedSegments.filter((segment) => segment.dialogue_turn_count > 0 || segment.delivery_mode === "character_dialogue");
   const dialogueCovered = dialogueSegments.filter((segment) => !/calm,\s*cinematic narration|calm cinematic|cinematic narration|generic/i.test(segment.tag)).length;
   const genericTags = tags.filter((tag) => /calm, cinematic narration|calm cinematic|generic/i.test(tag)).length;
@@ -2566,6 +2583,7 @@ function qualityReport(segments, {
     pause_event_count: pauseEvents,
     pause_event_policy: {
       content_profile: contentProfile?.id ?? null,
+      source: isQwenLocalProvider(ttsProvider) ? "authored_reveal_stitch_boundaries" : "performance_pause_tags",
       longform_minimum_pause_events: Number.isInteger(contentProfile?.voice?.longform_minimum_pause_events)
         ? contentProfile.voice.longform_minimum_pause_events
         : 2,
@@ -5208,7 +5226,7 @@ async function main() {
     },
     audio_performance_segments: segments,
   };
-  const report = qualityReport(segments, { ttsProvider, contentProfile });
+  const report = qualityReport(segments, { ttsProvider, contentProfile, narrationGenerationPlan });
   if (narrationTextIntegrityCoverage.status !== "passed") {
     const textIntegrityFailure = {
       code: "narration_text_integrity_coverage_failed",

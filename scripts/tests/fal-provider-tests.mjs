@@ -162,6 +162,9 @@ test("Fal blocked-stage recovery admits only the exact status action", () => {
     next_command_shape: "node bin/goldflow.mjs imagegen fal --episode-dir /tmp/ep --action repair-reviewed-bulk --directives <file> --confirm-spend exact_fal_reviewed_bulk_repair" };
   assert.equal(falBlockedStageRecoveryAdmission(bulkQaStatus, { action: "repair-reviewed-bulk" }).allowed, true);
   assert.equal(falBlockedStageRecoveryAdmission(bulkQaStatus, { action: "finalize-reviewed-bulk" }).allowed, false);
+  const heldStatus={...bulkQaStatus,next_command_shape:"node bin/goldflow.mjs imagegen fal --episode-dir /tmp/ep --action recover-reviewed-bulk-hold --image-id shot-1 --directives /tmp/ep/fal/hold.json --confirm-spend exact_fal_reviewed_bulk_hold_recovery"};
+  assert.equal(falBlockedStageRecoveryAdmission(heldStatus,{action:"recover-reviewed-bulk-hold","image-id":"shot-1",directives:"/tmp/ep/fal/hold.json","confirm-spend":"exact_fal_reviewed_bulk_hold_recovery"}).allowed,true);
+  assert.equal(falBlockedStageRecoveryAdmission(heldStatus,{action:"recover-reviewed-bulk-hold","image-id":"shot-2",directives:"/tmp/ep/fal/hold.json","confirm-spend":"exact_fal_reviewed_bulk_hold_recovery"}).allowed,false);
 });
 
 test("early Fal visual fork routes reference and scene generations through guarded Fal actions", () => {
@@ -180,6 +183,7 @@ test("early Fal visual fork routes reference and scene generations through guard
   assert.equal(commandStageFor("imagegen", "fal", { action: "repair-reference-failures" }, identity), "reference_generation");
   assert.equal(commandStageFor("imagegen", "fal", { action: "repair-reviewed-references" }, identity), "reference_image_approval");
   assert.equal(commandStageFor("imagegen", "fal", { action: "repair-reviewed-bulk" }, identity), "image_output_qa");
+  assert.equal(commandStageFor("imagegen", "fal", { action: "recover-reviewed-bulk-hold" }, identity), "image_output_qa");
   assert.equal(commandStageFor("imagegen", "fal", { action: "review-validation" }, identity), "image_generation");
 });
 

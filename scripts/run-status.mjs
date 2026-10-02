@@ -1547,6 +1547,7 @@ export async function reviewedBulkQaRepairStatusForTests(episodeDir, report, qaP
   const qaHash = await fileSha256(qaPath);
   const root = path.join(episodeDir, "fal");
   let assignedCount = 0, completeCount = 0;
+  let heldRecovery = null;
   for (const id of ids) {
     const matches = ledger.cuts.filter(row => row.image_id === id);
     if (matches.length !== 1 || !/^[a-f0-9]{64}$/.test(matches[0].image_sha256 ?? "")
@@ -1557,16 +1558,54 @@ export async function reviewedBulkQaRepairStatusForTests(episodeDir, report, qaP
     if (round.assignment) {
       if (await exists(path.join(root, "bulk", "review-repair-failure-receipts", `${round.stem}.json`)))
         throw new Error(`Current reviewed Fal repair has a provider failure receipt: ${id}`);
-      if (await exists(path.join(root, "bulk", "transport-holds", `${round.stem}.json`)))
-        throw new Error(`Current reviewed Fal repair has an unresolved transport hold: ${id}`);
+      const holdPath = path.join(root, "bulk", "transport-holds", `${round.stem}.json`);
+      if (await exists(holdPath)) {
+        const hold = await readJson(holdPath, null);
+        if (hold?.image_id !== id || hold.assignment_sha256 !== round.assignment.assignment_sha256
+          || await exists(round.assignment.result_receipt_path))
+          throw new Error(`Current reviewed Fal transport hold binding changed: ${id}`);
+        const recoveryPath = path.join(root, "bulk", "review-repair-transport-recovery-assignments", `${round.stem}.json`);
+        const recovery = await readJson(recoveryPath, null);
+        const directivePath = path.join(root, "bulk", "review-repair-transport-recovery-directives", `${round.stem}.json`);
+        if (heldRecovery) throw new Error("Only one exact reviewed Fal transport hold can be recovered at a time.");
+        heldRecovery = { id, directivePath, pendingSubmission: !recovery || !await exists(recovery.submission_receipt_path) };
+        if (recovery) {
+          if (recovery.image_id !== id || recovery.previous_assignment_sha256 !== round.assignment.assignment_sha256
+            || recovery.source_hold_sha256 !== await fileSha256(holdPath)
+            || recovery.reviewed_directive_sha256 !== await fileSha256(directivePath)
+            || recovery.source_script_sha256 !== await fileSha256(path.join(episodeDir, "script_clean.md")))
+            throw new Error(`Current reviewed Fal transport recovery binding changed: ${id}`);
+          if (await exists(path.join(root, "bulk", "review-repair-transport-recovery-failure-receipts", `${round.stem}.json`)))
+            throw new Error(`Reviewed Fal transport recovery has a provider failure receipt: ${id}`);
+          if (await exists(path.join(root, "bulk", "transport-holds", `${round.stem}-recovery.json`)))
+            throw new Error(`Reviewed Fal transport recovery also has an unresolved hold: ${id}`);
+          if (await exists(recovery.submission_receipt_path)) {
+            const submitted = await readJson(recovery.submission_receipt_path, null);
+            if (submitted?.assignment_sha256 !== recovery.assignment_sha256
+              || submitted.request_id === recovery.previous_request_id)
+              throw new Error(`Reviewed Fal transport recovery submission changed: ${id}`);
+            if (await exists(recovery.result_receipt_path)) {
+              const result = await readJson(recovery.result_receipt_path, null);
+              if (result?.request_id !== submitted.request_id
+                || result?.output_path !== recovery.output_path
+                || await fileSha256(result.output_path) !== result.output_sha256)
+                throw new Error(`Reviewed Fal transport recovery result changed: ${id}`);
+            }
+          }
+          assignedCount++;
+          if (await exists(recovery.result_receipt_path)) completeCount++;
+        }
+        continue;
+      }
       assignedCount++;
       if (await exists(round.assignment.result_receipt_path)) completeCount++;
     }
   }
-  const next = assignedCount === ids.length
+  const next = heldRecovery?.pendingSubmission ? "recover-reviewed-bulk-hold" : assignedCount === ids.length
     ? completeCount === ids.length ? "finalize-reviewed-bulk" : "observe-reviewed-bulk"
     : "repair-reviewed-bulk";
-  return { next, assignedCount, completeCount, totalCount: ids.length };
+  return { next, assignedCount, completeCount, totalCount: ids.length,
+    ...(heldRecovery ? { heldRecovery } : {}) };
 }
 
 async function imageOutputQaComplete(episodeDir, episode, identity) {
@@ -1602,9 +1641,9 @@ async function imageOutputQaComplete(episodeDir, episode, identity) {
     let repair;
     try { repair = await reviewedBulkQaRepairStatusForTests(episodeDir, report, reportPath); }
     catch (error) { return { done: false, state: "blocked", evidence: `Fal exact-ID visual review hold: ${error.message}` }; }
-    const { next, completeCount, totalCount } = repair;
+    const { next, completeCount, totalCount, heldRecovery } = repair;
     return { done: false, state: "blocked", evidence: `Fal exact-ID visual review repairs=${completeCount}/${totalCount}`,
-      next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action ${next}${next === "repair-reviewed-bulk" ? " --directives <absolute_reviewed_bulk_repair_directives.json> --confirm-spend exact_fal_reviewed_bulk_repair" : ""}` };
+      next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action ${next}${next === "repair-reviewed-bulk" ? " --directives <absolute_reviewed_bulk_repair_directives.json> --confirm-spend exact_fal_reviewed_bulk_repair" : next === "recover-reviewed-bulk-hold" ? ` --image-id ${heldRecovery.id} --directives ${heldRecovery.directivePath} --confirm-spend exact_fal_reviewed_bulk_hold_recovery` : ""}` };
   }
   return {
     done: false,

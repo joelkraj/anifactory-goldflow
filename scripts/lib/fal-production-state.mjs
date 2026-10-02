@@ -72,7 +72,7 @@ export function falBlockedStageRecoveryAdmission(status, flags = {}) {
   const recoveryActions = new Set(referenceRecovery
     ? ["repair-reference-failures", "observe-reference-repairs"]
     : reviewRecovery ? ["repair-reviewed-references", "observe-reviewed-references", "observe-failed-reviewed-reference", "observe-successful-reviewed-references", "finalize-reviewed-references"]
-    : bulkReviewRecovery ? ["repair-reviewed-bulk", "observe-reviewed-bulk", "finalize-reviewed-bulk"]
+    : bulkReviewRecovery ? ["repair-reviewed-bulk", "recover-reviewed-bulk-hold", "observe-reviewed-bulk", "finalize-reviewed-bulk"]
     : ["observe-bulk", "observe-holds", "recover-holds", "observe-transport-recovery", "repair-failures", "observe-repairs", "inspect-repair-failure", "observe-repair-v2"]);
   if ((!referenceRecovery && !reviewRecovery && !bulkReviewRecovery && status?.current_stage !== "image_generation") || status?.current_stage_state !== "blocked") {
     return { applicable: false, allowed: false, reason: "Fal blocked-stage recovery is not current." };
@@ -86,6 +86,15 @@ export function falBlockedStageRecoveryAdmission(status, flags = {}) {
     return { applicable: true, allowed: /^[a-z0-9][a-z0-9_-]{1,100}$/.test(imageId)
       && next.includes(`--action ${action} --image-id ${imageId}`),
       reason: "Run status does not authorize inspection of this exact Fal repair failure." };
+  }
+  if (action === "recover-reviewed-bulk-hold") {
+    const imageId = String(flags["image-id"] ?? "");
+    const directive = String(flags.directives ?? "");
+    return { applicable: true, allowed: /^[a-z0-9][a-z0-9_-]{1,100}$/.test(imageId)
+      && path.isAbsolute(directive)
+      && flags["confirm-spend"] === "exact_fal_reviewed_bulk_hold_recovery"
+      && next.includes(`--action ${action} --image-id ${imageId} --directives ${directive} --confirm-spend exact_fal_reviewed_bulk_hold_recovery`),
+      reason: "Run status does not authorize this exact reviewed Fal transport hold recovery." };
   }
   return expected.test(next)
     ? { applicable: true, allowed: true }

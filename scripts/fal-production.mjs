@@ -14,6 +14,7 @@ import { validateFalPrebulkPromptCorrection } from "./lib/fal-prebulk-prompt-cor
 import { applyFalPostplanPromptCorrection, inspectFalPostplanPromptCorrection } from "./lib/fal-postplan-prompt-correction.mjs";
 import { validateFalReviewedReferenceSuccessRepair } from "./lib/fal-reviewed-reference-success-repair.mjs";
 import { reviewedBulkRepairRound } from "./lib/fal-reviewed-bulk-round.mjs";
+import { reviewedBulkHoldRecoveryPrompt } from "./lib/fal-reviewed-bulk-hold-recovery.mjs";
 
 const digest = value => createHash("sha256").update(value).digest("hex");
 const bytes = value => `${JSON.stringify(value, null, 2)}\n`;
@@ -36,6 +37,24 @@ async function readEffectiveBulk(ctx){
     "Reviewed Fal post-plan prompt correction must be applied before dispatch, observation or finalization.");
   return {...bulk,assignments:correction.assignments,
     ...(correction.state==="applied"?{postplan_prompt_correction_receipt_sha256:await falFileSha256(correction.paths.receipt)}:{})};
+}
+async function verifyReviewedHoldRecovery(ctx, round, recovery, holdPath){
+  const directivePath=path.join(ctx.root,"bulk","review-repair-transport-recovery-directives",`${round.stem}.json`);
+  need(recovery.image_id===round.assignment.image_id
+    &&recovery.previous_assignment_sha256===round.assignment.assignment_sha256
+    &&recovery.source_hold_sha256===await falFileSha256(holdPath)
+    &&recovery.qa_report_sha256===round.assignment.qa_report_sha256
+    &&recovery.rejected_image_sha256===round.assignment.rejected_image_sha256
+    &&recovery.reviewed_directive_sha256===await falFileSha256(directivePath)
+    &&recovery.source_script_sha256===await falFileSha256(path.join(ctx.episodeDir,"script_clean.md")),
+    `Reviewed Fal hold recovery provenance changed: ${round.stem}`);
+  const submission=await read(recovery.submission_receipt_path);
+  need(submission.image_id===recovery.image_id
+    &&submission.assignment_sha256===recovery.assignment_sha256
+    &&submission.request_id&&submission.request_id!==recovery.previous_request_id
+    &&submission.prompt_sha256===recovery.prompt_sha256,
+    `Reviewed Fal hold recovery submission changed: ${round.stem}`);
+  return submission;
 }
 async function validationPlanPath(ctx){
   const revised=path.join(ctx.root,"validation-plan-v2.json");
@@ -288,7 +307,7 @@ async function preflightPaidRepair(ctx,receiptDir,imageIds,fileStemForId=id=>id)
   await assertFalSpendProjectionBudget({episodeDir:ctx.episodeDir,assignments:pending,
     warningBudgetUsd:ctx.contract.warning_budget_usd,hardBudgetUsd:ctx.contract.hard_budget_usd});
 }
-async function observeRows(ctx,rows,limit){return mapLimit(rows,limit,async row=>{const receipt=await read(row.submission_receipt_path);try{return await observeFalImage({endpoint:receipt.endpoint,requestId:receipt.request_id,outputPath:row.output_path,receiptPath:row.result_receipt_path});}catch(error){const timedOut=error?.name==="TimeoutError"||/aborted due to timeout/i.test(error?.message??"");const stale=Date.now()-Date.parse(receipt.submitted_at)>15*60_000;if(timedOut&&!stale)return {complete:false,transient_observation_timeout:true,request_id:receipt.request_id};if(timedOut||Number(error?.status)>=500||/Gateway Timeout|Internal Server Error/i.test(error?.message??"")){const holdName=path.basename(path.dirname(row.result_receipt_path))==="review-repair-result-receipts"?path.basename(row.result_receipt_path):`${row.image_id}.json`;const holdPath=path.join(path.dirname(path.dirname(row.result_receipt_path)),"transport-holds",holdName);if(!await fs.access(holdPath).then(()=>true,()=>false))await write(holdPath,{schema:"goldflow_fal_transport_hold_v1",created_at:new Date().toISOString(),image_id:row.image_id,endpoint:receipt.endpoint,request_id:receipt.request_id,assignment_sha256:row.assignment_sha256,provider_queue_status:"unknown_or_completed",reason:timedOut?"stale_observation_timeout":"provider_5xx_during_observation",billable_request_resubmitted:false});return {complete:false,transport_pending:true,request_id:receipt.request_id,hold_path:holdPath};}if(error?.status!==422)throw error;const failurePath=await recordFalFailure(row,receipt,error);return {complete:false,failed:true,failure_path:failurePath};}});}
+async function observeRows(ctx,rows,limit){return mapLimit(rows,limit,async row=>{const receipt=await read(row.submission_receipt_path);try{return await observeFalImage({endpoint:receipt.endpoint,requestId:receipt.request_id,outputPath:row.output_path,receiptPath:row.result_receipt_path});}catch(error){const timedOut=error?.name==="TimeoutError"||/aborted due to timeout/i.test(error?.message??"");const stale=Date.now()-Date.parse(receipt.submitted_at)>15*60_000;if(timedOut&&!stale)return {complete:false,transient_observation_timeout:true,request_id:receipt.request_id};if(timedOut||Number(error?.status)>=500||/Gateway Timeout|Internal Server Error/i.test(error?.message??"")){const resultDir=path.basename(path.dirname(row.result_receipt_path));const holdName=resultDir==="review-repair-result-receipts"?path.basename(row.result_receipt_path):resultDir==="review-repair-transport-recovery-result-receipts"?`${path.basename(row.result_receipt_path,".json")}-recovery.json`:`${row.image_id}.json`;const holdPath=path.join(path.dirname(path.dirname(row.result_receipt_path)),"transport-holds",holdName);if(!await fs.access(holdPath).then(()=>true,()=>false))await write(holdPath,{schema:"goldflow_fal_transport_hold_v1",created_at:new Date().toISOString(),image_id:row.image_id,endpoint:receipt.endpoint,request_id:receipt.request_id,assignment_sha256:row.assignment_sha256,provider_queue_status:"unknown_or_completed",reason:timedOut?"stale_observation_timeout":"provider_5xx_during_observation",billable_request_resubmitted:false});return {complete:false,transport_pending:true,request_id:receipt.request_id,hold_path:holdPath};}if(error?.status!==422)throw error;const failurePath=await recordFalFailure(row,receipt,error);return {complete:false,failed:true,failure_path:failurePath};}});}
 async function main(){
  const f=flags(process.argv.slice(2)); const ctx=await context(f); const action=f.action;
  if(action==="apply-postplan-prompt-correction"){
@@ -707,10 +726,86 @@ async function main(){
    const result=await submitRows(ctx,repairs,Math.min(ctx.contract.production_concurrency,repairs.length));
    return console.log(JSON.stringify({status:"reviewed_bulk_repair_submitted",count:result.length,image_ids:repairs.map(row=>row.image_id)},null,2));
  }
+ if(action==="recover-reviewed-bulk-hold"){
+   need(f["confirm-spend"]==="exact_fal_reviewed_bulk_hold_recovery","Paid reviewed hold recovery requires its exact confirmation token.");
+   const id=String(f["image-id"]??"");
+   need(/^[a-z0-9][a-z0-9_-]{1,100}$/.test(id),"One exact reviewed Fal image ID is required.");
+   const qaPath=path.join(ctx.episodeDir,`image_output_qa_${ctx.identity.episode}.json`);
+   const qa=await read(qaPath),qaHash=await falFileSha256(qaPath);
+   need(qa.status==="blocked"&&qa.critical_rejected_image_ids?.includes(id),"Current blocked image QA does not contain this exact ID.");
+   const ledger=await read(path.join(ctx.episodeDir,"cut_execution_ledger.json"));
+   const report=await read(path.join(ctx.episodeDir,`imagegen_report_${ctx.identity.episode}.json`));
+   const cut=ledger.cuts?.find(row=>row.image_id===id),selected=report.results?.find(row=>row.image_id===id);
+   need(cut&&selected&&selected.image_path===cut.image_path&&selected.generated?.output_sha256===cut.image_sha256
+     &&await falFileSha256(cut.image_path)===cut.image_sha256,"Rejected Fal raster/report/ledger binding changed.");
+   const round=await reviewedBulkRepairRound({root:ctx.root,imageId:id,qaReportSha256:qaHash,
+     rejectedImageSha256:cut.image_sha256});
+   const prior=round.assignment;
+   need(prior&&prior.qa_report_sha256===qaHash&&prior.rejected_image_sha256===cut.image_sha256,
+     "Current reviewed repair assignment is missing or changed.");
+   need(!await fs.access(prior.result_receipt_path).then(()=>true,()=>false),"Held reviewed repair already has a result.");
+   const submission=await read(prior.submission_receipt_path);
+   const holdPath=path.join(ctx.root,"bulk","transport-holds",`${round.stem}.json`);
+   const hold=await read(holdPath),holdSha=await falFileSha256(holdPath);
+   const directivePath=path.join(ctx.root,"bulk","review-repair-transport-recovery-directives",`${round.stem}.json`);
+   need(f.directives===directivePath,"Reviewed hold recovery requires the exact status-reported directive path.");
+   const directive=await read(directivePath);
+   const scriptPath=path.join(ctx.episodeDir,"script_clean.md");
+   const scriptText=await fs.readFile(scriptPath,"utf8");
+   const prompt=reviewedBulkHoldRecoveryPrompt({directive,qaReportSha256:qaHash,round,
+     assignment:prior,submission,hold,holdSha256:holdSha,scriptText});
+   const assignmentPath=path.join(ctx.root,"bulk","review-repair-transport-recovery-assignments",`${round.stem}.json`);
+   const base={...prior};
+   for(const key of ["assignment_sha256","submission_receipt_path","result_receipt_path","output_path","upload_receipt_path"])
+     delete base[key];
+   const core={...base,prompt,prompt_sha256:digest(prompt),previous_assignment_sha256:prior.assignment_sha256,
+     previous_request_id:submission.request_id,source_hold_sha256:holdSha,
+     reviewed_directive_sha256:await falFileSha256(directivePath),
+     source_script_sha256:await falFileSha256(scriptPath),
+     terminal_evidence_sha256:digest(JSON.stringify(directive.terminal_provider_evidence)),
+     recovery_reason:"terminal_504_no_cost_reviewed_visual_hold"};
+   const recovery={...core,assignment_sha256:falObjectSha256(JSON.stringify(core)),
+     submission_receipt_path:path.join(ctx.root,"bulk","review-repair-transport-recovery-submission-receipts",`${round.stem}.json`),
+     result_receipt_path:path.join(ctx.root,"bulk","review-repair-transport-recovery-result-receipts",`${round.stem}.json`),
+     output_path:path.join(ctx.root,"bulk","review-repair-transport-recovery-outputs",`${round.stem}.png`),
+     upload_receipt_path:path.join(ctx.root,"bulk","review-repair-transport-recovery-upload-receipts",`${round.stem}.json`)};
+   need(!await fs.access(path.join(ctx.root,"bulk","transport-holds",`${round.stem}-recovery.json`)).then(()=>true,()=>false),
+     "Reviewed Fal recovery attempt has its own unresolved hold.");
+   await preflightPaidRepair(ctx,"bulk/review-repair-transport-recovery-submission-receipts",[id],()=>round.stem);
+   await write(assignmentPath,recovery);
+   const submitted=await submitRows(ctx,[recovery],1);
+   return console.log(JSON.stringify({status:"reviewed_bulk_hold_recovery_submitted",image_id:id,
+     submitted:submitted.length,assignment_path:assignmentPath},null,2));
+ }
  if(action==="observe-reviewed-bulk"){
-   const dir=path.join(ctx.root,"bulk","review-repair-assignments"),names=await fs.readdir(dir),rows=[];
-   for(const name of names.filter(value=>value.endsWith(".json"))){const row=await read(path.join(dir,name));if(!await fs.access(row.result_receipt_path).then(()=>true,()=>false))rows.push(row);}
+   const qaPath=path.join(ctx.episodeDir,`image_output_qa_${ctx.identity.episode}.json`),qa=await read(qaPath),qaHash=await falFileSha256(qaPath);
+   need(qa.status==="blocked"&&qa.critical_rejected_image_ids?.length,"Current blocked QA is required to observe reviewed repairs.");
+   const ledger=await read(path.join(ctx.episodeDir,"cut_execution_ledger.json")),rows=[];
+   for(const id of qa.critical_rejected_image_ids){
+     const cut=ledger.cuts?.find(row=>row.image_id===id);
+     need(cut&&await falFileSha256(cut.image_path)===cut.image_sha256,`Current rejected cut changed: ${id}`);
+     const round=await reviewedBulkRepairRound({root:ctx.root,imageId:id,qaReportSha256:qaHash,
+       rejectedImageSha256:cut.image_sha256});
+     need(round.assignment,`Current reviewed repair assignment missing: ${id}`);
+     const holdPath=path.join(ctx.root,"bulk","transport-holds",`${round.stem}.json`);
+     const held=await fs.access(holdPath).then(()=>true,()=>false);
+     const recoveryPath=path.join(ctx.root,"bulk","review-repair-transport-recovery-assignments",`${round.stem}.json`);
+     const row=held?await read(recoveryPath):round.assignment;
+     if(held) await verifyReviewedHoldRecovery(ctx,round,row,holdPath);
+     else need(await fs.access(row.submission_receipt_path).then(()=>true,()=>false),`Reviewed repair is not submitted: ${id}`);
+     if(!await fs.access(row.result_receipt_path).then(()=>true,()=>false))rows.push(row);
+   }
    const result=await observeRows(ctx,rows,Math.min(ctx.contract.production_concurrency,rows.length));
+   for(let i=0;i<rows.length;i++){
+     if(path.basename(path.dirname(rows[i].result_receipt_path))!=="review-repair-transport-recovery-result-receipts"
+       || result[i]?.status?.status!=="FAILED")continue;
+     const row=rows[i],submission=await read(row.submission_receipt_path);
+     const stem=path.basename(row.result_receipt_path,".json");
+     await write(path.join(ctx.root,"bulk","transport-holds",`${stem}-recovery.json`),{
+       schema:"goldflow_fal_transport_hold_v1",created_at:new Date().toISOString(),image_id:row.image_id,
+       endpoint:submission.endpoint,request_id:submission.request_id,assignment_sha256:row.assignment_sha256,
+       provider_queue_status:"FAILED",reason:"provider_failed_queue_status",billable_request_resubmitted:false});
+   }
    return console.log(JSON.stringify({status:result.every(row=>row.complete)?"complete":"pending",checked:result.length,complete:result.filter(row=>row.complete).length},null,2));
  }
  if(action==="finalize-reviewed-bulk"){
@@ -728,14 +823,22 @@ async function main(){
      const round=await reviewedBulkRepairRound({root:ctx.root,imageId:id,qaReportSha256:qaHash,
        rejectedImageSha256:cut.image_sha256});
      need(round.assignment,"Current QA-bound reviewed repair assignment is missing: "+id);
-     const assignment=round.assignment;
+     const holdPath=path.join(ctx.root,"bulk","transport-holds",`${round.stem}.json`);
+     const held=await fs.access(holdPath).then(()=>true,()=>false);
+     const assignment=held
+       ?await read(path.join(ctx.root,"bulk","review-repair-transport-recovery-assignments",`${round.stem}.json`))
+       :round.assignment;
+     const recoverySubmission=held?await verifyReviewedHoldRecovery(ctx,round,assignment,holdPath):null;
      const receipt=await read(assignment.result_receipt_path);
      need(receipt.output_sha256===await falFileSha256(receipt.output_path),`Reviewed repair raster changed: ${id}`);
      need(receipt.output_path===assignment.output_path&&cut.image_sha256===assignment.rejected_image_sha256,
        `Current QA reviewed repair selection changed: ${id}`);
+     need(!held||receipt.request_id===recoverySubmission.request_id,
+       `Reviewed Fal hold recovery result request changed: ${id}`);
      result.image_path=receipt.output_path;
-     result.generated={...result.generated,...receipt,output_sha256:receipt.output_sha256,result_receipt_path:assignment.result_receipt_path,result_receipt_sha256:await falFileSha256(assignment.result_receipt_path),recovery_type:"reviewed_visual_repair",previous_image_sha256:assignment.rejected_image_sha256};
-     Object.assign(cut,{image_path:receipt.output_path,image_sha256:receipt.output_sha256,prompt_hash:assignment.prompt_sha256,reference_ids:assignment.reference_asset_ids,provider_request_id:receipt.request_id,provider_receipt_path:assignment.result_receipt_path,provider_receipt_sha256:await falFileSha256(assignment.result_receipt_path),recovery_type:"reviewed_visual_repair",previous_image_sha256:assignment.rejected_image_sha256});
+     const recoveryType=held?"reviewed_visual_transport_recovery":"reviewed_visual_repair";
+     result.generated={...result.generated,...receipt,output_sha256:receipt.output_sha256,result_receipt_path:assignment.result_receipt_path,result_receipt_sha256:await falFileSha256(assignment.result_receipt_path),recovery_type:recoveryType,previous_image_sha256:assignment.rejected_image_sha256};
+     Object.assign(cut,{image_path:receipt.output_path,image_sha256:receipt.output_sha256,prompt_hash:assignment.prompt_sha256,reference_ids:assignment.reference_asset_ids,provider_request_id:receipt.request_id,provider_receipt_path:assignment.result_receipt_path,provider_receipt_sha256:await falFileSha256(assignment.result_receipt_path),recovery_type:recoveryType,previous_image_sha256:assignment.rejected_image_sha256});
    }
    report.updated_at=new Date().toISOString();ledger.updated_at=report.updated_at;
    await write(path.join(ctx.root,"bulk","image-reports",`reviewed-${digest(JSON.stringify(report)).slice(0,16)}.json`),report);

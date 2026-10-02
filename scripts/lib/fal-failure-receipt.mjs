@@ -6,9 +6,11 @@ export function falFailureReceiptPath(row) {
   const failureDir = resultDir === "repair-result-receipts" ? "repair-failure-receipts"
     : resultDir === "repair-v2-result-receipts" ? "repair-v2-failure-receipts"
     : resultDir === "review-repair-result-receipts" ? "review-repair-failure-receipts"
+    : resultDir === "review-repair-transport-recovery-result-receipts" ? "review-repair-transport-recovery-failure-receipts"
     : resultDir === "review-repair-v3-result-receipts" ? "review-repair-v3-failure-receipts"
     : "failure-receipts";
   const receiptName = resultDir === "review-repair-result-receipts"
+    || resultDir === "review-repair-transport-recovery-result-receipts"
     ? path.basename(row.result_receipt_path) : `${row.image_id}.json`;
   return path.join(path.dirname(path.dirname(row.result_receipt_path)), failureDir, receiptName);
 }

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { constants, promises as fs } from "node:fs";
 import path from "node:path";
 import sharp from "sharp";
-import { falFileSha256 } from "./fal-provider.mjs";
+import { falFileSha256, falObjectSha256 } from "./fal-provider.mjs";
 
 const sha = value => createHash("sha256").update(value).digest("hex");
 const json = value => `${JSON.stringify(value, null, 2)}\n`;
@@ -10,6 +10,71 @@ const requireValue = (value, message) => { if (!value) throw new Error(message);
 async function read(file) { return JSON.parse(await fs.readFile(file, "utf8")); }
 async function exists(file) { return fs.access(file).then(() => true, () => false); }
 async function writeNew(file, value) { await fs.mkdir(path.dirname(file), { recursive: true }); await fs.writeFile(file, json(value), { flag: "wx" }); }
+
+async function verifyTransportRecoveredReference({ episodeDir, original, recovery, receipt }) {
+  const id = original.image_id;
+  const root = path.join(episodeDir, "fal", "reference");
+  const submissionPath = path.join(root, "transport-recovery-submission-receipts", `${id}.json`);
+  const resultPath = path.join(root, "transport-recovery-result-receipts", `${id}.json`);
+  const holdPath = path.join(root, "transport-holds", `${id}.json`);
+  const observationPath = path.join(root, "hold-observation-receipts", `${id}.json`);
+  const expectedOutput = path.join(episodeDir, "assets", "images", "reference-repairs", `${id}-transport.png`);
+  requireValue(recovery.image_id === id && recovery.ref_id === original.ref_id
+    && recovery.output_path === expectedOutput
+    && recovery.submission_receipt_path === submissionPath
+    && recovery.result_receipt_path === resultPath
+    && !await exists(original.result_receipt_path),
+  `Fal reference transport recovery path changed: ${id}`);
+  const core = { ...recovery };
+  for (const key of ["assignment_sha256", "assignment_path", "submission_receipt_path", "result_receipt_path", "output_path", "upload_receipt_path"]) delete core[key];
+  requireValue(recovery.assignment_sha256 === falObjectSha256(JSON.stringify(core))
+    && recovery.previous_assignment_sha256 === original.assignment_sha256
+    && recovery.prompt === original.prompt
+    && recovery.prompt_sha256 === original.prompt_sha256
+    && recovery.endpoint === original.endpoint
+    && recovery.run_identity_sha256 === original.run_identity_sha256
+    && recovery.reference_mode === original.reference_mode
+    && JSON.stringify(recovery.reference_asset_ids) === JSON.stringify(original.reference_asset_ids)
+    && JSON.stringify(recovery.reference_hashes) === JSON.stringify(original.reference_hashes)
+    && recovery.board_path === original.board_path
+    && recovery.board_sha256 === original.board_sha256,
+  `Fal reference transport recovery assignment changed: ${id}`);
+  const [originalSubmission, hold, observation, submission] = await Promise.all([
+    read(original.submission_receipt_path), read(holdPath), read(observationPath), read(submissionPath),
+  ]);
+  requireValue(originalSubmission.schema === "goldflow_fal_submission_receipt_v1"
+    && originalSubmission.image_id === id
+    && originalSubmission.assignment_sha256 === original.assignment_sha256
+    && originalSubmission.prompt_sha256 === original.prompt_sha256
+    && originalSubmission.endpoint === original.endpoint
+    && hold.schema === "goldflow_fal_transport_hold_v1"
+    && hold.image_id === id
+    && hold.assignment_sha256 === original.assignment_sha256
+    && hold.request_id === originalSubmission.request_id
+    && observation.schema === "goldflow_fal_reference_hold_observation_v1"
+    && observation.image_id === id
+    && ["provider_failed", "transport_pending"].includes(observation.outcome)
+    && observation.original_assignment_sha256 === original.assignment_sha256
+    && observation.original_request_id === hold.request_id
+    && observation.original_submission_receipt_sha256 === await falFileSha256(original.submission_receipt_path)
+    && observation.original_transport_hold_sha256 === await falFileSha256(holdPath)
+    && recovery.previous_request_id === hold.request_id
+    && recovery.original_transport_hold_sha256 === await falFileSha256(holdPath)
+    && recovery.hold_observation_receipt_sha256 === await falFileSha256(observationPath),
+  `Fal reference transport recovery hold lineage changed: ${id}`);
+  requireValue(submission.schema === "goldflow_fal_submission_receipt_v1"
+    && submission.image_id === id
+    && submission.assignment_sha256 === recovery.assignment_sha256
+    && submission.prompt_sha256 === recovery.prompt_sha256
+    && submission.endpoint === recovery.endpoint
+    && typeof submission.request_id === "string" && submission.request_id.length > 0
+    && submission.request_id !== recovery.previous_request_id
+    && receipt.schema === "goldflow_fal_result_receipt_v1"
+    && receipt.request_id === submission.request_id
+    && receipt.endpoint === recovery.endpoint
+    && receipt.output_path === recovery.output_path,
+  `Fal reference transport recovery result lineage changed: ${id}`);
+}
 
 export function falPortableAssetId(seriesSlug, target) {
   requireValue(/^[a-z0-9-]+$/.test(seriesSlug) && /^[a-z0-9][a-z0-9_-]+$/.test(target?.ref_id ?? ""), "Unsafe portable Fal asset identity");
@@ -43,12 +108,22 @@ export async function promoteApprovedFalReferences({ episodeDir, identity, contr
     const reviewedV3ReceiptPath = path.join(episodeDir, "fal", "reference", "review-repair-v3-result-receipts", `${assignment.image_id}.json`);
     const repairedAssignmentPath = path.join(episodeDir, "fal", "reference", "repair-assignments", `${assignment.image_id}.json`);
     const repairedReceiptPath = path.join(episodeDir, "fal", "reference", "repair-result-receipts", `${assignment.image_id}.json`);
+    const transportAssignmentPath = path.join(episodeDir, "fal", "reference", "transport-recovery-assignments", `${assignment.image_id}.json`);
+    const transportReceiptPath = path.join(episodeDir, "fal", "reference", "transport-recovery-result-receipts", `${assignment.image_id}.json`);
+    const transportRecovered = await exists(transportReceiptPath);
     const activeAssignment = await exists(reviewedV3ReceiptPath) ? await read(reviewedV3AssignmentPath)
       : await exists(reviewedReceiptPath) ? await read(reviewedAssignmentPath)
-      : await exists(repairedReceiptPath) ? await read(repairedAssignmentPath) : assignment;
+      : await exists(repairedReceiptPath) ? await read(repairedAssignmentPath)
+      : transportRecovered ? await read(transportAssignmentPath) : assignment;
     const receipt = await read(activeAssignment.result_receipt_path);
+    if (transportRecovered && activeAssignment.result_receipt_path === transportReceiptPath)
+      await verifyTransportRecoveredReference({ episodeDir, original: assignment, recovery: activeAssignment, receipt });
     const approvedHash = approval.reference_hash_by_ref_id[target.ref_id];
-    requireValue(approvedHash === receipt.output_sha256 && await falFileSha256(receipt.output_path) === approvedHash,
+    requireValue(target.reference_image_path === activeAssignment.output_path
+      && target.conditioning_image_path === activeAssignment.output_path
+      && receipt.output_path === activeAssignment.output_path
+      && approvedHash === receipt.output_sha256
+      && await falFileSha256(receipt.output_path) === approvedHash,
       `Approved Fal reference changed before global promotion: ${target.ref_id}`);
     if (receipt.schema === "goldflow_fal_approved_bank_reuse_v1") {
       requireValue(sourceBank.assets.some(row => row.asset_id === receipt.source_asset_id

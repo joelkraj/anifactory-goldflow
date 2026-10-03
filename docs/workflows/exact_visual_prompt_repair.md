@@ -66,12 +66,18 @@ the correction, such as both the purchase amount and the return rule. The new
 overlay text must also appear exactly in the corrected provider/image prompt.
 For a matching `shot_manifest.ui_elements` string, use
 `ui_element_patch: { "index": 1, "before": "<exact old label>",
-"to": "<exact new label>" }` alongside the source-backed overlay patch; the
-new label must also appear in the prompt.
+"to": "<exact new label>" }`. Up to four distinct indexed strings may instead
+use `ui_element_patches: [...]`; do not provide both singular and plural forms.
+The new labels must appear exactly in the corrected provider/image prompt.
+When no overlay changes, add `ui_element_source_quotes: ["<exact source quote>"]`.
+Every quote must occur in the hash-bound script, and at least one must occur in
+the selected beat excerpt. This permits a UI-only correction without changing
+the number or order of UI elements. When an overlay changes, its own
+`source_quotes` supply that evidence and `ui_element_source_quotes` is omitted.
 Use `manifest_text_patch` for any contradictory foreground action or continuity
 prose in that same cut. The command preserves the other overlay fields and UI
 elements, rejects stale old text or hashes, and records the before/after overlay
-and source quotes in its append-only receipt. This route does not add or remove
+and UI strings plus source quotes in its append-only receipt. This route does not add or remove
 overlays or author a new story event.
 
 When a reviewed later beat no longer depicts one formerly carried object, the

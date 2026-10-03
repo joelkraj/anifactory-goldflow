@@ -431,3 +431,65 @@ test("overlay repair refuses an altered unrelated row and any started harden", a
     } finally { await fs.rm(f.root, { recursive: true, force: true }); }
   }
 });
+
+async function uiOnlyFixture() {
+  const f = await bootOverlayFixture();
+  const plan = JSON.parse(await fs.readFile(f.planPath, "utf8"));
+  const row = plan.prompts[0];
+  row.narrative_overlays = [];
+  row.provider_prompt = row.image_prompt = "Joey's phone shows The return and Purchase return +$119.99.";
+  row.prompt_hash = hash(row.provider_prompt);
+  row.shot_manifest.ui_elements = ["The return", "Purchase return +$119.99"];
+  await fs.writeFile(f.planPath, json(plan));
+  f.spec.expected.prompt_plan_sha256 = hash(json(plan));
+  f.spec.old_row_sha256 = hash(json(row));
+  f.spec.replacement = {
+    provider_prompt: "Joey's phone shows Account activity and Purchase return +$239.98.",
+    image_prompt: "Joey's phone shows Account activity and Purchase return +$239.98.",
+    ui_element_patches: [
+      { index: 0, before: "The return", to: "Account activity" },
+      { index: 1, before: "Purchase return +$119.99", to: "Purchase return +$239.98" },
+    ],
+    ui_element_source_quotes: ["The return arrived before I reached the exit.",
+      "Each return was exactly twice the corresponding purchase."],
+    assert_absent_terms: ["Purchase return +$119.99"],
+  };
+  await fs.writeFile(f.specPath, json(f.spec));
+  return f;
+}
+
+test("UI-only correction repairs two indexed source-bound strings with no overlay or other-row changes", async () => {
+  const f = await uiOnlyFixture();
+  try {
+    const result = await repairVisualPromptExact(f);
+    const plan = JSON.parse(await fs.readFile(f.planPath, "utf8"));
+    assert.deepEqual(plan.prompts[0].shot_manifest.ui_elements, ["Account activity", "Purchase return +$239.98"]);
+    assert.deepEqual(plan.prompts[0].narrative_overlays, []);
+    assert.deepEqual(plan.prompts[1], f.untouched);
+    const receipt = JSON.parse(await fs.readFile(result.receipt_path, "utf8"));
+    assert.deepEqual(receipt.ui_element_text_changes, [
+      { index: 0, before: "The return", after: "Account activity" },
+      { index: 1, before: "Purchase return +$119.99", after: "Purchase return +$239.98" },
+    ]);
+    assert.deepEqual(receipt.ui_element_source_quotes, f.spec.replacement.ui_element_source_quotes);
+  } finally { await fs.rm(f.root, { recursive: true, force: true }); }
+});
+
+test("UI-only correction rejects missing or stale source evidence, duplicate indices, and stale element text", async () => {
+  for (const variant of ["no_quotes", "bad_quote", "no_local_quote", "duplicate", "stale", "fifth"]) {
+    const f = await uiOnlyFixture();
+    try {
+      const replacement = f.spec.replacement;
+      if (variant === "no_quotes") delete replacement.ui_element_source_quotes;
+      if (variant === "bad_quote") replacement.ui_element_source_quotes[1] = "Every purchase was an ordinary refund.";
+      if (variant === "no_local_quote") replacement.ui_element_source_quotes.shift();
+      if (variant === "duplicate") replacement.ui_element_patches[1].index = 0;
+      if (variant === "stale") replacement.ui_element_patches[1].before = "Purchase return +$119.98";
+      if (variant === "fifth") replacement.ui_element_patches.push(...Array(3).fill({ index: 0, before: "The return", to: "Account activity" }));
+      await fs.writeFile(f.specPath, json(f.spec));
+      const before = await fs.readFile(f.planPath);
+      await assert.rejects(repairVisualPromptExact(f), undefined, variant);
+      assert.deepEqual(await fs.readFile(f.planPath), before, variant);
+    } finally { await fs.rm(f.root, { recursive: true, force: true }); }
+  }
+});

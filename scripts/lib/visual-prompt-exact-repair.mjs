@@ -38,7 +38,7 @@ export function exactVisualPromptRepairAdmission(status, flags) {
 export function applyExactPromptText(row, replacement) {
   if (!only(replacement, ["provider_prompt", "image_prompt", "staging_patch", "staging_patches", "manifest_text_patch",
     "reference_text_patch", "anatomy_contract_patch", "anatomy_contract_patches", "equipment_contract_removal",
-    "visible_prop_removal", "narrative_overlay_patch", "ui_element_patch",
+    "visible_prop_removal", "narrative_overlay_patch", "ui_element_patch", "ui_element_patches", "ui_element_source_quotes",
     "assert_absent_terms"]) || !nonempty(replacement.provider_prompt)
     || replacement.provider_prompt !== replacement.image_prompt || replacement.provider_prompt.length > 12000) {
     throw new Error("Replacement must contain the same nonempty provider_prompt and image_prompt, at most 12000 characters.");
@@ -89,15 +89,32 @@ function patchRowStructures(row, replacement, { sourceScript, sourceBeat } = {})
       throw new Error("Corrected provider prompt must include the exact new narrative overlay text.");
     }
   }
-  if (replacement.ui_element_patch !== undefined) {
-    if (replacement.narrative_overlay_patch === undefined) {
-      throw new Error("UI element text correction requires the source-backed narrative overlay patch in this exact-cut route.");
+  if (replacement.ui_element_patch !== undefined && replacement.ui_element_patches !== undefined) {
+    throw new Error("Use ui_element_patch or ui_element_patches, never both.");
+  }
+  const uiPatches = replacement.ui_element_patches ?? (replacement.ui_element_patch === undefined ? [] : [replacement.ui_element_patch]);
+  if (!Array.isArray(uiPatches) || uiPatches.length > 4) {
+    throw new Error("UI element patches must contain at most four exact indexed elements.");
+  }
+  if (uiPatches.length && replacement.narrative_overlay_patch === undefined) {
+    const quotes = replacement.ui_element_source_quotes;
+    if (!Array.isArray(quotes) || !quotes.length || quotes.length > 4
+      || quotes.some((quote) => !nonempty(quote) || quote.length < 5 || quote.length > 500)
+      || new Set(quotes).size !== quotes.length || quotes.some((quote) => !sourceScript?.includes(quote))
+      || !quotes.some((quote) => sourceBeat?.visual_beat_script_excerpt?.includes(quote))) {
+      throw new Error("UI-only correction requires exact source quotes, including one in the selected beat.");
     }
-    const patch = replacement.ui_element_patch;
+  } else if (replacement.ui_element_source_quotes !== undefined) {
+    throw new Error("UI source quotes belong only to a UI-only correction; overlay repairs bind their own source quotes.");
+  }
+  const uiIndices = new Set();
+  for (const patch of uiPatches) {
     if (!only(patch, ["index", "before", "to"]) || !Number.isInteger(patch.index) || patch.index < 0
-      || !Array.isArray(next.shot_manifest?.ui_elements) || patch.index >= next.shot_manifest.ui_elements.length) {
-      throw new Error("UI element patch requires one exact indexed current element.");
+      || uiIndices.has(patch.index) || !Array.isArray(next.shot_manifest?.ui_elements)
+      || patch.index >= next.shot_manifest.ui_elements.length) {
+      throw new Error("UI element patch requires one distinct exact indexed current element.");
     }
+    uiIndices.add(patch.index);
     next.shot_manifest.ui_elements[patch.index] = exactTextPatch(
       next.shot_manifest.ui_elements[patch.index], { before: patch.before, to: patch.to }, "shot_manifest.ui_elements");
     if (!replacement.provider_prompt?.includes(patch.to)) {
@@ -311,6 +328,9 @@ export async function repairVisualPromptExact({ episodeDir, spec, specPath, stat
       before: spec.replacement.ui_element_patch.before,
       after: spec.replacement.ui_element_patch.to,
     } : null,
+    ui_element_text_changes: (spec.replacement.ui_element_patches ?? (spec.replacement.ui_element_patch ? [spec.replacement.ui_element_patch] : []))
+      .map((patch) => ({ index: patch.index, before: patch.before, after: patch.to })),
+    ui_element_source_quotes: spec.replacement.ui_element_source_quotes ?? null,
     before_plan_sha256: files.prompt_plan_sha256.sha256, after_plan_sha256: sha256(output),
     before_snapshot_path: path.join(receiptDir, "before", "section_image_prompts.json"),
     provider_calls: 0, estimated_cost_usd: 0, updated_at: at };

@@ -34,15 +34,16 @@ export async function validateFalValidationCorrection({ root, validationPlanPath
     const ids = plan.assignments.map(row => row.image_id);
     const approved = review.approved_ids ?? [];
     const rejected = review.rejected_ids ?? [];
+    const twoNoncriticalRejects = approved.length === 6 && rejected.length === 2 && approved.includes(ids[0]);
+    const oneCriticalReject = approved.length === 7 && rejected.length === 1 && rejected[0] === ids[0];
     requireState(ids.length === new Set(ids).size
-      && approved.length === 6 && rejected.length === 2
+      && (twoNoncriticalRejects || oneCriticalReject)
       && new Set([...approved, ...rejected]).size === 8
       && ids.every(id => approved.includes(id) || rejected.includes(id))
-      && approved.includes(ids[0])
       && !Object.hasOwn(request, "move_to_rejected_id")
       && !Object.hasOwn(request, "moved_result_sha256")
       && !Object.hasOwn(request, "moved_output_sha256"),
-    "Failed validation recovery must preserve six approved shots, including the probe, and name exactly two reviewed rejects.");
+    "Failed validation recovery must preserve either six approved shots including the probe and two rejects, or seven approved shots with only the critical probe rejected.");
     requireState(Object.keys(request.reviewed_result_sha256_by_id ?? {}).length === 8
       && Object.keys(request.reviewed_output_sha256_by_id ?? {}).length === 8
       && ids.every(id => hex(request.reviewed_result_sha256_by_id[id])
@@ -56,10 +57,10 @@ export async function validateFalValidationCorrection({ root, validationPlanPath
       `Reviewed validation raster changed: ${original.image_id}`);
     }
     requireState(Array.isArray(request.recovery_prompts)
-      && request.recovery_prompts.length === 2
-      && new Set(request.recovery_prompts.map(row => row.image_id)).size === 2
+      && request.recovery_prompts.length === rejected.length
+      && new Set(request.recovery_prompts.map(row => row.image_id)).size === rejected.length
       && rejected.every(id => request.recovery_prompts.some(row => row.image_id === id)),
-    "Failed validation recovery prompts must cover only the two rejected shots.");
+    "Failed validation recovery prompts must cover only the exact rejected shots.");
     for (const entry of request.recovery_prompts) {
       const original = plan.assignments.find(row => row.image_id === entry.image_id);
       requireState(entry.previous_assignment_sha256 === original.assignment_sha256

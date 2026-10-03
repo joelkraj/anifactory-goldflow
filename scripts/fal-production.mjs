@@ -426,13 +426,13 @@ async function main(){
      return console.log(JSON.stringify({status:result.every(row=>row.complete)?"complete":"pending",checked:result.length,complete:result.filter(row=>row.complete).length},null,2));
    }
    if(action==="review-validation-recovery"){
-     need(recovery.status==="pending"&&recovery.results.every(Boolean),"Both exact recovery rasters must exist before visual review.");
+     need(recovery.status==="pending"&&recovery.results.every(Boolean),"Every exact recovery raster must exist before visual review.");
      const approved=String(f["approve-ids"]??"").split(",").filter(Boolean),rejected=String(f["reject-ids"]??"").split(",").filter(Boolean);
      need(f.reviewer&&String(f.note??"").trim().length>20,"Visual recovery review requires actual reviewer and material note.");
      need(approved.length+rejected.length===recovery.plan.assignments.length
        &&new Set([...approved,...rejected]).size===recovery.plan.assignments.length
        &&recovery.plan.assignments.every(row=>approved.includes(row.image_id)||rejected.includes(row.image_id)),
-     "Visual recovery review must disposition only the two exact IDs.");
+     "Visual recovery review must disposition only the exact recovery IDs.");
      const resultHashes={};
      for(const row of recovery.plan.assignments){const receipt=await read(row.result_receipt_path);
        need(receipt.output_sha256===await falFileSha256(receipt.output_path),`Recovery raster changed: ${row.image_id}`);

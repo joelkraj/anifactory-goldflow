@@ -4,7 +4,7 @@ Use this optional route only when `visual_prompt_plan` passed and the next
 stage is the still-missing `visual_prompt_harden`. It fixes one reviewed cut's
 prompt and contradictory prose metadata without another planner or provider
 call. The route cannot change the cut's image or beat ID, timing, narration,
-visible cast, location contract, character/reference roles, overlay identities or placement,
+visible cast, character/reference roles, overlay identities or placement,
 provider route, or
 other cuts. Review the source beat and all attached reference scopes before
 writing the replacement. The subsequent normal
@@ -100,8 +100,8 @@ or plural form, never both.
 An exact sublocation mistake may use `location_reference_patch: {
 "from_ref_id": "<attached location ref>", "to_ref_id": "<approved location ref>",
 "approved_reference_sha256": "<approved raster SHA-256>",
-"source_quotes": ["<verbatim source evidence>"] }`. This keeps the current
-location contract, cast, timing, reference slot order and roles. It changes
+"source_quotes": ["<verbatim source evidence>"] }`. By default this keeps the
+current location contract, cast, timing, reference slot order and roles. It changes
 only one already-attached environment location reference in its requirement,
 usage, anchor, manifest slot and `location_ref_id`. The replacement target must
 be explicitly planned for the selected beat, approved, in scene scope and
@@ -120,6 +120,19 @@ reference ID must disappear entirely from the
 corrected row. This route does not select a new location based on prose and
 cannot change an unplanned or unapproved location image.
 
+If the prompt row also has a stale `shot_manifest.location_contract_id`, add
+`location_contract_patch: { "before": "<exact current contract ID>",
+"to": "<approved source beat location_id>" }` to the same replacement. The
+contract patch is valid only with `location_reference_patch`; its `to` must
+equal the selected beat's immutable `location_id`. Both the attached old ref
+and the new ref must cover that beat location contract and be in the beat's
+scene scope. The old ref may be a scene-scoped sublocation that was never
+planned for this exact beat; the new ref must be explicitly beat-planned. Both
+rasters must still match their approved hashes, and the replacement spec binds
+the original row and all input artifacts. This changes only the one manifest
+contract field alongside the reviewed reference and prose corrections and
+records the before/after contract in the repair receipt.
+
 Then execute `node bin/goldflow.mjs visual repair-prompt --episode-dir
 <episode-dir> --repair-spec <reviewed-json>`. The command checks the current
 status, every expected hash, the original row hash, all current source
@@ -132,4 +145,5 @@ downstream provenance input. Rerun status and execute its next command.
 
 This route requires one canonical prompt variant. If the row has divergent
 provider-specific prompt text, use the existing scoped visual review instead.
-Do not use it after image dispatch or for a structural/ref change.
+Do not use it after image dispatch or for a structural/ref change outside the
+exact location correction described above.

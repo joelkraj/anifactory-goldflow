@@ -568,6 +568,112 @@ async function locationReferenceFixture() {
   return { ...f, planPath, rasterPath };
 }
 
+async function locationContractFixture() {
+  const f = await locationReferenceFixture();
+  const beatPath = path.join(f.episodeDir, "visual_beat_plan.json");
+  const beats = JSON.parse(await fs.readFile(beatPath, "utf8"));
+  beats.beats[0].location_id = "house_gate";
+  await fs.writeFile(beatPath, json(beats));
+  f.spec.expected.visual_beat_plan_sha256 = hash(json(beats));
+
+  const oldRasterPath = path.join(f.episodeDir, "kitchen.png");
+  const oldRaster = Buffer.from("approved-old-sublocation-raster");
+  await fs.writeFile(oldRasterPath, oldRaster);
+  const refsPath = path.join(f.episodeDir, "visual_reference_plan.json");
+  const refs = JSON.parse(await fs.readFile(refsPath, "utf8"));
+  const oldTarget = refs.reference_targets.find((item) => item.ref_id === "kitchen_ref");
+  const newTarget = refs.reference_targets.find((item) => item.ref_id === "gate_ref");
+  oldTarget.location_contract_ids = ["house_gate"];
+  oldTarget.reference_image_path = oldRasterPath;
+  oldTarget.evidence_asset_ids = ["house_source"];
+  newTarget.location_contract_ids = ["house_gate"];
+  newTarget.evidence_asset_ids = ["house_source"];
+  await fs.writeFile(refsPath, json(refs));
+  f.spec.expected.visual_reference_plan_sha256 = hash(json(refs));
+
+  const approvalPath = path.join(f.episodeDir, "visual_reference_approval_ep_01.json");
+  const approval = JSON.parse(await fs.readFile(approvalPath, "utf8"));
+  approval.reference_hash_by_ref_id.kitchen_ref = hash(oldRaster);
+  await fs.writeFile(approvalPath, json(approval));
+  f.spec.expected.reference_image_approval_sha256 = hash(json(approval));
+
+  const plan = JSON.parse(await fs.readFile(f.planPath, "utf8"));
+  plan.prompts[0].shot_manifest.location_contract_id = "house_property";
+  await fs.writeFile(f.planPath, json(plan));
+  f.spec.expected.prompt_plan_sha256 = hash(json(plan));
+  f.spec.old_row_sha256 = hash(json(plan.prompts[0]));
+  f.spec.replacement.location_contract_patch = { before: "house_property", to: "house_gate" };
+  await fs.writeFile(f.specPath, json(f.spec));
+  return { ...f, oldRasterPath };
+}
+
+test("corrects one stale contract to the approved beat location while swapping a planned approved sublocation ref", async () => {
+  const f = await locationContractFixture();
+  try {
+    const before = JSON.parse(await fs.readFile(f.planPath, "utf8")).prompts[0];
+    const result = await repairVisualPromptExact(f);
+    const after = JSON.parse(await fs.readFile(f.planPath, "utf8")).prompts[0];
+    const expected = structuredClone(before);
+    expected.provider_prompt = expected.image_prompt = f.spec.replacement.provider_prompt;
+    expected.prompt_hash = hash(expected.provider_prompt);
+    for (const group of [expected.reference_requirements, expected.reference_usage,
+      expected.anchor_roles, expected.shot_manifest.reference_slots]) {
+      const item = group.find((entry) => entry.ref_id === "kitchen_ref");
+      item.ref_id = "gate_ref";
+      if (item.slot_purpose === "Kitchen geometry") item.slot_purpose = "Gate and driveway geometry";
+      if (item.reason === "An inside conversation.") item.reason = "Keeps Claire outside the gate.";
+    }
+    expected.shot_manifest.location_ref_id = "gate_ref";
+    expected.shot_manifest.location_contract_id = "house_gate";
+    expected.shot_manifest.visible_props = ["Claire's green dress"];
+    expected.shot_manifest.continuity_notes = "Claire remains outside the gate.";
+    expected.shot_manifest.motion_intent.depth_candidate.background_plane = "house gate and driveway";
+    assert.deepEqual(after, expected);
+    const receipt = JSON.parse(await fs.readFile(result.receipt_path, "utf8"));
+    assert.deepEqual(receipt.location_contract_change,
+      { before: "house_property", after: "house_gate", source_beat_location_id: "house_gate" });
+    assert.equal(receipt.provider_calls, 0);
+  } finally { await fs.rm(f.root, { recursive: true, force: true }); }
+});
+
+test("contract correction fails closed for stale IDs, wrong beat, missing swap, scope, plan, approval, or raster", async () => {
+  for (const variant of ["absent_patch", "stale_before", "wrong_to", "no_swap", "old_contract", "new_contract",
+    "old_scene", "new_scene", "unplanned", "old_approval", "new_approval", "old_raster", "new_raster"]) {
+    const f = await locationContractFixture();
+    try {
+      const replacement = f.spec.replacement;
+      if (variant === "absent_patch") delete replacement.location_contract_patch;
+      if (variant === "stale_before") replacement.location_contract_patch.before = "other_property";
+      if (variant === "wrong_to") replacement.location_contract_patch.to = "other_gate";
+      if (variant === "no_swap") delete replacement.location_reference_patch;
+      if (["old_contract", "new_contract", "old_scene", "new_scene", "unplanned"].includes(variant)) {
+        const file = path.join(f.episodeDir, "visual_reference_plan.json");
+        const refs = JSON.parse(await fs.readFile(file, "utf8"));
+        const target = refs.reference_targets.find((item) => item.ref_id ===
+          (["old_contract", "old_scene"].includes(variant) ? "kitchen_ref" : "gate_ref"));
+        if (variant.endsWith("contract")) target.location_contract_ids = ["other_place"];
+        if (variant.endsWith("scene")) target.scene_ids = ["scene_999"];
+        if (variant === "unplanned") target.planned_beat_ids = [];
+        await fs.writeFile(file, json(refs));
+        f.spec.expected.visual_reference_plan_sha256 = hash(json(refs));
+      }
+      if (["old_approval", "new_approval"].includes(variant)) {
+        const file = path.join(f.episodeDir, "visual_reference_approval_ep_01.json");
+        const approval = JSON.parse(await fs.readFile(file, "utf8"));
+        approval.reference_hash_by_ref_id[variant === "old_approval" ? "kitchen_ref" : "gate_ref"] = "0".repeat(64);
+        await fs.writeFile(file, json(approval));
+        f.spec.expected.reference_image_approval_sha256 = hash(json(approval));
+      }
+      if (variant === "old_raster") await fs.writeFile(f.oldRasterPath, "changed-old-raster");
+      if (variant === "new_raster") await fs.writeFile(f.rasterPath, "changed-new-raster");
+      await fs.writeFile(f.specPath, json(f.spec));
+      const before = await fs.readFile(f.planPath);
+      await assert.rejects(repairVisualPromptExact(f), undefined, variant);
+      assert.deepEqual(await fs.readFile(f.planPath), before, variant);
+    } finally { await fs.rm(f.root, { recursive: true, force: true }); }
+  }
+});
+
 test("replaces one approved wrong sublocation reference and stale room prose without changing cast or timing", async () => {
   const f = await locationReferenceFixture();
   try {

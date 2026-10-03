@@ -39,6 +39,7 @@ export function applyExactPromptText(row, replacement) {
   if (!only(replacement, ["provider_prompt", "image_prompt", "staging_patch", "staging_patches", "manifest_text_patch",
     "reference_text_patch", "anatomy_contract_patch", "anatomy_contract_patches", "equipment_contract_removal",
     "equipment_contract_text_patch", "visible_prop_removal", "visible_prop_removals", "location_reference_patch",
+    "location_contract_patch",
     "narrative_overlay_patch", "ui_element_patch", "ui_element_patches", "ui_element_source_quotes",
     "assert_absent_terms"]) || !nonempty(replacement.provider_prompt)
     || replacement.provider_prompt !== replacement.image_prompt || replacement.provider_prompt.length > 12000) {
@@ -62,6 +63,15 @@ function exactTextPatch(value, patch, label) {
 
 function patchRowStructures(row, replacement, { sourceScript, sourceBeat, referencePlan, referenceApproval } = {}) {
   const next = structuredClone(row);
+  const contractPatch = replacement.location_contract_patch;
+  if (contractPatch !== undefined) {
+    if (!only(contractPatch, ["before", "to"]) || !nonempty(contractPatch.before) || !nonempty(contractPatch.to)
+      || contractPatch.before === contractPatch.to || replacement.location_reference_patch === undefined
+      || next.shot_manifest?.location_contract_id !== contractPatch.before
+      || sourceBeat?.location_id !== contractPatch.to) {
+      throw new Error("Location-contract correction requires exact before/to IDs, the approved beat location, and a location-reference swap.");
+    }
+  }
   if (replacement.location_reference_patch !== undefined) {
     const patch = replacement.location_reference_patch;
     if (!only(patch, ["from_ref_id", "to_ref_id", "approved_reference_sha256", "source_quotes"])
@@ -74,7 +84,7 @@ function patchRowStructures(row, replacement, { sourceScript, sourceBeat, refere
       throw new Error("Location-reference correction requires exact old/new IDs, approved raster hash, and source quotes.");
     }
     if (next.shot_manifest?.location_ref_id !== patch.from_ref_id
-      || next.shot_manifest?.location_contract_id !== sourceBeat?.location_id
+      || (!contractPatch && next.shot_manifest?.location_contract_id !== sourceBeat?.location_id)
       || !Array.isArray(next.required_reference_paths) || next.required_reference_paths.length) {
       throw new Error("Location-reference correction requires one matching beat contract and no untracked reference paths.");
     }
@@ -83,10 +93,12 @@ function patchRowStructures(row, replacement, { sourceScript, sourceBeat, refere
     const newTargets = targets.filter((item) => item.ref_id === patch.to_ref_id);
     const sharedSourceAssets = oldTargets.length === 1 && newTargets.length === 1
       ? oldTargets[0].evidence_asset_ids?.filter((id) => newTargets[0].evidence_asset_ids?.includes(id)) ?? [] : [];
+    const targetContractId = contractPatch?.to ?? next.shot_manifest.location_contract_id;
     if (oldTargets.length !== 1 || newTargets.length !== 1
       || oldTargets[0].kind !== "location" || newTargets[0].kind !== "location"
-      || !oldTargets[0].location_contract_ids?.includes(next.shot_manifest.location_contract_id)
-      || (!newTargets[0].location_contract_ids?.includes(next.shot_manifest.location_contract_id) && !sharedSourceAssets.length)
+      || !oldTargets[0].location_contract_ids?.includes(targetContractId)
+      || (!newTargets[0].location_contract_ids?.includes(targetContractId)
+        && (contractPatch || !sharedSourceAssets.length))
       || !newTargets[0].planned_beat_ids?.includes(sourceBeat.visual_beat_id)
       || referenceApproval?.reference_hash_by_ref_id?.[patch.to_ref_id] !== patch.approved_reference_sha256) {
       throw new Error("Replacement location reference is not approved, beat-planned, or in the same location contract.");
@@ -105,6 +117,7 @@ function patchRowStructures(row, replacement, { sourceScript, sourceBeat, refere
     }
     for (const items of groups) items.find((item) => item.ref_id === patch.from_ref_id).ref_id = patch.to_ref_id;
     next.shot_manifest.location_ref_id = patch.to_ref_id;
+    if (contractPatch) next.shot_manifest.location_contract_id = contractPatch.to;
     if (JSON.stringify(next).includes(`\"${patch.from_ref_id}\"`)) {
       throw new Error("Stale old location reference remains attached after correction.");
     }
@@ -375,6 +388,14 @@ export async function repairVisualPromptExact({ episodeDir, spec, specPath, stat
     if (!target?.reference_image_path || sha256(await fs.readFile(target.reference_image_path)) !== selected.approved_reference_sha256) {
       throw new Error("Replacement approved location raster changed since review.");
     }
+    if (spec.replacement.location_contract_patch) {
+      const previous = refs.reference_targets?.find((item) => item.ref_id === selected.from_ref_id);
+      const approvedHash = files.reference_image_approval_sha256.value.reference_hash_by_ref_id?.[selected.from_ref_id];
+      if (!previous?.reference_image_path || !hashPattern.test(approvedHash ?? "")
+        || sha256(await fs.readFile(previous.reference_image_path)) !== approvedHash) {
+        throw new Error("Current approved location raster changed since review.");
+      }
+    }
   }
   const corrected = applyExactPromptText(patchRowStructures(original, spec.replacement, {
     sourceScript: files.source_script_sha256.value, sourceBeat: sourceBeats[0], referencePlan: refs,
@@ -437,6 +458,11 @@ export async function repairVisualPromptExact({ episodeDir, spec, specPath, stat
       to_ref_id: spec.replacement.location_reference_patch.to_ref_id,
       approved_reference_sha256: spec.replacement.location_reference_patch.approved_reference_sha256,
       source_quotes: spec.replacement.location_reference_patch.source_quotes,
+    } : null,
+    location_contract_change: spec.replacement.location_contract_patch ? {
+      before: spec.replacement.location_contract_patch.before,
+      after: spec.replacement.location_contract_patch.to,
+      source_beat_location_id: sourceBeats[0].location_id,
     } : null,
     before_plan_sha256: files.prompt_plan_sha256.sha256, after_plan_sha256: sha256(output),
     before_snapshot_path: path.join(receiptDir, "before", "section_image_prompts.json"),

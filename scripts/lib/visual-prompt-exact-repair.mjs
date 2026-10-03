@@ -165,6 +165,12 @@ function patchRowStructures(row, replacement, { sourceScript, sourceBeat, refere
     uiIndices.add(patch.index);
     next.shot_manifest.ui_elements[patch.index] = exactTextPatch(
       next.shot_manifest.ui_elements[patch.index], { before: patch.before, to: patch.to }, "shot_manifest.ui_elements");
+    if (Array.isArray(next.ui_text_on_screen)) {
+      const mirrored = next.ui_text_on_screen
+        .map((value, index) => ({ value, index })).filter(({ value }) => value === patch.before);
+      if (mirrored.length > 1) throw new Error("Top-level UI text mirror is ambiguous for an exact patch.");
+      if (mirrored.length === 1) next.ui_text_on_screen[mirrored[0].index] = patch.to;
+    }
     if (!replacement.provider_prompt?.includes(patch.to)) {
       throw new Error("Corrected provider prompt must include the exact new UI element text.");
     }

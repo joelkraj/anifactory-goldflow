@@ -440,6 +440,7 @@ async function uiOnlyFixture() {
   row.provider_prompt = row.image_prompt = "Joey's phone shows The return and Purchase return +$119.99.";
   row.prompt_hash = hash(row.provider_prompt);
   row.shot_manifest.ui_elements = ["The return", "Purchase return +$119.99"];
+  row.ui_text_on_screen = ["The return", "Purchase return +$119.99"];
   await fs.writeFile(f.planPath, json(plan));
   f.spec.expected.prompt_plan_sha256 = hash(json(plan));
   f.spec.old_row_sha256 = hash(json(row));
@@ -464,6 +465,7 @@ test("UI-only correction repairs two indexed source-bound strings with no overla
     const result = await repairVisualPromptExact(f);
     const plan = JSON.parse(await fs.readFile(f.planPath, "utf8"));
     assert.deepEqual(plan.prompts[0].shot_manifest.ui_elements, ["Account activity", "Purchase return +$239.98"]);
+    assert.deepEqual(plan.prompts[0].ui_text_on_screen, ["Account activity", "Purchase return +$239.98"]);
     assert.deepEqual(plan.prompts[0].narrative_overlays, []);
     assert.deepEqual(plan.prompts[1], f.untouched);
     const receipt = JSON.parse(await fs.readFile(result.receipt_path, "utf8"));
@@ -475,8 +477,8 @@ test("UI-only correction repairs two indexed source-bound strings with no overla
   } finally { await fs.rm(f.root, { recursive: true, force: true }); }
 });
 
-test("UI-only correction rejects missing or stale source evidence, duplicate indices, and stale element text", async () => {
-  for (const variant of ["no_quotes", "bad_quote", "no_local_quote", "duplicate", "stale", "fifth"]) {
+test("UI-only correction rejects missing or stale source evidence, duplicate indices, stale element text, and ambiguous mirrors", async () => {
+  for (const variant of ["no_quotes", "bad_quote", "no_local_quote", "duplicate", "stale", "fifth", "ambiguous_mirror"]) {
     const f = await uiOnlyFixture();
     try {
       const replacement = f.spec.replacement;
@@ -486,6 +488,13 @@ test("UI-only correction rejects missing or stale source evidence, duplicate ind
       if (variant === "duplicate") replacement.ui_element_patches[1].index = 0;
       if (variant === "stale") replacement.ui_element_patches[1].before = "Purchase return +$119.98";
       if (variant === "fifth") replacement.ui_element_patches.push(...Array(3).fill({ index: 0, before: "The return", to: "Account activity" }));
+      if (variant === "ambiguous_mirror") {
+        const plan = JSON.parse(await fs.readFile(f.planPath, "utf8"));
+        plan.prompts[0].ui_text_on_screen.push("The return");
+        await fs.writeFile(f.planPath, json(plan));
+        f.spec.expected.prompt_plan_sha256 = hash(json(plan));
+        f.spec.old_row_sha256 = hash(json(plan.prompts[0]));
+      }
       await fs.writeFile(f.specPath, json(f.spec));
       const before = await fs.readFile(f.planPath);
       await assert.rejects(repairVisualPromptExact(f), undefined, variant);

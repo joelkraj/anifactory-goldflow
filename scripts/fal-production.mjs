@@ -15,6 +15,7 @@ import { applyFalPostplanPromptCorrection, inspectFalPostplanPromptCorrection } 
 import { validateFalReviewedReferenceSuccessRepair } from "./lib/fal-reviewed-reference-success-repair.mjs";
 import { recheckFalReferenceHolds } from "./lib/fal-reference-hold-recheck.mjs";
 import { reviewedBulkRepairRound } from "./lib/fal-reviewed-bulk-round.mjs";
+import { reviewedBulkSourceReceipt } from "./lib/fal-reviewed-bulk-source-receipt.mjs";
 import { reviewedBulkHoldRecoveryPrompt } from "./lib/fal-reviewed-bulk-hold-recovery.mjs";
 
 const digest = value => createHash("sha256").update(value).digest("hex");
@@ -787,8 +788,13 @@ async function main(){
    for(const directive of directives.repairs){
      const original=bulk.assignments.find(row=>row.image_id===directive.image_id);
      need(original&&original.assignment_sha256===directive.original_assignment_sha256,`Original assignment changed: ${directive.image_id}`);
-     const originalReceipt=await read(original.result_receipt_path);
-     need(originalReceipt.output_sha256===await falFileSha256(originalReceipt.output_path),`Original Fal result changed: ${directive.image_id}`);
+     const selected=report.results.find(row=>row.image_id===directive.image_id);
+     await reviewedBulkSourceReceipt({imageId:directive.image_id,
+       primaryReceiptPath:original.result_receipt_path,
+       selectedReceiptPath:selected.generated.result_receipt_path,
+       selectedReceiptSha256:selected.generated.result_receipt_sha256,
+       selectedImagePath:selected.image_path,
+       selectedImageSha256:directive.rejected_image_sha256});
      need(typeof directive.finding==="string"&&directive.finding.length>20&&typeof directive.replacement_prompt==="string"&&directive.replacement_prompt.length>100,"Review finding and replacement prompt required.");
      const promptRow=prompts.prompts.find(row=>row.image_id===directive.image_id);
      need(promptRow,`Locked prompt row missing: ${directive.image_id}`);

@@ -634,7 +634,8 @@ test("location correction can remove two stale room props and patch one exact eq
     const plan = JSON.parse(await fs.readFile(f.planPath, "utf8"));
     const row = plan.prompts[0];
     row.shot_manifest.visible_props = ["kitchen table", "meeting chairs", "presentation screen"];
-    const screen = { owner: "hotel", item: "presentation screen", holder_state: "fixed in meeting room", visible_count: 1 };
+    const screen = { owner: "hotel", item: "presentation screen", holder_state: "fixed in meeting room",
+      contact_target: "meeting room wall", visible_count: 1 };
     row.shot_manifest.equipment_contracts = [screen];
     await fs.writeFile(f.planPath, json(plan));
     f.spec.expected.prompt_plan_sha256 = hash(json(plan));
@@ -642,7 +643,8 @@ test("location correction can remove two stale room props and patch one exact eq
     f.spec.replacement.visible_prop_removal = undefined;
     f.spec.replacement.visible_prop_removals = ["kitchen table", "meeting chairs"];
     f.spec.replacement.equipment_contract_text_patch = { owner: "hotel", item: "presentation screen",
-      expected_contract_sha256: hash(json(screen)), holder_state: { before: "fixed in meeting room", to: "fixed in ballroom" } };
+      expected_contract_sha256: hash(json(screen)), holder_state: { before: "fixed in meeting room", to: "fixed in ballroom" },
+      contact_target: { before: "meeting room wall", to: "ballroom wall" } };
     f.spec.replacement.provider_prompt = f.spec.replacement.image_prompt =
       "Joey stands inside the house gate while Claire waits outside beside the driveway; a presentation screen is fixed in ballroom.";
     await fs.writeFile(f.specPath, json(f.spec));
@@ -650,5 +652,6 @@ test("location correction can remove two stale room props and patch one exact eq
     const corrected = JSON.parse(await fs.readFile(f.planPath, "utf8")).prompts[0];
     assert.deepEqual(corrected.shot_manifest.visible_props, ["presentation screen"]);
     assert.equal(corrected.shot_manifest.equipment_contracts[0].holder_state, "fixed in ballroom");
+    assert.equal(corrected.shot_manifest.equipment_contracts[0].contact_target, "ballroom wall");
   } finally { await fs.rm(f.root, { recursive: true, force: true }); }
 });

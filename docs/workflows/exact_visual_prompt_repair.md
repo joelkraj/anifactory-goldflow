@@ -114,7 +114,9 @@ prompt/continuity/depth wording in the same repair. When a screen's
 `holder_state` mentions the old room, a location correction may include
 `equipment_contract_text_patch: { "owner": "...", "item": "...",
 "expected_contract_sha256": "...", "holder_state": { "before": "...",
-"to": "..." } }`. The old reference ID must disappear entirely from the
+"to": "..." }, "contact_target": { "before": "...", "to": "..." } }`.
+Either holder state or contact target may be omitted when unchanged. The old
+reference ID must disappear entirely from the
 corrected row. This route does not select a new location based on prose and
 cannot change an unplanned or unapproved location image.
 

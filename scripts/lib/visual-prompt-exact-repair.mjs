@@ -212,17 +212,20 @@ function patchRowStructures(row, replacement, { sourceScript, sourceBeat, refere
     if (replacement.location_reference_patch === undefined) {
       throw new Error("Equipment holder-state correction is limited to a reviewed location-reference correction.");
     }
-    if (!only(patch, ["owner", "item", "expected_contract_sha256", "holder_state"])
+    if (!only(patch, ["owner", "item", "expected_contract_sha256", "holder_state", "contact_target"])
       || !nonempty(patch.owner) || !nonempty(patch.item)
-      || !hashPattern.test(patch.expected_contract_sha256 ?? "") || !patch.holder_state) {
-      throw new Error("Equipment text correction requires an exact contract hash and holder-state patch.");
+      || !hashPattern.test(patch.expected_contract_sha256 ?? "")
+      || (!patch.holder_state && !patch.contact_target)) {
+      throw new Error("Equipment text correction requires an exact contract hash and holder-state/contact patch.");
     }
     const contracts = (next.shot_manifest?.equipment_contracts ?? [])
       .filter((item) => item.owner === patch.owner && item.item === patch.item);
     if (contracts.length !== 1 || sha256(jsonBytes(contracts[0])) !== patch.expected_contract_sha256) {
       throw new Error("Reviewed equipment contract is missing, ambiguous, or changed.");
     }
-    contracts[0].holder_state = exactTextPatch(contracts[0].holder_state, patch.holder_state, "equipment_contracts.holder_state");
+    for (const field of ["holder_state", "contact_target"]) {
+      if (patch[field]) contracts[0][field] = exactTextPatch(contracts[0][field], patch[field], `equipment_contracts.${field}`);
+    }
   }
   if (replacement.staging_patch !== undefined && replacement.staging_patches !== undefined) {
     throw new Error("Use staging_patch or staging_patches, never both.");

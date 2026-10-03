@@ -38,7 +38,7 @@ export function exactVisualPromptRepairAdmission(status, flags) {
 export function applyExactPromptText(row, replacement) {
   if (!only(replacement, ["provider_prompt", "image_prompt", "staging_patch", "staging_patches", "manifest_text_patch",
     "reference_text_patch", "anatomy_contract_patch", "anatomy_contract_patches", "equipment_contract_removal",
-    "visible_prop_removal",
+    "visible_prop_removal", "narrative_overlay_patch", "ui_element_patch",
     "assert_absent_terms"]) || !nonempty(replacement.provider_prompt)
     || replacement.provider_prompt !== replacement.image_prompt || replacement.provider_prompt.length > 12000) {
     throw new Error("Replacement must contain the same nonempty provider_prompt and image_prompt, at most 12000 characters.");
@@ -59,8 +59,51 @@ function exactTextPatch(value, patch, label) {
   return patch.to;
 }
 
-function patchRowStructures(row, replacement) {
+function patchRowStructures(row, replacement, { sourceScript, sourceBeat } = {}) {
   const next = structuredClone(row);
+  if (replacement.narrative_overlay_patch !== undefined) {
+    const patch = replacement.narrative_overlay_patch;
+    if (!only(patch, ["index", "before", "old_overlay_sha256", "to", "information_delta", "source_quotes"])
+      || !Number.isInteger(patch.index) || patch.index < 0
+      || !Array.isArray(next.narrative_overlays) || patch.index >= next.narrative_overlays.length
+      || !nonempty(patch.before) || !nonempty(patch.to) || patch.to.length > 160
+      || !hashPattern.test(patch.old_overlay_sha256 ?? "")) {
+      throw new Error("Narrative overlay patch requires one indexed, hash-bound current overlay and exact before/to text.");
+    }
+    const overlay = next.narrative_overlays[patch.index];
+    if (overlay?.text !== patch.before || sha256(jsonBytes(overlay)) !== patch.old_overlay_sha256) {
+      throw new Error("Reviewed narrative overlay text or hash is stale.");
+    }
+    if (!Array.isArray(patch.source_quotes) || !patch.source_quotes.length || patch.source_quotes.length > 4
+      || patch.source_quotes.some((quote) => !nonempty(quote) || quote.length < 16 || quote.length > 500)
+      || new Set(patch.source_quotes).size !== patch.source_quotes.length
+      || patch.source_quotes.some((quote) => !sourceScript?.includes(quote))
+      || !patch.source_quotes.some((quote) => sourceBeat?.visual_beat_script_excerpt?.includes(quote))) {
+      throw new Error("Narrative overlay correction requires exact source quotes, including one in the selected beat.");
+    }
+    overlay.text = exactTextPatch(overlay.text, { before: patch.before, to: patch.to }, "narrative_overlays.text");
+    if (patch.information_delta !== undefined) {
+      overlay.information_delta = exactTextPatch(overlay.information_delta, patch.information_delta, "narrative_overlays.information_delta");
+    }
+    if (!replacement.provider_prompt?.includes(patch.to)) {
+      throw new Error("Corrected provider prompt must include the exact new narrative overlay text.");
+    }
+  }
+  if (replacement.ui_element_patch !== undefined) {
+    if (replacement.narrative_overlay_patch === undefined) {
+      throw new Error("UI element text correction requires the source-backed narrative overlay patch in this exact-cut route.");
+    }
+    const patch = replacement.ui_element_patch;
+    if (!only(patch, ["index", "before", "to"]) || !Number.isInteger(patch.index) || patch.index < 0
+      || !Array.isArray(next.shot_manifest?.ui_elements) || patch.index >= next.shot_manifest.ui_elements.length) {
+      throw new Error("UI element patch requires one exact indexed current element.");
+    }
+    next.shot_manifest.ui_elements[patch.index] = exactTextPatch(
+      next.shot_manifest.ui_elements[patch.index], { before: patch.before, to: patch.to }, "shot_manifest.ui_elements");
+    if (!replacement.provider_prompt?.includes(patch.to)) {
+      throw new Error("Corrected provider prompt must include the exact new UI element text.");
+    }
+  }
   if (replacement.visible_prop_removal !== undefined) {
     const prop = replacement.visible_prop_removal;
     if (!nonempty(prop) || !Array.isArray(next.shot_manifest?.visible_props)) {
@@ -224,7 +267,9 @@ export async function repairVisualPromptExact({ episodeDir, spec, specPath, stat
     original.shot_manifest?.location_ref_id,
   ].filter(Boolean);
   if (declared.some((id) => !allowed.has(id))) throw new Error("Prompt row contains an out-of-scope reference; repair refs with the guarded review route first.");
-  const corrected = applyExactPromptText(patchRowStructures(original, spec.replacement), spec.replacement);
+  const corrected = applyExactPromptText(patchRowStructures(original, spec.replacement, {
+    sourceScript: files.source_script_sha256.value, sourceBeat: sourceBeats[0],
+  }), spec.replacement);
   if (spec.replacement.assert_absent_terms !== undefined) {
     const terms = spec.replacement.assert_absent_terms;
     if (!Array.isArray(terms) || !terms.length || terms.length > 8 || terms.some((term) => !nonempty(term) || term.length > 100)) {
@@ -249,6 +294,23 @@ export async function repairVisualPromptExact({ episodeDir, spec, specPath, stat
     episode: spec.episode, image_id: spec.image_id, visual_beat_id: spec.visual_beat_id, reviewer: spec.reviewer, note: spec.note,
     spec_sha256: sha256(await fs.readFile(specPath)), source_hashes: Object.fromEntries(Object.entries(files).map(([key, item]) => [key, item.sha256])),
     old_row_sha256: spec.old_row_sha256, new_row_sha256: sha256(jsonBytes(corrected)),
+    narrative_overlay_text_change: spec.replacement.narrative_overlay_patch ? {
+      index: spec.replacement.narrative_overlay_patch.index,
+      before: spec.replacement.narrative_overlay_patch.before,
+      after: spec.replacement.narrative_overlay_patch.to,
+      before_overlay_sha256: spec.replacement.narrative_overlay_patch.old_overlay_sha256,
+      after_overlay_sha256: sha256(jsonBytes(corrected.narrative_overlays[spec.replacement.narrative_overlay_patch.index])),
+      information_delta_change: spec.replacement.narrative_overlay_patch.information_delta ? {
+        before: spec.replacement.narrative_overlay_patch.information_delta.before,
+        after: spec.replacement.narrative_overlay_patch.information_delta.to,
+      } : null,
+      source_quotes: spec.replacement.narrative_overlay_patch.source_quotes,
+    } : null,
+    ui_element_text_change: spec.replacement.ui_element_patch ? {
+      index: spec.replacement.ui_element_patch.index,
+      before: spec.replacement.ui_element_patch.before,
+      after: spec.replacement.ui_element_patch.to,
+    } : null,
     before_plan_sha256: files.prompt_plan_sha256.sha256, after_plan_sha256: sha256(output),
     before_snapshot_path: path.join(receiptDir, "before", "section_image_prompts.json"),
     provider_calls: 0, estimated_cost_usd: 0, updated_at: at };

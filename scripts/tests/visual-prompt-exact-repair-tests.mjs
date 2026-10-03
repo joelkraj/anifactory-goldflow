@@ -317,3 +317,117 @@ test("plural patches reject repeated character or anatomy targets", async () => 
     await assert.rejects(repairVisualPromptExact(f), /match exactly once/);
   } finally { await fs.rm(f.root, { recursive: true, force: true }); }
 });
+
+async function bootOverlayFixture() {
+  const f = await fixture();
+  const source = "One hundred nineteen dollars and ninety-nine cents.\nThe return arrived before I reached the exit.\nEach return was exactly twice the corresponding purchase.\n";
+  await fs.writeFile(path.join(f.episodeDir, "script_clean.md"), source);
+  f.spec.expected.source_script_sha256 = hash(source);
+  const beatPath = path.join(f.episodeDir, "visual_beat_plan.json");
+  const beats = JSON.parse(await fs.readFile(beatPath, "utf8"));
+  beats.beats[0].visual_beat_script_excerpt = "The return arrived before I reached the exit.";
+  beats.beats.push({ ...beats.beats[0], visual_beat_id: "beat_other" });
+  await fs.writeFile(beatPath, json(beats));
+  f.spec.expected.visual_beat_plan_sha256 = hash(json(beats));
+  const planPath = path.join(f.episodeDir, "section_image_prompts.json");
+  const plan = JSON.parse(await fs.readFile(planPath, "utf8"));
+  const row = plan.prompts[0];
+  row.provider_prompt = row.image_prompt = "Joey receives Purchase return +$119.99. RPG panel NET COST: $0.";
+  row.prompt_hash = hash(row.provider_prompt);
+  row.narrative_overlays = [{ kind: "rpg_game_text", text: "NET COST: $0",
+    information_delta: "matching credit cancels boot purchase cost", style: "system_cyan" }];
+  row.shot_manifest.foreground_action = "Joey sees one $119.99 purchase-return credit.";
+  row.shot_manifest.ui_elements = ["Paid $119.99", "Purchase return +$119.99"];
+  const untouched = { ...structuredClone(row), image_id: "ep_01-other", visual_beat_id: "beat_other" };
+  plan.prompts.push(untouched);
+  plan.source_script_hash = f.spec.expected.source_script_sha256;
+  await fs.writeFile(planPath, json(plan));
+  f.spec.expected.prompt_plan_sha256 = hash(json(plan));
+  f.spec.old_row_sha256 = hash(json(row));
+  const overlayPatch = { index: 0, before: "NET COST: $0", old_overlay_sha256: hash(json(row.narrative_overlays[0])),
+    to: "CASH UP $119.99", information_delta: { before: "matching credit cancels boot purchase cost",
+      to: "Joey retains the boots while his cash increases by $119.99." },
+    source_quotes: ["The return arrived before I reached the exit.",
+      "One hundred nineteen dollars and ninety-nine cents.",
+      "Each return was exactly twice the corresponding purchase."] };
+  const correctedPrompt = "Joey receives Purchase return +$239.98. RPG panel CASH UP $119.99. The paid $119.99 boots remain with him.";
+  f.spec.replacement = {
+    provider_prompt: correctedPrompt, image_prompt: correctedPrompt,
+    narrative_overlay_patch: overlayPatch,
+    ui_element_patch: { index: 1, before: "Purchase return +$119.99", to: "Purchase return +$239.98" },
+    manifest_text_patch: { foreground_action: { before: "Joey sees one $119.99 purchase-return credit.",
+      to: "Joey sees a $239.98 return on the $119.99 boots purchase." } },
+    assert_absent_terms: ["NET COST: $0", "Purchase return +$119.99", "matching credit cancels boot purchase cost"],
+  };
+  f.spec.note = "The source says every purchase returns twice its price, so the $119.99 boots yield $239.98 and increase cash by $119.99.";
+  await fs.writeFile(f.specPath, json(f.spec));
+  return { ...f, planPath, untouched };
+}
+
+test("corrects one source-backed purchase overlay, UI amount, and action without changing another cut", async () => {
+  const f = await bootOverlayFixture();
+  try {
+    const result = await repairVisualPromptExact(f);
+    const plan = JSON.parse(await fs.readFile(f.planPath, "utf8"));
+    const row = plan.prompts[0];
+    assert.equal(row.narrative_overlays[0].text, "CASH UP $119.99");
+    assert.match(row.narrative_overlays[0].information_delta, /cash increases by \$119\.99/);
+    assert.equal(row.shot_manifest.ui_elements[1], "Purchase return +$239.98");
+    assert.match(row.shot_manifest.foreground_action, /\$239\.98/);
+    assert.deepEqual(plan.prompts[1], f.untouched);
+    const receipt = JSON.parse(await fs.readFile(result.receipt_path, "utf8"));
+    assert.equal(receipt.narrative_overlay_text_change.before, "NET COST: $0");
+    assert.equal(receipt.narrative_overlay_text_change.after, "CASH UP $119.99");
+    assert.equal(receipt.narrative_overlay_text_change.after_overlay_sha256, hash(json(row.narrative_overlays[0])));
+    assert.equal(receipt.narrative_overlay_text_change.information_delta_change.after,
+      "Joey retains the boots while his cash increases by $119.99.");
+    assert.deepEqual(receipt.narrative_overlay_text_change.source_quotes, f.spec.replacement.narrative_overlay_patch.source_quotes);
+    assert.deepEqual(receipt.ui_element_text_change,
+      { index: 1, before: "Purchase return +$119.99", after: "Purchase return +$239.98" });
+  } finally { await fs.rm(f.root, { recursive: true, force: true }); }
+});
+
+test("refuses stale overlay text or hash, bad source quotes, stale UI text, and unmirrored prompt text", async () => {
+  for (const variant of ["text", "hash", "quote", "local_quote", "ui", "ui_without_overlay", "prompt", "information_delta"]) {
+    const f = await bootOverlayFixture();
+    try {
+      const patch = f.spec.replacement.narrative_overlay_patch;
+      if (variant === "text") patch.before = "NET COST: $1";
+      if (variant === "hash") patch.old_overlay_sha256 = "0".repeat(64);
+      if (variant === "quote") patch.source_quotes[1] = "One hundred nineteen dollars and ninety-eight cents.";
+      if (variant === "local_quote") patch.source_quotes.shift();
+      if (variant === "ui") f.spec.replacement.ui_element_patch.before = "Purchase return +$119.98";
+      if (variant === "ui_without_overlay") delete f.spec.replacement.narrative_overlay_patch;
+      if (variant === "prompt") {
+        f.spec.replacement.provider_prompt = f.spec.replacement.image_prompt = "Joey receives Purchase return +$239.98. The boots remain with him.";
+      }
+      if (variant === "information_delta") patch.information_delta.before = "matching credit covers purchase";
+      await fs.writeFile(f.specPath, json(f.spec));
+      const before = await fs.readFile(f.planPath);
+      await assert.rejects(repairVisualPromptExact(f));
+      assert.deepEqual(await fs.readFile(f.planPath), before, variant);
+    } finally { await fs.rm(f.root, { recursive: true, force: true }); }
+  }
+});
+
+test("overlay repair refuses an altered unrelated row and any started harden", async () => {
+  for (const variant of ["other_row", "harden", "harden_event"]) {
+    const f = await bootOverlayFixture();
+    try {
+      if (variant === "other_row") {
+        const plan = JSON.parse(await fs.readFile(f.planPath, "utf8"));
+        plan.prompts[1].provider_prompt = "Unreviewed change";
+        await fs.writeFile(f.planPath, json(plan));
+      } else if (variant === "harden") {
+        f.status.stage_ledger.find((stage) => stage.stage === "visual_prompt_harden").state = "failed";
+        f.status.current_stage_state = "failed";
+      } else {
+        await fs.writeFile(path.join(f.episodeDir, "execution_events.jsonl"),
+          `${JSON.stringify({ stage: "visual_prompt_harden", status: "failed" })}\n`);
+      }
+      const before = await fs.readFile(f.planPath);
+      await assert.rejects(repairVisualPromptExact(f));
+      assert.deepEqual(await fs.readFile(f.planPath), before);
+    } finally { await fs.rm(f.root, { recursive: true, force: true }); }
+  }
+});

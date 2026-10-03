@@ -4,7 +4,8 @@ Use this optional route only when `visual_prompt_plan` passed and the next
 stage is the still-missing `visual_prompt_harden`. It fixes one reviewed cut's
 prompt and contradictory prose metadata without another planner or provider
 call. The route cannot change the cut's image or beat ID, timing, narration,
-visible cast, location, reference IDs or roles, overlays, provider route, or
+visible cast, location, reference IDs or roles, overlay identities or placement,
+provider route, or
 other cuts. Review the source beat and all attached reference scopes before
 writing the replacement. The subsequent normal
 `visual harden` command remains the structural and continuity gate.
@@ -52,6 +53,26 @@ one cut. Add
 `assert_absent_terms` to fail if rejected wording remains anywhere in the
 corrected row. All prose patches require exact before/after text; no ID, role,
 reference set, timing or other row may change.
+
+For a source-inconsistent on-image amount, one existing overlay's `text` and
+optionally its `information_delta` may be corrected with
+`narrative_overlay_patch: { "index": 0, "before": "<exact old text>",
+"old_overlay_sha256": "<SHA-256 of JSON.stringify(the overlay, null, 2) plus newline>",
+"to": "<exact new text>", "information_delta": { "before": "<exact old delta>",
+"to": "<reviewed new delta>" }, "source_quotes": ["<exact source quote>"] }`.
+Every quote must occur in the hash-bound source script, and at least one must
+occur in that cut's approved beat excerpt. Include all quotes needed to support
+the correction, such as both the purchase amount and the return rule. The new
+overlay text must also appear exactly in the corrected provider/image prompt.
+For a matching `shot_manifest.ui_elements` string, use
+`ui_element_patch: { "index": 1, "before": "<exact old label>",
+"to": "<exact new label>" }` alongside the source-backed overlay patch; the
+new label must also appear in the prompt.
+Use `manifest_text_patch` for any contradictory foreground action or continuity
+prose in that same cut. The command preserves the other overlay fields and UI
+elements, rejects stale old text or hashes, and records the before/after overlay
+and source quotes in its append-only receipt. This route does not add or remove
+overlays or author a new story event.
 
 When a reviewed later beat no longer depicts one formerly carried object, the
 replacement may remove its stale `shot_manifest.equipment_contracts` entry

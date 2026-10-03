@@ -4,7 +4,7 @@ Use this optional route only when `visual_prompt_plan` passed and the next
 stage is the still-missing `visual_prompt_harden`. It fixes one reviewed cut's
 prompt and contradictory prose metadata without another planner or provider
 call. The route cannot change the cut's image or beat ID, timing, narration,
-visible cast, location, reference IDs or roles, overlay identities or placement,
+visible cast, location contract, character/reference roles, overlay identities or placement,
 provider route, or
 other cuts. Review the source beat and all attached reference scopes before
 writing the replacement. The subsequent normal
@@ -44,7 +44,8 @@ If the defect also affects structured metadata, `replacement` may include a
 `screen_position`. Use `staging_patches` for multiple distinct characters in
 one cut; do not supply singular and plural forms together.
 `manifest_text_patch` may correct `foreground_action` and
-`continuity_notes`. `reference_text_patch` binds one already-attached `ref_id`
+`continuity_notes`; `depth_background_plane` corrects one exact depth candidate
+description when the physical background changes. `reference_text_patch` binds one already-attached `ref_id`
 and may correct its `slot_purpose` or `reason` in the requirement and matching
 manifest slot. `anatomy_contract_patch` binds one exact `entity` and
 `identity_ref_id` and may correct `body_invariant` or `reason`. Use
@@ -92,6 +93,30 @@ alter the source beat's projected state or permit reference changes.
 If the same object is listed in `shot_manifest.visible_props`, include
 `visible_prop_removal: "<exact current prop label>"`; it must match one and
 only one visible prop, leaving the other props untouched.
+`visible_prop_removals` accepts up to three distinct exact prop labels when a
+reviewed wrong room contributed more than one stale prop. Use either singular
+or plural form, never both.
+
+An exact sublocation mistake may use `location_reference_patch: {
+"from_ref_id": "<attached location ref>", "to_ref_id": "<approved location ref>",
+"approved_reference_sha256": "<approved raster SHA-256>",
+"source_quotes": ["<verbatim source evidence>"] }`. This keeps the current
+location contract, cast, timing, reference slot order and roles. It changes
+only one already-attached environment location reference in its requirement,
+usage, anchor, manifest slot and `location_ref_id`. The replacement target must
+be explicitly planned for the selected beat, approved, in scene scope and
+hash-identical to its on-disk raster. Both targets must share the current
+location contract, or share a source location asset when the new reference is
+a narrower adjacent sublocation; the normal harden reports any resulting
+contract/ref warning. Include `reference_text_patch` to replace stale room
+purpose/reason, `visible_prop_removal(s)` for stale furniture, and exact
+prompt/continuity/depth wording in the same repair. When a screen's
+`holder_state` mentions the old room, a location correction may include
+`equipment_contract_text_patch: { "owner": "...", "item": "...",
+"expected_contract_sha256": "...", "holder_state": { "before": "...",
+"to": "..." } }`. The old reference ID must disappear entirely from the
+corrected row. This route does not select a new location based on prose and
+cannot change an unplanned or unapproved location image.
 
 Then execute `node bin/goldflow.mjs visual repair-prompt --episode-dir
 <episode-dir> --repair-spec <reviewed-json>`. The command checks the current

@@ -38,7 +38,8 @@ export function exactVisualPromptRepairAdmission(status, flags) {
 export function applyExactPromptText(row, replacement) {
   if (!only(replacement, ["provider_prompt", "image_prompt", "staging_patch", "staging_patches", "manifest_text_patch",
     "reference_text_patch", "anatomy_contract_patch", "anatomy_contract_patches", "equipment_contract_removal",
-    "visible_prop_removal", "narrative_overlay_patch", "ui_element_patch", "ui_element_patches", "ui_element_source_quotes",
+    "equipment_contract_text_patch", "visible_prop_removal", "visible_prop_removals", "location_reference_patch",
+    "narrative_overlay_patch", "ui_element_patch", "ui_element_patches", "ui_element_source_quotes",
     "assert_absent_terms"]) || !nonempty(replacement.provider_prompt)
     || replacement.provider_prompt !== replacement.image_prompt || replacement.provider_prompt.length > 12000) {
     throw new Error("Replacement must contain the same nonempty provider_prompt and image_prompt, at most 12000 characters.");
@@ -59,8 +60,55 @@ function exactTextPatch(value, patch, label) {
   return patch.to;
 }
 
-function patchRowStructures(row, replacement, { sourceScript, sourceBeat } = {}) {
+function patchRowStructures(row, replacement, { sourceScript, sourceBeat, referencePlan, referenceApproval } = {}) {
   const next = structuredClone(row);
+  if (replacement.location_reference_patch !== undefined) {
+    const patch = replacement.location_reference_patch;
+    if (!only(patch, ["from_ref_id", "to_ref_id", "approved_reference_sha256", "source_quotes"])
+      || !nonempty(patch.from_ref_id) || !nonempty(patch.to_ref_id)
+      || patch.from_ref_id === patch.to_ref_id || !hashPattern.test(patch.approved_reference_sha256 ?? "")
+      || !Array.isArray(patch.source_quotes) || !patch.source_quotes.length || patch.source_quotes.length > 3
+      || new Set(patch.source_quotes).size !== patch.source_quotes.length
+      || patch.source_quotes.some((quote) => !nonempty(quote) || quote.length < 16 || quote.length > 500
+        || !sourceScript?.includes(quote))) {
+      throw new Error("Location-reference correction requires exact old/new IDs, approved raster hash, and source quotes.");
+    }
+    if (next.shot_manifest?.location_ref_id !== patch.from_ref_id
+      || next.shot_manifest?.location_contract_id !== sourceBeat?.location_id
+      || !Array.isArray(next.required_reference_paths) || next.required_reference_paths.length) {
+      throw new Error("Location-reference correction requires one matching beat contract and no untracked reference paths.");
+    }
+    const targets = referencePlan?.reference_targets ?? [];
+    const oldTargets = targets.filter((item) => item.ref_id === patch.from_ref_id);
+    const newTargets = targets.filter((item) => item.ref_id === patch.to_ref_id);
+    const sharedSourceAssets = oldTargets.length === 1 && newTargets.length === 1
+      ? oldTargets[0].evidence_asset_ids?.filter((id) => newTargets[0].evidence_asset_ids?.includes(id)) ?? [] : [];
+    if (oldTargets.length !== 1 || newTargets.length !== 1
+      || oldTargets[0].kind !== "location" || newTargets[0].kind !== "location"
+      || !oldTargets[0].location_contract_ids?.includes(next.shot_manifest.location_contract_id)
+      || (!newTargets[0].location_contract_ids?.includes(next.shot_manifest.location_contract_id) && !sharedSourceAssets.length)
+      || !newTargets[0].planned_beat_ids?.includes(sourceBeat.visual_beat_id)
+      || referenceApproval?.reference_hash_by_ref_id?.[patch.to_ref_id] !== patch.approved_reference_sha256) {
+      throw new Error("Replacement location reference is not approved, beat-planned, or in the same location contract.");
+    }
+    if (JSON.stringify(next).includes(`\"${patch.to_ref_id}\"`)) {
+      throw new Error("Replacement location reference is already attached to the cut.");
+    }
+    const groups = [next.reference_requirements, next.reference_usage, next.anchor_roles, next.shot_manifest.reference_slots];
+    if (groups.some((items) => !Array.isArray(items) || items.filter((item) => item.ref_id === patch.from_ref_id).length !== 1)) {
+      throw new Error("Old location reference must appear exactly once in every bound reference group.");
+    }
+    const requirement = next.reference_requirements.find((item) => item.ref_id === patch.from_ref_id);
+    const slot = next.shot_manifest.reference_slots.find((item) => item.ref_id === patch.from_ref_id);
+    if (requirement.kind !== "location" || slot.kind !== "location" || slot.conditioning_asset_role !== "environment") {
+      throw new Error("Only the environment location slot may be replaced.");
+    }
+    for (const items of groups) items.find((item) => item.ref_id === patch.from_ref_id).ref_id = patch.to_ref_id;
+    next.shot_manifest.location_ref_id = patch.to_ref_id;
+    if (JSON.stringify(next).includes(`\"${patch.from_ref_id}\"`)) {
+      throw new Error("Stale old location reference remains attached after correction.");
+    }
+  }
   if (replacement.narrative_overlay_patch !== undefined) {
     const patch = replacement.narrative_overlay_patch;
     if (!only(patch, ["index", "before", "old_overlay_sha256", "to", "information_delta", "source_quotes"])
@@ -121,8 +169,14 @@ function patchRowStructures(row, replacement, { sourceScript, sourceBeat } = {})
       throw new Error("Corrected provider prompt must include the exact new UI element text.");
     }
   }
-  if (replacement.visible_prop_removal !== undefined) {
-    const prop = replacement.visible_prop_removal;
+  if (replacement.visible_prop_removal !== undefined && replacement.visible_prop_removals !== undefined) {
+    throw new Error("Use visible_prop_removal or visible_prop_removals, never both.");
+  }
+  const removedProps = replacement.visible_prop_removals ?? (replacement.visible_prop_removal === undefined ? [] : [replacement.visible_prop_removal]);
+  if (!Array.isArray(removedProps) || removedProps.length > 3 || new Set(removedProps).size !== removedProps.length) {
+    throw new Error("Visible prop removals require at most three distinct labels.");
+  }
+  for (const prop of removedProps) {
     if (!nonempty(prop) || !Array.isArray(next.shot_manifest?.visible_props)) {
       throw new Error("Visible prop removal requires one exact current prop label.");
     }
@@ -146,6 +200,23 @@ function patchRowStructures(row, replacement, { sourceScript, sourceBeat } = {})
       throw new Error("Reviewed equipment contract is missing, ambiguous, or changed.");
     }
     next.shot_manifest.equipment_contracts.splice(matches[0].index, 1);
+  }
+  if (replacement.equipment_contract_text_patch !== undefined) {
+    const patch = replacement.equipment_contract_text_patch;
+    if (replacement.location_reference_patch === undefined) {
+      throw new Error("Equipment holder-state correction is limited to a reviewed location-reference correction.");
+    }
+    if (!only(patch, ["owner", "item", "expected_contract_sha256", "holder_state"])
+      || !nonempty(patch.owner) || !nonempty(patch.item)
+      || !hashPattern.test(patch.expected_contract_sha256 ?? "") || !patch.holder_state) {
+      throw new Error("Equipment text correction requires an exact contract hash and holder-state patch.");
+    }
+    const contracts = (next.shot_manifest?.equipment_contracts ?? [])
+      .filter((item) => item.owner === patch.owner && item.item === patch.item);
+    if (contracts.length !== 1 || sha256(jsonBytes(contracts[0])) !== patch.expected_contract_sha256) {
+      throw new Error("Reviewed equipment contract is missing, ambiguous, or changed.");
+    }
+    contracts[0].holder_state = exactTextPatch(contracts[0].holder_state, patch.holder_state, "equipment_contracts.holder_state");
   }
   if (replacement.staging_patch !== undefined && replacement.staging_patches !== undefined) {
     throw new Error("Use staging_patch or staging_patches, never both.");
@@ -176,10 +247,15 @@ function patchRowStructures(row, replacement, { sourceScript, sourceBeat } = {})
   }
   if (replacement.manifest_text_patch !== undefined) {
     const patch = replacement.manifest_text_patch;
-    if (!only(patch, ["foreground_action", "continuity_notes"]) || !Object.keys(patch).length) {
-      throw new Error("Manifest text patch supports only reviewed foreground_action and continuity_notes.");
+    if (!only(patch, ["foreground_action", "continuity_notes", "depth_background_plane"]) || !Object.keys(patch).length) {
+      throw new Error("Manifest text patch supports only reviewed action, continuity, and depth background prose.");
     }
-    for (const field of Object.keys(patch)) next.shot_manifest[field] = exactTextPatch(next.shot_manifest?.[field], patch[field], `shot_manifest.${field}`);
+    for (const field of Object.keys(patch)) {
+      if (field === "depth_background_plane") {
+        const depth = next.shot_manifest?.motion_intent?.depth_candidate;
+        depth.background_plane = exactTextPatch(depth?.background_plane, patch[field], "motion_intent.depth_candidate.background_plane");
+      } else next.shot_manifest[field] = exactTextPatch(next.shot_manifest?.[field], patch[field], `shot_manifest.${field}`);
+    }
   }
   if (replacement.reference_text_patch !== undefined) {
     const patch = replacement.reference_text_patch;
@@ -284,9 +360,25 @@ export async function repairVisualPromptExact({ episodeDir, spec, specPath, stat
     original.shot_manifest?.location_ref_id,
   ].filter(Boolean);
   if (declared.some((id) => !allowed.has(id))) throw new Error("Prompt row contains an out-of-scope reference; repair refs with the guarded review route first.");
+  if (spec.replacement.location_reference_patch) {
+    const selected = spec.replacement.location_reference_patch;
+    const target = refs.reference_targets?.find((item) => item.ref_id === selected.to_ref_id);
+    if (!target?.reference_image_path || sha256(await fs.readFile(target.reference_image_path)) !== selected.approved_reference_sha256) {
+      throw new Error("Replacement approved location raster changed since review.");
+    }
+  }
   const corrected = applyExactPromptText(patchRowStructures(original, spec.replacement, {
-    sourceScript: files.source_script_sha256.value, sourceBeat: sourceBeats[0],
+    sourceScript: files.source_script_sha256.value, sourceBeat: sourceBeats[0], referencePlan: refs,
+    referenceApproval: files.reference_image_approval_sha256.value,
   }), spec.replacement);
+  const correctedRefs = [
+    ...(corrected.reference_requirements ?? []).map((item) => item?.ref_id),
+    ...(corrected.shot_manifest?.reference_slots ?? []).map((item) => item?.ref_id),
+    ...(corrected.shot_manifest?.character_state_ref_ids ?? []),
+    corrected.shot_manifest?.protagonist_state_ref_id,
+    corrected.shot_manifest?.location_ref_id,
+  ].filter(Boolean);
+  if (correctedRefs.some((id) => !allowed.has(id))) throw new Error("Corrected prompt contains an out-of-scope reference.");
   if (spec.replacement.assert_absent_terms !== undefined) {
     const terms = spec.replacement.assert_absent_terms;
     if (!Array.isArray(terms) || !terms.length || terms.length > 8 || terms.some((term) => !nonempty(term) || term.length > 100)) {
@@ -331,6 +423,12 @@ export async function repairVisualPromptExact({ episodeDir, spec, specPath, stat
     ui_element_text_changes: (spec.replacement.ui_element_patches ?? (spec.replacement.ui_element_patch ? [spec.replacement.ui_element_patch] : []))
       .map((patch) => ({ index: patch.index, before: patch.before, after: patch.to })),
     ui_element_source_quotes: spec.replacement.ui_element_source_quotes ?? null,
+    location_reference_change: spec.replacement.location_reference_patch ? {
+      from_ref_id: spec.replacement.location_reference_patch.from_ref_id,
+      to_ref_id: spec.replacement.location_reference_patch.to_ref_id,
+      approved_reference_sha256: spec.replacement.location_reference_patch.approved_reference_sha256,
+      source_quotes: spec.replacement.location_reference_patch.source_quotes,
+    } : null,
     before_plan_sha256: files.prompt_plan_sha256.sha256, after_plan_sha256: sha256(output),
     before_snapshot_path: path.join(receiptDir, "before", "section_image_prompts.json"),
     provider_calls: 0, estimated_cost_usd: 0, updated_at: at };

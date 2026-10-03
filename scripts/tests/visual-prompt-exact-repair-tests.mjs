@@ -493,3 +493,153 @@ test("UI-only correction rejects missing or stale source evidence, duplicate ind
     } finally { await fs.rm(f.root, { recursive: true, force: true }); }
   }
 });
+
+async function locationReferenceFixture() {
+  const f = await fixture();
+  const quote = "She did not have permission to come through the gate.";
+  await fs.writeFile(path.join(f.episodeDir, "script_clean.md"), `${quote}\n`);
+  f.spec.expected.source_script_sha256 = hash(`${quote}\n`);
+  const beatPath = path.join(f.episodeDir, "visual_beat_plan.json");
+  const beats = JSON.parse(await fs.readFile(beatPath, "utf8"));
+  beats.beats[0].location_id = "joeys_new_house";
+  beats.beats[0].visual_beat_script_excerpt = quote;
+  await fs.writeFile(beatPath, json(beats));
+  f.spec.expected.visual_beat_plan_sha256 = hash(json(beats));
+  const rasterPath = path.join(f.episodeDir, "gate.png");
+  const raster = Buffer.from("approved-gate-raster");
+  await fs.writeFile(rasterPath, raster);
+  const refsPath = path.join(f.episodeDir, "visual_reference_plan.json");
+  const refs = JSON.parse(await fs.readFile(refsPath, "utf8"));
+  refs.reference_targets.push({ ref_id: "kitchen_ref", kind: "location", scene_ids: ["scene_001"],
+    location_contract_ids: ["joeys_new_house"], planned_beat_ids: [] });
+  refs.reference_targets.push({ ref_id: "gate_ref", kind: "location", scene_ids: ["scene_001"],
+    location_contract_ids: ["joeys_new_house"], planned_beat_ids: [beats.beats[0].visual_beat_id],
+    reference_image_path: rasterPath });
+  await fs.writeFile(refsPath, json(refs));
+  f.spec.expected.visual_reference_plan_sha256 = hash(json(refs));
+  const approvalPath = path.join(f.episodeDir, "visual_reference_approval_ep_01.json");
+  const approval = { status: "approved", reference_hash_by_ref_id: { gate_ref: hash(raster) } };
+  await fs.writeFile(approvalPath, json(approval));
+  f.spec.expected.reference_image_approval_sha256 = hash(json(approval));
+  const planPath = path.join(f.episodeDir, "section_image_prompts.json");
+  const plan = JSON.parse(await fs.readFile(planPath, "utf8"));
+  const row = plan.prompts[0];
+  row.provider_prompt = row.image_prompt = "Joey faces Claire across the kitchen table.";
+  row.prompt_hash = hash(row.provider_prompt);
+  const reference = { ref_id: "kitchen_ref", kind: "location", slot_purpose: "Kitchen geometry", reason: "An inside conversation." };
+  row.reference_requirements.push(structuredClone(reference));
+  row.reference_usage.push({ ref_id: "kitchen_ref", usage: "attach_existing_ref", reason: reference.reason });
+  row.anchor_roles.push({ ref_id: "kitchen_ref", kind: "location", anchor_role: "source_anchor", reason: reference.reason });
+  row.shot_manifest.reference_slots.push({ ...reference, conditioning_asset_role: "environment" });
+  row.shot_manifest.location_contract_id = "joeys_new_house";
+  row.shot_manifest.location_ref_id = "kitchen_ref";
+  row.shot_manifest.visible_props = ["kitchen table", "Claire's green dress"];
+  row.shot_manifest.motion_intent = { depth_candidate: { background_plane: "kitchen windows and table" } };
+  row.shot_manifest.continuity_notes = "Same kitchen conversation.";
+  plan.source_script_hash = f.spec.expected.source_script_sha256;
+  await fs.writeFile(planPath, json(plan));
+  f.spec.expected.prompt_plan_sha256 = hash(json(plan));
+  f.spec.old_row_sha256 = hash(json(row));
+  f.spec.replacement = {
+    provider_prompt: "Joey stands inside the house gate while Claire waits outside beside the driveway. Her green dress remains visible.",
+    image_prompt: "Joey stands inside the house gate while Claire waits outside beside the driveway. Her green dress remains visible.",
+    location_reference_patch: { from_ref_id: "kitchen_ref", to_ref_id: "gate_ref",
+      approved_reference_sha256: hash(raster), source_quotes: [quote] },
+    reference_text_patch: { ref_id: "gate_ref",
+      slot_purpose: { before: "Kitchen geometry", to: "Gate and driveway geometry" },
+      reason: { before: "An inside conversation.", to: "Keeps Claire outside the gate." } },
+    visible_prop_removal: "kitchen table",
+    manifest_text_patch: {
+      continuity_notes: { before: "Same kitchen conversation.", to: "Claire remains outside the gate." },
+      depth_background_plane: { before: "kitchen windows and table", to: "house gate and driveway" },
+    },
+    assert_absent_terms: ["kitchen_ref", "kitchen table", "Same kitchen conversation"],
+  };
+  await fs.writeFile(f.specPath, json(f.spec));
+  return { ...f, planPath, rasterPath };
+}
+
+test("replaces one approved wrong sublocation reference and stale room prose without changing cast or timing", async () => {
+  const f = await locationReferenceFixture();
+  try {
+    const result = await repairVisualPromptExact(f);
+    const row = JSON.parse(await fs.readFile(f.planPath, "utf8")).prompts[0];
+    assert.equal(row.shot_manifest.location_ref_id, "gate_ref");
+    assert.deepEqual(row.shot_manifest.visible_props, ["Claire's green dress"]);
+    assert.equal(row.shot_manifest.motion_intent.depth_candidate.background_plane, "house gate and driveway");
+    assert.equal(row.reference_requirements.at(-1).ref_id, "gate_ref");
+    assert.equal(row.shot_manifest.reference_slots.at(-1).ref_id, "gate_ref");
+    assert.equal(row.shot_manifest.character_state_ref_ids[0], "tessa_current");
+    const receipt = JSON.parse(await fs.readFile(result.receipt_path, "utf8"));
+    assert.equal(receipt.location_reference_change.to_ref_id, "gate_ref");
+  } finally { await fs.rm(f.root, { recursive: true, force: true }); }
+});
+
+test("location reference correction fails closed on unplanned, unapproved, changed, or cross-contract targets", async () => {
+  for (const variant of ["unplanned", "unapproved", "changed", "cross_contract", "bad_quote", "stale_id"]) {
+    const f = await locationReferenceFixture();
+    try {
+      if (variant === "unplanned" || variant === "cross_contract") {
+        const file = path.join(f.episodeDir, "visual_reference_plan.json");
+        const refs = JSON.parse(await fs.readFile(file, "utf8"));
+        const gate = refs.reference_targets.find((item) => item.ref_id === "gate_ref");
+        if (variant === "unplanned") gate.planned_beat_ids = [];
+        else gate.location_contract_ids = ["another_house"];
+        await fs.writeFile(file, json(refs)); f.spec.expected.visual_reference_plan_sha256 = hash(json(refs));
+      }
+      if (variant === "unapproved") f.spec.replacement.location_reference_patch.approved_reference_sha256 = "0".repeat(64);
+      if (variant === "changed") await fs.writeFile(f.rasterPath, "changed-raster");
+      if (variant === "bad_quote") f.spec.replacement.location_reference_patch.source_quotes = ["Claire entered the house and sat at the table."];
+      if (variant === "stale_id") f.spec.replacement.location_reference_patch.from_ref_id = "other_ref";
+      await fs.writeFile(f.specPath, json(f.spec));
+      const before = await fs.readFile(f.planPath);
+      await assert.rejects(repairVisualPromptExact(f), undefined, variant);
+      assert.deepEqual(await fs.readFile(f.planPath), before, variant);
+    } finally { await fs.rm(f.root, { recursive: true, force: true }); }
+  }
+});
+
+test("a planned adjacent sublocation can retain the broad contract only when both references share source geography", async () => {
+  const f = await locationReferenceFixture();
+  try {
+    const refsPath = path.join(f.episodeDir, "visual_reference_plan.json");
+    const refs = JSON.parse(await fs.readFile(refsPath, "utf8"));
+    const kitchen = refs.reference_targets.find((item) => item.ref_id === "kitchen_ref");
+    const gate = refs.reference_targets.find((item) => item.ref_id === "gate_ref");
+    kitchen.evidence_asset_ids = ["house_property_source"];
+    gate.evidence_asset_ids = ["house_property_source"];
+    gate.location_contract_ids = ["house_entry_subspace"];
+    await fs.writeFile(refsPath, json(refs));
+    f.spec.expected.visual_reference_plan_sha256 = hash(json(refs));
+    await fs.writeFile(f.specPath, json(f.spec));
+    await repairVisualPromptExact(f);
+    const row = JSON.parse(await fs.readFile(f.planPath, "utf8")).prompts[0];
+    assert.equal(row.shot_manifest.location_contract_id, "joeys_new_house");
+    assert.equal(row.shot_manifest.location_ref_id, "gate_ref");
+  } finally { await fs.rm(f.root, { recursive: true, force: true }); }
+});
+
+test("location correction can remove two stale room props and patch one exact equipment holder", async () => {
+  const f = await locationReferenceFixture();
+  try {
+    const plan = JSON.parse(await fs.readFile(f.planPath, "utf8"));
+    const row = plan.prompts[0];
+    row.shot_manifest.visible_props = ["kitchen table", "meeting chairs", "presentation screen"];
+    const screen = { owner: "hotel", item: "presentation screen", holder_state: "fixed in meeting room", visible_count: 1 };
+    row.shot_manifest.equipment_contracts = [screen];
+    await fs.writeFile(f.planPath, json(plan));
+    f.spec.expected.prompt_plan_sha256 = hash(json(plan));
+    f.spec.old_row_sha256 = hash(json(row));
+    f.spec.replacement.visible_prop_removal = undefined;
+    f.spec.replacement.visible_prop_removals = ["kitchen table", "meeting chairs"];
+    f.spec.replacement.equipment_contract_text_patch = { owner: "hotel", item: "presentation screen",
+      expected_contract_sha256: hash(json(screen)), holder_state: { before: "fixed in meeting room", to: "fixed in ballroom" } };
+    f.spec.replacement.provider_prompt = f.spec.replacement.image_prompt =
+      "Joey stands inside the house gate while Claire waits outside beside the driveway; a presentation screen is fixed in ballroom.";
+    await fs.writeFile(f.specPath, json(f.spec));
+    await repairVisualPromptExact(f);
+    const corrected = JSON.parse(await fs.readFile(f.planPath, "utf8")).prompts[0];
+    assert.deepEqual(corrected.shot_manifest.visible_props, ["presentation screen"]);
+    assert.equal(corrected.shot_manifest.equipment_contracts[0].holder_state, "fixed in ballroom");
+  } finally { await fs.rm(f.root, { recursive: true, force: true }); }
+});

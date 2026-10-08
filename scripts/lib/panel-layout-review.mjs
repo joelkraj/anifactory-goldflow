@@ -1,0 +1,56 @@
+import { samplePanelKeyframes, panelFrameState, panelImagePlacement } from './panel-layout-runtime.mjs';
+import { validatePanelTimeline } from './panel-layout-validation.mjs';
+
+const safeJson = (value) => JSON.stringify(value).replace(/</g, '\\u003c').replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
+
+export function createPanelReviewHtml({ timeline, assets, audioUrl = null }) {
+  return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Panel composition review</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#101216;color:#e8e6e0;font:14px system-ui,sans-serif}main{max-width:1560px;margin:auto;padding:30px}header{display:flex;justify-content:space-between;gap:20px;align-items:center;margin-bottom:24px}.eyebrow{font-size:11px;color:#b6c988;letter-spacing:2px;text-transform:uppercase}h1{font-size:27px;font-weight:550;margin:8px 0}p{color:#a7aaa9;line-height:1.5;margin:5px 0}button,select{font:inherit;color:inherit;background:#24292c;border:1px solid #41474a;border-radius:7px;padding:9px 14px;cursor:pointer}button:hover{background:#353d3f}button.primary{background:#c6d99b;color:#182014;border:0}section{background:#1a1d22;border:1px solid #303438;border-radius:12px;overflow:hidden}canvas{width:100%;display:block;background:#050609;aspect-ratio:16/9}.transport{display:flex;gap:14px;align-items:center;padding:15px 20px}input[type=range]{flex:1;accent-color:#c6d99b}time{font-variant-numeric:tabular-nums;min-width:110px}.info{padding:18px 22px;border-top:1px solid #303438;min-height:85px}.info strong{font-size:15px}.lower{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-top:20px}.card{padding:22px}h2{font-size:17px;margin:0 0 12px}.row{display:flex;align-items:center;gap:10px;margin-top:12px}textarea{width:100%;height:290px;margin-top:14px;resize:vertical;background:#101317;color:#d5dfd4;border:1px solid #41474a;border-radius:5px;padding:14px;font:12px ui-monospace,monospace;line-height:1.5}small{color:#8e9799}#status{color:#c6d99b;min-height:22px;margin-top:12px}.tag{display:inline-block;padding:5px 9px;background:#303831;border-radius:5px;font-size:12px;margin:8px 6px 0 0}details summary{cursor:pointer}a{color:#c6d99b}@media(max-width:850px){main{padding:15px}.lower{grid-template-columns:1fr}header{align-items:start}}
+</style></head><body><main>
+<header><div><div class="eyebrow">AniFactory / Editing lab</div><h1>Panel composition review</h1><p>Authored reveals. Shared backgrounds. Continuous narration.</p></div><button id="download">Export timeline</button></header>
+<section><canvas id="panel-canvas"></canvas><div class="transport"><button class="primary" id="play">Play</button><input id="scrub" aria-label="Timeline" type="range" min="0" step="0.001"><time id="time"></time></div><div class="info"><strong id="scene-label"></strong><p id="excerpt"></p></div></section>
+<div class="lower"><section class="card"><h2>Review this cut</h2><p id="scope"></p><div><span class="tag">Private engine proof</span><span class="tag">No narration retiming</span><span class="tag">Manual layout overrides</span></div><p style="margin-top:16px">Look for readable faces, reveals that land on the spoken beat, and movement that earns its place. Scrub around an overlap to inspect exactly when the new panel enters.</p><p id="asset-note"></p><small>This preview and the video export use the same frame compositor. Exported edits need validation and a fresh render.</small></section>
+<section class="card"><h2>Composition overrides</h2><p>Select a scene to edit its panel positions, camera path or reveal times. Values use absolute seconds and normalized screen coordinates.</p><div class="row"><select id="scene-select" aria-label="Scene"></select><button id="apply">Apply scene edit</button></div><details><summary style="margin-top:15px">Edit scene JSON</summary><textarea id="editor" spellcheck="false" aria-label="Scene JSON"></textarea></details><div id="status" role="status"></div></section></div>
+</main><script>
+const timeline = ${safeJson(timeline)};
+const assetRows = ${safeJson(assets.map(({ id, data_url }) => ({ id, data_url })))};
+const audioUrl = ${safeJson(audioUrl)};
+${validatePanelTimeline.toString()}
+${samplePanelKeyframes.toString()}
+${panelFrameState.toString()}
+${panelImagePlacement.toString()}
+const canvas = document.getElementById('panel-canvas');
+canvas.width=timeline.width;canvas.height=timeline.height;
+const ctx=canvas.getContext('2d',{alpha:false});
+ctx.imageSmoothingEnabled=true;ctx.imageSmoothingQuality='high';
+const images=new Map();const panels=new Map(timeline.panels.map(p=>[p.id,p]));const backgrounds=new Map();
+function panelSource(id){const p=panels.get(id),im=images.get(p.asset_id),c=p.source_rect;return {image:im,x:c.x*im.naturalWidth,y:c.y*im.naturalHeight,width:c.width*im.naturalWidth,height:c.height*im.naturalHeight};}
+function drawImageInRect(context,source,rect,camera,fit){const pos=panelImagePlacement(source.width,source.height,rect,camera,fit);context.drawImage(source.image,source.x,source.y,source.width,source.height,pos.x,pos.y,pos.width,pos.height);}
+function background(scene){const key=JSON.stringify(scene.background);if(backgrounds.has(key))return backgrounds.get(key);const c=document.createElement('canvas');c.width=timeline.width;c.height=timeline.height;const g=c.getContext('2d',{alpha:false});g.fillStyle='#11141a';g.fillRect(0,0,c.width,c.height);const pad=scene.background.blur_px*3;g.filter='blur('+scene.background.blur_px+'px)';drawImageInRect(g,panelSource(scene.background.panel_id),{x:-pad,y:-pad,width:c.width+2*pad,height:c.height+2*pad},{x:.5,y:.5,zoom:1},'cover');g.filter='none';g.fillStyle='rgba(0,0,0,'+(1-scene.background.brightness)+')';g.fillRect(0,0,c.width,c.height);backgrounds.set(key,c);return c;}
+const layerCanvas=document.createElement('canvas');layerCanvas.width=canvas.width;layerCanvas.height=canvas.height;const layerCtx=layerCanvas.getContext('2d');
+function drawPanelLayer(g,layer){const s=layer.state,r={x:s.rect.x*canvas.width,y:s.rect.y*canvas.height,width:s.rect.width*canvas.width,height:s.rect.height*canvas.height};g.save();g.globalAlpha=1;g.fillStyle='#101218';g.shadowColor='rgba(0,0,0,.55)';g.shadowBlur=20;g.shadowOffsetY=8;g.fillRect(r.x,r.y,r.width,r.height);g.shadowColor='transparent';g.beginPath();g.rect(r.x,r.y,r.width,r.height);g.clip();drawImageInRect(g,panelSource(layer.panel_id),r,s.camera,layer.fit);g.restore();if(layer.border_px){g.save();g.strokeStyle='#ebeee6';g.lineWidth=layer.border_px;g.strokeRect(r.x+layer.border_px/2,r.y+layer.border_px/2,r.width-layer.border_px,r.height-layer.border_px);g.restore();}}
+window.renderPanelFrame=function(time){const frame=panelFrameState(timeline,time);ctx.globalAlpha=1;ctx.fillStyle='#050609';ctx.fillRect(0,0,canvas.width,canvas.height);if(!frame.scene)return;ctx.drawImage(background(frame.scene),0,0);for(const layer of frame.layers){if(layer.state.opacity<=0)continue;if(layer.state.opacity===1){drawPanelLayer(ctx,layer);}else{layerCtx.clearRect(0,0,canvas.width,canvas.height);drawPanelLayer(layerCtx,layer);ctx.save();ctx.globalAlpha=layer.state.opacity;ctx.drawImage(layerCanvas,0,0);ctx.restore();}}};
+window.panelProofReady=Promise.all(assetRows.map(row=>new Promise((resolve,reject)=>{const im=new Image();im.onload=()=>{images.set(row.id,im);resolve();};im.onerror=()=>reject(new Error('Cannot decode '+row.id));im.src=row.data_url;}))).then(()=>{window.renderPanelFrame(0);refresh(0);});
+const audio=audioUrl?new Audio(audioUrl):null;
+let time=0,playing=false,started=0,from=0;
+const scrub=document.getElementById('scrub'),play=document.getElementById('play');scrub.max=timeline.duration_sec;
+const format=t=>(Math.floor(t/60)+':'+(t%60).toFixed(2).padStart(5,'0'));
+function refresh(t){document.getElementById('time').textContent=format(t)+' / '+format(timeline.duration_sec);scrub.value=t;const frame=panelFrameState(timeline,Math.min(t,timeline.duration_sec-1e-7));document.getElementById('scene-label').textContent=frame.scene?.id||'';const top=frame.layers.at(-1),meta=top?panels.get(top.panel_id).metadata:null;document.getElementById('excerpt').textContent=meta?.narration_excerpt||'';}
+function pause(){playing=false;play.textContent='Play';if(audio)audio.pause();}
+function tick(now){if(!playing)return;time=audio?audio.currentTime:from+(now-started)/1000;if(time>=timeline.duration_sec){time=timeline.duration_sec;pause();}window.renderPanelFrame(Math.min(time,timeline.duration_sec-1e-7));refresh(time);if(playing)requestAnimationFrame(tick);}
+play.onclick=async()=>{await window.panelProofReady;if(playing){pause();return;}if(time>=timeline.duration_sec)time=0;from=time;started=performance.now();if(audio){audio.currentTime=time;try{await audio.play();}catch(e){document.getElementById('status').textContent='Audio could not play: '+e.message;return;}}playing=true;play.textContent='Pause';requestAnimationFrame(tick);};
+scrub.oninput=async()=>{pause();await window.panelProofReady;time=Number(scrub.value);if(audio)audio.currentTime=time;window.renderPanelFrame(Math.min(time,timeline.duration_sec-1e-7));refresh(time);};
+if(audio)audio.onended=()=>{pause();};
+const select=document.getElementById('scene-select'),editor=document.getElementById('editor');
+timeline.scenes.forEach((s,i)=>{const option=document.createElement('option');option.value=i;option.textContent=format(s.start_sec)+' · '+s.id;select.append(option);});
+function selectScene(){editor.value=JSON.stringify(timeline.scenes[Number(select.value)],null,2);}
+select.onchange=selectScene;selectScene();
+document.getElementById('apply').onclick=()=>{try{const scene=JSON.parse(editor.value),index=Number(select.value),old=timeline.scenes[index];if(scene.start_sec!==old.start_sec||scene.end_sec!==old.end_sec)throw new Error('Keep scene boundaries fixed here; export the timeline for boundary edits.');validatePanelTimeline({...timeline,scenes:timeline.scenes.map((row,i)=>i===index?scene:row)});pause();timeline.scenes[index]=scene;backgrounds.clear();time=scene.start_sec;window.renderPanelFrame(time);refresh(time);document.getElementById('status').textContent='Preview updated. Export timeline to keep this edit; the CLI validates before render.';}catch(e){document.getElementById('status').textContent=e.message;}};
+document.getElementById('download').onclick=()=>{const url=URL.createObjectURL(new Blob([JSON.stringify(timeline,null,2)+'\\n'],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download=timeline.id+'-edited.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);};
+document.getElementById('scope').textContent=timeline.id+' · '+timeline.width+' × '+timeline.height+' · '+timeline.fps+' fps · '+timeline.duration_sec.toFixed(2)+' seconds';
+document.getElementById('asset-note').textContent='Artwork: '+timeline.assets.length+' supplied rasters, '+timeline.panels.length+' indexed panels. '+(timeline.provenance?.note||'');
+</script></body></html>`;
+}

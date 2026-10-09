@@ -43,7 +43,9 @@
     "test:integration": "node scripts/tests/integration-tests.mjs",
     "test:fixtures": "npm run test:workflow-routing && npm run test:stage-contract && npm run test:planner && npm run test:voice-boundary && npm run test:media && npm run test:production-direction && npm run test:performance && npm run test:narration-quality && npm run test:analytics-quality && npm run test:integration",
     "docs:workflow": "node scripts/generate-workflow-guidance.mjs",
-    "docs:workflow:check": "node scripts/generate-workflow-guidance.mjs --check"
+    "docs:workflow:check": "node scripts/generate-workflow-guidance.mjs --check",
+    "test:panel-workbench": "node scripts/tests/panel-original-import-tests.mjs && node scripts/tests/panel-composition-authoring-tests.mjs && node scripts/tests/panel-experiment-renderer-tests.mjs && node scripts/tests/panel-workbench-tests.mjs",
+    "test:recap-source": "node scripts/tests/recap-source-package-tests.mjs && node scripts/tests/recap-adaptation-tests.mjs"
   },
   "engines": {
     "node": ">=20"

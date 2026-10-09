@@ -1,5 +1,5 @@
 // Self-contained validator shared by the local review editor and render loader.
-export function validatePanelTimeline(timeline) {
+export function validatePanelTimeline(timeline, mode = 'engine_proof') {
 const fail = (message) => { throw new Error(`Panel timeline: ${message}`); };
 const ensure = (condition, message) => { if (!condition) fail(message); };
 const number = (v, min, max, name) => ensure(Number.isFinite(v) && v >= min && v <= max, `${name} must be within ${min}..${max}`);
@@ -18,11 +18,17 @@ const unique = (rows, name) => {
 };
 
 
-  ensure(timeline?.schema === 'goldflow_panel_timeline_v1', 'unsupported schema');
-  ensure(timeline.intent === 'engine_proof', 'only engine_proof is supported');
+  ensure(['engine_proof', 'editing_experiment'].includes(mode), 'unsupported validation mode');
+  const experiment = mode === 'editing_experiment';
+  ensure(timeline?.schema === (experiment ? 'goldflow_panel_experiment_timeline_v1' : 'goldflow_panel_timeline_v1'), 'unsupported schema');
+  ensure(timeline.intent === mode, `only ${mode} is supported`);
+  if (experiment) {
+    text(timeline.experiment_identity?.path, 'experiment_identity.path');
+    hash(timeline.experiment_identity?.sha256, 'experiment_identity.sha256');
+  }
   ensure(timeline.content_profile === 'manhwa_recap_v1', 'explicit manhwa_recap_v1 profile required');
   text(timeline.id, 'id');
-  number(timeline.duration_sec, 0.1, 150, 'duration_sec');
+  number(timeline.duration_sec, 0.1, experiment ? 1800 : 150, 'duration_sec');
   number(timeline.width, 160, 1920, 'width');
   number(timeline.height, 90, 1080, 'height');
   ensure(Number.isInteger(timeline.width / 2) && Number.isInteger(timeline.height / 2), 'canvas must have even dimensions');
@@ -35,7 +41,7 @@ const unique = (rows, name) => {
     number(timeline.audio?.offset_sec, 0, 86400, 'audio.offset_sec');
   } else ensure(timeline.audio == null, 'silent_fixture must not include audio');
   const assets = unique(timeline.assets, 'assets');
-  ensure(timeline.assets.length <= 100, 'proof has more than 100 assets');
+  ensure(timeline.assets.length <= (experiment ? 2000 : 100), 'too many assets for the selected scope');
   for (const asset of timeline.assets) {
     text(asset.path, 'asset.path'); hash(asset.sha256, 'asset.sha256');
     ensure(['original_generated', 'existing_artwork', 'continuity_generated', 'test_fixture'].includes(asset.origin), `unknown origin for ${asset.id}`);
@@ -92,4 +98,3 @@ const unique = (rows, name) => {
   ensure(Math.abs(end - timeline.duration_sec) < 1e-7, 'scenes must cover the complete duration');
   return timeline;
 }
-

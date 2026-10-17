@@ -34,6 +34,7 @@ export function planAlignmentSafeUnitEdit({
   sampleCount,
   sampleRate,
   alignment = null,
+  waveformActivity = null,
   contract,
 } = {}) {
   const sourceSamples = integer(sampleCount);
@@ -68,6 +69,38 @@ export function planAlignmentSafeUnitEdit({
   }
   const trimStart = Math.max(0, alignment.first_speech_sample - headSafety);
   const trimEnd = Math.min(sourceSamples, alignment.last_speech_sample_exclusive + tailSafety);
+  // Word alignment can end before a quiet final syllable. Waveform activity is
+  // never used as a trim point; disagreement only vetoes the aligned trim.
+  const activityStart = waveformActivity?.active_start_sec == null
+    ? NaN : Number(waveformActivity.active_start_sec);
+  const activityEnd = waveformActivity?.active_end_sec == null
+    ? NaN : Number(waveformActivity.active_end_sec);
+  const disagreementTolerance = millisecondsToSamples(20, rate);
+  const activityBeforeTrim = Number.isFinite(activityStart)
+    && Math.round(activityStart * rate) < trimStart - disagreementTolerance;
+  const activityAfterTrim = Number.isFinite(activityEnd)
+    && Math.round(activityEnd * rate) > trimEnd + disagreementTolerance;
+  if (activityBeforeTrim || activityAfterTrim) {
+    return {
+      status: "passed",
+      unit_id: unitId,
+      mode: "preserve_entire_unit_alignment_activity_conflict",
+      source_sample_count: sourceSamples,
+      trim_start_sample: 0,
+      trim_end_sample: sourceSamples,
+      retained_sample_count: sourceSamples,
+      fade_in_samples: 0,
+      fade_out_samples: 0,
+      alignment_used: false,
+      warnings: [{
+        code: "narration_alignment_waveform_activity_conflict_edges_preserved",
+        severity: "warning",
+        activity_before_trim: activityBeforeTrim,
+        activity_after_trim: activityAfterTrim,
+      }],
+      blockers: [],
+    };
+  }
   const blockers = [];
   if (trimStart > alignment.first_speech_sample) {
     blockers.push({ code: "narration_trim_crosses_first_aligned_word" });

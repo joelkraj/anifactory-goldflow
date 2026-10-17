@@ -58,6 +58,7 @@ import {
   emptyNarrationFinalizationCheckpoint,
   narrationFinalizationStageKey,
   narrationFinalizationUnitKey,
+  narrationStitchImplementationIdentity,
   reusableNarrationFinalizationStage,
   reusableNarrationFinalizationUnit,
 } from "./lib/narration-finalization-checkpoint.mjs";
@@ -2676,11 +2677,14 @@ export async function finalizeNarrationProviderOutput(
 
   const rawWav = reviewContinuation?.rawAudio.path
     ?? path.join(workDir, `${episode}-narration-provider-neutral-raw.wav`);
+  const stitchImplementation = await narrationStitchImplementationIdentity();
   const stitchInputKey = narrationFinalizationStageKey("semantic_stitch", {
     ordered_unit_keys: rows.map((row) => row.finalization_unit_key),
+    narration_generation_plan_sha256: plan.plan_sha256,
     quality_contract_sha256: qualityContract.contract_sha256,
     stitch_sample_rate_hz: CANONICAL_SAMPLE_RATE_HZ,
     alignment_policy: "narration_alignment_safe_semantic_stitch_v2",
+    stitch_implementation: stitchImplementation,
   });
   const cachedStitchStage = reusableNarrationFinalizationStage(
     checkpoint,
@@ -2730,6 +2734,7 @@ export async function finalizeNarrationProviderOutput(
       raw_wav_path: rawWav,
       raw_wav_sha256: rawWavSha256,
       stitch,
+      stitch_implementation: stitchImplementation,
     },
   };
   await atomicWriteJson(checkpointPath, checkpoint);

@@ -32,6 +32,8 @@ The voice stage writes:
 
 Sentence-complete units prefer 20-42 spoken words. Forty-eight words is the soft maximum and 60 is the hard maximum. Short dialogue, system/UI, emphasis, and hard-boundary units stay atomic.
 
+Fresh local-Qwen plans follow [coherent narration submission](qwen_submission_v1.md): the author may join connected dialogue and narration across planning segments, while preserving genuine source/voice barriers and intentional short lines. Each group and semantic boundary has an explicit reason. Historical plans and other providers retain their original grouping contract and caches.
+
 Each unit carries:
 
 - immutable source, caption, and spoken tracks
@@ -183,6 +185,8 @@ A confirmed defect names only the affected sample and unit IDs. Passed units rem
 ## Editing And Stitching
 
 Amplitude-only trim is forbidden. A unit may be trimmed only from speech alignment while retaining at least 80 ms before its first aligned word and 140 ms after its last aligned word. If either ASR reports a leading or trailing deletion, edge alignment is considered uncertain and the whole unit is preserved. Otherwise dual-ASR alignment uses the widest speech envelope. Missing alignment preserves the entire unit. A four-millisecond fade may occur only inside verified retained silence, never over aligned speech.
+
+Waveform activity more than 20 ms beyond a proposed aligned trim vetoes the trim and preserves the entire unit without fades. Activity never chooses a new cut. Semantic-stitch cache keys bind the current plan and editor/helper implementation hashes, so cached stitching cannot bypass an editing or authored-boundary change; accepted raw synthesis and ASR remain reusable.
 
 Semantic boundary targets are:
 

@@ -24,6 +24,7 @@
     "status": "git status --short",
     "test:stage-contract": "node scripts/tests/stage-contract-tests.mjs",
     "test:planner": "node scripts/tests/planner-tests.mjs",
+    "test:narration-submission": "node scripts/tests/narration-submission-grouping-tests.mjs && node scripts/tests/narration-submission-audit-tests.mjs && node scripts/tests/narration-stitch-implementation-tests.mjs && node scripts/tests/narration-pre-synthesis-gate-tests.mjs && node scripts/tests/tts-submission-diagnostic-tests.mjs",
     "test:voice-boundary": "node scripts/tests/voice-direction-boundary-tests.mjs && node scripts/tests/narration-performance-profile-tests.mjs",
     "test:media": "node scripts/tests/media-tests.mjs",
     "test:reference-parallax": "node scripts/tests/reference-parallax-policy-tests.mjs",

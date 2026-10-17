@@ -13,6 +13,11 @@ import {
   punctuationInsensitiveTokens,
   validateActionableNarrationDirection,
 } from "./narration-performance-contract.mjs";
+import { COHERENT_THOUGHT_SUBMISSION_POLICY, COHERENT_THOUGHT_DIRECTION_SCHEMA,
+  coherentNarrationGroupFindings, coherentThoughtSubmissionContract,
+  NARRATION_SHORT_UNIT_REASONS, NARRATION_BOUNDARY_INTENTS,
+} from "./narration-submission-contract.mjs";
+import { narrationSubmissionRisks } from "./narration-submission-audit.mjs";
 import { contentProfilePlannerRole } from "./content-profiles.mjs";
 
 function sha256(value) {
@@ -114,7 +119,8 @@ function narrationEditorialDirection(contentProfile) {
   };
 }
 
-function promptForChunk(units, chunkIndex, chunkCount, contentProfile = null) {
+function promptForChunk(units, chunkIndex, chunkCount, contentProfile = null, submissionPolicy = null) {
+  if (submissionPolicy === COHERENT_THOUGHT_SUBMISSION_POLICY) return coherentPromptForChunk(units, chunkIndex, chunkCount, contentProfile);
   const direction = narrationEditorialDirection(contentProfile);
   const atoms = units.map((unit) => {
     const mergeBarrier = unit.source_merge_barrier === true
@@ -161,6 +167,39 @@ Atomic spoken units:
 ${JSON.stringify(atoms)}`;
 }
 
+function coherentPromptForChunk(units, chunkIndex, chunkCount, contentProfile) {
+  const direction = narrationEditorialDirection(contentProfile);
+  const atoms = units.map((unit) => ({
+    source_ref_key: narrationSourceRefKey(unit.source_unit_refs?.[0]),
+    segment_id: unit.segment_id, source_text: unit.source_text ?? unit.spoken_text,
+    spoken_text: unit.spoken_text, word_count: punctuationInsensitiveTokens(unit.spoken_text).length,
+    kind: unit.kind, source_speaker: unit.source_speaker, synthesis_speaker: unit.speaker ?? "NARRATOR",
+    source_constraint: unit.submission_source_constraint ?? null,
+    risks: narrationSubmissionRisks(unit).map((risk) => ({ category: risk.category ?? risk.code, context: risk.context })),
+  }));
+  return `You are ${direction.role}.
+
+Author coherent spoken thoughts for one locked narrator. Source/caption text and approved pronunciation transformations are immutable. Qwen Base has NO effective instruction channel: only exact spoken words, punctuation and request grouping reach synthesis; semantic boundary metadata is used by the stitcher, never spoken.
+Return JSON only: {"chapters":[{"segment_id":"voice_seg_01","dramatic_function":"concise function","audience_effect":"concise effect","energy_start":2,"energy_end":3,"tension_peak":3,"intimacy":2,"pace":"steady_forward","reveal_weight":2,"transition_from_previous":"concise handoff","avoidance":"likely bad read"}],"units":[{"source_ref_keys":["voice_seg_01:u001"],"spoken_text":"Exact approved spoken words.","dialogue_separation":"connected_narrator_delivery","grouping_rationale":"Why these complete components form one thought.","short_unit_reason":{"reason":"dramatic_line","rationale":"Why this specific short line needs its own performance."},"boundary_after":"sentence","boundary_intent":{"reason":"sentence_complete","rationale":"Why the next request begins a new spoken thought."},"performance_intent":{"energy":"controlled","tension":"neutral","intimacy":"standard","pace":"steady_forward","emphasis":[],"pause_strategy":"punctuation_led","style_tags":[]}}]}
+
+Binding rules:
+- Preserve every source_ref_key exactly once in supplied order, using whole components. Preserve all spoken lexical tokens exactly in order. Only punctuation and capitalization may change. No paraphrase, new connective words, removed repetition, contraction expansion or pronunciation rewrites.
+- Prefer 20-42 words for a connected thought, soft ceiling 48, absolute maximum 60. Never split a source component to hit a target. Above 48 supply length_exception_reason explaining the indivisible thought. Do not create tiny requests merely because a sentence is short.
+- segment_id is planning/source provenance, NOT a chapter, visual cut or mandatory speech boundary. Adjacent sentences may cross it. Quoted dialogue, a character turn voiced by this same narrator, approved override application, and a visual scene boundary are NOT automatic standalone barriers. Keep connected attribution/dialogue and explanatory follow-through together when it reads naturally.
+- Preserve source_constraint atomic units and explicit before/after boundaries, chapter_id or delivery_id changes, and actual synthesis voice changes. Never merge around these. Independently recognize meaningful narrative/chapter/delivery transitions from the source; leave a boundary there and state it explicitly. Do not mistake every paragraph or planning segment for a meaningful reset.
+- Deliberate dramatic lines, genuine reveals and system announcements may remain short. Every unit under 20 words MUST supply short_unit_reason with one reason from ${JSON.stringify(NARRATION_SHORT_UNIT_REASONS)} and a source-specific rationale. This is not a minimum word quota. Avoid formulaic rationales that simply restate the word count.
+- Every group needs grouping_rationale and boundary_intent. boundary_after reasons must match ${JSON.stringify(NARRATION_BOUNDARY_INTENTS)}. A request end alone is not a paragraph/reveal. Use reveal only for an actual disclosure, paragraph only for a meaningful idea/chapter/delivery reset. Connected requests can use continuation. The final unit of the final packet alone uses episode_end. Packet edges alone do not authorize a scene reset.
+- Preserve expressive ellipses, dashes, question marks, quotations and source repetitions where they carry meaning. Punctuation changes must serve the actual line. Do not globally flatten punctuation or expand contractions. Ambiguous forms and risky numbers listed below are review evidence, not authorization to change lexical words; those require separate exact approved overrides.
+- End every request with terminal punctuation. Do not emit pause/emotion tags, speaker labels, SSML, instructions or performance prompts in spoken_text.
+- ${direction.cadence}
+- performance_intent enums: energy=restrained|low|controlled|high|urgent; tension=neutral|warm|cold|social_pressure|high; intimacy=distant|standard|close; pace=measured|steady|steady_forward|precise|fast; pause_strategy=minimal|punctuation_led|short_precise|reveal_weighted. emphasis phrases must be exact substrings, maximum eight. style_tags maximum six. These fields are non-spoken metadata.
+- chapters is a compatibility prosody ledger: exactly one row per distinct segment_id in first-seen order; it does NOT establish actual chapter boundaries. Numeric values are integers 1-5 and pace uses the same enum. All text fields must be nonempty.${direction.profileContext}
+
+Packet ${chunkIndex + 1} of ${chunkCount}:
+Atomic spoken units:
+${JSON.stringify(atoms)}`;
+}
+
 function validateProsodySpine(parsed, atomicUnits) {
   const rows = Array.isArray(parsed?.chapters) ? parsed.chapters : [];
   const expected = [...new Set(atomicUnits.map((unit) => String(unit.segment_id ?? "")).filter(Boolean))];
@@ -194,7 +233,8 @@ function validateProsodySpine(parsed, atomicUnits) {
   }));
 }
 
-function validateChunkResult(parsed, atomicUnits, chunkIndex, chunkCount) {
+function validateChunkResult(parsed, atomicUnits, chunkIndex, chunkCount, submissionPolicy = null) {
+  const coherent = submissionPolicy === COHERENT_THOUGHT_SUBMISSION_POLICY;
   const chapters = validateProsodySpine(parsed, atomicUnits);
   const expected = atomicUnits.map((unit) => narrationSourceRefKey(unit.source_unit_refs?.[0]));
   const rows = Array.isArray(parsed?.units) ? parsed.units : [];
@@ -206,16 +246,20 @@ function validateChunkResult(parsed, atomicUnits, chunkIndex, chunkCount) {
   for (const row of rows) {
     const keys = row.source_ref_keys.map(String);
     const sourceRows = keys.map((key) => byKey.get(key));
-    if (new Set(sourceRows.map((unit) => unit.segment_id)).size !== 1) {
+    if (!coherent && new Set(sourceRows.map((unit) => unit.segment_id)).size !== 1) {
       throw new Error("Narration performance author crossed a voice segment.");
     }
-    if (keys.length > 1 && sourceRows.some((unit) => (
+    if (!coherent && keys.length > 1 && sourceRows.some((unit) => (
       unit.source_merge_barrier === true
       || unit.risk_flags?.includes("system_ui_atomic")
       || unit.risk_flags?.includes("speaker_or_performance_turn")
       || unit.risk_flags?.includes("tts_override_applied")
     ))) {
       throw new Error("Narration performance author crossed an atomic performance barrier.");
+    }
+    if (coherent) {
+      const findings = coherentNarrationGroupFindings(row, sourceRows);
+      if (findings.length) throw new Error(`Coherent narration submission contract failed: ${JSON.stringify(findings)}`);
     }
     const expectedWords = sourceRows.flatMap((unit) => punctuationInsensitiveTokens(unit.spoken_text));
     const actualWords = punctuationInsensitiveTokens(row.spoken_text);
@@ -251,6 +295,11 @@ function validateChunkResult(parsed, atomicUnits, chunkIndex, chunkCount) {
     units: rows.map((row) => ({
       source_ref_keys: row.source_ref_keys.map(String),
       spoken_text: String(row.spoken_text).trim(),
+      ...(coherent ? {
+        grouping_rationale: row.grouping_rationale, boundary_intent: row.boundary_intent,
+        ...(row.short_unit_reason ? { short_unit_reason: row.short_unit_reason } : {}),
+        ...(row.length_exception_reason ? { length_exception_reason: row.length_exception_reason } : {}),
+      } : {}),
       dialogue_separation: String(row.dialogue_separation ?? "preserve").trim() || "preserve",
       boundary_after: String(row.boundary_after),
       performance_intent: normalizeNarrationPerformanceIntent(
@@ -284,11 +333,12 @@ async function authoredChunk({
   model,
   reasoningEffort,
   contentProfile = null,
+  submissionPolicy = null,
   repairReason = null,
   allowCreativeSubmission = true,
   plannerExecutor = runCodexCli,
 }) {
-  const packetPrompt = promptForChunk(chunk, index, chunkCount, contentProfile);
+  const packetPrompt = promptForChunk(chunk, index, chunkCount, contentProfile, submissionPolicy);
   const prompt = repairReason
     ? `${packetPrompt}\n\nEXACT-PACKET REPAIR: The operator reviewed the failed packet and requested one replacement submission for this packet only. Review note: ${String(repairReason).trim()} Preserve the exact source-ref and word contract above; return the complete packet once.`
     : packetPrompt;
@@ -340,7 +390,7 @@ async function authoredChunk({
       content = call.content;
     }
     const parsedContent = extractNarrationPerformanceJsonForTests(content);
-    const result = validateChunkResult(parsedContent.value, chunk, index, chunkCount);
+    const result = validateChunkResult(parsedContent.value, chunk, index, chunkCount, submissionPolicy);
     return {
       packet_id: packetId,
       packet_index: index,
@@ -387,6 +437,7 @@ export function narrationPerformancePacketPlanForTests(
     maximumAtoms = NARRATION_PERFORMANCE_TARGET_ATOMS,
     maxPromptBytes = NARRATION_PERFORMANCE_SAFE_MAX_BYTES,
     contentProfile = null,
+    submissionPolicy = null,
   } = {},
 ) {
   const ceiling = Math.min(
@@ -400,7 +451,7 @@ export function narrationPerformancePacketPlanForTests(
     const next = [];
     for (let index = 0; index < chunks.length; index += 1) {
       const chunk = chunks[index];
-      const promptBytes = Buffer.byteLength(promptForChunk(chunk, index, chunkCount, contentProfile), "utf8");
+      const promptBytes = Buffer.byteLength(promptForChunk(chunk, index, chunkCount, contentProfile, submissionPolicy), "utf8");
       if (promptBytes <= ceiling) {
         next.push(chunk);
         continue;
@@ -417,7 +468,7 @@ export function narrationPerformancePacketPlanForTests(
     if (!changed) break;
   }
   return chunks.map((chunk, index) => {
-    const prompt = promptForChunk(chunk, index, chunks.length, contentProfile);
+    const prompt = promptForChunk(chunk, index, chunks.length, contentProfile, submissionPolicy);
     return {
       packet_id: `performance_packet_${String(index + 1).padStart(3, "0")}_${sha256(prompt).slice(0, 12)}`,
       packet_index: index,
@@ -456,7 +507,8 @@ async function readOptionalJsonEvidence(filePath) {
 function editorialContract({ mode, contentProfile, sourceScriptSha256, packets }) {
   return {
     schema: "goldflow_narration_editorial_contract_v1",
-    version: "2026-09-06.1",
+    version: mode === COHERENT_THOUGHT_SUBMISSION_POLICY ? "2026-10-17.1" : "2026-09-06.1",
+    ...(mode === COHERENT_THOUGHT_SUBMISSION_POLICY ? { submission_contract_sha256: coherentThoughtSubmissionContract().sha256 } : {}),
     mode,
     source_script_sha256: sourceScriptSha256,
     direction_sha256: sha256(JSON.stringify(narrationEditorialDirection(contentProfile))),
@@ -482,6 +534,7 @@ export async function authorNarrationPerformanceDirection({
   reasoningEffort = "medium",
   concurrency = 8,
   contentProfile = null,
+  submissionPolicy = null,
   repairPacketIds = [],
   repairReason = null,
   plannerExecutor = runCodexCli,
@@ -494,7 +547,7 @@ export async function authorNarrationPerformanceDirection({
   const contractPath = path.join(episodeDir, "narration_editorial_contract.json");
   const existing = await readOptionalJsonEvidence(artifactPath);
   const storedContract = await readOptionalJsonEvidence(contractPath);
-  if (existing && (!new Set(["goldflow_narration_actionable_direction_v1", "goldflow_narration_actionable_direction_v2", "goldflow_narration_actionable_direction_v3"]).has(existing.schema)
+  if (existing && (!new Set(["goldflow_narration_actionable_direction_v1", "goldflow_narration_actionable_direction_v2", "goldflow_narration_actionable_direction_v3", COHERENT_THOUGHT_DIRECTION_SCHEMA]).has(existing.schema)
     || !new Set(["approved", "blocked"]).has(existing.status))) {
     throw new Error("Malformed existing narration performance artifact; stop for reviewed recovery.");
   }
@@ -512,18 +565,28 @@ export async function authorNarrationPerformanceDirection({
   if (!storedContract && existing?.authoring?.editorial_contract) {
     throw new Error("Narration editorial contract marker is missing from a contract-bound artifact; stop for reviewed recovery.");
   }
+  if (existing?.submission_policy === COHERENT_THOUGHT_SUBMISSION_POLICY && !storedContract) {
+    throw new Error("Coherent narration history requires its original editorial contract marker.");
+  }
   const legacyMode = "legacy_manhwa_prompt_v1";
   const profileMode = "profile_directed_v1";
-  if (storedContract && ![legacyMode, profileMode].includes(storedContract.mode)) {
+  if (storedContract && ![legacyMode, profileMode, COHERENT_THOUGHT_SUBMISSION_POLICY].includes(storedContract.mode)) {
     throw new Error("Narration editorial contract has an unsupported mode; stop before creative submission.");
   }
+  const requestedCoherentPolicy = submissionPolicy === COHERENT_THOUGHT_SUBMISSION_POLICY
+    ? await resolveNarrationSubmissionPolicy({ episodeDir }) : null;
   const mode = storedContract?.mode
-    ?? ((existing || hasCallHistory || !contentProfile?.id || contentProfile.id === "manhwa_recap_v1")
-      ? legacyMode : profileMode);
+    ?? (!existing && !hasCallHistory && requestedCoherentPolicy === COHERENT_THOUGHT_SUBMISSION_POLICY
+      ? COHERENT_THOUGHT_SUBMISSION_POLICY : ((existing || hasCallHistory || !contentProfile?.id || contentProfile.id === "manhwa_recap_v1")
+      ? legacyMode : profileMode));
+  if (existing && ((mode === COHERENT_THOUGHT_SUBMISSION_POLICY) !== (existing.submission_policy === COHERENT_THOUGHT_SUBMISSION_POLICY))) {
+    throw new Error("Narration submission mode conflicts with the existing artifact; historical grouping cannot be migrated in place.");
+  }
   // Historical aggregate artifacts and interrupted packet caches predate profile
   // direction. Their original prompt, IDs and repair scope must remain intact.
   const effectiveContentProfile = mode === legacyMode ? null : contentProfile;
-  const packets = narrationPerformancePacketPlanForTests(atomicUnits, { contentProfile: effectiveContentProfile });
+  const effectiveSubmissionPolicy = mode === COHERENT_THOUGHT_SUBMISSION_POLICY ? mode : null;
+  const packets = narrationPerformancePacketPlanForTests(atomicUnits, { contentProfile: effectiveContentProfile, submissionPolicy: effectiveSubmissionPolicy });
   const boundEditorialContract = editorialContract({
     mode, contentProfile: effectiveContentProfile, sourceScriptSha256, packets,
   });
@@ -609,7 +672,7 @@ export async function authorNarrationPerformanceDirection({
         }
         const content = await fs.readFile(prior.output_path, "utf8");
         const parsed = extractNarrationPerformanceJsonForTests(content);
-        const result = validateChunkResult(parsed.value, packet.chunk, index, packets.length);
+        const result = validateChunkResult(parsed.value, packet.chunk, index, packets.length, effectiveSubmissionPolicy);
         return { ...prior, chapters: result.chapters, units: result.units, reused: true,
           json_syntax_repair: parsed.syntax_repair };
       }
@@ -623,6 +686,7 @@ export async function authorNarrationPerformanceDirection({
       model,
       reasoningEffort: "medium",
       contentProfile: effectiveContentProfile,
+      submissionPolicy: effectiveSubmissionPolicy,
       repairReason: repairSet.has(packet.packet_id) ? repairReason : null,
       allowCreativeSubmission: !existing || repairSet.has(packet.packet_id),
       plannerExecutor,
@@ -641,7 +705,8 @@ export async function authorNarrationPerformanceDirection({
   }
   const chapterProsody = [...chapterBySegment.values()];
   const artifact = {
-    schema: "goldflow_narration_actionable_direction_v3",
+    schema: effectiveSubmissionPolicy ? COHERENT_THOUGHT_DIRECTION_SCHEMA : "goldflow_narration_actionable_direction_v3",
+    ...(effectiveSubmissionPolicy ? { submission_policy: effectiveSubmissionPolicy, submission_contract: coherentThoughtSubmissionContract() } : {}),
     status: failedCalls.length ? "blocked" : "approved",
     generated_at: new Date().toISOString(),
     source_script_sha256: sourceScriptSha256,
@@ -704,4 +769,33 @@ export async function authorNarrationPerformanceDirection({
     throw new Error(`Authored narration performance map failed final validation: ${JSON.stringify(validation.findings)}`);
   }
   return { artifact, artifactPath, callCount: calls.length };
+}
+
+export async function resolveNarrationSubmissionPolicy({ episodeDir } = {}) {
+  const marker = await readOptionalJsonEvidence(path.join(episodeDir, "narration_editorial_contract.json"));
+  const existing = await readOptionalJsonEvidence(path.join(episodeDir, "narration_actionable_direction.json"));
+  for (const name of ["narration_generation_plan.json", "qwen_generation_plan.json"]) {
+    const priorPlan = await readOptionalJsonEvidence(path.join(episodeDir, name));
+    if (priorPlan?.submission_policy === COHERENT_THOUGHT_SUBMISSION_POLICY && marker?.mode !== COHERENT_THOUGHT_SUBMISSION_POLICY) throw new Error("Coherent narration plan requires its original editorial contract marker.");
+  }
+  if (existing?.submission_policy === COHERENT_THOUGHT_SUBMISSION_POLICY && !marker) throw new Error("Coherent narration history requires its original editorial contract marker.");
+  if (marker) {
+    if (existing && ((marker.mode === COHERENT_THOUGHT_SUBMISSION_POLICY) !== (existing.submission_policy === COHERENT_THOUGHT_SUBMISSION_POLICY))) throw new Error("Narration submission mode conflicts with the existing artifact.");
+    if (!["legacy_manhwa_prompt_v1", "profile_directed_v1", COHERENT_THOUGHT_SUBMISSION_POLICY].includes(marker.mode)) throw new Error("Unsupported narration editorial contract mode.");
+    return marker.mode === COHERENT_THOUGHT_SUBMISSION_POLICY ? marker.mode : null;
+  }
+  for (const name of ["narration_actionable_direction.json", "narration_generation_plan.json", "qwen_generation_plan.json", "narration_text_ir.json", "_codex_calls/narration-performance-author"]) {
+    try { await fs.stat(path.join(episodeDir, name)); return null; } catch (error) { if (error.code !== "ENOENT") throw error; }
+  }
+  return COHERENT_THOUGHT_SUBMISSION_POLICY;
+}
+
+export async function assertCoherentNarrationEditorialContract({ episodeDir, artifact, atomicUnits, sourceScriptSha256, contentProfile } = {}) {
+  const stored = await readOptionalJsonEvidence(path.join(episodeDir, "narration_editorial_contract.json"));
+  const expected = editorialContract({
+    mode: COHERENT_THOUGHT_SUBMISSION_POLICY, sourceScriptSha256, contentProfile,
+    packets: narrationPerformancePacketPlanForTests(atomicUnits, { contentProfile, submissionPolicy: COHERENT_THOUGHT_SUBMISSION_POLICY }),
+  });
+  assertEditorialContractMatches(stored, expected);
+  assertEditorialContractMatches(artifact?.authoring?.editorial_contract, expected);
 }

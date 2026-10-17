@@ -1,7 +1,20 @@
 import { createHash } from "node:crypto";
+import { fileURLToPath } from "node:url";
+import { sha256File } from "./file-hash.mjs";
 
 export const NARRATION_FINALIZATION_CHECKPOINT_SCHEMA =
   "goldflow_narration_finalization_checkpoint_v1";
+
+export async function narrationStitchImplementationIdentity({
+  boundaryEditorPath = fileURLToPath(new URL("./narration-boundary-editor.mjs", import.meta.url)),
+  stitchHelperPath = fileURLToPath(new URL("../modelslab-qwen-episode-audio.mjs", import.meta.url)),
+} = {}) {
+  return {
+    version: "goldflow_narration_stitch_implementation_v1",
+    boundary_editor_sha256: await sha256File(boundaryEditorPath),
+    stitch_helper_sha256: await sha256File(stitchHelperPath),
+  };
+}
 
 function canonicalize(value) {
   if (Array.isArray(value)) return value.map(canonicalize);

@@ -1,5 +1,10 @@
 import { createHash } from "node:crypto";
 import { hasTtsTerminalPunctuation } from "./tts-text-boundaries.mjs";
+import {
+  COHERENT_SUBMISSION_POLICY,
+  buildNarrationSubmissionRiskLedger,
+  narrationSubmissionPayloadBlockers,
+} from "./narration-submission-audit.mjs";
 
 export const TTS_SPOKEN_TEXT_AUDIT_SCHEMA = "goldflow_tts_spoken_text_audit_v1";
 
@@ -145,6 +150,9 @@ export function buildTtsSpokenTextAudit({
   generatedAt = new Date().toISOString(),
 } = {}) {
   const units = unitsFromPlan(plan);
+  // Historical audit hashes remain replayable. Only the new authored contract
+  // opts into this inventory and its corrected 20–42-word diagnostics.
+  const coherentSubmission = plan?.submission_policy === COHERENT_SUBMISSION_POLICY;
   const blockers = [];
   const warnings = [];
   const seenIds = new Set();
@@ -177,7 +185,13 @@ export function buildTtsSpokenTextAudit({
       unitBlockers.push("spoken_text_missing_terminal_punctuation");
     }
     if (spokenWordCount > 60) unitBlockers.push("spoken_text_exceeds_60_word_hard_maximum");
-    if (!atomic && spokenWordCount > 0 && spokenWordCount < 45) {
+    if (coherentSubmission) {
+      unitBlockers.push(...narrationSubmissionPayloadBlockers(spokenText));
+      if (spokenWordCount > 0 && spokenWordCount < 20) {
+        unitWarnings.push("short_narration_unit_requires_authored_reason");
+      }
+      if (spokenWordCount > 48) unitWarnings.push("narration_unit_above_48_word_soft_maximum");
+    } else if (!atomic && spokenWordCount > 0 && spokenWordCount < 45) {
       unitWarnings.push("narration_unit_below_45_word_target");
     }
     if (ordinaryItPronounAppears(sourceText) && /\bI\s+T\b/.test(spokenText)) {
@@ -252,6 +266,10 @@ export function buildTtsSpokenTextAudit({
       ledger_sha256: pronunciationLedgerSha256,
       entries: pronunciationLedger,
     },
+    ...(coherentSubmission ? {
+      submission_policy: COHERENT_SUBMISSION_POLICY,
+      submission_risk_ledger: buildNarrationSubmissionRiskLedger(units),
+    } : {}),
   };
   audit.audit_sha256 = ttsSpokenTextAuditSha256(audit);
   return audit;
@@ -273,5 +291,7 @@ export function ttsSpokenTextAuditMatches({ audit, plan, sourceScriptSha256, ove
     generatedAt: audit.generated_at,
   });
   return audit.unit_contract_sha256 === expected.unit_contract_sha256
-    && audit.unit_count === expected.unit_count;
+    && audit.unit_count === expected.unit_count
+    && (audit.submission_risk_ledger?.ledger_sha256 ?? null) === (expected.submission_risk_ledger?.ledger_sha256 ?? null)
+    && (audit.submission_policy ?? null) === (expected.submission_policy ?? null);
 }

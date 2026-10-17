@@ -27,6 +27,7 @@ import {
 import {
   stageOutputPathMatches,
 } from "../lib/pipeline-stage-registry.mjs";
+import { COHERENT_THOUGHT_SUBMISSION_POLICY, coherentThoughtSubmissionContract } from "../lib/narration-submission-contract.mjs";
 
 function sha256(value) {
   return createHash("sha256").update(String(value ?? "")).digest("hex");
@@ -247,6 +248,46 @@ assert.equal(passedGate.model_load_performed, false);
 assert.equal(passedGate.synthesis_invoked, false);
 assert.equal(typeof passedGate.updated_at, "string");
 assert.equal(passedGate.gate_sha256, narrationPreSynthesisGateSha256(passedGate));
+
+function refreshFixturePlan(value) {
+  const { plan, inputs } = value;
+  for (const field of ['generation_units', 'narration_generation_units', 'qwen_generation_units']) plan.segments[0][field] = structuredClone(plan.units);
+  const audit = buildTtsSpokenTextAudit({ plan, sourceScriptSha256: inputs.scriptSha256, overridesSha256: inputs.overridesSha256, provider: inputs.policy.primary.provider, voiceId: inputs.policy.primary.voice_id });
+  plan.tts_spoken_text_audit = { status: audit.status, audit_sha256: audit.audit_sha256, unit_contract_sha256: audit.unit_contract_sha256, blocker_count: audit.blocker_count };
+  inputs.spokenTextAudit = audit;
+  plan.plan_sha256 = canonicalNarrationPlanSha256(plan);
+  inputs.textIr = buildNarrationTextIr({ sourceScriptSha256: inputs.scriptSha256, generationPlanSha256: plan.plan_sha256, units: plan.units });
+  return buildNarrationPreSynthesisGate(inputs);
+}
+const coherent = fixture({ sourceText: 'The lantern dimmed. The traveler entered.' });
+coherent.plan.submission_policy = COHERENT_THOUGHT_SUBMISSION_POLICY;
+coherent.plan.submission_contract = coherentThoughtSubmissionContract();
+const coherentUnit = coherent.plan.units[0];
+coherentUnit.grouping_rationale = 'The adjoining actions form one continuous thought despite separate planning segments.';
+coherentUnit.short_unit_reason = { reason: 'complete_short_thought', rationale: 'These two sentences complete this bounded fixture thought.' };
+coherentUnit.boundary_after = 'episode_end'; coherentUnit.boundary_intent = { reason: 'episode_end', rationale: 'The fixture source concludes here.' };
+coherentUnit.source_unit_refs = ['The lantern dimmed.', 'The traveler entered.'].map((text, index) => ({ source_unit_id: `source_${index}`, segment_id: `voice_seg_${index}`, source_text: text, caption_text: text, source_text_sha256: sha256(text), caption_text_sha256: sha256(text), submission_source_constraint: { atomic: false, before: null, after: null, chapter_id: 'chapter_1', delivery_id: 'neutral' }, submission_synthesis_identity: { speaker: 'NARRATOR', reference_id: 'fixture-reference', reference_audio_path: '/fixture/reference.wav', voice_source_policy: 'owned_clone' } }));
+coherentUnit.spoken_text_lineage.components = coherentUnit.source_unit_refs.map(ref => lineage(ref.source_unit_id, ref.source_text, ref.source_text).components[0]);
+const coherentUnsignedLineage = structuredClone(coherentUnit.spoken_text_lineage); delete coherentUnsignedLineage.lineage_sha256;
+coherentUnit.spoken_text_lineage.lineage_sha256 = sha256(JSON.stringify(coherentUnsignedLineage));
+coherent.plan.sentence_unit_boundary_integrity.within_voice_segment_boundary_count = 0;
+coherent.plan.sentence_unit_boundary_integrity.within_submission_boundary_count = 1;
+assert.equal(refreshFixturePlan(coherent).status, 'passed', 'new policy may cross planning segments with one actual voice and intact source lineage');
+const legacyCrossSegment = structuredClone(coherent); legacyCrossSegment.inputs.plan = legacyCrossSegment.plan;
+delete legacyCrossSegment.plan.submission_policy; delete legacyCrossSegment.plan.submission_contract;
+assert.ok(findingCodes(refreshFixturePlan(legacyCrossSegment)).has('pre_synthesis_sentence_boundary_coverage_stale'), 'historical policy retains its segment barrier');
+for (const mutate of [
+  ref => { ref.submission_source_constraint.atomic = true; },
+  ref => { ref.submission_source_constraint.before = 'chapter'; },
+  ref => { ref.submission_source_constraint.chapter_id = 'chapter_2'; },
+  ref => { ref.submission_synthesis_identity.reference_id = 'different_voice'; },
+]) {
+  const blocked = structuredClone(coherent); blocked.inputs.plan = blocked.plan;
+  mutate(blocked.plan.units[0].source_unit_refs[1]);
+  const gate = refreshFixturePlan(blocked);
+  assert.equal(gate.status, 'blocked'); assert.ok(findingCodes(gate).has('pre_synthesis_submission_boundary_invalid'));
+  assert.equal(gate.model_load_performed, false); assert.equal(gate.synthesis_invoked, false);
+}
 
 const authorizedGate = authorizeNarrationPreSynthesisGate(passedGate, {
   generatedAt: "2026-08-21T00:00:01.000Z",

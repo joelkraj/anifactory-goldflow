@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import sharp from "sharp";
+import { assertPanelPromptAllocation, materializePanelAssetAliases } from "./lib/panel-production-assets.mjs";
 import { promptTextForImageProvider } from "./lib/image-prompt-utils.mjs";
 
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
@@ -226,7 +227,11 @@ async function updateCutExecutionLedger({ prompt, outputPath, outputHash, prompt
       updated_at: new Date().toISOString(),
     };
   }
+  const currentReport = await readJson(reportPath, null);
+  const panelAliases = new Map((currentReport?.results ?? []).filter(row => row.generated?.panel_asset_plan_sha256 && row.generated?.editorial_reuse_approved).map(row => [row.image_id, row]));
   const cuts = ledger.cuts.map((cut) => {
+    const alias = panelAliases.get(cut.image_id);
+    if (alias) return { ...cut, submitted_prompt_hash: alias.prompt_hash, image_provider: 'editorial_reuse', editorial_reuse_approved: true, reuse_source_image_id: alias.generated.reuse_source_image_id, panel_asset_id: alias.panel_asset_id, panel_asset_plan_sha256: alias.panel_asset_plan_sha256, image_path: alias.image_path, image_sha256: alias.image_sha256, generation_status: 'editorial_reuse', image_qa_status: cut.image_sha256 === alias.image_sha256 ? cut.image_qa_status : 'pending', image_qa_note: cut.image_sha256 === alias.image_sha256 ? cut.image_qa_note : null };
     if (String(cut?.image_id ?? "") !== String(prompt.image_id)) return cut;
     return {
       ...cut,
@@ -270,8 +275,10 @@ async function main() {
   await verifyRasterImage(sourcePath);
   const plan = await readJson(promptPath, null);
   if (plan?.status !== "passed" || !Array.isArray(plan.prompts)) throw new Error(`Missing passed prompt plan: ${promptPath}`);
+  const panelAllocation = await assertPanelPromptAllocation({ episodeDir, prompts: plan.prompts, allowSubset: true });
   const prompt = plan.prompts.find((row) => row.image_id === imageId);
   if (!prompt) throw new Error(`Prompt plan does not contain image_id ${imageId}`);
+  if (prompt.provider_submission_required === false) throw new Error(`Image ${imageId} is an authored alias; import its owner ${prompt.reuse_source_image_id}.`);
   const promptForHash = {
     ...prompt,
     reference_slots: Array.isArray(prompt.reference_slots) ? prompt.reference_slots : referenceSlotsFromPrompt(prompt),
@@ -293,7 +300,7 @@ async function main() {
     for (const row of priorReport.results) {
       if (!row?.image_id || !allPromptIds.has(row.image_id)) continue;
       if (!row.image_path || !(await exists(row.image_path))) continue;
-      if (!forceDuplicate && row.image_id !== prompt.image_id) {
+      if (!forceDuplicate && row.image_id !== prompt.image_id && !(panelAllocation && row.generated?.panel_asset_plan_sha256 === panelAllocation.planSha256 && row.generated?.reuse_source_image_id === prompt.image_id)) {
         const existingHash = row.generated?.output_sha256 ?? await hashFile(row.image_path);
         if (existingHash === sourceHash) {
           throw new Error(`Refusing duplicate Codex manual import for ${prompt.image_id}: source hash matches accepted ${row.image_id}. Regenerate a fresh raster or pass --force-duplicate true only for an explicitly approved intentional reuse.`);
@@ -313,6 +320,8 @@ async function main() {
   const updatedAt = new Date().toISOString();
   await writeJson(`${outputPath}.metadata.json`, {
     image_id: prompt.image_id,
+    panel_asset_id: prompt.panel_asset_id ?? null,
+    panel_asset_plan_sha256: prompt.panel_asset_plan_sha256 ?? null,
     prompt_hash: promptHash,
     source_prompt_path: promptPath,
     source_prompt_sha256: promptPlanHash,
@@ -356,7 +365,8 @@ async function main() {
       output_sha256: outputHash,
     },
   });
-  const results = [...mergedById.values()].sort((a, b) => String(a.image_id).localeCompare(String(b.image_id), undefined, { numeric: true }));
+  const materializedResults = await materializePanelAssetAliases({ episodeDir, prompts: plan.prompts, results: [...mergedById.values()], allowSubset: true, ownerImageIds: [prompt.image_id] });
+  const results = materializedResults.sort((a, b) => String(a.image_id).localeCompare(String(b.image_id), undefined, { numeric: true }));
   const missingImageCount = Math.max(0, allPromptIds.size - results.length);
   const reportStatus = missingImageCount === 0 ? "passed" : "partial";
   const report = {

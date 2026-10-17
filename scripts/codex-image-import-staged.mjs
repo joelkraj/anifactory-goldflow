@@ -526,7 +526,7 @@ async function main() {
   }
   const plan = await readJson(promptPath);
   if (plan?.status !== "passed" || !Array.isArray(plan.prompts)) throw new Error(`Missing passed prompt plan: ${promptPath}`);
-  const validIds = new Set(plan.prompts.filter((prompt) => prompt.image_generation_required !== false).map((prompt) => prompt.image_id));
+  const validIds = new Set(plan.prompts.filter((prompt) => prompt.image_generation_required !== false && prompt.provider_submission_required !== false).map((prompt) => prompt.image_id));
   const scope = requestedIds(flags["image-ids"], flags["image-id"], flags["cut-ids"], flags["cut-id"]);
   const unknownScope = [...scope].filter((id) => !validIds.has(id));
   if (unknownScope.length) throw new Error(`Unknown image ids requested: ${unknownScope.join(", ")}`);

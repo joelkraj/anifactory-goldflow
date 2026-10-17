@@ -214,6 +214,7 @@ export function combineWavefrontPlansForTests(plans = [], options = {}) {
   const seen = new Set();
   for (const plan of plans) {
     for (const prompt of plan?.prompts ?? []) {
+      if (prompt.provider_submission_required === false) continue;
       const imageId = String(prompt?.image_id ?? "");
       if (!imageId || seen.has(imageId)) throw new Error(`Wavefront prompt identity is missing or duplicated: ${imageId || "(missing)"}.`);
       seen.add(imageId);

@@ -52,6 +52,8 @@ import {
 } from "./lib/content-profiles.mjs";
 import { isChatGptWebRateLimitError } from "./lib/chatgpt-web-throttle-state.mjs";
 import { parseJsonObjectFromPlannerOutput } from "./lib/json-output-repair.mjs";
+import { isPanelProductionIdentity } from "./lib/panel-production-policy.mjs";
+import { loadPanelAssetPlan, panelAssetOwnerRows, expandPanelAssetPrompts, assertPanelPromptAllocation } from "./lib/panel-production-assets.mjs";
 import { noLtxOverrideStatus } from "./lib/operator-motion-route-override.mjs";
 import { planningRuntimeFromProcessContext } from "./lib/planning-runtime-policy.mjs";
 import {
@@ -439,6 +441,7 @@ function compactSceneForPrompt(scene, stateRefIndex = new Map()) {
     : null;
   return {
     target_image_id: scene.image_id_hint ?? (absoluteIndex == null ? null : `${episode}-cut-${String(absoluteIndex + 1).padStart(3, "0")}`),
+    panel_asset_order: scene.panel_asset_order ?? null,
     editorial_reuse: {
       eligible: Array.isArray(scene.__editorial_reuse_candidate_image_ids) && scene.__editorial_reuse_candidate_image_ids.length > 0,
       candidate_image_ids: scene.__editorial_reuse_candidate_image_ids ?? [],
@@ -739,6 +742,7 @@ CONTENT PROFILE: ${contentProfile?.id ?? "manhwa_recap_v1"}
 ${plannerDirective || "- Preserve the exact local story truth and author one decisive visual moment per cut."}
 
 Core contract:
+- If a unit includes panel_asset_order, the explicit allocation is binding: author ONE image for its visual_brief and all bound_beats. Read their exact narrative evidence, retain truthful shared state and any described crop/reaction opportunities, and keep image_strategy fresh for this owner. The pipeline materializes the authored bindings without further image generation. Do not regroup, add owners, apply a reuse quota, or invent content. If the requested image cannot honestly serve its bound beats, report that contradiction rather than quietly changing the allocation.
 - You are the creative visual editor. The exact local visual_beat_script_excerpt, visual_beat_action, timing, visual_job, local location, and current-scene candidate refs are the source of truth.
 - Ask what the viewer needs to see now to understand, feel, and keep watching. Depict one present-tense moment, not a parent-scene summary or generic hero portrait.
 - Author shot_manifest first, then prose that obeys it. Preserve target_image_id, scene_id, visual_beat_id, start_sec, and duration_sec exactly.
@@ -772,8 +776,8 @@ ${animationEnabled ? `- ANIMATION MODE IS LOCKED. Copy each beat's complete anim
 - Keep motion_keyframes as [] for ordinary static holds and smooth single moves represented by start/end anchors and scales. Add only 2-4 compact keyframes when the beat genuinely needs a timed hold, impact, reveal, or focus change; never copy the four-row example mechanically into every cut.
 - The beat director owns background_population and its visual treatment. Copy that authored contract into shot_manifest and provider prose without imposing a default crowd, emptiness, detail level, prominence, lighting, or silhouette treatment. Preserve exact evidence and named identities; do not deterministically invent, remove, restage, or cosmetically rewrite the author's choice.
 - Author only provider_prompt for the supplied target_provider_route. The pipeline derives legacy image_prompt/modelslab_image_prompt/codex_image_prompt fields after validation.
-- Keep image_strategy as fresh unless editorial_reuse.eligible is true and one listed candidate image genuinely depicts the same stable location, cast, state, and emotional purpose. For deliberate reuse, set image_strategy to reuse_prior_approved and copy one exact candidate id into reuse_source_image_id. Still author the full current-beat provider_prompt and motion_intent so the cut can safely fall back to fresh generation and receive its own edit movement.
-- Editorial reuse is a late-video efficiency tool for stable explanation, analysis, aftermath, or low-risk dialogue. Never use it for the opening, action, a new location, a state change, UI/system reveal, status turn, payoff, threat, or cliffhanger.
+- For units WITHOUT panel_asset_order, keep image_strategy as fresh unless editorial_reuse.eligible is true and one listed candidate image genuinely depicts the same stable location, cast, state, and emotional purpose. For deliberate reuse, set image_strategy to reuse_prior_approved and copy one exact candidate id into reuse_source_image_id. Still author the full current-beat provider_prompt and motion_intent so the cut can safely fall back to fresh generation and receive its own edit movement.
+- For units WITHOUT panel_asset_order, editorial reuse is a late-video efficiency tool for stable explanation, analysis, aftermath, or low-risk dialogue. Never use it for the opening, action, a new location, a state change, UI/system reveal, status turn, payoff, threat, or cliffhanger.
 - Do not create standalone negative_prompt, avoid_list, or exclude_list fields. Normal story-faithful prose may freely state absences, refusals, and contrast.
 - Correction directives are binding only for their matching image_id or scene_id.
 ${narrativeOverlayRules.map((rule) => `- ${rule}`).join("\n")}
@@ -1584,6 +1588,12 @@ function normalizePrompt(row, index, episodeId, sourceUnit = null, scope = {}) {
     active_state_constraints: sourceUnit?.active_state_constraints ?? null,
     start_sec: Number(sourceUnit?.start_sec ?? row.start_sec ?? 0),
     duration_sec: Math.max(0.25, Number(sourceUnit?.duration_sec ?? row.duration_sec ?? 6)),
+    ...(sourceUnit?.panel_asset_order ? {
+      panel_asset_id: sourceUnit.panel_asset_order.asset_id,
+      panel_asset_owner_image_id: imageId,
+      panel_asset_plan_sha256: sourceUnit.panel_asset_plan_sha256,
+      provider_submission_required: true,
+    } : {}),
     image_strategy: validEditorialReuse ? "reuse_prior_approved" : "fresh",
     reuse_source_image_id: validEditorialReuse ? requestedReuseSource : null,
     editorial_reuse_approved: validEditorialReuse,
@@ -2454,7 +2464,7 @@ export function editorialReuseCandidatesForTests(rows = [], episodeId = "ep_01",
 }
 
 function filterVisualSourceRows(rows, episodeId) {
-  const reuseCandidates = editorialReuseCandidates(rows, episodeId, {
+  const reuseCandidates = rows.some(row => row.panel_asset_order) ? rows.map(() => []) : editorialReuseCandidates(rows, episodeId, {
     thresholdSec: Number(flags["editorial-reuse-after-sec"] ?? 1200),
     lookbackCuts: Number(flags["editorial-reuse-lookback-cuts"] ?? 5),
     lookbackSec: Number(flags["editorial-reuse-lookback-sec"] ?? 75),
@@ -2791,9 +2801,13 @@ async function main() {
     ? visualBeatPlan.beats
     : timedPlan.scenes;
   const allVisualSourceRows = expireElapsedPhysicalState(rawVisualSourceRows);
-  const visualSourceRows = filterVisualSourceRows(allVisualSourceRows, episode);
+  const panelAllocation = isPanelProductionIdentity(runIdentity) ? await loadPanelAssetPlan({ episodeDir }) : null;
+  const allocatedVisualSourceRows = panelAllocation
+    ? panelAssetOwnerRows(allVisualSourceRows, panelAllocation.plan).map(row => ({ ...row, panel_asset_plan_sha256: panelAllocation.planSha256 }))
+    : allVisualSourceRows;
+  const visualSourceRows = filterVisualSourceRows(allocatedVisualSourceRows, episode);
   if (!visualSourceRows.length) throw new Error("Visual planner small-batch filters selected zero visual units.");
-  const scopedRepair = visualSourceRows.length !== allVisualSourceRows.length;
+  const scopedRepair = visualSourceRows.length !== allocatedVisualSourceRows.length;
   const dryRunPrompt = flags["dry-run-prompt"] === "true";
   const basePromptPlan = scopedRepair && !dryRunPrompt ? await readJson(basePromptPlanPath, null) : null;
   if (scopedRepair && !dryRunPrompt && (!Array.isArray(basePromptPlan?.prompts) || basePromptPlan.prompts.length !== allVisualSourceRows.length)) {
@@ -2984,12 +2998,14 @@ async function main() {
       throw new Error(`Existing prompt-plan revalidation requires ${allVisualSourceRows.length} prompts at ${outputPath}.`);
     }
     assertPromptIdentityMatchesInputs(prompts, allVisualSourceRows, episode, "visual prompt revalidation");
+    if (panelAllocation) await assertPanelPromptAllocation({ episodeDir, prompts });
     const timingRebind = flags["retime-existing"] === "true";
     if (timingRebind) prompts = retimeExistingPromptsForTests(prompts, allVisualSourceRows, episode);
     prompts = prompts.map((prompt, index) => revalidateExistingPrompt(prompt, allVisualSourceRows[index], {
       visualReferencePlan: enrichedVisualReferencePlan,
       stateRefIndex,
     }));
+    if (panelAllocation) prompts = expandPanelAssetPrompts(prompts, { ...panelAllocation, beats: allVisualSourceRows });
     assertScenePromptShape(prompts);
     assertLocalBeatFidelity(prompts, allVisualSourceRows, storyFactLedger);
     const activeStateFindings = activeStateConstraintFindings(prompts, allVisualSourceRows);
@@ -3008,6 +3024,7 @@ async function main() {
     if (visualBeatPlan?.status === "passed") sourcePaths.push(visualBeatPlanPath);
     if (locationContractLedger?.status === "passed") sourcePaths.push(locationContractLedgerPath);
     if (noLtxOverride.done) sourcePaths.push(noLtxOverride.path);
+    if (panelAllocation) sourcePaths.push(panelAllocation.planPath);
     const refreshed = {
       ...existingPlan,
       prompts,
@@ -3426,17 +3443,19 @@ async function main() {
         Number(row?.__visual_plan_absolute_index ?? 0),
       ));
       const failedBeatIds = failedSourceRows.map((row) => String(row?.visual_beat_id ?? "")).filter(Boolean);
-      const partialPrompts = scopedRepair
+      let partialPrompts = scopedRepair
         ? mergeScopedPromptReplacements(basePromptPlan.prompts, successfulScopedPrompts, {
             image_ids: successfulScopedPrompts.map((prompt) => prompt.image_id),
           })
         : partialScopedPrompts;
+      if (panelAllocation) partialPrompts = expandPanelAssetPrompts(partialPrompts, { ...panelAllocation, beats: allVisualSourceRows });
       const sourcePaths = [timedPlanPath, semanticPlanPath, visualReferencePlanPath, characterStateRefsPath];
       if (referencePlanApproval?.status === "approved") sourcePaths.push(referencePlanApprovalPath);
       if (storyFactLedger?.status === "passed") sourcePaths.push(storyFactLedgerPath);
       if (visualBeatPlan?.status === "passed") sourcePaths.push(visualBeatPlanPath);
       if (locationContractLedger?.status === "passed") sourcePaths.push(locationContractLedgerPath);
       if (noLtxOverride.done) sourcePaths.push(noLtxOverride.path);
+      if (panelAllocation) sourcePaths.push(panelAllocation.planPath);
       const partialReport = {
         schema: "goldflow_section_image_prompts_v1",
         status: "blocked",
@@ -3570,6 +3589,7 @@ async function main() {
   if (scopedRepair) {
     prompts = mergeScopedPromptReplacements(basePromptPlan.prompts, scopedPrompts, { image_ids: scopedImageIds });
   }
+  if (panelAllocation) prompts = expandPanelAssetPrompts(prompts, { ...panelAllocation, beats: allVisualSourceRows });
   const unresolvedRecoveryPrompts = prompts.filter((prompt) => (
     prompt?.planner_recovery_required === true
     || !String(prompt?.provider_prompt ?? prompt?.image_prompt ?? prompt?.modelslab_image_prompt ?? prompt?.codex_image_prompt ?? "").trim()
@@ -3583,7 +3603,10 @@ async function main() {
     message: "This exact cut still has no accepted authored prompt; preserve all passed cuts and make one later explicit repair submission for only this image/beat id.",
     resolved: false,
   }));
-  const editorialReuse = enforceEditorialReusePolicy(prompts, {
+  const editorialReuse = panelAllocation ? {
+    prompts, findings: [], policy: "authored_reuse_before_generation",
+    reused_count: prompts.filter(row => row.provider_submission_required === false).length,
+  } : enforceEditorialReusePolicy(prompts, {
     thresholdSec: Number(flags["editorial-reuse-after-sec"] ?? 1200),
     maxShare: Number(flags["editorial-reuse-max-share"] ?? 0.18),
   });
@@ -3633,6 +3656,7 @@ async function main() {
   if (visualBeatPlan?.status === "passed") sourcePaths.push(visualBeatPlanPath);
   if (locationContractLedger?.status === "passed") sourcePaths.push(locationContractLedgerPath);
   if (noLtxOverride.done) sourcePaths.push(noLtxOverride.path);
+  if (panelAllocation) sourcePaths.push(panelAllocation.planPath);
   sourcePaths.push(...manualRecoveryOutputFiles);
   const report = {
     schema: "goldflow_section_image_prompts_v1",

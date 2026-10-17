@@ -72,11 +72,15 @@ export function plannerInvocationScope(flags = {}) {
 }
 
 export function plannerRerunDecision({
+  command,
+  subcommand,
   stage,
   flags = {},
   priorEvents = [],
   unresolvedExpectedIds = [],
 } = {}) {
+  if (command === 'visual' && subcommand === 'panel-assets' && stage === 'visual_prompt_plan') return { allowed: true, reason: 'panel_allocation_has_no_provider_submission' };
+  priorEvents = priorEvents.filter(row => row?.command !== 'visual panel-assets');
   if (!PLANNER_STAGE_IDS.has(stage)) return { allowed: true, reason: "not_a_planner_stage" };
   const deterministicNonAuthoringRerun = (
     stage === "visual_beat_plan"
@@ -221,7 +225,7 @@ function unresolvedPlannerIds(episodeDir, stage) {
   }
 }
 
-export function plannerRerunDecisionForEpisode({ stage, flags = {}, episodeDir }) {
+export function plannerRerunDecisionForEpisode({ command, subcommand, stage, flags = {}, episodeDir }) {
   if (PLANNER_STAGE_IDS.has(stage) && !episodeDir) {
     return {
       allowed: false,
@@ -236,6 +240,8 @@ export function plannerRerunDecisionForEpisode({ stage, flags = {}, episodeDir }
     : [];
   const unresolvedExpectedIds = episodeDir ? unresolvedPlannerIds(episodeDir, stage) : [];
   const decision = plannerRerunDecision({
+    command,
+    subcommand,
     stage,
     flags,
     priorEvents,

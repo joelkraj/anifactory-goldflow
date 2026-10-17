@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { assertPanelPromptAllocation, expandPanelAssetPrompts } from "./lib/panel-production-assets.mjs";
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
@@ -1607,13 +1608,15 @@ async function main() {
     throw new Error(`character_state_refs must be approved before prompt hardening. Current status: ${characterStateRefs?.status ?? "missing"}.`);
   }
   const indexes = buildIndexes(visualReferencePlan, characterStateRefs, referenceInventoryLedger, locationContractLedger);
-  const prompts = [];
+  const panelAllocation = await assertPanelPromptAllocation({ episodeDir, prompts: promptPlan.prompts, allowSubset: true });
+  let prompts = [];
   const findings = [];
-  for (const prompt of promptPlan.prompts) {
+  for (const prompt of promptPlan.prompts.filter(row => !panelAllocation || row.provider_submission_required !== false)) {
     const result = sanitizePrompt(prompt, indexes);
     prompts.push(result.prompt);
     findings.push(...result.findings);
   }
+  if (panelAllocation && promptPlan.prompts.length === panelAllocation.beats.length) prompts = expandPanelAssetPrompts(prompts, panelAllocation);
   findings.push(...promptIdentityFindings(prompts));
   const triageResult = applyManualTriage(findings, manualTriage);
   const classifiedFindings = classifyPromptHardeningFindings(triageResult.findings);

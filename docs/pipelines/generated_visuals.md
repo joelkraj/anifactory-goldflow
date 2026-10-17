@@ -99,6 +99,8 @@ Current migrated scope is source ingest, script approval, targeted speakability,
 
 ## Detailed Technical and Recovery Rules
 
+New manhwa identities may explicitly select [panel composition v1](../workflows/panel_production_v1.md). Its locked contract uses authored unique artwork orders and per-beat bindings, then a production panel timeline with the shared caption/audio/final-QA path. Its declared reuse is validated against the allocation, source raster and plan hash, including in the opening; the legacy 20-minute reuse rules below remain unchanged for other profiles. The first panel profile uses guarded sequential generation, narrator-only audio and no generated motion/parallax.
+
 - Do not use source-seed scene annotations. Final semantic truth comes from the locked script.
 - Run identity is a production gate, not an admin detail. Do not ingest, generate, render, or create new episode folders until `run_identity.json` exists and matches the command flags. Episode numbers live in `--episode` (`ep_01`, `ep_02`, etc.), not in the run/week slug. A title or operator phrase such as "Part 2" means `--episode ep_02` by default; do not create `part-2/episodes/ep_01` unless the operator explicitly approves a separate standalone run.
 - New runs use `goldflow_run_identity_v2` and lock the Git commit, branch, dirty-diff hash, stage-registry version, provider/model versions, and proof scope. Production preflight requires a clean worktree. A dirty worktree may be recorded only for an explicit diagnostic/proof with both `--allow-dirty-worktree true` and `--dirty-reason <reason>`; it is never a production shortcut.

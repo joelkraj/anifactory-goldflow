@@ -45,7 +45,8 @@
     "docs:workflow": "node scripts/generate-workflow-guidance.mjs",
     "docs:workflow:check": "node scripts/generate-workflow-guidance.mjs --check",
     "test:panel-workbench": "node scripts/tests/panel-original-import-tests.mjs && node scripts/tests/panel-composition-authoring-tests.mjs && node scripts/tests/panel-experiment-renderer-tests.mjs && node scripts/tests/panel-workbench-tests.mjs",
-    "test:recap-source": "node scripts/tests/recap-source-package-tests.mjs && node scripts/tests/recap-adaptation-tests.mjs"
+    "test:recap-source": "node scripts/tests/recap-source-package-tests.mjs && node scripts/tests/recap-adaptation-tests.mjs",
+    "test:panel-production": "node scripts/tests/panel-production-policy-tests.mjs && node scripts/tests/panel-production-assets-tests.mjs && node scripts/tests/panel-production-plan-tests.mjs && node scripts/tests/panel-production-renderer-tests.mjs"
   },
   "engines": {
     "node": ">=20"

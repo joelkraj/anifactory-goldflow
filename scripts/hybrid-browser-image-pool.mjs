@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { assertPanelPromptAllocation, reconcilePanelAssetReport } from "./lib/panel-production-assets.mjs";
 import { execFile as execFileCallback } from "node:child_process";
 import { promises as fs } from "node:fs";
 import os from "node:os";
@@ -2163,6 +2164,11 @@ export async function runHybridBrowserImagePool(flags) {
     for (const assetId of phase.pending_asset_ids ?? []) pendingAssetIds.add(assetId);
   };
   const finalizePoolReport = async () => {
+    if (!referencesOnly && identity.render_profile === 'panel_composition_v1') {
+      const aliases = await reconcilePanelAssetReport({ episodeDir, promptsPath, imagegenReportPath, cutExecutionLedgerPath });
+      for (const id of aliases.missing_owner_image_ids) pendingAssetIds.add(id);
+      phases.push({ phase: 'panel_alias_materialization', ...aliases });
+    }
     const report = {
       schema: "goldflow_hybrid_browser_pool_report_v1",
       status: failedAssetIds.size || pendingAssetIds.size ? "blocked" : "passed",
@@ -2290,7 +2296,7 @@ export async function runHybridBrowserImagePool(flags) {
       if (reconciled.length) phases.push({ phase: "reconciled_completed_reference_materialization", completed_asset_ids: reconciled });
     } else {
       const currentPlan = await readJson(promptsPath, null);
-      const currentRows = (currentPlan?.prompts ?? []).filter((prompt) => prompt.image_generation_required !== false);
+      const currentRows = (currentPlan?.prompts ?? []).filter((prompt) => prompt.image_generation_required !== false && prompt.provider_submission_required !== false);
       const priorReport = await readJson(imagegenReportPath, null);
       const currentPromptPlanSha256 = await sha256File(promptsPath);
       const cutLedger = await readJson(cutExecutionLedgerPath, null);
@@ -2344,7 +2350,7 @@ export async function runHybridBrowserImagePool(flags) {
       for (const assetId of reconciled) reconciledRepairAssetIds.add(assetId);
       if (reconciled.length) phases.push({ phase: "reconciled_completed_reference_repair_materialization", completed_asset_ids: reconciled });
     } else {
-      const currentRows = (repairPlan?.prompts ?? []).filter((prompt) => prompt.image_generation_required !== false);
+      const currentRows = (repairPlan?.prompts ?? []).filter((prompt) => prompt.image_generation_required !== false && prompt.provider_submission_required !== false);
       const priorReport = await readJson(imagegenReportPath, null);
       const currentPromptPlanSha256 = await sha256File(promptsPath);
       const cutLedger = await readJson(cutExecutionLedgerPath, null);
@@ -2493,7 +2499,8 @@ export async function runHybridBrowserImagePool(flags) {
   } else {
     const promptPlan = await readJson(promptsPath, null);
     if (promptPlan?.status !== "passed" || !Array.isArray(promptPlan.prompts)) throw new Error(`Missing passed prompt plan: ${promptsPath}`);
-    const candidates = promptPlan.prompts.filter((prompt) => prompt.image_generation_required !== false);
+    await assertPanelPromptAllocation({ episodeDir, prompts: promptPlan.prompts, allowSubset: wavefrontPrefetch });
+    const candidates = promptPlan.prompts.filter((prompt) => prompt.image_generation_required !== false && prompt.provider_submission_required !== false);
     const unknownIds = [...requestedIds].filter((id) => !candidates.some((prompt) => prompt.image_id === id));
     if (unknownIds.length) throw new Error(`Unknown image IDs: ${unknownIds.join(", ")}`);
     const priorReport = await readJson(imagegenReportPath, null);

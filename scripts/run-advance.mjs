@@ -9,6 +9,7 @@ import { normalizeImageProvider } from "./lib/image-provider-routing.mjs";
 import { isBrowserPoolImageProvider } from "./lib/image-provider-policy.mjs";
 import { productionProfileById, productionProfileForIdentity } from "./lib/production-profiles.mjs";
 import { buildProductionSloState } from "./lib/production-slo.mjs";
+import { isPanelProductionIdentity } from "./lib/panel-production-policy.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const flags = parseFlags(process.argv.slice(2));
@@ -263,6 +264,7 @@ async function main() {
       && profile.orchestration?.parallel_audio_semantic === true;
     const normalizedImageProvider = normalizeImageProvider(status.identity?.image_provider);
     const useVisualWavefront = stageId === "visual_prompt_plan"
+      && !isPanelProductionIdentity(status.identity)
       && profile.orchestration?.visual_wavefront_prefetch === true
       && (normalizedImageProvider === "modelslab" || isBrowserPoolImageProvider(normalizedImageProvider));
     const decision = autoAdvanceDecisionForTests(stageId, stageState, {

@@ -88,10 +88,11 @@ export function planPanelExperimentChunks(timeline, { chunkDurationSec = 10 } = 
   return chunks;
 }
 
-export function panelExperimentChunkKey({ timeline, chunk, assets, code_hashes, environment }) {
+export function panelExperimentChunkKey({ timeline, chunk, assets, code_hashes, environment, identitySha256 = timeline.experiment_identity?.sha256, cacheSchema = 'goldflow_panel_chunk_cache_v2' }) {
+  if (!/^[a-f0-9]{64}$/.test(identitySha256 ?? '')) fail('picture cache requires an exact identity hash');
   const scenes = chunk.scenes.map(scene => ({ id: scene.id, start_sec: Math.max(scene.start_sec, chunk.start_sec), end_sec: Math.min(scene.end_sec, (chunk.end_frame / timeline.fps)), background: scene.background,
     layers: scene.layers.map(layer => ({ id: layer.id, panel_id: layer.panel_id, z: layer.z, fit: layer.fit, border_px: layer.border_px, start_sec: Math.max(layer.start_sec, chunk.start_sec), end_sec: Math.min(layer.end_sec, chunk.end_frame / timeline.fps), keyframes: affectingKeys(layer.keyframes, Math.max(chunk.start_sec, layer.start_sec), Math.min(chunk.last_sec, layer.end_sec)) })) }));
-  return hash(canonical({ schema: 'goldflow_panel_chunk_cache_v2', identity_sha256: timeline.experiment_identity.sha256, width: timeline.width, height: timeline.height, fps: timeline.fps, start_frame: chunk.start_frame, end_frame: chunk.end_frame, scenes,
+  return hash(canonical({ schema: cacheSchema, identity_sha256: identitySha256, width: timeline.width, height: timeline.height, fps: timeline.fps, start_frame: chunk.start_frame, end_frame: chunk.end_frame, scenes,
     panels: chunk.panels.map(({ id, asset_id, source_rect }) => ({ id, asset_id, source_rect })), assets: assets.filter(asset => chunk.asset_ids.includes(asset.id)).map(({ id, sha256 }) => ({ id, sha256 })), code_hashes, environment, codec: cacheCodec }));
 }
 
@@ -102,7 +103,7 @@ function assertChunkProbe(inspected, timeline, chunk) {
   if (Math.abs(Number(inspected.format.duration) - chunk.frame_count / timeline.fps) > 1 / timeline.fps + 1e-6) fail('lossless chunk duration differs from its absolute frame range');
 }
 
-async function cachedChunk(keyDir, cacheKey, timeline, chunk) {
+export async function cachedPanelPictureChunk(keyDir, cacheKey, timeline, chunk) {
   const attempts = await fs.readdir(keyDir).catch(error => error.code === 'ENOENT' ? [] : Promise.reject(error));
   const rejected = [];
   for (const attempt of attempts.sort().reverse()) {
@@ -151,7 +152,7 @@ function framePictureSignature(timeline, time) {
   });
 }
 
-async function renderChunk({ browser, loaded, chunk, cacheKey, keyDir, onProgress }) {
+export async function renderPanelPictureChunk({ browser, loaded, chunk, cacheKey, keyDir, onProgress }) {
   const attemptDir = path.join(keyDir, `attempt-${randomUUID()}`);
   const assets = loaded.assets.filter(asset => chunk.asset_ids.includes(asset.id));
   if (assets.reduce((total, asset) => total + asset.width * asset.height, 0) > 64_000_000) fail(`chunk ${chunk.index} exceeds the 64-megapixel active raster memory budget; narrow scene/chunk scope`);
@@ -243,8 +244,8 @@ export async function renderPanelExperiment({ timelinePath, outputDir, cacheDir,
     for (const chunk of chunks) {
       const key = panelExperimentChunkKey({ timeline: loaded.timeline, chunk, assets: loaded.assets, code_hashes: codes, environment: report.environment });
       const keyDir = path.join(cache, 'chunks', key);
-      const previous = await cachedChunk(keyDir, key, loaded.timeline, chunk);
-      const result = previous.reused ? previous : await renderChunk({ browser, loaded, chunk, cacheKey: key, keyDir, onProgress });
+      const previous = await cachedPanelPictureChunk(keyDir, key, loaded.timeline, chunk);
+      const result = previous.reused ? previous : await renderPanelPictureChunk({ browser, loaded, chunk, cacheKey: key, keyDir, onProgress });
       const row = { index: chunk.index, cache_key: key, start_frame: chunk.start_frame, end_frame: chunk.end_frame, frame_count: chunk.frame_count, ...result, rejected_cache_attempts: previous.rejected };
       report.chunks.push(row); report[result.reused ? 'reused_chunk_count' : 'rendered_chunk_count']++;
       if (!result.reused) { report.captured_frame_count += result.capture_count; report.unchanged_frame_reuse_count += result.unchanged_frame_reuse_count; }

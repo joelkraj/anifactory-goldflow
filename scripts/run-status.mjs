@@ -4,6 +4,7 @@ import { promises as fs } from "node:fs";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { isPanelProductionIdentity, assertPanelProductionIdentity } from "./lib/panel-production-policy.mjs";
 import {
   PIPELINE_STAGE_REGISTRY_VERSION,
   stageRegistryFor,
@@ -626,6 +627,7 @@ function runIdentityPlanningComplete(runIdentity = {}) {
 }
 
 function renderCommand(identity, base, episode) {
+  if (isPanelProductionIdentity(identity)) return `node bin/goldflow.mjs render start ${base} --motion panel_composition_v1 --fps 30`;
   const profile = String(identity?.render_profile ?? "smooth_subpixel_ken_burns").toLowerCase();
   const common = `node bin/goldflow.mjs render start ${base} --prompts <episode-dir>/section_image_prompts_hardened.json --audio-bed-report <episode-dir>/<final-longform-audio-report>.json --transition-plan <episode-dir>/transition_edit_plan_${episode}.json --hook-xfade true --hook-xfade-duration-sec 0.28 --retention-xfade-sec 180`;
   if (profile === "smooth_subpixel_ken_burns") {
@@ -772,7 +774,7 @@ function inferredState(validation = {}) {
 }
 
 function stage(stageId, validation, identity, nextCommandOverride = null) {
-  const definition = stageDefinition(stageId);
+  const definition = stageDefinition(stageId, identity);
   if (!definition) throw new Error(`Stage ${stageId} is missing from the pipeline registry.`);
   const state = inferredState(validation);
   return {
@@ -1033,7 +1035,7 @@ async function derivedReferenceImagegenStatus(episodeDir, promptPlan, latestImag
   };
 }
 
-async function imageReportComplete(episodeDir, episode, identity) {
+export async function imageReportComplete(episodeDir, episode, identity) {
   const promptPlanPath = path.join(episodeDir, "section_image_prompts_hardened.json");
   const promptPlan = await readJson(promptPlanPath, null);
   const currentPromptRows = Array.isArray(promptPlan)
@@ -1041,6 +1043,16 @@ async function imageReportComplete(episodeDir, episode, identity) {
     : Array.isArray(promptPlan?.prompts) ? promptPlan.prompts : [];
   const promptCount = currentPromptRows.length;
   const promptPlanHash = promptCount > 0 ? await fileSha256(promptPlanPath) : null;
+  let panelAssetPlan = null;
+  if (isPanelProductionIdentity(identity)) {
+    try {
+      const { assertPanelPromptAllocation } = await import("./lib/panel-production-assets.mjs");
+      panelAssetPlan = await assertPanelPromptAllocation({ episodeDir, prompts: currentPromptRows });
+      panelAssetPlan.planSha256 = await fileSha256(panelAssetPlan.planPath);
+    } catch (error) {
+      return { done: false, state: "stale", evidence: `Panel asset plan unavailable or stale: ${error.message}`, next_command_shape: "Review the current panel asset plan and prompt allocation before any provider work." };
+    }
+  }
   if (!promptCount || !promptPlanHash) {
     return { done: false, evidence: `image files=0/${promptCount || "unknown"}; section_image_prompts_hardened.json missing or empty` };
   }
@@ -1054,10 +1066,82 @@ async function imageReportComplete(episodeDir, episode, identity) {
     reports.push({ name, filePath, report, mtimeMs: stat.mtimeMs });
   }
   reports.sort((left, right) => right.mtimeMs - left.mtimeMs || left.name.localeCompare(right.name));
+  const acceptedPanelOwnerStatuses = new Set(["generated", "cached", "passed", "imported", "accepted", "completed", "reused", "staged_import", "manual_imported", "reused_fresh", "reused_imported_codex", "existing_file"]);
+  const panelOwnerHash = (row) => row?.image_sha256 ?? row?.generated?.output_sha256 ?? row?.generated?.manual_source_sha256 ?? null;
+  async function panelOwnerCurrent(row) {
+    const expected = panelOwnerHash(row);
+    return acceptedPanelOwnerStatuses.has(row?.status) && /^[a-f0-9]{64}$/.test(expected ?? "")
+      && row?.image_path && await fileSha256(row.image_path) === expected;
+  }
+  async function panelAliasApproved(row, report) {
+    if (!panelAssetPlan) return false;
+    const sidecar = await readJson(`${row.image_path}.metadata.json`, null);
+    if (sidecar?.editorial_reuse_approved !== true || sidecar.panel_asset_plan_sha256 !== panelAssetPlan.planSha256) return false;
+    const order = panelAssetPlan.plan.asset_orders.find((item) => item.asset_id === sidecar.panel_asset_id);
+    if (!order) return false;
+    const beats = Array.isArray(panelAssetPlan.beats) ? panelAssetPlan.beats : panelAssetPlan.beats?.beats ?? [];
+    const beatImageId = (id) => beats.find((beat) => (beat.visual_beat_id ?? beat.id) === id)?.image_id_hint;
+    const sourceId = beatImageId(order.owner_beat_id);
+    if (!sourceId || sidecar.reuse_source_image_id !== sourceId || row.image_id === sourceId
+      || !order.beat_ids.some((id) => beatImageId(id) === row.image_id)) return false;
+    const source = (report.results ?? []).find((item) => item.image_id === sourceId);
+    if (!await panelOwnerCurrent(source)) return false;
+    const expected = panelOwnerHash(source);
+    return sidecar.source_image_sha256 === expected && await fileSha256(row.image_path) === expected;
+  }
+  async function panelRecoveryState(report, label) {
+    const ownerPrompts = currentPromptRows.filter((row) => row.provider_submission_required !== false);
+    const ownerIds = ownerPrompts.map((row) => String(row.image_id));
+    const results = new Map((report?.results ?? []).map((row) => [String(row.image_id), row]));
+    const missingOwners = [], staleOwners = [], acceptedOwners = [];
+    for (const id of ownerIds) {
+      const row = results.get(id);
+      if (await panelOwnerCurrent(row)) acceptedOwners.push(id);
+      else if (acceptedPanelOwnerStatuses.has(row?.status)) staleOwners.push(id);
+      else missingOwners.push(id);
+    }
+    if (staleOwners.length) return { done: false, state: "stale", evidence: `${label}; accepted panel owner bytes or receipt hashes changed=${staleOwners.join(", ")}`, next_command_shape: "Preserve accepted owner artifacts and reconcile their exact import evidence before requesting any provider repair." };
+    const aliases = currentPromptRows.filter((row) => row.provider_submission_required === false);
+    const missingAliases = [], staleAliases = [];
+    for (const prompt of aliases) {
+      const row = results.get(prompt.image_id);
+      if (!row?.image_path || !(await exists(row.image_path))) missingAliases.push(prompt.image_id);
+      else if (!(await panelAliasApproved(row, report))) staleAliases.push(prompt.image_id);
+    }
+    if (staleAliases.length) return { done: false, state: "stale", evidence: `${label}; panel alias provenance missing or stale=${staleAliases.join(", ")}`, next_command_shape: "Review the authored allocation and retained owner before exact local alias materialization; do not regenerate accepted owners." };
+    if (missingOwners.length) {
+      const credits = codexCreditFallbackEnabled(identity) ? new Set(creditExhaustedIdsFromReport(report)) : new Set();
+      const creditOwners = missingOwners.filter(id => credits.has(id));
+      const providerOwners = missingOwners.filter(id => !credits.has(id));
+      let providerCommand = null;
+      if (providerOwners.length && isBrowserPoolImageProvider(normalizeImageProvider(identity?.image_provider))) {
+        const deadletters = await hybridDeadletteredAssetIds(episodeDir, "scene", currentPromptRows);
+        const repairOwners = providerOwners.filter(id => deadletters.has(id));
+        const remainingOwners = providerOwners.filter(id => !deadletters.has(id));
+        providerCommand = [
+          repairOwners.length ? browserPoolCommand(identity, repairOwners, { repair: true }) : null,
+          remainingOwners.length ? browserPoolCommand(identity, remainingOwners) : null,
+        ].filter(Boolean).join("; then ");
+      } else if (providerOwners.length) {
+        providerCommand = scopedImagegenRecoveryCommand(identity, providerOwners, promptPlan);
+      }
+      const commands = [
+        creditOwners.length ? codexCreditFallbackCommand(identity, creditOwners) : null,
+        providerCommand,
+      ].filter(Boolean);
+      return { done: false, evidence: `${label}; accepted panel owners=${acceptedOwners.length}/${ownerIds.length}; missing owner IDs=${missingOwners.join(", ")}; dependent aliases=${missingAliases.length}`, next_command_shape: commands.join("; then ") };
+    }
+    return {
+      done: false,
+      evidence: `${label}; all ${acceptedOwners.length} panel owners are accepted; ${missingAliases.length} missing aliases or incomplete report require local reconciliation with zero provider submissions`,
+      next_command_shape: `node bin/goldflow.mjs imagegen panel-reconcile --episode-dir '${episodeDir.replaceAll("'", "'\\''")}'`,
+    };
+  }
   async function duplicateSummary(report) {
     const byHash = new Map();
     for (const row of report.results ?? []) {
       if (!row?.image_id || !row.image_path || !(await exists(row.image_path))) continue;
+      if (await panelAliasApproved(row, report)) continue;
       const hash = row.generated?.output_sha256 ?? await fileSha256(row.image_path);
       if (!hash) continue;
       const rows = byHash.get(hash) ?? [];
@@ -1070,6 +1154,7 @@ async function imageReportComplete(episodeDir, episode, identity) {
     const byHash = new Map();
     for (const row of report.results ?? []) {
       if (!row?.image_id || !row.image_path || !(await exists(row.image_path))) continue;
+      if (await panelAliasApproved(row, report)) continue;
       const hash = row.generated?.output_sha256 ?? await fileSha256(row.image_path);
       if (!hash) continue;
       const rows = byHash.get(hash) ?? [];
@@ -1108,6 +1193,14 @@ async function imageReportComplete(episodeDir, episode, identity) {
     return report.reference_only !== true && status === "passed" && missing === 0 && hashOk && countOk;
   });
   if (passed) {
+    if (panelAssetPlan) {
+      let complete = true;
+      for (const prompt of currentPromptRows) {
+        const row = (passed.report.results ?? []).find((item) => item.image_id === prompt.image_id);
+        if (prompt.provider_submission_required === false ? !row?.image_path || !(await exists(row.image_path)) || !(await panelAliasApproved(row, passed.report)) : !(await panelOwnerCurrent(row))) complete = false;
+      }
+      if (!complete) return panelRecoveryState(passed.report, passed.name);
+    }
     const duplicates = await duplicateSummary(passed.report);
     if (duplicates.length) {
       const duplicateLosers = await duplicateLoserIds(passed.report);
@@ -1121,6 +1214,11 @@ async function imageReportComplete(episodeDir, episode, identity) {
       };
     }
     return { done: true, evidence: `${passed.name}${passed.report.prompt_plan_hash !== promptPlanHash ? "; timing-only prompt rebind verified against per-cut creative hashes and accepted rasters" : ""}` };
+  }
+  if (panelAssetPlan) {
+    const current = reports.find(({ report }) => report.reference_only !== true && report.prompt_plan_hash === promptPlanHash);
+    if (!current && reports.some(({ report }) => report.reference_only !== true)) return { done: false, state: "stale", evidence: "Panel image reports do not bind the current prompt plan.", next_command_shape: "Reconcile exact accepted owner provenance against the current prompt plan before provider work." };
+    return panelRecoveryState(current?.report ?? null, current?.name ?? "Panel images missing");
   }
   const imageDir = path.join(episodeDir, "assets", "images");
   const imageNames = await listFiles(imageDir);
@@ -1368,6 +1466,21 @@ async function sourceHashState(sourceHashes = {}) {
   return { count: entries.length, stale };
 }
 
+export async function panelArtifactComplete({ episodeDir, identity, kind }) {
+  assertPanelProductionIdentity(identity);
+  const asset = kind === "assets";
+  const artifactPath = path.join(episodeDir, `${asset ? "panel_asset_plan" : "panel_composition_plan"}_${identity.episode}.json`);
+  const present = await exists(artifactPath);
+  try {
+    const loaded = asset
+      ? await (await import("./lib/panel-production-assets.mjs")).loadPanelAssetPlan({ episodeDir })
+      : await (await import("./lib/panel-production-plan.mjs")).loadPanelProductionPlan({ episodeDir });
+    return { done: true, evidence: `${path.basename(artifactPath)}; current identity, authored plan and source hashes verified`, loaded };
+  } catch (error) {
+    return { done: false, state: present ? "stale" : "missing", evidence: `${path.basename(artifactPath)}: ${error.message}` };
+  }
+}
+
 async function renderComplete(episodeDir, episode, identity) {
   const latest = await latestMatching(episodeDir, new RegExp(`^render_report_${episode}.*\\.json$`));
   if (!latest) return { done: false, evidence: null };
@@ -1387,6 +1500,15 @@ async function renderComplete(episodeDir, episode, identity) {
   }
   if (identity.run_identity_schema === "goldflow_run_identity_v2" && sourceState.count === 0) {
     return { done: false, state: "stale", evidence: `${latest.name}; v2 render report has no source hashes` };
+  }
+  if (isPanelProductionIdentity(identity)) {
+    const panelPlan = await panelArtifactComplete({ episodeDir, identity, kind: "composition" });
+    if (!panelPlan.done) return { done: false, state: "stale", evidence: panelPlan.evidence };
+    const expectedSources = panelPlan.loaded.inputHashes ?? {};
+    const missing = Object.entries(expectedSources).filter(([sourcePath, hash]) => report.source_hashes?.[sourcePath] !== hash);
+    if (report.render_profile !== "panel_composition_v1" || !Object.keys(expectedSources).length || missing.length) {
+      return { done: false, state: "stale", evidence: `${latest.name}; panel render profile or current panel plan/art/audio provenance missing` };
+    }
   }
   return {
     done: true,
@@ -1426,7 +1548,7 @@ async function finalQaComplete(episodeDir, episode, identity) {
   return { done: true, evidence: `${path.basename(reportPath)} status=passed; hashes=current` };
 }
 
-async function imageOutputQaComplete(episodeDir, episode, identity) {
+export async function imageOutputQaComplete(episodeDir, episode, identity) {
   if (!imageOutputQaRequired(identity)) return { done: true, evidence: "skipped for legacy run identity; new preflights require output QA" };
   const reportPath = path.join(episodeDir, `image_output_qa_${episode}.json`);
   const report = await readJson(reportPath, null);
@@ -1441,6 +1563,17 @@ async function imageOutputQaComplete(episodeDir, episode, identity) {
     };
   }
   const status = String(report.status ?? "").toLowerCase();
+  if (isPanelProductionIdentity(identity) && status !== "passed") {
+    try {
+      const { loadPanelAssetPlan } = await import("./lib/panel-production-assets.mjs");
+      const allocation = await loadPanelAssetPlan({ episodeDir });
+      const beatsById = new Map(allocation.beats.map(beat => [beat.visual_beat_id, beat.image_id_hint]));
+      const aliases = new Map(allocation.plan.asset_orders.flatMap(order => order.beat_ids.filter(id => id !== order.owner_beat_id).map(id => [beatsById.get(id), beatsById.get(order.owner_beat_id)])));
+      const failedIds = new Set([...(report.critical_rejected_image_ids ?? []), ...(report.findings ?? []).filter(row => row.severity === "blocker").map(row => row.image_id)]);
+      const rejectedAliases = [...failedIds].filter(id => aliases.has(id));
+      if (rejectedAliases.length) return { done: false, state: "blocked", evidence: `${path.basename(reportPath)} rejects allocated aliases=${rejectedAliases.join(", ")}; source owners=${[...new Set(rejectedAliases.map(id => aliases.get(id)))].join(", ")}`, next_command_shape: "Review the authored panel allocation, accepted owner artwork and alias-specific QA finding; record an exact local repair or allocation correction before requesting any provider regeneration." };
+    } catch (error) { return { done: false, state: "stale", evidence: `Panel QA recovery requires current asset allocation: ${error.message}` }; }
+  }
   if (status === "passed" && identity.run_identity_schema === "goldflow_run_identity_v2") {
     const decisionsPath = report.review_decisions_path ?? path.join(episodeDir, `image_output_review_decisions_${episode}.json`);
     const decisions = await readJson(decisionsPath, null);
@@ -4223,6 +4356,9 @@ async function main() {
     target_wpm_midpoint: flags["target-wpm-mid"] ?? flags["wpm-mid"] ?? runIdentity.target_wpm_midpoint ?? runIdentity.pace_targets?.target_wpm_midpoint ?? runIdentity.pace_targets?.mid ?? DEFAULT_TARGET_WPM_MID,
     pace_targets: runIdentity.pace_targets ?? null,
     render_profile: flags["render-profile"] ?? runIdentity.render_profile ?? "smooth_subpixel_ken_burns",
+    panel_composition_contract: runIdentity.panel_composition_contract,
+    generated_motion_policy: runIdentity.generated_motion_policy,
+    generated_motion_required_through_sec: runIdentity.generated_motion_required_through_sec,
     motion_policy: runIdentity.motion_policy ?? null,
     animation_policy: runIdentity.animation_policy ?? runIdentity.ltx_video_policy ?? "disabled",
     ltx_video_policy: runIdentity.ltx_video_policy ?? runIdentity.animation_policy ?? "disabled",
@@ -4243,6 +4379,7 @@ async function main() {
   const effectiveImageRoute = await effectiveImageIdentityForEpisode(episodeDir, runIdentityPath, identity);
   Object.assign(identity, effectiveImageRoute.identity);
   const legacyIdentity = runIdentity.schema !== "goldflow_run_identity_v2";
+  const panelComposition = isPanelProductionIdentity(identity);
   const episode = identity.episode;
   const scriptHash = await fileSha256(path.join(episodeDir, "script_clean.md"));
   const scriptApproval = await scriptApprovalComplete(episodeDir, scriptHash);
@@ -4303,8 +4440,19 @@ async function main() {
     }
   }
   const visualReferencePlan = await visualReferencePlanComplete(episodeDir, scriptHash, identity);
-  const visualPromptPlan = await jsonStatusWithSourceHashesComplete(path.join(episodeDir, "section_image_prompts.json"), "section_image_prompts.json");
-  const hardenedPromptPlan = await jsonStatusWithSourceHashesComplete(path.join(episodeDir, "section_image_prompts_hardened.json"), "section_image_prompts_hardened.json");
+  let visualPromptPlan = await jsonStatusWithSourceHashesComplete(path.join(episodeDir, "section_image_prompts.json"), "section_image_prompts.json");
+  const panelAssetPlan = panelComposition ? await panelArtifactComplete({ episodeDir, identity, kind: "assets" }) : null;
+  let hardenedPromptPlan = await jsonStatusWithSourceHashesComplete(path.join(episodeDir, "section_image_prompts_hardened.json"), "section_image_prompts_hardened.json");
+  if (panelComposition && panelAssetPlan.done) {
+    const { assertPanelPromptAllocation } = await import("./lib/panel-production-assets.mjs");
+    for (const [file, state] of [["section_image_prompts.json", visualPromptPlan], ["section_image_prompts_hardened.json", hardenedPromptPlan]]) {
+      if (!state.done) continue;
+      try {
+        const plan = await readJson(path.join(episodeDir, file), null);
+        await assertPanelPromptAllocation({ episodeDir, prompts: Array.isArray(plan) ? plan : plan?.prompts ?? [] });
+      } catch (error) { Object.assign(state, { done: false, state: "stale", evidence: `${file}: ${error.message}` }); }
+    }
+  }
   const longformMix = await longformMixComplete(episodeDir, episode, identity);
   const referenceGeneration = await referenceGenerationComplete(episodeDir, identity);
   const referenceImageApproval = await referenceImageApprovalComplete(episodeDir, episode);
@@ -4339,6 +4487,9 @@ async function main() {
     ? await youtubePinnedCommentReceiptComplete(episodeDir, episode)
     : null;
   const visualPromptNextCommand = await visualPromptPlanReviewHardenCommand(episodeDir, identity);
+  const panelAssetNextCommand = panelComposition && await exists(path.join(episodeDir, `panel_asset_packet_${episode}.json`))
+    ? `node bin/goldflow.mjs visual panel-assets ${commandBase(identity)} --plan <authored-panel-asset-candidate.json>`
+    : `node bin/goldflow.mjs visual panel-assets ${commandBase(identity)}`;
   const narratorOnly = isNarratorOnlyAudio(identity);
   const sfxScoreDone = narratorOnly
     ? { done: true, evidence: "skipped: audio_target narrator_only" }
@@ -4373,7 +4524,12 @@ async function main() {
       ? { next_command_shape: transitionRecoveryCommand }
       : {}),
   };
-  const motionPlan = await jsonStatusWithSourceHashesComplete(path.join(episodeDir, `motion_edit_plan_${episode}.json`), `motion_edit_plan_${episode}.json`);
+  const motionPlan = panelComposition
+    ? await panelArtifactComplete({ episodeDir, identity, kind: "composition" })
+    : await jsonStatusWithSourceHashesComplete(path.join(episodeDir, `motion_edit_plan_${episode}.json`), `motion_edit_plan_${episode}.json`);
+  if (panelComposition && !motionPlan.done && await exists(path.join(episodeDir, `panel_composition_packet_${episode}.json`))) {
+    motionPlan.next_command_shape = `node bin/goldflow.mjs visual panel-plan ${commandBase(identity)} --action compile --recipe <authored-panel-composition-recipe.json>`;
+  }
   const semanticValidation = legacyIdentity
     ? {
         ...semanticPlan,
@@ -4431,7 +4587,9 @@ async function main() {
     reference_image_approval: legacyIdentity && legacyCharacterRefStatus !== "draft_needs_manual_review" && !referenceImageApproval.done
       ? { state: "skipped_with_waiver", evidence: "legacy run predates separate generated-reference approval report" }
       : referenceImageApproval,
-    visual_prompt_plan: visualPromptPlan.done
+    visual_prompt_plan: panelComposition && !panelAssetPlan.done
+      ? { ...panelAssetPlan, next_command_shape: panelAssetNextCommand }
+      : visualPromptPlan.done
       ? visualPromptPlan
       : { ...visualPromptPlan, next_command_shape: visualPromptNextCommand },
     visual_prompt_harden: hardenStatus === "blocked" || /visual review|manual agent review/i.test(String(visualPromptNextCommand ?? ""))
@@ -4440,7 +4598,9 @@ async function main() {
     visual_prompt_blocker_repair: hardenedPromptPlan.done
       ? { state: "skipped_with_waiver", evidence: "hardening passed with no unresolved prompt blockers" }
       : { state: hardenStatus === "blocked" ? "missing" : "blocked", evidence: hardenStatus ? `hardening status=${hardenStatus}` : "awaiting hardening result", next_command_shape: visualPromptNextCommand },
-    transition_edit_plan: legacyIdentity
+    transition_edit_plan: panelComposition
+      ? { state: "skipped_with_waiver", evidence: "panel_composition_v1: authored panel plan owns transitions and overlaps" }
+      : legacyIdentity
       ? { done: await exists(path.join(episodeDir, `transition_edit_plan_${episode}.json`)), evidence: `transition_edit_plan_${episode}.json legacy adapter` }
       : transitionPlan,
     image_generation: imagegen,

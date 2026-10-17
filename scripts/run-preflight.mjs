@@ -6,6 +6,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { sha256File } from "./lib/file-hash.mjs";
+import { PANEL_PRODUCTION_RENDER_PROFILE, createPanelProductionContract, assertPanelProductionIdentity, assertPanelProductionPreflightFlags } from "./lib/panel-production-policy.mjs";
 import { normalizeImageProvider } from "./lib/image-provider-routing.mjs";
 import {
   DEFAULT_GOOGLE_GEMINI_MODEL,
@@ -153,6 +154,7 @@ if (invokedAsCommand) {
       mediaWorkflow: flags["media-workflow"],
     });
     if (mediaWorkflowBinding.media_workflow !== "generated_visuals_v1") throw new Error("Use pilot preflight for the bounded avatar proof; this preflight is generated-visuals only.");
+    assertPanelProductionPreflightFlags(flags, { contentProfile: contentProfileDefinition(flags["content-profile"]).config.id, mediaWorkflow: mediaWorkflowBinding.media_workflow });
     requiredFlag("channel", channel);
     requiredFlag("series", series);
     requiredFlag("week", week);
@@ -258,6 +260,8 @@ const pacePolicy = normalizePacePolicy(flags["pace-policy"] ?? flags["wpm-policy
 const targetWpmMin = positiveNumber(flags["target-wpm-min"] ?? flags["wpm-min"] ?? null, 180);
 const targetWpmMax = positiveNumber(flags["target-wpm-max"] ?? flags["wpm-max"] ?? null, 195);
 const renderProfile = normalizeRenderProfile(flags["render-profile"] ?? flags.render ?? "premium");
+const panelComposition = renderProfile === PANEL_PRODUCTION_RENDER_PROFILE;
+const panelCompositionBinding = panelComposition ? { panel_composition_contract: createPanelProductionContract() } : {};
 const motionPolicy = normalizeMotionPolicy(flags["motion-policy"] ?? "selective_editorial_v1");
 const productionDefaults = productionProfileConfig.defaults ?? {};
 const humanCheckpointValue = String(flags["human-checkpoints"] ?? "").trim();
@@ -270,7 +274,7 @@ const generatedMotionPolicy = normalizeGeneratedMotionPolicy(
   flags["generated-motion-policy"]
     ?? flags["animation-policy"]
     ?? flags["ltx-video-policy"]
-    ?? productionDefaults.generated_motion_policy
+    ?? (panelComposition ? "disabled" : productionDefaults.generated_motion_policy)
     ?? DEFAULT_GENERATED_MOTION_POLICY,
 );
 const generatedMotionProvider = generatedMotionPolicy === "disabled"
@@ -324,7 +328,7 @@ if (generatedMotionPolicy === "disabled" && generatedMotionRequiredThroughSec > 
 const ltxVideoPolicy = generatedMotionProvider === GENERATED_MOTION_PROVIDER_LTX
   ? generatedMotionPolicy === "full_generated_video" ? "full_ltx23" : "selective_ltx23"
   : "disabled";
-const parallaxPolicy = normalizeParallaxPolicy(flags["parallax-policy"] ?? "selective_inspected");
+const parallaxPolicy = normalizeParallaxPolicy(flags["parallax-policy"] ?? (panelComposition ? "disabled" : "selective_inspected"));
 const parallaxTargetMax = boundedInteger(flags["parallax-target-max"], 15, 0, 20);
 const parallaxMinSpacingSec = boundedNumber(flags["parallax-min-spacing-sec"], 3, 0, 120);
 const parallaxOpeningWindowSec = boundedNumber(flags["parallax-opening-window-sec"], 180, 0, 600);
@@ -534,6 +538,7 @@ function normalizePacePolicy(value) {
 }
 
 function normalizeRenderProfile(value) {
+  if (value === PANEL_PRODUCTION_RENDER_PROFILE) return PANEL_PRODUCTION_RENDER_PROFILE;
   const normalized = String(value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
   if (["fill", "fill_ken_burns", "oversampled_ken_burns", "legacy_premium"].includes(normalized)) return "fill_ken_burns";
   if (["smooth_subpixel", "subpixel", "subpixel_ken_burns", "smooth_subpixel_ken_burns"].includes(normalized)) return "smooth_subpixel_ken_burns";
@@ -685,6 +690,7 @@ function lockedModelVersions() {
         ? googleFlowPrimaryProviderLocks(null, { flowModel: googleFlowModel }).image_provider_models
         : null,
     render_profile: renderProfile,
+    ...panelCompositionBinding,
   };
 }
 
@@ -1360,6 +1366,7 @@ async function main() {
       target_wpm_midpoint: Number(((targetWpmMin + targetWpmMax) / 2).toFixed(3)),
     },
     render_profile: renderProfile,
+    ...panelCompositionBinding,
     motion_policy: motionPolicy,
     animation_policy: generatedMotionPolicy,
     generated_motion_policy: generatedMotionPolicy,
@@ -1600,6 +1607,10 @@ async function main() {
     },
     stage_checklist: stageChecklistFor({
       ...mediaWorkflowBinding,
+      schema: "goldflow_run_identity_v2",
+      render_profile: renderProfile,
+      run_intent: runIntent,
+      ...panelCompositionBinding,
       content_profile: contentProfile.id,
       content_profile_config: contentProfile,
       audio_target: audioTarget,
@@ -1611,6 +1622,7 @@ async function main() {
     updated_at: now,
   };
   assertAvailableMediaWorkflow(manifest);
+  if (panelComposition) assertPanelProductionIdentity(manifest);
   const localWhisperIdentityValidation =
     validateLocalWhisperIdentityContract(manifest);
   if (!localWhisperIdentityValidation.done) {

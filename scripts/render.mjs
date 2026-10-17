@@ -12,6 +12,8 @@ import { assertMuxDurationIntegrity } from "./lib/media-duration-integrity.mjs";
 import { motionKeyframesForIntent, motionTraceFindings, motionTraceForIntent, sanitizeLayeredParallaxTreatment } from "./lib/motion-plan-utils.mjs";
 import { resolveNarrationReportPath } from "./lib/narration-artifacts.mjs";
 import { narrationRenderMasterReuseDecision } from "./lib/narration-mastering.mjs";
+import { loadPanelProductionPlan } from "./lib/panel-production-plan.mjs";
+import { buildPanelProductionPicture, assertPanelProductionPictureCurrent } from "./lib/panel-production-renderer.mjs";
 
 const execFile = promisify(execFileCb);
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
@@ -2438,8 +2440,8 @@ function numericOrNull(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-async function finalAudioLoudnormSettings(audioBedReport, inputAudioPath) {
-  if (!finalAudioLoudnormEnabled) return { enabled: false, reason: "disabled_by_operator" };
+async function finalAudioLoudnormSettings(audioBedReport, inputAudioPath, { requireCanonicalMaster = false } = {}) {
+  if (!finalAudioLoudnormEnabled && !requireCanonicalMaster) return { enabled: false, reason: "disabled_by_operator" };
   // A narrator-only mix may carry zero-valued unset metadata. FFmpeg rejects
   // those values, so accept report settings only within loudnorm's valid range.
   const inRange = (value, min, max) => {
@@ -2557,6 +2559,17 @@ async function main() {
   const lockedRenderProfile = normalizeMotionMode(runIdentity?.render_profile ?? "smooth_subpixel_ken_burns");
   const workflowBypass = /^(true|1|yes)$/i.test(String(flags["workflow-bypass"] ?? "false"));
   assertLockedRenderProfileForTests({ v2Run, lockedRenderProfile, requestedMotionMode: motionMode, workflowBypass, diagnosticProof });
+  const panelMode = motionMode === "panel_composition_v1";
+  if (panelMode && (lockedRenderProfile !== "panel_composition_v1" || !v2Run || diagnosticProof || Number.isFinite(proofScopeEndSec))) throw new Error("Panel production render requires its exact production identity and complete authored timeline; private proof flags cannot enable it.");
+  if (panelMode && (prebuildMotionClipsOnly || allowTransitionSfxOnNarratorOnly)) throw new Error("Panel production does not support legacy motion prebuild or render-layer transition SFX overrides.");
+  const panelPlan = panelMode ? await loadPanelProductionPlan({ episodeDir }) : null;
+  if (panelMode) {
+    for (const file of [runIdentityPath, promptPlanPath, visualBeatPlanPath, imagegenReportPath, wordTimingPath, audioBedReportPath, audioStitchReportPath, imageOutputQaPath, cutExecutionLedgerPath]) {
+      const canonicalPath = await fs.realpath(file);
+      if (panelPlan.inputHashes[canonicalPath] !== await hashFile(canonicalPath)) throw new Error(`Panel render input is not bound by its current production plan: ${file}`);
+    }
+    if ((engagementOverlayPlan?.engagement_overlays ?? []).length || (engagementOverlayPlan?.events ?? []).length) throw new Error("Panel composition v1 does not support separate engagement overlays; author visual elements in the production panel recipe.");
+  }
   if (prebuildMotionClipsOnly) {
     if (motionEditPlan?.status !== "passed") throw new Error(`Motion-clip prebuild requires a passed hash-bound partial motion plan: ${motionEditPlanPath}`);
     if (transitionEditPlan?.status !== "passed") throw new Error(`Motion-clip prebuild requires a passed transition plan: ${transitionEditPlanPath}`);
@@ -2616,31 +2629,47 @@ async function main() {
   const validatedSubtitleRows = buildSubtitleEvents(wordTiming, audioStitchReport, visualBeatPlan);
   if (v2Run && validatedSubtitleRows.source === "whisper_recognized_words_fallback") throw new Error("V2 render refused Whisper-recognized caption text; provide approved visual-beat or stitch caption text timed by Whisper.");
   validateSubtitleTimeline(validatedSubtitleRows.events);
-  if (v2Run && motionEditPlan?.status !== "passed") throw new Error(`Missing passed directed motion plan: ${motionEditPlanPath}`);
-  if (motionEditPlan?.status === "passed") await assertSourceHashesCurrent(motionEditPlan, "Directed motion plan");
+  if (!panelMode && v2Run && motionEditPlan?.status !== "passed") throw new Error(`Missing passed directed motion plan: ${motionEditPlanPath}`);
+  if (!panelMode && motionEditPlan?.status === "passed") await assertSourceHashesCurrent(motionEditPlan, "Directed motion plan");
   const imageIntegrity = await assertRenderImageIntegrity(promptPlan, imagegenReport, runIdentity, imageOutputQa, cutExecutionLedger);
   const audioPath = preferredAudioBedRenderPathForTests({
     explicitAudio: flags.audio,
     audioBedReport,
   });
   if (!audioPath || !(await exists(audioPath))) throw new Error(`Missing final mixed audio from ${audioBedReportPath}`);
-  await fs.mkdir(renderDir, { recursive: true });
-  await fs.mkdir(workDir, { recursive: true });
+  if (panelMode && (!panelPlan.audio || await fs.realpath(audioPath) !== await fs.realpath(panelPlan.audio.path) || await hashFile(audioPath) !== panelPlan.audio.sha256)) throw new Error("Panel production must use its hash-bound canonical final audio bed.");
   const sourceAudioDuration = await mediaDuration(audioPath);
   const audioDuration = Number.isFinite(proofScopeEndSec) ? Math.min(sourceAudioDuration, proofScopeEndSec) : sourceAudioDuration;
+  if (panelMode && Math.abs(panelPlan.timeline.duration_sec - audioDuration) > 1 / fps + 1e-7) throw new Error("Panel timeline duration differs from final continuous audio.");
   const proofAudioPath = await scopedAudioForProof(audioPath, Number.isFinite(proofScopeEndSec) ? audioDuration : NaN);
   const proofPromptPlan = scopedPromptPlan(promptPlan, Number.isFinite(proofScopeEndSec) ? audioDuration : NaN);
   const selectedImageIds = new Set((proofPromptPlan.prompts ?? []).map((prompt) => String(prompt.image_id ?? "")));
   const proofMotionPlan = scopedMotionPlan(motionEditPlan?.status === "passed" ? motionEditPlan : null, proofPromptPlan.prompts ?? [], Number.isFinite(proofScopeEndSec) ? audioDuration : NaN);
   const transitionSfxDisabledByAudioReport = audioReportDisablesTransitionSfx(audioBedReport);
   const transitionSfxDisabledForRender = transitionSfxDisabledByAudioReport && !allowTransitionSfxOnNarratorOnly;
-  const rawTransitionPlan = scopedTransitionPlan(transitionEditPlan?.status === "passed" ? transitionEditPlan : null, selectedImageIds, Number.isFinite(proofScopeEndSec) ? audioDuration : NaN);
+  const rawTransitionPlan = panelMode ? null : scopedTransitionPlan(transitionEditPlan?.status === "passed" ? transitionEditPlan : null, selectedImageIds, Number.isFinite(proofScopeEndSec) ? audioDuration : NaN);
   const strippedTransitionSfxCount = transitionSfxDisabledForRender
     ? (rawTransitionPlan?.transition_events ?? []).filter((event) => event.transition_sfx === true).length
     : 0;
   const usableTransitionPlan = transitionSfxDisabledForRender ? withoutTransitionSfx(rawTransitionPlan) : rawTransitionPlan;
   const renderAudio = await audioWithRenderTransitionSfx(proofAudioPath, usableTransitionPlan, audioDuration);
-  const concat = await buildMotionClips(
+  const panelAudioSettings = panelMode ? await finalAudioLoudnormSettings(audioBedReport, renderAudio.audio_path, { requireCanonicalMaster: true }) : null;
+  if (panelMode && !panelAudioSettings.reuse_decision?.eligible) throw new Error("Panel render requires the current canonical narration master without loudness changes; requested settings must match the approved audio bed.");
+  await fs.mkdir(renderDir, { recursive: true });
+  await fs.mkdir(workDir, { recursive: true });
+  const panelPicture = panelMode ? await buildPanelProductionPicture({ episodeDir, loadedPlan: panelPlan, workDir, width, height, fps, onProgress: row => console.error(JSON.stringify(row)) }) : null;
+  const concat = panelPicture ? {
+    prompt_count: panelPlan.timeline.scenes.length,
+    motion_mode: "panel_composition_v1", clip_dir: path.dirname(panelPicture.videoPath),
+    motion_clip_cache_reused_count: panelPicture.cache_stats.reused_chunk_count,
+    motion_clip_cache_generated_count: panelPicture.cache_stats.rendered_chunk_count,
+    motion_profiles: {}, motion_behaviors: {}, transition_profiles: {},
+    hook_clip_ids: [], transition_clip_ids: [], hook_xfade_enabled: false, hook_xfade_applied: false,
+    planned_transition_count: 0, applied_transition_count: 0, applied_transitions: [],
+    motion_trace_blocker_count: 0, layered_parallax_clip_count: 0,
+    planned_approved_generated_video_count: 0, generated_video_clip_count: 0, generated_video_clip_ids: [], generated_video_source_hashes: {},
+    xfade_group_cache_reused_count: 0, xfade_group_cache_generated_count: 0,
+  } : await buildMotionClips(
     proofPromptPlan,
     imagegenReport,
     audioDuration,
@@ -2650,8 +2679,8 @@ async function main() {
   const subtitleRows = scopedSubtitleRows(validatedSubtitleRows, Number.isFinite(proofScopeEndSec) ? audioDuration : NaN);
   const ass = await writeAss(path.join(workDir, "subtitles.ass"), subtitleRows.events);
   const engagementOverlay = await writeEngagementOverlayVideo(path.join(workDir, "engagement_overlay.mov"), Number.isFinite(proofScopeEndSec) ? null : engagementOverlayPlan, audioDuration);
-  const videoPath = path.join(workDir, "silent_video.mp4");
-  await execFile(ffmpegBin, [
+  const videoPath = panelPicture?.videoPath ?? path.join(workDir, "silent_video.mp4");
+  if (!panelPicture) await execFile(ffmpegBin, [
     "-y",
     "-f", "concat",
     "-safe", "0",
@@ -2687,7 +2716,7 @@ async function main() {
   let subtitleOverlay = null;
   const finalAudioNormalization = await prepareFinalMuxAudio(
     renderAudio.audio_path,
-    await finalAudioLoudnormSettings(audioBedReport, renderAudio.audio_path),
+    panelAudioSettings ?? await finalAudioLoudnormSettings(audioBedReport, renderAudio.audio_path),
   );
   const finalMuxAudioPath = finalAudioNormalization.audio_path;
   const muxOutputPath = outputPath;
@@ -2776,7 +2805,8 @@ async function main() {
     videoDurationSec: finalVideoInputDurationSec,
     audioDurationSec: finalAudioInputDurationSec,
   });
-  const sourceHashes = {};
+  if (panelPicture) await assertPanelProductionPictureCurrent(panelPicture);
+  const sourceHashes = panelPicture ? { ...panelPicture.source_hashes, ...panelPicture.code_hashes, [panelPicture.report_path]: panelPicture.report_sha256 } : {};
   for (const sourcePath of [
     promptPlanPath,
     visualBeatPlanPath,
@@ -2786,7 +2816,7 @@ async function main() {
     audioBedReportPath,
     audioStitchReportPath,
     usableTransitionPlan ? transitionEditPlanPath : null,
-    motionEditPlan?.status === "passed" ? motionEditPlanPath : null,
+    !panelMode && motionEditPlan?.status === "passed" ? motionEditPlanPath : null,
     engagementOverlay.events.length ? engagementOverlayPlanPath : null,
   ].filter(Boolean)) {
     if (await exists(sourcePath)) sourceHashes[path.resolve(sourcePath)] = await hashFile(sourcePath);
@@ -2795,6 +2825,7 @@ async function main() {
   const report = {
     schema: "goldflow_render_report_v2",
     status: "passed",
+    render_profile: motionMode,
     channel,
     series_slug: series,
     week,
@@ -2816,7 +2847,8 @@ async function main() {
     silent_concat_stream: concatStream,
     silent_concat_reused_without_normalization_encode: concatStreamReusable,
     transition_edit_plan_path: usableTransitionPlan ? transitionEditPlanPath : null,
-    motion_edit_plan_path: motionEditPlan?.status === "passed" ? motionEditPlanPath : null,
+    motion_edit_plan_path: !panelMode && motionEditPlan?.status === "passed" ? motionEditPlanPath : null,
+    panel_composition: panelPicture ? { plan_path: panelPlan.planPath, picture_report_path: panelPicture.report_path, picture_report_sha256: panelPicture.report_sha256, cache_stats: panelPicture.cache_stats, scene_count: panelPlan.timeline.scenes.length, panel_count: panelPlan.timeline.panels.length, asset_count: panelPlan.assets.length } : null,
     transition_sfx_disabled_by_audio_report: transitionSfxDisabledByAudioReport,
     transition_sfx_disabled_for_render: transitionSfxDisabledForRender,
     transition_sfx_narrator_only_override: allowTransitionSfxOnNarratorOnly,

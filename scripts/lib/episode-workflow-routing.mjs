@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { contentProfileDefinition, DEFAULT_CONTENT_PROFILE } from "./content-profiles.mjs";
 import { commandStageFor } from "./pipeline-stage-registry.mjs";
+import { PANEL_PRODUCTION_RENDER_PROFILE, isPanelProductionIdentity, assertPanelProductionIdentity, assertPanelProductionPreflightFlags } from "./panel-production-policy.mjs";
 import { packagingWorkflowSupport } from "./youtube-publish-contract.mjs";
 import {
   assertAvailableMediaWorkflow,
@@ -62,6 +63,16 @@ export function readEpisodeRoutingIdentity(episodeDir) {
 
 export function assertEpisodeWorkflowFlags(identity = {}, flags = {}) {
   const workflow = assertAvailableMediaWorkflow(identity);
+  const panelComposition = isPanelProductionIdentity(identity);
+  if (panelComposition) {
+    assertPanelProductionIdentity(identity);
+    for (const key of ["render-profile", "render", "motion"]) {
+      if (flags[key] != null && flags[key] !== PANEL_PRODUCTION_RENDER_PROFILE) throw new Error(`Panel render profile is identity-locked; --${key} cannot change it.`);
+    }
+    assertPanelProductionPreflightFlags({ ...flags, "render-profile": PANEL_PRODUCTION_RENDER_PROFILE }, { contentProfile: identity.content_profile, mediaWorkflow: workflow.id });
+  } else if (identity.panel_composition_contract != null || [flags["render-profile"], flags.render, flags.motion].includes(PANEL_PRODUCTION_RENDER_PROFILE)) {
+    throw new Error("Panel composition requires an explicitly selected new run identity; existing runs cannot be migrated by flags.");
+  }
   if (Object.hasOwn(flags, "media-workflow") && flags["media-workflow"] !== workflow.id) {
     throw new Error(`Media workflow is identity-locked to ${workflow.id}; --media-workflow cannot switch an existing run.`);
   }
@@ -103,6 +114,7 @@ export function assertCommandWorkflowRoute({ command, subcommand, script, flags 
     // Validate custom profile paths too, before beginStageExecution can write.
     const profile = contentProfileDefinition(flags["content-profile"]);
     assertAvailableMediaWorkflow({ ...binding, content_profile: profile.config.id, content_profile_config: profile.config });
+    assertPanelProductionPreflightFlags(flags, { contentProfile: profile.config.id, mediaWorkflow: binding.media_workflow });
     assertTupleOnlyContext(script, flags);
     if (identity) throw new Error("Run identity already exists. Preflight cannot overwrite or migrate an existing run.");
     return binding;
@@ -110,6 +122,14 @@ export function assertCommandWorkflowRoute({ command, subcommand, script, flags 
   let workflow = null;
   if (identity) {
     workflow = assertEpisodeWorkflowFlags(identity, flags);
+    const panelComposition = isPanelProductionIdentity(identity);
+    if (((command === "visual" && ["panel-assets", "panel-plan"].includes(subcommand)) || (command === "imagegen" && subcommand === "panel-reconcile")) && !panelComposition) {
+      throw new Error("Panel authoring commands require a new panel_composition_v1 identity.");
+    }
+    if (panelComposition && ((command === "visual" && ["transitions", "engagement", "motion-plan", "animation-plan", "generated-motion", "ltx-video", "approve-generated-motion", "approve-ltx-video", "parallax-assets", "approve-parallax"].includes(subcommand))
+      || (command === "run" && subcommand === "visual-wavefront"))) {
+      throw new Error("Panel composition uses its authored asset allocation and panel plan; ordinary transitions, generated motion, parallax and visual-wavefront are unavailable for this render profile.");
+    }
     if (workflow.id === "avatar_footage_pilot_v1" && command !== "pilot" && !(command === "run" && subcommand === "status")) {
       throw new Error("Avatar pilot permits only pilot commands and run status. Generated production, source manufacture, auto-advance and publishing are unavailable, including with workflow bypass.");
     }

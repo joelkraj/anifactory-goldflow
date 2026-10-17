@@ -18,17 +18,23 @@ const unique = (rows, name) => {
 };
 
 
-  ensure(['engine_proof', 'editing_experiment'].includes(mode), 'unsupported validation mode');
+  ensure(['engine_proof', 'editing_experiment', 'production_panel_composition'].includes(mode), 'unsupported validation mode');
   const experiment = mode === 'editing_experiment';
-  ensure(timeline?.schema === (experiment ? 'goldflow_panel_experiment_timeline_v1' : 'goldflow_panel_timeline_v1'), 'unsupported schema');
+  const production = mode === 'production_panel_composition';
+  ensure(timeline?.schema === (production ? 'goldflow_panel_production_timeline_v1' : experiment ? 'goldflow_panel_experiment_timeline_v1' : 'goldflow_panel_timeline_v1'), 'unsupported schema');
   ensure(timeline.intent === mode, `only ${mode} is supported`);
   if (experiment) {
     text(timeline.experiment_identity?.path, 'experiment_identity.path');
     hash(timeline.experiment_identity?.sha256, 'experiment_identity.sha256');
   }
+  if (production) {
+    text(timeline.run_identity?.path, 'run_identity.path');
+    hash(timeline.run_identity?.sha256, 'run_identity.sha256');
+    ensure(timeline.audio_target === 'narrator_only' && timeline.audio?.offset_sec === 0, 'production requires the complete continuous narrator-only master');
+  }
   ensure(timeline.content_profile === 'manhwa_recap_v1', 'explicit manhwa_recap_v1 profile required');
   text(timeline.id, 'id');
-  number(timeline.duration_sec, 0.1, experiment ? 1800 : 150, 'duration_sec');
+  number(timeline.duration_sec, 0.1, production ? 86400 : experiment ? 1800 : 150, 'duration_sec');
   number(timeline.width, 160, 1920, 'width');
   number(timeline.height, 90, 1080, 'height');
   ensure(Number.isInteger(timeline.width / 2) && Number.isInteger(timeline.height / 2), 'canvas must have even dimensions');
@@ -41,7 +47,7 @@ const unique = (rows, name) => {
     number(timeline.audio?.offset_sec, 0, 86400, 'audio.offset_sec');
   } else ensure(timeline.audio == null, 'silent_fixture must not include audio');
   const assets = unique(timeline.assets, 'assets');
-  ensure(timeline.assets.length <= (experiment ? 2000 : 100), 'too many assets for the selected scope');
+  ensure(timeline.assets.length <= (production ? 40000 : experiment ? 2000 : 100), 'too many assets for the selected scope');
   for (const asset of timeline.assets) {
     text(asset.path, 'asset.path'); hash(asset.sha256, 'asset.sha256');
     ensure(['original_generated', 'existing_artwork', 'continuity_generated', 'test_fixture'].includes(asset.origin), `unknown origin for ${asset.id}`);

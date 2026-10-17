@@ -3,6 +3,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 
 import sharp from "sharp";
+import { assertPanelPromptAllocation } from "./panel-production-assets.mjs";
 
 import {
   compileVisualPrompt,
@@ -614,7 +615,8 @@ export async function createCodexWorkManifest(options) {
     episodeDir = normalizeAbsolute(options.episodeDir) ?? path.dirname(promptsPath);
     const runIdentityPath = path.join(episodeDir, "run_identity.json");
     const runIdentity = await pathExists(runIdentityPath) ? await readJson(runIdentityPath) : null;
-    const allRows = sceneRows(plan).filter((row) => row?.image_generation_required !== false);
+    await assertPanelPromptAllocation({ episodeDir, prompts: sceneRows(plan), allowSubset: true });
+    const allRows = sceneRows(plan).filter((row) => row?.image_generation_required !== false && row?.provider_submission_required !== false);
     const routePlan = { ...plan, image_provider: plan.image_provider ?? runIdentity?.provider_locks?.image_provider ?? runIdentity?.image_provider };
     const candidateRows = explicitScope.length ? allRows : allRows.filter((row) => routeIsCodex(row, routePlan));
     const selected = exactScopedRows(candidateRows, explicitScope, (row) => row?.image_id ?? row?.target_image_id, "image");

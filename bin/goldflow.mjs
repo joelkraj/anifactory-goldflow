@@ -144,6 +144,8 @@ function run(script, scriptArgs = []) {
   enforceWorkflowGuard(command, subcommand, scriptArgs);
   const stage = commandStage(command, subcommand, parsedFlags);
   const plannerRerunDecision = plannerRerunDecisionForEpisode({
+    command,
+    subcommand,
     stage,
     flags: parsedFlags,
     episodeDir,
@@ -559,6 +561,12 @@ if (command === "pilot" && !helpRequested) {
   run("visual-prompt-benchmark.mjs", flags);
 } else if (command === "visual" && subcommand === "plan") {
   run("visual-plan.mjs", flags);
+} else if (command === "visual" && subcommand === "panel-assets") {
+  run("visual-panel-assets.mjs", flags);
+} else if (command === "imagegen" && subcommand === "panel-reconcile") {
+  run("visual-panel-assets.mjs", [...flags, "--action", "reconcile"]);
+} else if (command === "visual" && subcommand === "panel-plan") {
+  run("visual-panel-plan.mjs", flags);
 } else if (command === "visual" && subcommand === "refs") {
   run("visual-reference-plan.mjs", flags);
 } else if (command === "visual" && subcommand === "approve-ref-plan") {

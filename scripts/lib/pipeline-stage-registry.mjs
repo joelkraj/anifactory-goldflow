@@ -1,4 +1,5 @@
 import { productionProfileForIdentity } from "./production-profiles.mjs";
+import { isPanelProductionIdentity, assertPanelProductionIdentity } from "./panel-production-policy.mjs";
 import { AVATAR_PILOT_STAGES } from "./avatar-pilot-stage-registry.mjs";
 import { assertAvailableMediaWorkflow, GENERATED_VISUALS_STAGE_REGISTRY_VERSION } from "./media-workflows.mjs";
 import {
@@ -239,8 +240,10 @@ const stages = [
     output_patterns: [
       /^section_image_prompts\.json$/,
       /^planner_chunk_ledger\.json$/,
+      /^panel_asset_.*\.json$/,
+      /^panel_asset_.*\.md$/,
     ],
-    commands: ["visual plan"],
+    commands: ["visual plan", "visual panel-assets"],
   },
   {
     id: "visual_prompt_harden",
@@ -285,7 +288,7 @@ const stages = [
     output_artifact: "immutable image batches + cut_execution_ledger.json",
     approval: "automatic",
     validator: "episode_image_manifest",
-    commands: ["imagegen browser-pool", "imagegen start", "imagegen codex-work", "imagegen import-codex", "imagegen import-staged-codex"],
+    commands: ["imagegen browser-pool", "imagegen start", "imagegen codex-work", "imagegen import-codex", "imagegen import-staged-codex", "imagegen panel-reconcile"],
   },
   {
     id: "image_focal_analysis",
@@ -362,7 +365,7 @@ const stages = [
     output_artifact: "motion_edit_plan_<episode>.json",
     approval: "automatic",
     validator: "motion_plan_hashes_and_geometry",
-    commands: ["visual motion-plan"],
+    commands: ["visual motion-plan", "visual panel-plan"],
   },
   {
     id: "premium_render",
@@ -437,13 +440,22 @@ const stagesById = new Map(PIPELINE_STAGE_REGISTRY.map((entry) => [entry.id, ent
 // Other workflows must supply a real registry and validators before dispatch.
 export function stageRegistryFor(identity = {}) {
   const workflow = assertAvailableMediaWorkflow(identity);
+  if (isPanelProductionIdentity(identity)) assertPanelProductionIdentity(identity);
+  else if (identity.panel_composition_contract != null) throw new Error("Panel composition contract requires its locked panel_composition_v1 render profile.");
   if (workflow.id === "avatar_footage_pilot_v1") return AVATAR_PILOT_STAGES;
   return PIPELINE_STAGE_REGISTRY;
 }
 
 export function stageDefinition(stageId, identity = {}) {
   const registry = stageRegistryFor(identity);
-  return registry === PIPELINE_STAGE_REGISTRY ? stagesById.get(stageId) ?? null : registry.find((entry) => entry.id === stageId) ?? null;
+  const definition = registry === PIPELINE_STAGE_REGISTRY ? stagesById.get(stageId) ?? null : registry.find((entry) => entry.id === stageId) ?? null;
+  if (!isPanelProductionIdentity(identity) || !definition) return definition;
+  const overrides = {
+    visual_prompt_plan: { title: "Panel asset allocation and prompt authoring", required_input: "approved beats + approved refs + authored panel asset allocation", output_artifact: "panel_asset_plan_<episode>.json + section_image_prompts.json", validator: "panel_asset_allocation_and_prompt_source_hashes" },
+    motion_edit_plan: { title: "Authored panel composition", required_input: "accepted images + current authored panel asset plan + exact continuous audio", output_artifact: "panel_composition_plan_<episode>.json + panel_timeline_<episode>.json", validator: "panel_composition_plan_art_audio_hashes" },
+    premium_render: { title: "Panel composition render", required_input: "accepted images + authored panel timeline + continuous audio", validator: "panel_render_hashes_and_timeline" },
+  }[stageId];
+  return overrides ? { ...definition, ...overrides, artifact_contract: { output: overrides.output_artifact ?? definition.output_artifact, validator: overrides.validator } } : definition;
 }
 
 export function assertStageState(value) {
@@ -471,12 +483,15 @@ export function commandStageFor(commandName, subcommandName, flags = {}, identit
 
 export function stageChecklistFor(identity = {}) {
   const registry = stageRegistryFor(identity);
+  const panelComposition = isPanelProductionIdentity(identity);
   const narratorOnly = String(identity.audio_target ?? "narrator_only") === "narrator_only";
   const parallaxDisabled = String(identity.parallax_policy ?? "selective_inspected") !== "selective_inspected";
   const ltxDisabled = !generatedMotionEnabled(identity);
   return registry.map((entry) => ({
     stage: entry.id,
-    status: entry.id === "sfx_score_plan" && narratorOnly
+    status: entry.id === "transition_edit_plan" && panelComposition
+      ? "skipped_with_waiver"
+      : entry.id === "sfx_score_plan" && narratorOnly
       ? "skipped_with_waiver"
       : ["animation_direction_plan", "generated_video_motion", "generated_video_motion_approval"].includes(entry.id) && ltxDisabled
         ? "skipped_with_waiver"
@@ -484,7 +499,7 @@ export function stageChecklistFor(identity = {}) {
         ? "skipped_with_waiver"
         : "missing",
     approval_policy: entry.approval,
-    validator: entry.validator,
+    validator: stageDefinition(entry.id, identity).validator,
   }));
 }
 
@@ -609,6 +624,7 @@ function codexSceneCuts(identity = {}) {
 
 export function buildStageCommand(stageId, identity = {}, options = {}) {
   stageRegistryFor(identity);
+  const panelComposition = isPanelProductionIdentity(identity);
   const base = identityBase(identity);
   const episode = identity.episode ?? "<episode>";
   const provider = identity.image_provider ?? "modelslab";
@@ -723,8 +739,12 @@ export function buildStageCommand(stageId, identity = {}, options = {}) {
     generated_video_motion_approval: `node bin/goldflow.mjs visual approve-generated-motion ${base} --reviewer <name> --note "<clip review notes>" --approve-ids <ids> --reject-ids <ids>`,
     parallax_asset_generation: `node bin/goldflow.mjs visual parallax-assets ${base}`,
     parallax_asset_approval: `node bin/goldflow.mjs visual approve-parallax ${base} --reviewer <name> --note "<mask and layer review notes>" --approve-ids <ids> --decline-ids <ids>`,
-    motion_edit_plan: `node bin/goldflow.mjs visual motion-plan ${base}`,
-    premium_render: `node bin/goldflow.mjs render start ${base} --motion-plan <episode-dir>/motion_edit_plan_${episode}.json --motion ${renderProfile} --render-concurrency ${render.render_concurrency} --clip-preset ${render.clip_preset} --final-preset ${render.final_preset}${identity?.proof_scope?.mode === "bounded" ? ` --diagnostic-proof true --proof-scope-end-sec ${Number(identity.proof_scope.end_sec)}` : ""}`,
+    motion_edit_plan: panelComposition
+      ? `node bin/goldflow.mjs visual panel-plan ${base} --action prepare`
+      : `node bin/goldflow.mjs visual motion-plan ${base}`,
+    premium_render: panelComposition
+      ? `node bin/goldflow.mjs render start ${base} --motion panel_composition_v1 --fps 30 --final-preset ${render.final_preset}`
+      : `node bin/goldflow.mjs render start ${base} --motion-plan <episode-dir>/motion_edit_plan_${episode}.json --motion ${renderProfile} --render-concurrency ${render.render_concurrency} --clip-preset ${render.clip_preset} --final-preset ${render.final_preset}${identity?.proof_scope?.mode === "bounded" ? ` --diagnostic-proof true --proof-scope-end-sec ${Number(identity.proof_scope.end_sec)}` : ""}`,
     final_qa: `node bin/goldflow.mjs final qa ${base} --master-scan true --approve true --reviewed-finding-codes <comma_separated_codes_if_any> --note "<QA review notes>"`,
     upload_packaging: `node bin/goldflow.mjs youtube approve-packaging ${base} --approve true --approved-by <name> --note "<packaging review notes>"`,
     youtube_publish_readiness: `node bin/goldflow.mjs youtube prepare ${base}`,

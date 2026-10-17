@@ -1,0 +1,56 @@
+# Panel composition for original manhwa production
+
+`panel_composition_v1` is an explicit render option for a **new** `manhwa_recap_v1` / `generated_visuals_v1` production identity. It uses the compositor exercised in the Joey editing experiment, with the official narration, approved-script captions, image acceptance, render report and final-QA path. Existing identities and private editing experiments retain their contracts.
+
+The initial option locks 1920×1080 at 30 fps, narrator-only continuous audio, generated video disabled and parallax disabled. The timeline authors its own reveals and overlaps. Incompatible options fail before preflight creates an episode. This option supports original generated artwork; external recap ingestion into production remains a separate adapter.
+
+## Starting the next run
+
+Wait for the operator's final script. Lock the actual channel, series, stable run slug, episode, title, exact source, selected providers and production intent through normal preflight from clean committed code. Add these options to that complete preflight command:
+
+```text
+--content-profile manhwa_recap_v1
+--media-workflow generated_visuals_v1
+--render-profile panel_composition_v1
+--audio-target narrator_only
+--generated-motion-policy disabled
+--parallax-policy disabled
+--run-intent production
+```
+
+Use the identity's normal narrator and image provider selection. No provider or voice switch is implied. Never retrofit these fields onto an existing run. Read `run status` before continuing and after each completed stage; use its exact next command.
+
+## Plan artwork before generation
+
+After approved visual beats and reference images, the panel asset stage prepares a source-bound authoring packet and draft. An editor/agent groups only beats that can be told faithfully from the same artwork. Every unique artwork order names its owner beat, covered beats, visual brief and editorial reason; every beat keeps an explicit binding. There is no reuse quota, keyword grouping, or timer-based transition cycle.
+
+`visual panel-assets --episode-dir <episode-dir>` prepares the draft. Author it against approved story and reference context, then use `visual panel-assets --episode-dir <episode-dir> --plan <authored-candidate.json>` to validate and import it. This is editorial work for the operating agent; the user need not fill a JSON template.
+
+Visual prompt planning authors only unique artwork orders, with their covered beats as context. The validated plan expands those orders back into the original beat IDs and timing. Reused rows do not receive provider leases or creative submissions. Materialization records the exact source asset and plan hash, zero generation cost, and separate per-beat acceptance. Missing or failed source art stops that scope; it never silently becomes a fresh paid request. Ordinary wavefront prefetch is disabled for this first profile because it can dispatch before allocation is complete.
+
+If an import is interrupted after a source image was accepted, status can select `imagegen panel-reconcile --episode-dir <episode-dir>` to restore missing derivative panels and their ledger rows with zero provider calls. A failed source image is repaired by its exact owner ID. Changed or conflicting accepted bytes stop for triage.
+
+Measure savings as unique scene artwork orders versus covered beats, then compare actual provider receipts. Reference images still have their own cost. Do not claim a savings percentage from the three-minute experiment, which reused artwork already generated for an earlier edit.
+
+## Author composition after image QA
+
+The normal motion-edit stage becomes `visual panel-plan` for this profile:
+
+```bash
+node bin/goldflow.mjs visual panel-plan --episode-dir <episode-dir> --action prepare
+node bin/goldflow.mjs visual panel-plan --episode-dir <episode-dir> --action compile --recipe <authored-recipe.json>
+```
+
+Preparation writes `panel_composition_packet_<episode>.json` and `panel_composition_recipe_<episode>.json`. The packet includes exact narration excerpts, original Whisper indices, beat boundaries and accepted artwork. Inspect the artwork and author every decision. Blank or missing decisions cannot pass.
+
+Layouts are `full_frame`, `inset`, `reveal`, `reaction_pair` and `page_pan`. Crop, placement, entry direction/time, overlap duration, camera path and reading holds are explicit. Main panels stay bound to their current beats. Background/context panels may carry earlier artwork forward; a later panel cannot be disclosed as context before its beat. The compiler preserves all internal beat boundaries and keeps source, caption and spoken text separate.
+
+Compilation writes the official `panel_timeline_<episode>.json` and `panel_composition_plan_<episode>.json`, plus immutable candidate snapshots. Current script approval, narration, word timing, grouping approval, allocation, hardened prompts, accepted images, focal analysis, review decisions and per-cut ledger are hash-bound. A changed source or recipe invalidates its dependent plan. Recipe corrections recompile through the guarded stage, preserving earlier snapshots.
+
+## Render and review
+
+Continue through the exact `run status` render command. The panel backend supplies silent picture to the existing render path. Script-faithful captions, one continuous final audio master, final mux, upload-safe encoding and `goldflow_render_report_v2` remain authoritative.
+
+Picture caching uses absolute frame ranges and only artwork/keys affecting each range. It preserves interpolation across chunk boundaries. Changed composition rebuilds affected chunks; narration is never cut into chunks. Private proof outputs cannot satisfy the production render stage.
+
+Review the opening with sound and sample dialogue, revelations, action, reused-art transitions and later sections. Check face crops, reading time, disclosure order, captions and synchronization. Run normal final QA after playback review. Fixture tests do not approve an episode. Packaging, upload, release and comment gates remain separate.

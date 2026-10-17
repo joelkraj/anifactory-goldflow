@@ -3,6 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { sha256File } from './file-hash.mjs';
 import { loadPanelExperimentTimeline, validatePanelExperimentTimeline } from './panel-experiment-contract.mjs';
+import { validatePanelTimeline } from './panel-layout-validation.mjs';
 
 const fail = message => { throw new Error(`Panel composition: ${message}`); };
 const json = value => `${JSON.stringify(value, null, 2)}\n`;
@@ -80,7 +81,8 @@ function cameraKeys(start, end, rect, row) {
   return keys;
 }
 
-export function compilePanelComposition(timeline, recipe) {
+export function compilePanelComposition(timeline, recipe, { mode = 'editing_experiment' } = {}) {
+  if (!['editing_experiment', 'production_panel_composition'].includes(mode)) fail('unsupported compilation mode');
   if (recipe?.schema !== 'goldflow_panel_composition_recipe_v1' || !recipe.author?.trim()) fail('recipe schema and author are required');
   if (!Array.isArray(recipe.decisions) || recipe.decisions.length !== timeline.scenes.length) fail('one explicit decision is required for every scene');
   const decisions = new Map();
@@ -130,7 +132,7 @@ export function compilePanelComposition(timeline, recipe) {
     layers.push(main);
     return { id: scene.id, start_sec: start, end_sec: end, background: { panel_id: row.background_panel_id, blur_px: row.blur_px ?? 32, brightness: row.background_brightness ?? 0.32 }, layers, editorial: { layout: row.layout, reason: row.editorial_reason, author: recipe.author } };
   });
-  return validatePanelExperimentTimeline(result);
+  return mode === 'production_panel_composition' ? validatePanelTimeline(result, mode) : validatePanelExperimentTimeline(result);
 }
 
 export async function writePanelComposition({ recipePath, outputDir }) {

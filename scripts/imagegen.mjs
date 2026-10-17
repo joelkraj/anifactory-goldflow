@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { assertPanelPromptAllocation, materializePanelAssetAliases } from "./lib/panel-production-assets.mjs";
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
@@ -1641,9 +1642,16 @@ async function generateOne(prompt, _index = 0, modelslabAccount = null) {
     ...sceneGeometry,
   });
   assertGeneratedProviderContract(prompt, generated, modelPrompt, referenceImagePaths, routedProvider);
+  if (prompt.panel_asset_id) {
+    const acceptedHash = await hashFile(generated.downloaded_path ?? outputPath);
+    if (generated.output_sha256 && generated.output_sha256 !== acceptedHash) throw new Error(`Provider output hash changed for ${prompt.image_id}.`);
+    generated.output_sha256 = acceptedHash;
+  }
   await fs.writeFile(`${outputPath}.prompt.sha256`, promptHash, "utf8");
   await writeJson(`${outputPath}.metadata.json`, {
     image_id: prompt.image_id,
+    panel_asset_id: prompt.panel_asset_id ?? null,
+    panel_asset_plan_sha256: prompt.panel_asset_plan_sha256 ?? null,
     prompt_hash: promptHash,
     source_prompt_path: promptPath,
     reference_image_paths: referenceImagePaths,
@@ -2490,6 +2498,7 @@ async function main() {
   await assertApprovedMaterializedReferenceHashesForTests(referenceRun.characterRefs, referenceRun.referencePlan);
   let plan = await readJson(promptPath, null);
   if (plan?.status !== "passed" || !Array.isArray(plan.prompts) || !plan.prompts.length) throw new Error(`Missing passed section image prompt plan: ${promptPath}`);
+  const panelAllocation = await assertPanelPromptAllocation({ episodeDir, prompts: plan.prompts });
   if (!allowUnhardenedPrompts && !plan.visual_prompt_hardening_report_path && !String(plan.prompt_policy ?? "").includes("deterministic hardening")) {
     throw new Error(`Imagegen requires a deterministic-hardened prompt plan. Run "goldflow visual harden" and pass section_image_prompts_hardened.json, or use --allow-unhardened-prompts true for diagnostics.`);
   }
@@ -2543,7 +2552,8 @@ async function main() {
     : { results: [], circuit_open: false, circuit_reason: null, adaptive_concurrency: null, account_pools: [] };
   const generatedResults = [...probeResults, ...pool.results];
   const availableBeforeReuse = await mergeImagegenResults({ currentResults: generatedResults, promptIds: allPromptIds, promptPlanHash });
-  const editorialReuseResults = await materializeEditorialReuses(editorialReusePrompts, availableBeforeReuse);
+  const panelResults = panelAllocation ? await materializePanelAssetAliases({ episodeDir, prompts: plan.prompts, results: availableBeforeReuse }) : null;
+  const editorialReuseResults = panelResults ? panelResults.filter(row => row.status === 'editorial_reuse') : await materializeEditorialReuses(editorialReusePrompts, availableBeforeReuse);
   const results = [...generatedResults, ...editorialReuseResults];
   const mergedResults = await mergeImagegenResults({ currentResults: results, promptIds: allPromptIds, promptPlanHash });
   const cutExecutionLedger = await writeCutExecutionLedger(plan, mergedResults, promptPlanHash);

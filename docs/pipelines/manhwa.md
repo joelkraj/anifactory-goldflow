@@ -6,6 +6,8 @@ These fiction, recurring-character, style, graphic, and packaging rules apply on
 
 New preflight must explicitly select `--content-profile manhwa_recap_v1 --media-workflow generated_visuals_v1`. `source manufacture` is the manhwa-only source-development route; it is not a factual research writer or movie/TV recap planner. Source development remains separate from production and stops for exact-script approval.
 
+For a new original-story run using the tested panel style, also read [panel production v1](../workflows/panel_production_v1.md). Select `--render-profile panel_composition_v1` explicitly; it adds authored artwork allocation before generation and composition after image QA. It does not migrate an existing identity or enable external recap production.
+
 ## Authority and Existing Runs
 
 The locked content-profile configuration and run identity govern an existing episode. Examples below preserve the detailed manhwa operating history; they are not instructions to start the named episode, enable an optional audio variant, replace approved assets, or rerun a passed stage. Structural/hash/scope gates and exact-ID recovery in the generated-visuals guide remain binding. Creative preferences never authorize automatic generation retries.

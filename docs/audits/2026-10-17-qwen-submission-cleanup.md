@@ -39,8 +39,47 @@ The six excerpts contain **203 unchanged words: 21 requests become seven**. Unde
 
 One example joins the three-word greeting “Early. Good habit.” to its immediate sleeve observation and explanation, producing one 28-word thought across a planning-segment boundary. Another retains the isolated ability-name revelation and groups the explanatory follow-through. No lexical material is added or removed. For isolated validator replay, the excerpt endpoint receives a diagnostic-only `episode_end`; historical episode boundary metadata is not changed.
 
+Exact payload example (two requests become one; quotation marks and punctuation are preserved):
+
+```text
+Before, request 1: “Early. Good habit.”
+Before, request 2: Then he saw my sleeve. I told him what happened. Not the part about the ability. Just the stone. His expression changed before I finished.
+
+After, request 1: “Early. Good habit.” Then he saw my sleeve. I told him what happened. Not the part about the ability. Just the stone. His expression changed before I finished.
+```
+
+## Actual bounded audio comparison
+
+The documented standalone diagnostic ran once from clean commit `36f328c`, outside all episode folders. It synthesized three other representative excerpts, with **110 identical submitted words per arm**, one resident pinned model, the same owned dry/deadpan reference, unchanged sampling controls and the production batch-four scheduler. Regrouping changes batch membership and cohort-derived seeds; this comparison does not isolate those effects or reproduce historical takes.
+
+| Excerpt | Original requests | Grouped requests | Original raw duration | Grouped raw duration |
+| --- | ---: | ---: | ---: | ---: |
+| New Game Plus — family judgment | 5 | 1 | 10.64 s | 9.92 s |
+| $53 — deli checkout | 4 | 1 | 12.64 s | 11.84 s |
+| Death Awakening — hand contact | 4 | 1 | 12.24 s | 11.84 s |
+| Total | 13 | 3 | 35.52 s | 33.60 s |
+
+All 16 outputs passed exact raw-output accounting; none reached the token limit. Execution took 46.685 seconds and incurred zero provider billing (local hardware/electricity costs were not estimated). Every attempt, raw WAV, payload, cohort, source binding and output hash is retained in `/Users/joel/AniFactoryData/channels/53rebirth/source_development/audio_diagnostic_2026_10_17/qwen-submission-ab-v1/`.
+
+- Manifest SHA-256: `5ede84f60cde27fc9e612b371ea05c080294abfb957dfde152474016c81b7c0f`.
+- Raw generation report SHA-256: `36dbfad6b4b83b8095d505abc273a16b14de27021dba892b7b6b5bd9e6c4bba8`.
+- Listening page: [local comparison](http://127.0.0.1:8772/compare.html), saved as `listening-preview/compare.html` within that directory. All six browser audio elements loaded with the expected durations and no media errors.
+- `listening_preview_manifest.json` binds each preview to the raw WAVs. Original requests are concatenated in source order with no PCM samples removed, changed or inserted. These are raw submission comparisons, not finished semantic-pause/mastering comparisons.
+
+**No actual listening was performed, and no naturalness or stutter-resolution verdict is claimed.** Duration is measured, not a quality score. The diagnostic does not approve or replace production narration. Inside-request stutters, clone/reference effects and sustained-runtime effects remain unresolved; changing those variables requires a separate controlled comparison after listening to this one.
+
 ## Verification and deployment
 
 Passing checks include the new grouping, contextual audit, stitch implementation and pre-synthesis suites; the existing voice-boundary/profile and complete narration-quality suites; batch-four/voice-selection/syntax tests; production-direction contracts; and repository syntax/generated-guidance checks. Tests reject missing/duplicated/reordered components, ambiguous contraction expansion without a receipt, altered payloads, crossed actual barriers, invalid short-line/boundary rationales and instruction leaks. A real synthetic WAV passes through the actual stitch helper with all PCM samples preserved when activity contradicts alignment.
 
-Implementation lives on `codex/qwen-submission-cleanup`, based on the production checkout's `d2a3e8d`, in `/Users/joel/.codex/worktrees/qwen-submission-cleanup/anifactory-goldflow`. Root's unrelated dirty edits and the production checkout are untouched. Before starting the next production run, integrate this branch into the intended clean checkout, run `npm ci --ignore-scripts`, `npm run test:narration-submission`, `npm run test:narration-quality`, `npm run test:voice-boundary` and `npm run check`, then use the normal guarded preflight/voice-plan route. A new Qwen plan must contain `coherent_thought_groups_v1`. Do not rerun historical voice planning or replace historical audio to adopt it. Exact integration commands and bounded audio results are recorded with the final handoff.
+Implementation lives on `codex/qwen-submission-cleanup`, based on the production checkout's `d2a3e8d`, in `/Users/joel/.codex/worktrees/qwen-submission-cleanup/anifactory-goldflow`. Root's unrelated dirty edits remain untouched. After verifying the production checkout was clean at the expected base and had no active production process, the actual production checkout was fast-forwarded to implementation commit `36f328c`:
+
+```sh
+cd /Users/joel/.codex/worktrees/three-script-slate-production/anifactory-goldflow
+git merge --ff-only codex/qwen-submission-cleanup
+npm run test:narration-submission
+```
+
+The complete focused submission suite passed again in that production checkout, including all eight no-model diagnostic test groups. The broader narration-quality, voice-boundary, production-direction, batch/selection, syntax and repository checks had already passed on the identical implementation; `npm run check` covered 652 modules. The dependency lockfile is unchanged. This report-only follow-up is also fast-forwarded into production; it does not change the diagnostic's locked code identity.
+
+No code integration remains for this Qwen change. For the next script, use the normal guarded preflight and fresh local-Qwen voice-authoring route in the production checkout. Verify the new plan records `coherent_thought_groups_v1`, review its exact spoken payloads and complete the required listening gate before accepting narration. Existing episode plans, identities and accepted media were not regenerated or replaced. Do not rerun historical voice planning merely to adopt this policy. Panel-composition work remains on its separate branch and is not included in this TTS integration.

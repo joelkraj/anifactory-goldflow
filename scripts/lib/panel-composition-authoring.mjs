@@ -72,12 +72,16 @@ function key(at_sec, rect, view = camera, easing = 'smooth') { return { at_sec, 
 
 function cameraKeys(start, end, rect, row) {
   const from = row.camera_from ?? camera, to = row.camera_to ?? from;
+  const toRect = row.rect_to ?? rect;
+  if (row.rect_to && (!['x', 'y', 'width', 'height'].every(k => Number.isFinite(toRect[k]))
+    || toRect.x < 0 || toRect.y < 0 || toRect.width <= 0 || toRect.height <= 0
+    || toRect.x + toRect.width > 1 + 1e-9 || toRect.y + toRect.height > 1 + 1e-9)) fail(`invalid panel motion destination for ${row.scene_id}`);
   const a = row.move_start_sec ?? start, b = row.move_end_sec ?? end;
   if (![a, b].every(Number.isFinite) || a < start || b > end || b <= a) fail(`invalid camera interval for ${row.scene_id}`);
   const keys = [key(start, rect, from)];
   if (a > start) keys.push(key(a, rect, from));
-  keys.push(key(b, rect, to));
-  if (b < end) keys.push(key(end, rect, to, 'hold'));
+  keys.push(key(b, toRect, to));
+  if (b < end) keys.push(key(end, toRect, to, 'hold'));
   return keys;
 }
 

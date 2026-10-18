@@ -121,6 +121,22 @@ try {
     assert.equal(top.y, 0); assert.equal(bottom.y + bottom.height, viewport.height); assert.ok(bottom.y < top.y);
     const held = result.scenes[0].layers[0]; assert.deepEqual(held.keyframes[0].camera, held.keyframes[1].camera);
   });
+  await test('authored panel drift and internal camera move share the exact interval and retain endpoint holds', async () => {
+    const f = await fixture('drift'), row = f.recipe.decisions[1];
+    row.rect_to = { ...row.rect, x: .3, y: .4 }; row.camera_to = { ...view, zoom: 1.2 };
+    row.move_start_sec = 2.25; row.move_end_sec = 3.75;
+    const result = compilePanelComposition(f.timeline, f.recipe), state = t => panelFrameState(result, t).layers[0].state;
+    assert.deepEqual(state(2.1).rect, row.rect); assert.equal(state(2.1).camera.zoom, 1);
+    near(state(3).rect.x, .2); near(state(3).rect.y, .3); near(state(3).camera.zoom, 1.1);
+    assert.deepEqual(state(3.9).rect, row.rect_to); assert.equal(state(3.9).camera.zoom, 1.2);
+    const reveal = f.recipe.decisions[2]; reveal.rect = { x: .1, y: .1, width: .6, height: .6 };
+    reveal.rect_to = { x: .3, y: .3, width: .6, height: .6 };
+    const moved = compilePanelComposition(f.timeline, f.recipe);
+    for (const k of ['x', 'y', 'width', 'height']) near(panelFrameState(moved, 4.8).layers.at(-1).state.rect[k], reveal.rect[k]);
+    const middle = panelFrameState(moved, 5.4).layers.at(-1).state.rect;
+    assert.ok(middle.x > reveal.rect.x && middle.x < reveal.rect_to.x);
+    assert.throws(() => compilePanelComposition(f.timeline, { ...f.recipe, decisions: f.recipe.decisions.map((r, i) => i === 1 ? { ...r, rect_to: { ...r.rect_to, x: .8 } } : r) }), /invalid panel motion destination/);
+  });
   await test('incomplete and contradictory editorial recipes fail without mutating source', async () => {
     const f = await fixture('invalid'); const original = structuredClone(f.timeline);
     const invalid = [

@@ -3757,8 +3757,10 @@ function testQwenTtsOutputQaContracts() {
     "I did not take his power.",
     "I'd not take his power.",
   );
-  assert.equal(asrContractedIDidNot.word_error_rate, 0);
-  assert.deepEqual(asrContractedIDidNot.findings, []);
+  // The current comparator keeps ambiguous had/would contractions lexical.
+  // "I'd" cannot silently stand in for the approved words "I did".
+  assert.ok(asrContractedIDidNot.word_error_rate > 0);
+  assert.ok(asrContractedIDidNot.findings.some((finding) => finding.code === "tts_transcript_word_substitutions"));
   const asrCompoundSpacing = transcriptQaForTests(
     "New status. Deedholder.",
     "New status. Deed holder.",

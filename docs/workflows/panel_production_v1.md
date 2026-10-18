@@ -30,6 +30,8 @@ Visual prompt planning authors only unique artwork orders, with their covered be
 
 Shared-artwork prompt packets project each covered beat to its exact narration, action/evidence, source indices, depiction, entities, local props/UI, state, population and continuity. They omit repeated parent-scene diagnostics and artifact metadata; the complete source-bound beat plan and allocation remain intact. The normal packet byte ceiling still applies and an oversized individual order stops before provider submission.
 
+Possession is not a permanent pose. A previously received document or book can stay owned without occupying a hand in every later image. The author must prioritize the current action's hand use and the exact local narration; stale projected holding/location labels are reported as metadata discrepancies rather than forcing an impossible shot. This does not authorize disposal, a new handoff, source rewriting or automatic edits to accepted prompt prose. Confirmed errors in existing prompts still require exact reviewed repair before image spend.
+
 If an import is interrupted after a source image was accepted, status can select `imagegen panel-reconcile --episode-dir <episode-dir>` to restore missing derivative panels and their ledger rows with zero provider calls. A failed source image is repaired by its exact owner ID. Changed or conflicting accepted bytes stop for triage.
 
 Measure savings as unique scene artwork orders versus covered beats, then compare actual provider receipts. Reference images still have their own cost. Do not claim a savings percentage from the three-minute experiment, which reused artwork already generated for an earlier edit.

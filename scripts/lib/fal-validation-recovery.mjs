@@ -233,5 +233,91 @@ export async function validateFalValidationRecovery({ root, correction }) {
       && review.result_sha256_by_id?.[row.image_id] === await fileSha(row.result_receipt_path),
     `Validation recovery review result changed: ${row.image_id}`);
   }
-  return { status: review.status, paths, plan: recoveryPlan, submissions, results, failures, holds, review };
+  const base = { status: review.status, paths, plan: recoveryPlan, submissions, results, failures, holds, review };
+  return inspectSecondValidationRecovery({root, correction, base});
+}
+
+// One explicitly reviewed later repair, never an automatic retry loop. Original
+// decisions and successful rasters remain immutable inputs to the effective set.
+export async function inspectSecondValidationRecovery({root, correction, base}) {
+  const dir = path.join(root, "validation-recovery-second");
+  const requestPath = path.join(dir, "request.json");
+  const bulkPath=path.join(root,"bulk-plan.json");
+  if (!await exists(requestPath)) {
+    if(await exists(bulkPath)) requireState(!(await read(bulkPath)).validation_second_review_sha256,"Second validation recovery source was removed.");
+    return base;
+  }
+  requireState(base.status === "failed" && (!await exists(bulkPath) || await exists(path.join(dir,"review.json"))),
+  "Second validation recovery requires a failed first recovery and cannot start after bulk.");
+  const request = await read(requestPath);
+  requireState(request.schema === "goldflow_fal_second_validation_recovery_v1"
+    && request.run_identity_sha256 === await fileSha(path.join(root,"..","run_identity.json"))
+    && request.source_script_sha256 === await fileSha(path.join(root,"..","script_clean.md"))
+    && request.correction_sha256 === await fileSha(correction.paths.correction)
+    && request.previous_plan_sha256 === await fileSha(base.paths.plan)
+    && request.previous_review_sha256 === await fileSha(base.paths.review)
+    && request.actual_review === true && request.reviewer?.trim()
+    && request.note?.trim().length > 20 && request.repairs?.length === base.review.rejected_ids.length
+    && new Set(request.repairs.map(r=>r.image_id)).size === request.repairs.length
+    && request.repairs.every(r=>base.review.rejected_ids.includes(r.image_id)),
+  "Second validation recovery lacks exact reviewed failed-scope/source provenance.");
+  const assignments=[];
+  for (const directive of request.repairs) {
+    const previous = base.plan.assignments.find(r=>r.image_id===directive.image_id);
+    const result = await read(previous.result_receipt_path);
+    requireState(directive.previous_assignment_sha256 === previous.assignment_sha256
+      && directive.previous_result_sha256 === await fileSha(previous.result_receipt_path)
+      && directive.previous_output_sha256 === result.output_sha256
+      && directive.reason?.trim().length > 20
+      && directive.replacement_prompt?.length > 100
+      && sha(directive.replacement_prompt) === directive.replacement_prompt_sha256
+      && directive.replacement_prompt_sha256 !== previous.prompt_sha256,
+    `Second validation repair changed or repeats its rejected candidate: ${directive.image_id}`);
+    const core={...previous};
+    for(const key of ["assignment_sha256","assignment_path","submission_receipt_path","result_receipt_path","output_path","upload_receipt_path"]) delete core[key];
+    Object.assign(core,{prompt:directive.replacement_prompt,prompt_sha256:directive.replacement_prompt_sha256,
+      previous_assignment_sha256:previous.assignment_sha256,previous_result_sha256:directive.previous_result_sha256,
+      rejected_image_sha256:result.output_sha256,second_review_request_sha256:await fileSha(requestPath),repair_reason:directive.reason});
+    assignments.push({...core,assignment_sha256:sha(JSON.stringify(core)),
+      submission_receipt_path:path.join(dir,"submission-receipts",`${directive.image_id}.json`),
+      result_receipt_path:path.join(dir,"result-receipts",`${directive.image_id}.json`),
+      upload_receipt_path:path.join(dir,"upload-receipts",`${directive.image_id}.json`),
+      output_path:path.join(dir,"outputs",`${directive.image_id}.png`)});
+  }
+  const second={dir,requestPath,request,assignments,reviewPath:path.join(dir,"review.json")};
+  const submitted=await Promise.all(assignments.map(r=>exists(r.submission_receipt_path)));
+  const completed=await Promise.all(assignments.map(r=>exists(r.result_receipt_path)));
+  for(let i=0;i<assignments.length;i++) {
+    const row=assignments[i];
+    if(submitted[i]) {
+      requireState(await exists(path.join(dir,"assignments",`${row.image_id}.json`)),"Second validation assignment missing.");
+      requireState(JSON.stringify(await read(path.join(dir,"assignments",`${row.image_id}.json`)))===JSON.stringify(row),"Second validation assignment changed.");
+      const submission=await read(row.submission_receipt_path);
+      requireState(submission.schema==="goldflow_fal_submission_receipt_v1" && submission.image_id===row.image_id
+        && submission.assignment_sha256===row.assignment_sha256,"Second validation submission changed.");
+      if(completed[i]) { const result=await read(row.result_receipt_path);
+        requireState(result.request_id===submission.request_id && result.output_path===row.output_path
+          && result.output_sha256===await fileSha(row.output_path),"Second validation result changed."); }
+    } else requireState(!completed[i],"Second validation result lacks submission.");
+  }
+  second.submitted=submitted;second.completed=completed;
+  const terminal=await Promise.all(assignments.map(async row=>await exists(path.join(dir,"failure-receipts",`${row.image_id}.json`))
+    ||await exists(path.join(dir,"transport-holds",`${row.image_id}.json`))));
+  second.state=terminal.some(Boolean)?"hold":!submitted.some(Boolean)?"submit":!submitted.every(Boolean)?"hold":!completed.every(Boolean)?"observe":"review";
+  if(!await exists(second.reviewPath)) return {...base,status:"second_pending",second};
+  const reviewed=await read(second.reviewPath);
+  requireState(completed.every(Boolean) && reviewed.schema==="goldflow_fal_second_validation_review_v1"
+    && reviewed.request_sha256===await fileSha(requestPath) && reviewed.actual_review===true
+    && reviewed.reviewer?.trim() && reviewed.note?.trim().length>20
+    && reviewed.approved_ids?.length+reviewed.rejected_ids?.length===assignments.length
+    && new Set([...reviewed.approved_ids,...reviewed.rejected_ids]).size===assignments.length
+    && assignments.every(r=>reviewed.approved_ids.includes(r.image_id)||reviewed.rejected_ids.includes(r.image_id)),
+  "Second validation review is not a complete exact visual decision.");
+  for(const row of assignments) requireState(reviewed.result_sha256_by_id?.[row.image_id]===await fileSha(row.result_receipt_path),"Second validation reviewed receipt changed.");
+  if(reviewed.rejected_ids.length) return {...base,status:"second_failed",second};
+  if(await exists(bulkPath)) requireState((await read(bulkPath)).validation_second_review_sha256===await fileSha(second.reviewPath),"Bulk second validation review binding changed.");
+  const combined={...base.review,status:"passed",approved_ids:[...base.review.approved_ids,...reviewed.approved_ids],rejected_ids:[],
+    result_sha256_by_id:{...base.review.result_sha256_by_id,...reviewed.result_sha256_by_id}};
+  return {...base,status:"passed",second,review:combined,plan:{...base.plan,
+    assignments:base.plan.assignments.map(row=>assignments.find(r=>r.image_id===row.image_id)??row)}};
 }

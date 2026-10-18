@@ -33,6 +33,14 @@ async function reviewedSecondRepair(root, imageId) {
 
 export function falBlockedStageRecoveryAdmission(status, flags = {}) {
   const action = String(flags.action ?? "");
+  if(["dispatch-validation-second","observe-validation-second","review-validation-second"].includes(action)) {
+    const extra=action==="dispatch-validation-second"?["confirm-spend"]:action==="review-validation-second"?["reviewer","note","approve-ids","reject-ids"]:[];
+    return {applicable:true,allowed:status.current_stage==="image_generation"&&status.current_stage_state==="blocked"
+      &&flags["episode-dir"]===status.episode_dir&&String(status.next_command_shape??"").includes(`--action ${action}`)
+      &&Object.keys(flags).sort().join(',')===["episode-dir","action",...extra].sort().join(',')
+      &&(action!=="dispatch-validation-second"||flags["confirm-spend"]==="exact_fal_validation_second"),
+      reason:"Only the exact status-directed reviewed second validation repair is allowed."};
+  }
   if (["prepare-reference-probe-repair", "dispatch-reference-probe-repair", "observe-reference-probe-repair", "review-reference-probe-repair"].includes(action)) {
     const extra=action==="dispatch-reference-probe-repair"?["confirm-spend"]:action==="review-reference-probe-repair"?["reviewer","note"]:[];
     return {applicable:true,allowed:status.current_stage==="reference_generation"&&status.current_stage_state==="blocked"
@@ -345,7 +353,13 @@ export async function falProductionStageStates({ episodeDir, identity } = {}) {
         if (retryCapEvidence) validationEvidence = retryCapEvidence;
       } else if (!recovery.results.every(Boolean)) next = `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action observe-validation-recovery`;
       else next = `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action review-validation-recovery --reviewer <name> --note "<exact visual review>" --approve-ids <ids> --reject-ids <ids>`;
-    } else if (recovery.status === "failed") {
+    } else if(recovery.status === "second_pending") {
+      const state=recovery.second.state;
+      next=state==="submit"&&!retryCapEvidence?`node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action dispatch-validation-second --confirm-spend exact_fal_validation_second`
+        :state==="observe"?`node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action observe-validation-second`
+        :state==="review"?`node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action review-validation-second --reviewer <name> --note "<exact visual review>" --approve-ids <ids> --reject-ids <ids>`:null;
+      validationEvidence=retryCapEvidence??"Explicit reviewed second validation repair; accepted shots remain immutable";
+    } else if (recovery.status === "failed" || recovery.status === "second_failed") {
       next = null;
       validationEvidence = "Reviewed exact validation recovery still has rejected rasters; inspect immutable result/review before a further scoped decision";
     } else next = null;

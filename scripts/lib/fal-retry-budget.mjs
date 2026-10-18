@@ -10,6 +10,7 @@ const RETRY_FRACTION = 0.10;
 export const FAL_PROJECTED_PAID_REQUEST_USD = 0.022;
 const REPAIR_RECEIPT_DIRS = Object.freeze([
   "validation-recovery/submission-receipts",
+  "validation-recovery-second/submission-receipts",
   "reference/repair-submission-receipts",
   "reference/transport-recovery-submission-receipts",
   "reference/review-repair-submission-receipts",

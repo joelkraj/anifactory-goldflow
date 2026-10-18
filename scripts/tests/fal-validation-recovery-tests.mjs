@@ -349,3 +349,74 @@ test("failed validation recovery rejects stale, broader, or unproven requests", 
     } finally { await rm(f.dir, { recursive: true, force: true }); }
   }
 });
+
+async function secondRecoveryFixture() {
+  const f=await failedReviewFixture();
+  const script=path.resolve('scripts/fal-production.mjs');
+  const call=async(action,...extra)=>exec(process.execPath,[script,'--episode-dir',f.dir,'--action',action,...extra]);
+  await call('correct-validation-review');await call('prepare-validation-recovery');
+  const correction=await validateFalValidationCorrection({root:f.root,validationPlanPath:f.planPath,validationReviewPath:f.reviewPath});
+  const first=await validateFalValidationRecovery({root:f.root,correction});
+  for(const row of first.plan.assignments) {
+    await writeJson(row.submission_receipt_path,{schema:'goldflow_fal_submission_receipt_v1',image_id:row.image_id,assignment_sha256:row.assignment_sha256,request_id:`first-${row.image_id}`});
+    await mkdir(path.dirname(row.output_path),{recursive:true});await writeFile(row.output_path,`first-repair-${row.image_id}`);
+    await writeJson(row.result_receipt_path,{request_id:`first-${row.image_id}`,output_path:row.output_path,output_sha256:await fileSha(row.output_path)});
+  }
+  await call('review-validation-recovery','--reviewer','Test','--note','Actual inspection accepts one replacement and rejects the remaining extra arm.','--approve-ids','frame-6','--reject-ids','frame-7');
+  await writeFile(path.join(f.dir,'script_clean.md'),'Approved exact source.');
+  const prior=first.plan.assignments.find(r=>r.image_id==='frame-7');
+  const prompt='Revised complete source-bound single frame with simplified two-arm staging. '+'D'.repeat(120);
+  const request={schema:'goldflow_fal_second_validation_recovery_v1',actual_review:true,reviewer:'Test',note:'Actually inspected persistent extra arm; simplify the exact rejected staging only.',
+    run_identity_sha256:await fileSha(path.join(f.dir,'run_identity.json')),source_script_sha256:await fileSha(path.join(f.dir,'script_clean.md')),
+    correction_sha256:await fileSha(correction.paths.correction),previous_plan_sha256:await fileSha(correction.paths.plan),previous_review_sha256:await fileSha(correction.paths.review),
+    repairs:[{image_id:'frame-7',previous_assignment_sha256:prior.assignment_sha256,previous_result_sha256:await fileSha(prior.result_receipt_path),
+      previous_output_sha256:await fileSha(prior.output_path),replacement_prompt:prompt,replacement_prompt_sha256:sha(prompt),reason:'Persistent third arm confirmed in the exact retained replacement raster.'}]};
+  const requestPath=path.join(f.root,'validation-recovery-second','request.json');await writeJson(requestPath,request);
+  return {...f,call,correction,request,requestPath};
+}
+
+test('one reviewed second validation repair preserves accepted first replacement and fails closed on tampering',async()=>{
+ const f=await secondRecoveryFixture();try {
+  const initial=await validateFalValidationRecovery({root:f.root,correction:f.correction});
+  assert.equal(initial.status,'second_pending');assert.equal(initial.second.state,'submit');
+  assert.deepEqual(initial.second.assignments.map(r=>r.image_id),['frame-7']);
+  const beforeReviewHash=await fileSha(f.correction.paths.review);
+  const kept=initial.plan.assignments.find(r=>r.image_id==='frame-6');const keptHash=await fileSha(kept.output_path);
+  assert.match((await falProductionStageStates({episodeDir:f.dir,identity:f.identity})).stageStates.image_generation.next_command_shape,/dispatch-validation-second/);
+  const row=initial.second.assignments[0];
+  await writeJson(path.join(initial.second.dir,'assignments','frame-7.json'),row);
+  await writeJson(row.submission_receipt_path,{schema:'goldflow_fal_submission_receipt_v1',image_id:row.image_id,assignment_sha256:row.assignment_sha256,request_id:'second-frame-7'});
+  let state=await validateFalValidationRecovery({root:f.root,correction:f.correction});assert.equal(state.second.state,'observe');
+  await mkdir(path.dirname(row.output_path),{recursive:true});await writeFile(row.output_path,'second complete raster');
+  await writeJson(row.result_receipt_path,{request_id:'second-frame-7',output_path:row.output_path,output_sha256:await fileSha(row.output_path)});
+  assert.equal((await validateFalValidationRecovery({root:f.root,correction:f.correction})).second.state,'review');
+  await f.call('review-validation-second','--reviewer','Test','--note','Actual full-frame inspection confirms two arms and original source action.','--approve-ids','frame-7','--reject-ids','');
+  state=await validateFalValidationRecovery({root:f.root,correction:f.correction});assert.equal(state.status,'passed');
+  assert.deepEqual(state.review.approved_ids,['frame-6','frame-7']);
+  assert.equal(state.plan.assignments.find(r=>r.image_id==='frame-7').output_path,row.output_path);
+  assert.equal(await fileSha(f.correction.paths.review),beforeReviewHash);assert.equal(await fileSha(kept.output_path),keptHash);
+  await assert.rejects(f.call('dispatch-validation-second','--confirm-spend','exact_fal_validation_second'),/Only a pending/);
+  await writeJson(path.join(f.dir,'section_image_prompts_hardened.json'),{prompts:f.assignments.map((r,i)=>({image_id:r.image_id,
+    provider_prompt:r.prompt,image_generation_required:true,reference_requirements:[],start_sec:i,duration_sec:1}))});
+  await writeJson(path.join(f.dir,'visual_reference_approval_ep_01.json'),{status:'approved',reference_hash_by_ref_id:{}});
+  await writeJson(path.join(f.dir,'visual_reference_plan.json'),{reference_targets:[]});
+  await writeJson(path.join(f.root,'reference-plan.json'),{assignments:[]});
+  await f.call('prepare-bulk','--image-ids','all');
+  const bulk=JSON.parse(await readFile(path.join(f.root,'bulk-plan.json')));
+  assert.equal(bulk.assignments.length,8);assert.equal(bulk.assignments.every(r=>r.reused_validation_shot),true);
+  assert.equal(bulk.assignments.find(r=>r.image_id==='frame-6').output_path,kept.output_path);
+  assert.equal(bulk.assignments.find(r=>r.image_id==='frame-7').output_path,row.output_path);
+  assert.equal(bulk.validation_second_review_sha256,await fileSha(initial.second.reviewPath));
+  assert.equal((await validateFalValidationRecovery({root:f.root,correction:f.correction})).status,'passed');
+  await writeFile(row.output_path,'tampered');await assert.rejects(validateFalValidationRecovery({root:f.root,correction:f.correction}),/result changed/);
+ }finally{await rm(f.dir,{recursive:true,force:true});}
+});
+
+test('second validation recovery rejects changed source, broadened scope and stale first review',async()=>{
+ for(const kind of ['source','scope','review']) {const f=await secondRecoveryFixture();try {
+  if(kind==='source')await writeFile(path.join(f.dir,'script_clean.md'),'changed');
+  if(kind==='scope'){f.request.repairs[0].image_id='frame-6';await writeJson(f.requestPath,f.request);}
+  if(kind==='review')await writeJson(f.correction.paths.review,{});
+  await assert.rejects(validateFalValidationRecovery({root:f.root,correction:f.correction}));
+ }finally{await rm(f.dir,{recursive:true,force:true});}}
+});

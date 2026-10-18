@@ -270,7 +270,8 @@ async function prepareBulk(ctx,f){
     console.error(`Fal projected episode spend $${projectedEpisode} reaches the locked warning threshold; estimate only, verify actual account spend.`);
   const plan={schema:"goldflow_fal_bulk_plan_v1",created_at:new Date().toISOString(),run_identity_sha256:ctx.identityHash,model:FAL_ENDPOINTS.primary_edit,quality:"low",width:1920,height:1080,format:"png",reference_mode:"one_positional_collage",concurrency:ctx.contract.production_concurrency,assignment_count:assignments.length,projected_base_cost_usd:projectedBase,projected_observed_rate_episode_cost_usd:projectedEpisode,pricing_note:"$0.00441 is base-output only. The episode spend projection uses $0.022 per paid request from observed Fal billing; actual charges require dashboard verification.",
     ...(prebulkCorrection?{prebulk_prompt_correction_receipt_sha256:await falFileSha256(prebulkCorrection.paths.receipt),prebulk_corrected_image_ids:[...prebulkCorrection.effectivePrompts.keys()]}:{}),
-    ...(correction?{validation_review_correction_sha256:await falFileSha256(correction.paths.correction),validation_recovery_review_sha256:await falFileSha256(correction.paths.review)}:{}),assignments};
+    ...(correction?{validation_review_correction_sha256:await falFileSha256(correction.paths.correction),validation_recovery_review_sha256:await falFileSha256(correction.paths.review)}:{}),
+    ...(recovery?.second?{validation_second_review_sha256:await falFileSha256(recovery.second.reviewPath)}:{}),assignments};
   await write(path.join(ctx.root,"bulk-plan.json"),plan);return {status:"prepared",count:assignments.length,projected_base_cost_usd:projectedBase,projected_observed_rate_episode_cost_usd:projectedEpisode};
 }
 async function submitRows(ctx,rows,limit){
@@ -392,6 +393,32 @@ async function main(){
    return console.log(JSON.stringify({status:"observed",checked:result.length,complete:result.filter(x=>x.complete).length},null,2));
  }
  if(action==="prepare-references") return console.log(JSON.stringify(await prepareReferences(ctx),null,2));
+ if(["dispatch-validation-second","observe-validation-second","review-validation-second"].includes(action)) {
+   const correction=await validateFalValidationCorrection({root:ctx.root,validationPlanPath:await validationPlanPath(ctx),validationReviewPath:await validationReviewPath(ctx)});
+   need(correction?.recorded,"First reviewed validation recovery is required.");
+   const recovery=await validateFalValidationRecovery({root:ctx.root,correction});
+   need(recovery.status==="second_pending","Only a pending, explicitly reviewed second validation repair is eligible.");
+   const second=recovery.second;
+   if(action==="dispatch-validation-second") {
+     need(second.state==="submit"&&f["confirm-spend"]==="exact_fal_validation_second","Second repair requires exact pending scope and spend token.");
+     await preflightPaidRepair(ctx,"validation-recovery-second/submission-receipts",second.assignments.map(r=>r.image_id));
+     for(const row of second.assignments) await write(path.join(second.dir,"assignments",`${row.image_id}.json`),row);
+     return console.log(JSON.stringify({status:"submitted",count:(await submitRows(ctx,second.assignments,1)).length},null,2));
+   }
+   if(action==="observe-validation-second") {
+     need(second.state==="observe","No original second-repair request awaits observation.");
+     return console.log(JSON.stringify(await observeRows(ctx,second.assignments.filter((r,i)=>!second.completed[i]),1),null,2));
+   }
+   need(second.state==="review"&&f.reviewer&&String(f.note??"").trim().length>20,"Actual complete visual review is required.");
+   const approved=String(f["approve-ids"]??"").split(',').filter(Boolean),rejected=String(f["reject-ids"]??"").split(',').filter(Boolean);
+   need(approved.length+rejected.length===second.assignments.length&&new Set([...approved,...rejected]).size===second.assignments.length
+     &&second.assignments.every(r=>approved.includes(r.image_id)||rejected.includes(r.image_id)),"Second review must disposition exact IDs only.");
+   const hashes={};for(const row of second.assignments) hashes[row.image_id]=await falFileSha256(row.result_receipt_path);
+   await write(second.reviewPath,{schema:"goldflow_fal_second_validation_review_v1",created_at:new Date().toISOString(),
+     request_sha256:await falFileSha256(second.requestPath),actual_review:true,reviewer:f.reviewer,note:f.note,
+     approved_ids:approved,rejected_ids:rejected,result_sha256_by_id:hashes});
+   return console.log(JSON.stringify({status:rejected.length?"failed":"passed",approved,rejected},null,2));
+ }
  if(["correct-validation-review","prepare-validation-recovery","dispatch-validation-recovery","observe-validation-recovery","review-validation-recovery"].includes(action)){
    const correction=await validateFalValidationCorrection({root:ctx.root,validationPlanPath:await validationPlanPath(ctx),validationReviewPath:await validationReviewPath(ctx)});
    need(correction,"Reviewed validation correction request is missing.");

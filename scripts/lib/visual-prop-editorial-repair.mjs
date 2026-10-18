@@ -10,7 +10,7 @@ const need=(ok,message)=>{if(!ok)throw new Error(`Editorial prop repair: ${messa
 const read=async file=>{const raw=await fs.readFile(file);return {value:JSON.parse(raw),sha256:propRepairHash(raw)}};
 const save=async(file,value)=>{await fs.mkdir(path.dirname(file),{recursive:true});await fs.writeFile(file,bytes(value),{flag:'wx'})};
 const required=['run_identity.json','script_clean.md','visual_beat_plan.json','visual_reference_plan.json','reference_plan_approval.json','section_image_prompts.json'];
-const textPath=/^(?:provider_prompt|shot_manifest\.(?:foreground_action|continuity_notes)|shot_manifest\.character_staging\[\d+\]\.pose|shot_manifest\.anatomy_contracts\[\d+\]\.reason|shot_manifest\.equipment_contracts\[\d+\]\.(?:hand_assignment|holder_state|contact_target|reason))$/;
+const textPath=/^(?:provider_prompt|shot_manifest\.(?:foreground_action|continuity_notes)|shot_manifest\.character_staging\[\d+\]\.pose|shot_manifest\.anatomy_contracts\[\d+\]\.(?:reason|body_invariant)|shot_manifest\.equipment_contracts\[\d+\]\.(?:hand_assignment|holder_state|contact_target|reason))$/;
 const removalPath=/^shot_manifest\.(?:equipment_contracts|visible_props)\[\d+\]$/;
 function fieldAt(object,field){const parts=field.replaceAll(/\[(\d+)\]/g,'.$1').split('.');let owner=object;for(const key of parts.slice(0,-1)){need(owner&&Object.hasOwn(owner,key),'unknown patch field');owner=owner[key]}const key=parts.at(-1);need(owner&&Object.hasOwn(owner,key),'unknown patch leaf');return {owner,key};}
 
@@ -18,8 +18,8 @@ function fieldAt(object,field){const parts=field.replaceAll(/\[(\d+)\]/g,'.$1').
 // lexical prose replacement, new artwork decision or source-state rewrite.
 export function applyPropRepairDecision(row,decision){
  need(decision.image_id===row.image_id&&['keep','repair'].includes(decision.disposition)&&typeof decision.reason==='string'&&decision.reason.trim(),'decision identity/disposition/reason required');
+ if(decision.disposition==='keep'){need(decision.patches===undefined||(Array.isArray(decision.patches)&&!decision.patches.length),'keep must not edit');return structuredClone(row)}
  need(Array.isArray(decision.patches)&&decision.patches.length<=24,'bounded explicit patches required');
- if(decision.disposition==='keep'){need(!decision.patches.length,'keep must not edit');return structuredClone(row)}
  need(decision.patches.length>0,'repair requires patches');
  const out=structuredClone(row),removals=[];
  for(const patch of decision.patches){

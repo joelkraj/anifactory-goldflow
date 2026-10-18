@@ -18,3 +18,10 @@ test('review acceptance refreshes dependent aliases while preserving untouched p
  assert.throws(()=>mergeAcceptedPropRepairs(plan,[{row:owner,decision}],['cut_1','cut_1']),/distinct/);
  const stale=structuredClone(owner);stale.provider_prompt+=' Changed';assert.throws(()=>mergeAcceptedPropRepairs(plan,[{row:stale,decision}],['cut_1']),/changed/);
 });
+
+test('retained provider decisions may omit an empty patch list; authored hand-state spans stay exact',()=>{
+ assert.deepEqual(applyPropRepairDecision(row,{image_id:'cut_1',disposition:'keep',reason:'Current source document use.'}),row);
+ const source=structuredClone(row);source.shot_manifest.anatomy_contracts=[{body_invariant:'Two intact arms; left hand holds permit.'}];
+ const out=applyPropRepairDecision(source,{image_id:'cut_1',disposition:'repair',reason:'Old hand pose.',patches:[{op:'span',path:'shot_manifest.anatomy_contracts[0].body_invariant',before:'; left hand holds permit',to:''}]});
+ assert.equal(out.shot_manifest.anatomy_contracts[0].body_invariant,'Two intact arms.');
+});

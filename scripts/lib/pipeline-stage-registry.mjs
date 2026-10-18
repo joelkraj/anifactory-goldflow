@@ -255,7 +255,7 @@ const stages = [
       /^panel_asset_.*\.json$/,
       /^panel_asset_.*\.md$/,
     ],
-    commands: ["visual plan", "visual panel-assets", "visual repair-prompt", "visual repair-prompt-multiplier"],
+    commands: ["visual plan", "visual panel-assets", "visual repair-prompt", "visual repair-prompt-multiplier", "visual review-prop-repair"],
   },
   {
     id: "visual_prompt_harden",

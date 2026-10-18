@@ -261,7 +261,7 @@ function enforceWorkflowGuard(commandName, subcommandName, scriptArgs, episodeDi
     }
     return;
   }
-  if (commandName === "visual" && ["repair-prompt", "repair-prompt-multiplier"].includes(subcommandName)) {
+  if (commandName === "visual" && ["repair-prompt", "repair-prompt-multiplier", "review-prop-repair"].includes(subcommandName)) {
     const repair = exactVisualPromptRepairAdmission(result, parsedFlags);
     if (!repair.allowed) {
       console.error(`Workflow guard blocked exact visual prompt repair: ${repair.reason}.`);
@@ -374,7 +374,7 @@ function run(script, scriptArgs = []) {
   }
   enforceWorkflowGuard(command, subcommand, scriptArgs, episodeDir);
   const stage = commandStage(command, subcommand, parsedFlags, episodeDir);
-  const plannerRerunDecision = command === "visual" && ["repair-beats", "repair-beat-density", "repair-prompt", "repair-prompt-multiplier", "repair-screen-identity", "repair-identity-binding", "repair-reviewed-ref-scope"].includes(subcommand)
+  const plannerRerunDecision = command === "visual" && ["repair-beats", "repair-beat-density", "repair-prompt", "repair-prompt-multiplier", "review-prop-repair", "repair-screen-identity", "repair-identity-binding", "repair-reviewed-ref-scope"].includes(subcommand)
     ? { allowed: true }
     : plannerRerunDecisionForEpisode({ command, subcommand, stage, flags: parsedFlags, episodeDir });
   if (!plannerRerunDecision.allowed) {
@@ -847,6 +847,8 @@ if (command === "crime-proof" && !helpRequested) {
   run("visual-panel-plan.mjs", flags);
 } else if (command === "visual" && subcommand === "repair-prompt") {
   run("visual-prompt-exact-repair.mjs", flags);
+} else if (command === "visual" && subcommand === "review-prop-repair") {
+  run("visual-prop-editorial-repair.mjs", flags);
 } else if (command === "visual" && subcommand === "repair-prompt-multiplier") {
   run("visual-prompt-multiplier-exact-repair.mjs", flags);
 } else if (command === "visual" && subcommand === "repair-screen-identity") {

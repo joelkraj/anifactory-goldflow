@@ -48,12 +48,14 @@ the old full-state reference is being replaced, or for the reviewed intact
 full-state ref in a pre-event correction. The exact new ID must be in the
 current row's forbidden list. No other prohibition may be removed.
 
-`continuity_scope` names the exact character, canonical subject ID, old and
+`continuity_scope` is optional; omit it or use null when only selecting missing
+identities. When supplied, it names the exact character, canonical subject ID, old and
 new reference IDs, and the literal active wardrobe state. The guard scans all
 reviewed cuts and requires every matching conflict to be in `bindings`; it
 refuses unrelated cuts. Each binding must match a current beat, approved
 reference target, approved raster hash, and old row hash. Original ambiguous
-blockers must all be covered. `temporal_scope` names a source beat where an
+blockers must all be covered. `temporal_scope` is likewise optional and, when
+supplied, names a source beat where an
 injury first occurs, the literal preceding active wardrobe state, and the
 wrongly selected wounded/intact refs. The guard scans all earlier cuts with
 that exact contradiction. Each such binding supplies one to three exact
@@ -82,6 +84,13 @@ the four-slot limit, visible cast, and all immutable cut fields. A memory's
 current-time state projection remains as provenance; its reviewed prompt and
 continuity note explicitly specify the earlier depicted time. This path
 does not change the beat or approved reference plan.
+
+A memory cut whose ambiguity is resolved by an actually reviewed faceless,
+non-identifying silhouette may be covered by that exact memory editorial
+replacement instead of binding an adult identity plate. The manifest pose and
+provider prose must both explicitly describe the silhouette, and no adult
+identity reference may remain selected for it. Other ambiguous visible people
+still require an explicit approved binding.
 
 ```bash
 node bin/goldflow.mjs visual repair-identity-binding --episode-dir <episode-dir> --repair-spec <reviewed-json>

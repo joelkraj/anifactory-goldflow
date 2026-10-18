@@ -291,33 +291,35 @@ export async function repairIdentityBindings({ episodeDir, specPath, spec, statu
   }
   const blockerIds = new Set(blockers.map((item) => item.image_id));
   const bindingIds = new Set(spec.bindings.map((item) => item.image_id));
-  if (bindingIds.size !== spec.bindings.length || [...blockerIds].some((id) => !bindingIds.has(id))
+  const editorialBlockerIds = new Set(spec.editorial_repairs.filter(item => item.manual_full_prompt_reviewed === true
+    && reviewed.prompts.some(row => row.image_id === item.image_id && row.depiction_mode === "memory_or_flashback")).map(item => item.image_id));
+  if (bindingIds.size !== spec.bindings.length || [...blockerIds].some((id) => !bindingIds.has(id) && !editorialBlockerIds.has(id))
     || manual.image_ids?.some((id) => !blockerIds.has(id))
     || manual.unresolved_blockers?.some((item) => item.code !== "required_source_identity_ambiguous")) {
     throw new Error("Every original ambiguous blocker and current manual blocker must be covered exactly.");
   }
   const scope = spec.continuity_scope;
-  if (!exactKeys(scope, ["character", "canonical_subject_id", "old_ref_id", "new_ref_id", "active_wardrobe_phrase"])
+  if (scope != null && (!exactKeys(scope, ["character", "canonical_subject_id", "old_ref_id", "new_ref_id", "active_wardrobe_phrase"])
     || !nonempty(scope.character) || !nonempty(scope.canonical_subject_id) || !nonempty(scope.old_ref_id)
-    || !nonempty(scope.new_ref_id) || !nonempty(scope.active_wardrobe_phrase)) {
+    || !nonempty(scope.new_ref_id) || !nonempty(scope.active_wardrobe_phrase))) {
     throw new Error("Bounded persistent wardrobe continuity scope is required.");
   }
-  const continuityRows = reviewed.prompts.filter((row) => row.shot_manifest?.visible_characters?.includes(scope.character)
+  const continuityRows = scope == null ? [] : reviewed.prompts.filter((row) => row.shot_manifest?.visible_characters?.includes(scope.character)
     && row.reference_requirements?.some((req) => req.ref_id === scope.old_ref_id)
     && row.active_state_constraints?.entities?.[scope.canonical_subject_id]?.wardrobe === scope.active_wardrobe_phrase);
   const continuityIds = new Set(continuityRows.map((row) => row.image_id));
   const temporal = spec.temporal_scope;
-  if (!exactKeys(temporal, ["character", "canonical_subject_id", "old_ref_id", "new_ref_id",
+  if (temporal != null && (!exactKeys(temporal, ["character", "canonical_subject_id", "old_ref_id", "new_ref_id",
     "pre_event_wardrobe", "event_image_id", "event_source_phrase"])
     || !nonempty(temporal.character) || !nonempty(temporal.canonical_subject_id)
     || !nonempty(temporal.old_ref_id) || !nonempty(temporal.new_ref_id)
     || !nonempty(temporal.pre_event_wardrobe) || !nonempty(temporal.event_image_id)
-    || !nonempty(temporal.event_source_phrase)) throw new Error("Exact source-timed injury boundary required.");
-  const eventBeat = beats.beats.find((item) => item.image_id_hint === temporal.event_image_id);
-  if (!eventBeat || !eventBeat.visual_beat_script_excerpt?.includes(temporal.event_source_phrase)) {
+    || !nonempty(temporal.event_source_phrase))) throw new Error("Exact source-timed injury boundary required.");
+  const eventBeat = temporal == null ? null : beats.beats.find((item) => item.image_id_hint === temporal.event_image_id);
+  if (temporal != null && (!eventBeat || !eventBeat.visual_beat_script_excerpt?.includes(temporal.event_source_phrase))) {
     throw new Error("Approved beat does not establish the claimed injury event.");
   }
-  const temporalRows = reviewed.prompts.filter((row) => row.shot_manifest?.visible_characters?.includes(temporal.character)
+  const temporalRows = temporal == null ? [] : reviewed.prompts.filter((row) => row.shot_manifest?.visible_characters?.includes(temporal.character)
     && row.reference_requirements?.some((req) => req.ref_id === temporal.old_ref_id)
     && row.active_state_constraints?.entities?.[temporal.canonical_subject_id]?.wardrobe === temporal.pre_event_wardrobe
     && row.start_sec < eventBeat.start_sec && /heat.cut shoulder|small wound|bleeding side cut/i.test(row.provider_prompt));
@@ -355,7 +357,7 @@ export async function repairIdentityBindings({ episodeDir, specPath, spec, statu
       || row.visual_beat_id !== binding.visual_beat_id || beat.image_id_hint !== binding.image_id
       || row.scene_id !== baseRow[0].scene_id || row.scene_id !== beat.scene_id
       || hash(json(row)) !== binding.old_row_sha256 || target.kind !== "character_state"
-      || target.canonical_subject_id !== binding.character.toLowerCase()
+      || String(target.canonical_subject_id ?? "").toLowerCase().replace(/[^a-z0-9]/g, "") !== binding.character.toLowerCase().replace(/[^a-z0-9]/g, "")
       || !target.scene_ids?.includes(row.scene_id) || decision.status !== "approved_clean"
       || !values.reference_plan_approval.selected_targets?.some((item) => item.ref_id === binding.ref_id && item.scene_ids?.includes(row.scene_id))
       || decision.reference_image_sha256 !== binding.approved_reference_sha256

@@ -51,6 +51,8 @@ node bin/goldflow.mjs visual panel-plan --episode-dir <episode-dir> --action com
 
 Preparation writes `panel_composition_packet_<episode>.json` and `panel_composition_recipe_<episode>.json`. The packet includes exact narration excerpts, original Whisper indices, beat boundaries and accepted artwork. Inspect the artwork and author every decision. Blank or missing decisions cannot pass.
 
+During hardening, an artwork owner's approved character-reference scope includes the exact beats covered by its validated asset order. A reaction in a later covered scene can use that scene's already approved identity without globally extending the reference plan. Unrelated scenes stay out of scope. Composition must still conceal that later reaction until its narration cue.
+
 Layouts are `full_frame`, `inset`, `reveal`, `reaction_pair` and `page_pan`. Crop, placement, entry direction/time, overlap duration, camera path and reading holds are explicit. Main panels stay bound to their current beats. Background/context panels may carry earlier artwork forward; a later panel cannot be disclosed as context before its beat. The compiler preserves all internal beat boundaries and keeps source, caption and spoken text separate.
 
 Compilation writes the official `panel_timeline_<episode>.json` and `panel_composition_plan_<episode>.json`, plus immutable candidate snapshots. Current script approval, narration, word timing, grouping approval, allocation, hardened prompts, accepted images, focal analysis, review decisions and per-cut ledger are hash-bound. A changed source or recipe invalidates its dependent plan. Recipe corrections recompile through the guarded stage, preserving earlier snapshots.

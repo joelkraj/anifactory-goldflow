@@ -88,6 +88,19 @@ try {
     spec: { ...spec, bindings: [{ ...binding, approved_reference_sha256: "0".repeat(64) }] }, status }), /approved scoped reference/);
   const result = await repairIdentityBindings({ episodeDir: dir, specPath, spec, status });
   assert.equal(result.repaired_cut_count, 1);
+  // Plain missing-identity repair must not invent a wardrobe migration or an
+  // injury event merely to satisfy an older recovery contract.
+  const plainDir = path.join(root, "plain", "ep_01");
+  await fs.mkdir(plainDir, { recursive: true });
+  for (const [key, name] of Object.entries(names)) {
+    await fs.writeFile(path.join(plainDir, name), name.endsWith(".json") ? json(contents[key]) : contents[key]);
+  }
+  const plainSpec = { ...spec, continuity_scope: null, temporal_scope: null };
+  const plainSpecPath = path.join(root, "plain-spec.json");
+  await fs.writeFile(plainSpecPath, json(plainSpec));
+  const plainResult = await repairIdentityBindings({ episodeDir: plainDir, specPath: plainSpecPath,
+    spec: plainSpec, status: { ...status, episode_dir: plainDir } });
+  assert.equal(plainResult.repaired_cut_count, 1);
   const after = JSON.parse(await fs.readFile(path.join(dir, names.reviewed_prompt_plan)));
   assert.equal(after.status, "passed");
   assert.deepEqual(after.prompts[0].reference_requirements.map((item) => item.ref_id), ["exit_location", "joey_state"]);

@@ -492,15 +492,23 @@ function targetIsRecurringBaseIdentity(target) {
     || /\brecurring core[- ]team member\b/i.test(rationale);
 }
 
-function targetScopedToPrompt(target, prompt) {
+export function targetScopedToPrompt(target, prompt, coveredBeats = []) {
   if (targetIsRecurringBaseIdentity(target)) return true;
   const plannedBeatIds = Array.isArray(target?.planned_beat_ids) ? target.planned_beat_ids.map(String).filter(Boolean) : [];
   const visualBeatId = String(prompt?.visual_beat_id ?? "");
   if (visualBeatId && (plannedBeatIds.includes(visualBeatId) || plannedBeatIds.includes("*"))) return true;
+  if (coveredBeats.some(beat => plannedBeatIds.includes(String(beat.visual_beat_id ?? "")))) return true;
   const sceneIds = Array.isArray(target?.scene_ids) ? target.scene_ids.map(String).filter(Boolean) : [];
   if (!sceneIds.length) return true;
   const sceneId = String(prompt?.scene_id ?? "");
-  return sceneIds.includes(sceneId) || sceneIds.includes("*");
+  return sceneIds.includes(sceneId) || sceneIds.includes("*")
+    || coveredBeats.some(beat => sceneIds.includes(String(beat.scene_id ?? "")));
+}
+
+export function authoredNonidentifyingMemorySilhouette(prompt, staging) {
+  return prompt.depiction_mode === "memory_or_flashback" && !staging?.ref_id
+    && /\bnon.identifying\b.*\bsilhouette\b/i.test(staging?.pose ?? "")
+    && /\bfaceless\b.*\bsilhouette/i.test(prompt.provider_prompt ?? prompt.image_prompt ?? "");
 }
 
 function attachableCharacterRefsForVisibleName(indexes, prompt, visibleName) {
@@ -509,7 +517,7 @@ function attachableCharacterRefsForVisibleName(indexes, prompt, visibleName) {
   for (const target of indexes.referenceById.values()) {
     if (referenceKindRank(target?.kind) !== 0) continue;
     if (!targetAttachable(target)) continue;
-    if (!targetScopedToPrompt(target, prompt)) continue;
+    if (!targetScopedToPrompt(target, prompt, indexes.panelArtworkBeats)) continue;
     if (!characterRefNameMatches(target, names)) continue;
     matches.push(target);
   }
@@ -722,7 +730,7 @@ function promptMatchedStateRefId(rawRefId, prompt, indexes) {
   for (const candidate of indexes.referenceById.values()) {
     if (!candidate?.ref_id || candidate.ref_id === lookupRefId) continue;
     if (referenceKindRank(candidate.kind) !== 0) continue;
-    if (!targetScopedToPrompt(candidate, prompt)) continue;
+    if (!targetScopedToPrompt(candidate, prompt, indexes.panelArtworkBeats)) continue;
     if (String(candidate.source_ref_id ?? candidate.ref_id) !== targetSource) continue;
     const candidateAnchor = normalize(candidate.scene_prompt_anchor ?? candidate.state_contract ?? candidate.prompt_anchor ?? "");
     const promptNorm = normalize(promptBody);
@@ -1062,6 +1070,13 @@ function sanitizePrompt(prompt, indexes) {
 
   for (const visibleName of (shotManifest?.visible_characters ?? [])) {
     if (genericVisibleGroupName(visibleName)) continue;
+    const authoredStaging = (shotManifest?.character_staging ?? []).find(row => normalize(row?.name) === normalize(visibleName));
+    if (authoredNonidentifyingMemorySilhouette(prompt, authoredStaging)) {
+      findings.push({ image_id: prompt.image_id, scene_id: prompt.scene_id, severity: "warning",
+        code: "authored_nonidentifying_memory_silhouette", character: visibleName, resolved: true,
+        message: "Explicit faceless memory silhouette uses no adult identity plate; inspect the generated depiction during image QA." });
+      continue;
+    }
     const visibleNameSet = manifestNameSet([visibleName]);
     const alreadyAttached = accepted.some((req) => {
       const target = indexes.referenceById.get(req.source_state_ref_id ?? req.ref_id) ?? indexes.referenceById.get(req.ref_id);
@@ -1612,7 +1627,9 @@ async function main() {
   let prompts = [];
   const findings = [];
   for (const prompt of promptPlan.prompts.filter(row => !panelAllocation || row.provider_submission_required !== false)) {
-    const result = sanitizePrompt(prompt, indexes);
+    const order = panelAllocation?.plan.asset_orders.find(row => row.owner_beat_id === prompt.visual_beat_id);
+    const panelArtworkBeats = order ? panelAllocation.beats.filter(beat => order.beat_ids.includes(beat.visual_beat_id)) : [];
+    const result = sanitizePrompt(prompt, panelArtworkBeats.length ? { ...indexes, panelArtworkBeats } : indexes);
     prompts.push(result.prompt);
     findings.push(...result.findings);
   }
@@ -1624,7 +1641,7 @@ async function main() {
   const unresolvedBlockers = classifiedFindings.hard_stops;
   const reviewFindings = classifiedFindings.review_findings;
   const status = unresolvedBlockers.length ? "blocked" : "passed";
-  const sourcePaths = [promptPath, timedPlanPath, visualReferencePlanPath, characterStateRefsPath, ...(referenceInventoryLedger ? [referenceInventoryLedgerPath] : []), ...(locationContractLedger ? [locationContractLedgerPath] : []), ...(manualTriage ? [manualTriagePath] : [])];
+  const sourcePaths = [promptPath, timedPlanPath, visualReferencePlanPath, characterStateRefsPath, ...(panelAllocation ? [panelAllocation.planPath] : []), ...(referenceInventoryLedger ? [referenceInventoryLedgerPath] : []), ...(locationContractLedger ? [locationContractLedgerPath] : []), ...(manualTriage ? [manualTriagePath] : [])];
   const sourceHashes = Object.fromEntries((await Promise.all(sourcePaths.map(async (filePath) => [filePath, await hashFile(filePath)]))).filter(([, hash]) => hash));
   const sampleRows = selectSamples(prompts);
   const report = {

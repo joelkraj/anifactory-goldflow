@@ -51,6 +51,7 @@ export function narrationManualReviewAdmission(status, command, subcommand, flag
   if (!applicable) return { applicable: false, allowed: false };
   const expected = `node bin/goldflow.mjs tts finalize-provider --episode-dir ${status.episode_dir} --manifest ${flags.manifest} --manual-review-evidence ${flags['manual-review-evidence']}`;
   const allowed = status.current_stage === 'qwen_tts_stitch' && status.current_stage_state === 'blocked'
+    && flags['episode-dir'] === status.episode_dir
     && status.next_command_shape === expected
     && Object.keys(flags).sort().join(',') === 'episode-dir,manifest,manual-review-evidence';
   return { applicable: true, allowed, reason: allowed ? null : 'Only the exact status-directed, hash-bound manual listening finalization is allowed.' };

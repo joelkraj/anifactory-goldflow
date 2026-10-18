@@ -34,6 +34,7 @@ test('current exact listening evidence exposes only no-synthesis finalization', 
   assert.equal(narrationManualReviewAdmission(status, 'tts', 'finalize-provider', flags).allowed, true);
   for (const extra of [{ force: 'true' }, { 'accept-asr-delivery-blockers': 'true' }]) assert.equal(narrationManualReviewAdmission(status, 'tts', 'finalize-provider', { ...flags, ...extra }).allowed, false);
   assert.equal(narrationManualReviewAdmission({ ...status, current_stage: 'voice_plan' }, 'tts', 'finalize-provider', flags).allowed, false);
+  assert.equal(narrationManualReviewAdmission(status, 'tts', 'finalize-provider', { ...flags, 'episode-dir': '/another/episode' }).allowed, false);
   assert.equal(narrationManualReviewAdmission(status, 'tts', 'narrate', flags).applicable, false);
   assert.equal(await narrationManualReviewStatus({ ...f.args, report: { ...f.report, manual_review_evidence_sha256: hash(await fs.readFile(f.evidencePath)) } }), null);
 });

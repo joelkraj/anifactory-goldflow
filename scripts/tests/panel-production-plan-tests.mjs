@@ -20,11 +20,18 @@ async function authored(f) {
 try {
   await test('official inputs produce a full-duration editable packet without authoring layouts', async () => {
     const f = await panelProductionFixture(path.join(root, 'prepare'));
+    const review = await read(f.p('image_output_review_decisions_ep_01.json'));
+    review.decisions[0].note = 'Keep the right-side outcome hidden until the spoken cue.';
+    const reviewHash = await writeJson(f.p('image_output_review_decisions_ep_01.json'), review);
+    const qa = await read(f.p('image_output_qa_ep_01.json'));
+    qa.review_decisions_sha256 = reviewHash; await writeJson(f.p('image_output_qa_ep_01.json'), qa);
     const result = await preparePanelProductionPlan(f), recipe = await read(result.recipe_path), packet = await read(result.packet_path);
     assert.equal(result.status, 'needs_authoring'); assert.equal(recipe.author, null); assert.equal(recipe.decisions.every(row => row.layout === null), true);
     assert.deepEqual(packet.words.map(row => row.word), ['I', 'paid', 'two', 'dollars.']);
     assert.deepEqual(packet.beats.map(row => row.visual_beat_script_excerpt), ['I paid', '$2.']);
     assert.equal(packet.baseline.fps, 30); assert.equal(packet.baseline.width, 1920);
+    assert.deepEqual(packet.image_review_decisions, review.decisions);
+    assert.equal(packet.source_hashes[await fs.realpath(f.p('image_output_review_decisions_ep_01.json'))], reviewHash);
     await assert.rejects(compilePanelProductionPlan(f), /author/);
     await assert.rejects(preparePanelProductionPlan(f), /existing artifact retained/);
   });

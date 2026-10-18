@@ -160,17 +160,18 @@ export async function readPanelProductionInputs({ episodeDir }) {
   const timeline = { schema: 'goldflow_panel_production_timeline_v1', intent: 'production_panel_composition', id: `${identity.channel}-${identity.week ?? identity.run_slug ?? 'run'}-${episode}`, content_profile: 'manhwa_recap_v1', run_identity: run.ref, ...canvas, duration_sec: duration, audio_target: 'narrator_only', audio, narration_preroll_sec: beatRows[0].start_sec, assets, panels, scenes };
   validatePanelTimeline(timeline, timeline.intent);
   await currentHashes(inputHashes);
-  return { episodeDir: dir, identity, paths, timeline, assets, audio, inputHashes, beats: beatRows, words, allocation: allocationPlan };
+  return { episodeDir: dir, identity, paths, timeline, assets, audio, inputHashes, beats: beatRows, words, allocation: allocationPlan, imageReviewDecisions: decisions.value.decisions };
 }
 
 export async function preparePanelProductionPlan({ episodeDir }) {
   const loaded = await readPanelProductionInputs({ episodeDir });
   const { paths, timeline, inputHashes } = loaded;
   for (const file of [paths.packetPath, paths.recipePath, paths.planPath]) need(!await fs.stat(file).then(() => true, () => false), `existing artifact retained: ${file}`);
-  const packet = { schema: 'goldflow_panel_production_packet_v1', status: 'needs_authored_composition', run_identity: timeline.run_identity, source_hashes: inputHashes, baseline: timeline, beats: loaded.beats, words: loaded.words, instructions: [
+  const packet = { schema: 'goldflow_panel_production_packet_v1', status: 'needs_authored_composition', run_identity: timeline.run_identity, source_hashes: inputHashes, baseline: timeline, beats: loaded.beats, words: loaded.words, image_review_decisions: loaded.imageReviewDecisions, instructions: [
     'Inspect accepted artwork and author every layout, crop, camera move and reveal against the exact narration. No fixed transition cycle or target reuse quota.',
     'Each main panel must stay bound to its current approved beat. Context/background may hold current or earlier panels; never disclose a later beat early.',
     'Choose full_frame, inset, reveal, reaction_pair or page_pan. Relative source_rect selects artwork; rect places it on the 16:9 output. Preserve faces and readable content.',
+    'Read the hash-bound image_review_decisions, including crop and disclosure notes, before choosing regions. Image acceptance does not approve full-frame disclosure or final composition; inspect foreground, context and blurred background together.',
     'Keep exact scene boundaries and original word indices. Source/caption/spoken text remain separate and immutable.',
     'Review the composed opening and samples from later sections before final QA. This authored edit is not a final-QA or publishing approval.',
   ] };

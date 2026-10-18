@@ -1,29 +1,65 @@
-// Single place to change the default model for NEW planning runs.
-// Existing run identities keep the model recorded in run_identity.json; nothing
-// here rewrites or migrates them.
+// Default planner models for NEW runs, read from config/planner-models.json so a
+// model change is a data edit, not a code change. Existing run identities keep
+// the model recorded in run_identity.json; nothing here rewrites or migrates them.
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+export const PLANNER_MODELS_SCHEMA = "goldflow_planner_models_v1";
+export const PLANNER_MODELS_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../config/planner-models.json");
+const EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
+const MODEL_ALIASES = new Set(["latest", "default", "current"]);
+const VERSION = /^\d+\.\d+\.\d+$/;
+
+export function parsePlannerModelsConfig(raw, source = "planner models config") {
+  let doc;
+  try { doc = typeof raw === "string" ? JSON.parse(raw) : raw; } catch (error) {
+    throw new Error(`${source} is not valid JSON: ${error.message}`);
+  }
+  if (doc?.schema !== PLANNER_MODELS_SCHEMA) throw new Error(`${source} must declare schema ${PLANNER_MODELS_SCHEMA}.`);
+  const providers = {};
+  for (const id of ["codex_cli", "claude_cli"]) {
+    const row = doc.providers?.[id];
+    if (!row || typeof row.model !== "string" || !row.model.trim()) throw new Error(`${source}: providers.${id}.model is required.`);
+    if (!EFFORTS.has(row.reasoning_effort)) throw new Error(`${source}: providers.${id}.reasoning_effort must be one of ${[...EFFORTS].join(", ")}.`);
+    const gates = (row.minimum_cli_by_model ?? []).map((gate, index) => {
+      if (!VERSION.test(String(gate?.minimum ?? ""))) throw new Error(`${source}: providers.${id}.minimum_cli_by_model[${index}].minimum must be x.y.z.`);
+      return Object.freeze({ pattern: new RegExp(String(gate.pattern), "i"), minimum: gate.minimum });
+    });
+    providers[id] = Object.freeze({
+      model: row.model.trim(),
+      reasoning_effort: row.reasoning_effort,
+      minimum_cli_by_model: Object.freeze(gates),
+    });
+  }
+  return Object.freeze(providers);
+}
+
+const PLANNER_MODELS = parsePlannerModelsConfig(readFileSync(PLANNER_MODELS_PATH, "utf8"), PLANNER_MODELS_PATH);
 
 export const CODEX_PLANNING_DEFAULTS = Object.freeze({
-  model: "gpt-6.1-sol",
-  reasoning_effort: "medium",
+  model: PLANNER_MODELS.codex_cli.model,
+  reasoning_effort: PLANNER_MODELS.codex_cli.reasoning_effort,
 });
 
 export const CLAUDE_PLANNING_DEFAULTS = Object.freeze({
-  model: "claude-sonnet-5-5",
-  reasoning_effort: "medium",
+  model: PLANNER_MODELS.claude_cli.model,
+  reasoning_effort: PLANNER_MODELS.claude_cli.reasoning_effort,
 });
 
-// Minimum Codex CLI release required per model family. First match wins; the
-// final entry is the fallback for unlisted models.
-// gpt-6.1-sol: the model entered the bundled catalog in 0.159.1 (third-party
-// release-note summaries, not OpenAI's own text). Treat as a floor; account
-// access can still be required beyond the CLI version.
-export const CODEX_MINIMUM_CLI_BY_MODEL = Object.freeze([
-  Object.freeze({ pattern: /^gpt-6\.1(?:-|$)/i, minimum: "0.159.1" }),
-  Object.freeze({ pattern: /^gpt-5\.6(?:-|$)/i, minimum: "0.144.0" }),
-  Object.freeze({ pattern: /./, minimum: "0.0.0" }),
-]);
-
-export function minimumCodexCliForModel(model) {
+// Minimum Codex CLI release per model; unlisted models have no minimum. A model's
+// own row wins, first match first.
+export function minimumCodexCliForModel(model, config = PLANNER_MODELS) {
   const name = String(model ?? "");
-  return CODEX_MINIMUM_CLI_BY_MODEL.find((row) => row.pattern.test(name)).minimum;
+  return config.codex_cli.minimum_cli_by_model.find((row) => row.pattern.test(name))?.minimum ?? "0.0.0";
+}
+
+// "latest"/"default"/"current" resolve to the configured default for the provider.
+// The caller records the concrete result, so a run never stores an alias.
+export function resolveModelAlias(provider, value, config = PLANNER_MODELS) {
+  const text = String(value ?? "").trim();
+  if (!MODEL_ALIASES.has(text.toLowerCase())) return text;
+  const row = config[provider];
+  if (!row) throw new Error(`Model alias "${text}" is not supported for provider ${provider}.`);
+  return row.model;
 }

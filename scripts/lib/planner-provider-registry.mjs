@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { plannerRouteFromRegistry } from "../../apps/goldflow-studio/lib/planning-route-registry.mjs";
-import { CLAUDE_PLANNING_DEFAULTS, CODEX_PLANNING_DEFAULTS } from "./model-defaults.mjs";
+import { CLAUDE_PLANNING_DEFAULTS, CODEX_PLANNING_DEFAULTS, resolveModelAlias } from "./model-defaults.mjs";
 
 export const PLANNING_ROOM_PROVIDER = "planning_room";
 export const FEDERATED_PLANNING_ROOM_SCHEMA = "goldflow_planning_room_v2";
@@ -273,8 +273,8 @@ export function plannerModelForProvider(provider, identity = {}, env = process.e
     ?? identity?.planning_room?.provider_models?.[id]
     ?? null;
   if (locked) return String(locked);
-  if (id === "codex_cli") return String(env.ANIFACTORY_CODEX_MODEL ?? PLANNER_PROVIDER_REGISTRY[id].default_model);
-  if (id === "claude_cli") return String(env.ANIFACTORY_CLAUDE_MODEL ?? PLANNER_PROVIDER_REGISTRY[id].default_model);
+  if (id === "codex_cli") return resolveModelAlias(id, env.ANIFACTORY_CODEX_MODEL ?? PLANNER_PROVIDER_REGISTRY[id].default_model);
+  if (id === "claude_cli") return resolveModelAlias(id, env.ANIFACTORY_CLAUDE_MODEL ?? PLANNER_PROVIDER_REGISTRY[id].default_model);
   if (id === "antigravity_cli") return String(env.ANIFACTORY_ANTIGRAVITY_MODEL ?? PLANNER_PROVIDER_REGISTRY[id].default_model);
   if (id === "gemini_web") return String(env.ANIFACTORY_GEMINI_WEB_MODEL ?? PLANNER_PROVIDER_REGISTRY[id].default_model);
   if (id === "chatgpt_web") return String(env.ANIFACTORY_CHATGPT_WEB_MODEL ?? PLANNER_PROVIDER_REGISTRY[id].default_model);

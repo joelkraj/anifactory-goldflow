@@ -1,0 +1,18 @@
+{
+  "schema": "goldflow_planner_models_v1",
+  "note": "Default planner model per provider for NEW runs. Edit here when a model ships. Existing run identities keep the model recorded in run_identity.json.",
+  "providers": {
+    "codex_cli": {
+      "model": "gpt-6.1-sol",
+      "reasoning_effort": "medium",
+      "minimum_cli_by_model": [
+        { "pattern": "^gpt-6\\.1(?:-|$)", "minimum": "0.159.1" },
+        { "pattern": "^gpt-5\\.6(?:-|$)", "minimum": "0.144.0" }
+      ]
+    },
+    "claude_cli": {
+      "model": "claude-sonnet-5-5",
+      "reasoning_effort": "medium"
+    }
+  }
+}

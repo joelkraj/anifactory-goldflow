@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -126,9 +127,72 @@ async function main() {
   assert.equal(result.status, "approved");
   const approval = JSON.parse(await fs.readFile(path.join(episodeDir, "operator_script_approval.json"), "utf8"));
   assert.match(approval.power_system_comprehension_audit_hash, /^[a-f0-9]{64}$/);
+  assert.equal(approval.power_system_editorial_exception, undefined);
 
   await fs.writeFile(path.join(episodeDir, "script_clean.md"), `${SCRIPT}\nA changed line.\n`, "utf8");
   await rejects(execFileAsync(process.execPath, ["scripts/script-approve.mjs", "--episode-dir", episodeDir], { cwd: process.cwd() }), /power-system comprehension audit is missing, stale, or blocked/i);
+
+  const releasedDir = path.join(root, "operator-released");
+  await fs.mkdir(releasedDir, { recursive: true });
+  await fs.writeFile(path.join(releasedDir, "script_clean.md"), SCRIPT, "utf8");
+  const scriptHash = createHash("sha256").update(SCRIPT).digest("hex");
+  const reason = "The operator reviewed and released this exact draft; the agent accepts its demonstrated-power opening before the later rules explanation without rewriting it.";
+  const exceptionArgs = ["--accept-power-system-editorial-risk", "true"];
+  const reasonArgs = ["--power-system-editorial-reason", reason];
+  const approveReleased = (extra = []) => execFileAsync(process.execPath, [
+    "scripts/script-approve.mjs", "--episode-dir", releasedDir, ...extra,
+  ], { cwd: process.cwd() });
+
+  await rejects(approveReleased([...exceptionArgs, ...reasonArgs]), /requires --hash/i);
+  await rejects(approveReleased([...exceptionArgs, "--hash", scriptHash]), /at least 40 characters/i);
+  await rejects(approveReleased([...exceptionArgs, "--hash", scriptHash, "--power-system-editorial-reason", "ok"]), /at least 40 characters/i);
+  await rejects(approveReleased(["--hash", scriptHash, ...reasonArgs]), /requires --accept-power-system-editorial-risk true/i);
+  await rejects(approveReleased([...exceptionArgs, ...reasonArgs, "--hash", "0".repeat(64)]), /expected hash.*current script hash/i);
+  await rejects(fs.readFile(path.join(releasedDir, "operator_script_approval.json")), /ENOENT/);
+
+  const releasedOutput = JSON.parse((await approveReleased([
+    ...exceptionArgs, ...reasonArgs, "--hash", scriptHash,
+  ])).stdout);
+  assert.equal(releasedOutput.status, "approved");
+  assert.equal(releasedOutput.power_system_comprehension_audit_hash, null);
+  for (const filename of ["manual_agent_script_review.json", "operator_script_approval.json", "script_lock.json"]) {
+    const receipt = JSON.parse(await fs.readFile(path.join(releasedDir, filename), "utf8"));
+    assert.equal(receipt.script_clean_hash, scriptHash);
+    assert.equal(receipt.power_system_comprehension_audit_path, null);
+    assert.equal(receipt.power_system_comprehension_audit_hash, null);
+    assert.deepEqual(receipt.power_system_editorial_exception, releasedOutput.power_system_editorial_exception);
+    assert.equal(receipt.power_system_editorial_exception.status, "not_performed_operator_editorial_exception");
+    assert.equal(receipt.power_system_editorial_exception.source_script_hash, scriptHash);
+    assert.equal(receipt.power_system_editorial_exception.approval_scope, "exact_script_hash");
+    assert.equal(receipt.power_system_editorial_exception.operator_release_basis_and_editorial_risk, reason);
+    assert.equal(receipt.power_system_editorial_exception.comprehension_audit_pass_claimed, false);
+  }
+  assert.equal(await fs.readFile(path.join(releasedDir, "script_clean.md"), "utf8"), SCRIPT);
+  await rejects(fs.readFile(path.join(releasedDir, "power_system_comprehension_audit.json")), /ENOENT/);
+  // An earlier exception never silently becomes the default for another call.
+  await rejects(approveReleased(["--hash", scriptHash]), /required power-system comprehension audit is missing/i);
+
+  const preservedAuditPath = path.join(releasedDir, "power_system_comprehension_audit.json");
+  const preservedAuditBytes = `${JSON.stringify(late, null, 2)}\n`;
+  await fs.writeFile(preservedAuditPath, preservedAuditBytes, "utf8");
+  await rejects(approveReleased(["--hash", scriptHash]), /power-system comprehension audit is missing, stale, or blocked/i);
+  const retainedOutput = JSON.parse((await approveReleased([
+    ...exceptionArgs, ...reasonArgs, "--hash", scriptHash,
+  ])).stdout);
+  assert.equal(retainedOutput.power_system_editorial_exception.status, "existing_audit_preserved_editorial_risk_accepted");
+  assert.equal(retainedOutput.power_system_editorial_exception.existing_audit_status, "blocked");
+  assert.equal(retainedOutput.power_system_editorial_exception.existing_audit_validation.status, "blocked");
+  assert.equal(retainedOutput.power_system_comprehension_audit_hash, createHash("sha256").update(preservedAuditBytes).digest("hex"));
+  assert.equal(await fs.readFile(preservedAuditPath, "utf8"), preservedAuditBytes);
+
+  const existingApproval = await fs.readFile(path.join(releasedDir, "operator_script_approval.json"), "utf8");
+  const metaScript = `${SCRIPT}\nThat was the hook.\n`;
+  await fs.writeFile(path.join(releasedDir, "script_clean.md"), metaScript, "utf8");
+  await rejects(approveReleased([
+    ...exceptionArgs, ...reasonArgs, "--hash", createHash("sha256").update(metaScript).digest("hex"),
+  ]), /production\/meta narration contamination/i);
+  assert.equal(await fs.readFile(path.join(releasedDir, "operator_script_approval.json"), "utf8"), existingApproval);
+  assert.equal(await fs.readFile(path.join(releasedDir, "script_clean.md"), "utf8"), metaScript);
 
   console.log("power-system comprehension tests passed");
 }

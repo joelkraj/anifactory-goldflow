@@ -7,17 +7,21 @@ import sharp from "sharp";
 import { sha256File } from "./lib/file-hash.mjs";
 import {
   LEGACY_YOUTUBE_PACKAGING_SPEC_SCHEMA,
+  listYoutubeScheduleReceipts,
   YOUTUBE_PACKAGING_SPEC_SCHEMA,
   YOUTUBE_PINNED_COMMENT_RECEIPT_SCHEMA,
   YOUTUBE_PUBLISH_MANIFEST_SCHEMA,
+  YOUTUBE_SCHEDULE_RECEIPT_SCHEMA,
   YOUTUBE_THUMBNAIL_UPDATE_RECEIPT_SCHEMA,
   YOUTUBE_THUMBNAIL_GENERATION_CONTRACT,
   YOUTUBE_UPLOAD_RECEIPT_SCHEMA,
   listYoutubeThumbnailUpdateReceipts,
   packagingWorkflowSupport,
+  selectedThumbnailCandidate,
   validateYoutubeThumbnailUpdateReceipt,
   validateYoutubePackagingSpec,
   validateYoutubePinnedCommentReceipt,
+  validateYoutubeScheduleReceipt,
   validateYoutubeUploadReceipt,
   youtubeEffectiveThumbnailState,
   youtubeFinalQaDurationSeconds,
@@ -144,6 +148,11 @@ async function packagingInputs(episodeDir, episode) {
     throw new Error(`Unsupported packaging spec schema: ${spec.schema ?? "missing"}`);
   }
   const thumbnailPath = path.resolve(episodeDir, clean(spec.thumbnail_final_path));
+  const selected = selectedThumbnailCandidate(spec);
+  if (selected?.generation_mode === YOUTUBE_THUMBNAIL_GENERATION_CONTRACT.scoped_edit_mode
+      && path.resolve(episodeDir, clean(selected.edit_source_path)) === thumbnailPath) {
+    throw new Error("Scoped thumbnail edit must preserve its source at a separate path.");
+  }
   if (!(await exists(thumbnailPath))) throw new Error(`Missing final thumbnail: ${thumbnailPath}`);
   const [metadata, stat] = await Promise.all([
     sharp(thumbnailPath).metadata(),
@@ -161,6 +170,10 @@ async function packagingInputs(episodeDir, episode) {
       format: metadata.format,
     },
     thumbnailBytes: stat.size,
+    thumbnailFinalSha256: await sha256File(thumbnailPath),
+    ...(selected?.generation_mode === YOUTUBE_THUMBNAIL_GENERATION_CONTRACT.scoped_edit_mode
+      ? { thumbnailEditSourceSha256: await sha256File(path.resolve(episodeDir, clean(selected.edit_source_path))).catch(() => null) }
+      : {}),
   };
 }
 
@@ -200,6 +213,8 @@ function packagingValidation(inputs, options = {}) {
     markdown: inputs.markdown,
     thumbnailMetadata: inputs.thumbnailMetadata,
     thumbnailBytes: inputs.thumbnailBytes,
+    thumbnailFinalSha256: inputs.thumbnailFinalSha256,
+    thumbnailEditSourceSha256: inputs.thumbnailEditSourceSha256,
     ...options,
   });
 }
@@ -221,6 +236,8 @@ async function approvePackaging() {
     markdown: inputs.markdown,
     thumbnailMetadata: inputs.thumbnailMetadata,
     thumbnailBytes: inputs.thumbnailBytes,
+    thumbnailFinalSha256: inputs.thumbnailFinalSha256,
+    thumbnailEditSourceSha256: inputs.thumbnailEditSourceSha256,
   });
   const experiment = await channelExperimentContext({ episodeDir, identity, episode, spec: approvedSpec });
   if (experiment?.validation.applies && experiment.validation.blockers.length) {
@@ -379,6 +396,8 @@ async function prepareManifest() {
     inputs.packagePath,
     inputs.specPath,
     inputs.thumbnailPath,
+    ...(selectedThumbnail?.generation_mode === YOUTUBE_THUMBNAIL_GENERATION_CONTRACT.scoped_edit_mode
+      ? [path.resolve(episodeDir, clean(selectedThumbnail.edit_source_path))] : []),
     ...(experiment?.validation.applies ? [experiment.path] : []),
     ...(abPlan ? [abPlanPath, ...abPlan.variants.map((row) => row.thumbnail_path)] : []),
   ];
@@ -423,6 +442,11 @@ async function prepareManifest() {
       provider: selectedThumbnail.provider ?? null,
       generation_mode: selectedThumbnail.generation_mode ?? null,
       reference_count: selectedThumbnail.reference_count ?? null,
+      edit_source_path: selectedThumbnail.edit_source_path ?? null,
+      edit_source_sha256: selectedThumbnail.edit_source_sha256 ?? null,
+      final_sha256: selectedThumbnail.final_sha256 ?? null,
+      edit_scope: selectedThumbnail.edit_scope ?? null,
+      edit_user_request: selectedThumbnail.edit_user_request ?? null,
       text_rendered_by_model: selectedThumbnail.text_rendered_by_model ?? null,
       locally_composited_text: selectedThumbnail.locally_composited_text ?? null,
       locally_composited_arrows: selectedThumbnail.locally_composited_arrows ?? null,
@@ -617,6 +641,73 @@ async function recordUpload() {
     analytics_followup_plan_path: analyticsFollowup.planPath,
     analytics_followup_status: analyticsFollowup.plan.status,
   }, null, 2));
+}
+
+async function recordSchedule() {
+  const { episodeDir, episode } = await episodeContext();
+  const manifestPath = path.join(episodeDir, `youtube_publish_manifest_${episode}.json`);
+  const uploadReceiptPath = path.join(episodeDir, `youtube_upload_receipt_${episode}.json`);
+  const [manifest, uploadReceipt, uploadReceiptSha256] = await Promise.all([
+    readJson(manifestPath),
+    readJson(uploadReceiptPath),
+    sha256File(uploadReceiptPath).catch(() => null),
+  ]);
+  if (!manifest || manifest.schema !== YOUTUBE_PUBLISH_MANIFEST_SCHEMA || manifest.status !== "passed") {
+    throw new Error(`Passed YouTube publish manifest required: ${manifestPath}`);
+  }
+  if (!uploadReceipt || validateYoutubeUploadReceipt(uploadReceipt, {
+    manifest,
+    manifestHash: await sha256File(manifestPath),
+  }).status !== "passed") {
+    throw new Error(`Passed current YouTube upload receipt required: ${uploadReceiptPath}`);
+  }
+  for (const name of ["video-id", "schedule-at", "time-zone", "publish-approved-by", "recorded-by"]) requiredFlag(name, flags[name]);
+  const existingSchedules = await listYoutubeScheduleReceipts(episodeDir, episode);
+  const sequence = existingSchedules.length + 1;
+  if (existingSchedules.some((row, index) => row.sequence !== index + 1)) {
+    throw new Error("Existing schedule receipt sequence has a gap; inspect before recording another revision.");
+  }
+  const previousScheduleReceiptSha256 = existingSchedules.length
+    ? await sha256File(existingSchedules.at(-1).path) : null;
+  const receiptPath = path.join(episodeDir, `youtube_scheduled_release_receipt_${episode}${sequence === 1 ? "" : `_${sequence}`}.json`);
+  const receipt = {
+    schema: YOUTUBE_SCHEDULE_RECEIPT_SCHEMA,
+    status: "passed",
+    episode,
+    manifest_path: manifestPath,
+    manifest_sha256: await sha256File(manifestPath),
+    upload_receipt_path: uploadReceiptPath,
+    upload_receipt_sha256: uploadReceiptSha256,
+    sequence,
+    supersedes_receipt_sha256: previousScheduleReceiptSha256,
+    video_id: clean(flags["video-id"]),
+    visibility: "scheduled",
+    schedule_at: clean(flags["schedule-at"]),
+    time_zone: clean(flags["time-zone"]),
+    publish_approval: {
+      approved: isTrue(flags["publish-approved"]),
+      approved_by: clean(flags["publish-approved-by"]),
+    },
+    field_verification: {
+      active_channel: isTrue(flags["channel-verified"]),
+      schedule: isTrue(flags["schedule-verified"]),
+      existing_fields: isTrue(flags["existing-fields-verified"]),
+      checks_complete: isTrue(flags["checks-complete"]),
+    },
+    recorded_by: clean(flags["recorded-by"]),
+    recorded_at: new Date().toISOString(),
+    note: clean(flags.note) || null,
+  };
+  const validation = validateYoutubeScheduleReceipt(receipt, {
+    manifest, uploadReceipt, uploadReceiptSha256, previousScheduleReceiptSha256, expectedSequence: sequence,
+  });
+  if (validation.status !== "passed") {
+    console.log(JSON.stringify({ status: "blocked", blockers: validation.blockers }, null, 2));
+    process.exitCode = 2;
+    return;
+  }
+  await writeJsonExclusive(receiptPath, receipt);
+  console.log(JSON.stringify({ status: "passed", receipt_path: receiptPath, video_id: receipt.video_id, schedule_at: receipt.schedule_at }, null, 2));
 }
 
 async function recordComment() {
@@ -817,6 +908,7 @@ async function main() {
   if (action === "approve-ab-test") return approveNativeAbTest();
   if (action === "prepare") return prepareManifest();
   if (action === "record-upload") return recordUpload();
+  if (action === "record-schedule") return recordSchedule();
   if (action === "record-ab-test") return recordNativeAbTest();
   if (action === "record-thumbnail-update") return recordThumbnailUpdate();
   if (action === "record-comment") return recordComment();

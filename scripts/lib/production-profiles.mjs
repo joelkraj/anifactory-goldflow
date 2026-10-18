@@ -227,6 +227,7 @@ profiles.fast_premium_v2 = mergeProfileConfig(profiles.fast_premium_v1, {
   audio: {
     narration_delivery_qa: {
       policy: "material_delivery_risk_only_v1",
+      acceptance_mode: "automated_asr_v1",
       substitution_only_asr_disagreement_requires_exact_listen: false,
       unconfirmed_primary_asr_requires_exact_listen: false,
       substitution_only_high_wer_requires_exact_listen: false,

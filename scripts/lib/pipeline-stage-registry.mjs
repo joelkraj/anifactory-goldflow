@@ -121,12 +121,24 @@ const stages = [
       /^modelslab_qwen_tts_report_.*\.json$/,
       /^qwen_tts_unit_qa_.*\.json$/,
       /^audio_stitch_report_.*\.json$/,
+      /^narration_source_structure_.*\.json$/,
+      /^narration_low_margin_disposition_.*\.json$/,
     ],
     commands: [
       "tts narrate",
+      "tts adopt-interrupted",
+      "tts finalize-interrupted",
       "tts import-provider",
       "tts finalize-provider",
+      "tts repair-boundary",
+      "tts complete-tail",
+      "tts repair-pronunciation",
+      "tts repair-pronunciation-auto",
+      "tts review-contraction",
+      "tts repair-contraction",
       "tts approve-listen",
+      "tts source-structure",
+      "tts low-margin-disposition",
       "tts qwen",
     ],
   },
@@ -192,7 +204,7 @@ const stages = [
     output_artifact: "visual_beat_plan.json + visual_beat_approval.json",
     approval: "operator_or_agent",
     validator: "beat_coverage_state_and_lock",
-    commands: ["visual beats"],
+    commands: ["visual beats", "visual repair-beats", "visual repair-beat-density"],
   },
   {
     id: "visual_reference_plan",
@@ -210,7 +222,7 @@ const stages = [
     output_artifact: "reference_plan_approval.json",
     approval: "operator_or_agent",
     validator: "reference_plan_approval_hash",
-    commands: ["visual approve-ref-plan"],
+    commands: ["visual approve-ref-plan", "visual repair-ref-plan"],
   },
   {
     id: "reference_generation",
@@ -243,7 +255,7 @@ const stages = [
       /^panel_asset_.*\.json$/,
       /^panel_asset_.*\.md$/,
     ],
-    commands: ["visual plan", "visual panel-assets"],
+    commands: ["visual plan", "visual panel-assets", "visual repair-prompt", "visual repair-prompt-multiplier"],
   },
   {
     id: "visual_prompt_harden",
@@ -267,7 +279,8 @@ const stages = [
     approval: "automatic",
     validator: "prompt_blocker_resolution",
     skip: "harden_has_no_blockers",
-    commands: ["visual review"],
+    output_patterns: [/^section_image_prompts_reviewed\.json$/],
+    commands: ["visual review", "visual repair-screen-identity", "visual repair-identity-binding", "visual repair-reviewed-ref-scope"],
   },
   {
     id: "transition_edit_plan",
@@ -419,7 +432,7 @@ const stages = [
     output_artifact: "youtube_pinned_comment_receipt_<episode>.json",
     approval: "operator",
     validator: "youtube_pinned_comment_receipt_hash",
-    commands: ["youtube record-comment"],
+    commands: ["youtube record-schedule", "youtube record-comment"],
   },
 ];
 
@@ -442,6 +455,7 @@ export function stageRegistryFor(identity = {}) {
   const workflow = assertAvailableMediaWorkflow(identity);
   if (isPanelProductionIdentity(identity)) assertPanelProductionIdentity(identity);
   else if (identity.panel_composition_contract != null) throw new Error("Panel composition contract requires its locked panel_composition_v1 render profile.");
+  if (workflow.id === "true_crime_hybrid_proof_v1") throw new Error("True-crime proof uses its dedicated private stage registry; use crime-proof commands or run status.");
   if (workflow.id === "avatar_footage_pilot_v1") return AVATAR_PILOT_STAGES;
   return PIPELINE_STAGE_REGISTRY;
 }
@@ -470,6 +484,23 @@ export function stageIsSatisfied(state) {
 export function commandStageFor(commandName, subcommandName, flags = {}, identity = {}) {
   const registry = stageRegistryFor(identity);
   const key = `${commandName} ${subcommandName}`.trim();
+  if (registry === PIPELINE_STAGE_REGISTRY && key === "visual openart-bank") {
+    return ({ plan: "visual_reference_plan", "revise-plan": "reference_generation", "approve-plan": "reference_plan_approval", "approve-refs": "reference_image_approval", "bind-shots": "visual_prompt_plan", harden: "visual_prompt_harden" })[String(flags.action ?? "")] ?? null;
+  }
+  if (registry === PIPELINE_STAGE_REGISTRY && key === "imagegen openart") {
+    if (!["generate", "review", "prepare", "mark-submitted", "import", "sync-library", "triage", "fail"].includes(String(flags.action ?? ""))) return null;
+    return /^(true|1|yes)$/i.test(String(flags["references-only"] ?? "")) ? "reference_generation" : "image_generation";
+  }
+  if (registry === PIPELINE_STAGE_REGISTRY && key === "imagegen fal") {
+    if (["repair-reviewed-bulk", "recover-reviewed-bulk-hold", "observe-reviewed-bulk", "finalize-reviewed-bulk"].includes(String(flags.action ?? ""))) return "image_output_qa";
+    if (identity.visual_restart?.fork_at === "visual_reference_plan") {
+      if (["repair-reviewed-references", "observe-reviewed-references", "repair-failed-reviewed-reference", "observe-failed-reviewed-reference", "repair-successful-reviewed-references", "observe-successful-reviewed-references", "finalize-reviewed-references"].includes(String(flags.action ?? ""))) return "reference_image_approval";
+      return ["prepare-references", "billing-submit-reference", "billing-observe-reference", "dispatch-references", "observe-references", "observe-reference-holds", "recover-reference-holds", "observe-reference-transport-recovery", "repair-reference-failures", "observe-reference-repairs", "finalize-references"].includes(String(flags.action ?? ""))
+        ? "reference_generation" : "image_generation";
+    }
+    return ["prepare-validation", "billing-submit", "billing-observe", "dispatch-validation", "observe-validation", "review-validation"].includes(String(flags.action ?? ""))
+      ? "reference_image_approval" : "image_generation";
+  }
   if (registry === PIPELINE_STAGE_REGISTRY && (key === "imagegen start" || key === "imagegen codex-work" || key === "imagegen browser-pool" || key === "imagegen import-codex" || key === "imagegen import-staged-codex")) {
     if (/^(true|1|yes)$/i.test(String(flags["references-only"] ?? ""))) return "reference_generation";
     if (/^(true|1|yes)$/i.test(String(flags["qa-recovery"] ?? ""))) return "image_output_qa";
@@ -733,7 +764,7 @@ export function buildStageCommand(stageId, identity = {}, options = {}) {
       ? `node bin/goldflow.mjs imagegen codex-work ${base} --action create --prompts <episode-dir>/section_image_prompts_hardened.json --image-ids <codex_cut_ids> --max-attempts 1 --lease-sec 900; after the validated Codex manifest is imported, run the ModelsLab remainder when this is a hybrid lane: node bin/goldflow.mjs imagegen start ${base}${codexOpeningFlag(identity)} --image-provider ${provider} --image-model ${imageModel} --provider-filter modelslab --skip-reference-generation true --concurrency ${media.image_concurrency} --output <episode-dir>/imagegen_report_${episode}.json`
       : `node bin/goldflow.mjs imagegen start ${base} --image-provider ${provider} --image-model ${imageModel} --prompts <episode-dir>/section_image_prompts_hardened.json --skip-reference-generation true --concurrency ${imageConcurrency} --reference-concurrency ${referenceMediaConcurrency}`,
     image_focal_analysis: `node bin/goldflow.mjs imagegen analyze ${base} --concurrency ${media.focal_analysis_concurrency}`,
-    image_output_qa: `node bin/goldflow.mjs imagegen qa ${base} --semantic-audit true --semantic-audit-concurrency 8 --semantic-audit-effort medium`,
+    image_output_qa: `node bin/goldflow.mjs imagegen qa ${base} --semantic-audit true --semantic-audit-concurrency 8 --semantic-audit-model gpt-6-sol --semantic-audit-effort medium`,
     animation_direction_plan: `node bin/goldflow.mjs visual animation-plan ${base}`,
     generated_video_motion: `node bin/goldflow.mjs visual generated-motion ${base} --concurrency ${media.generated_motion_concurrency ?? 3}${(orchestration.generated_motion_coherence_prefetch ?? orchestration.incremental_generated_motion_prefetch) === true ? " --prefetch-coherence-cache true" : ""}`,
     generated_video_motion_approval: `node bin/goldflow.mjs visual approve-generated-motion ${base} --reviewer <name> --note "<clip review notes>" --approve-ids <ids> --reject-ids <ids>`,
@@ -749,7 +780,31 @@ export function buildStageCommand(stageId, identity = {}, options = {}) {
     upload_packaging: `node bin/goldflow.mjs youtube approve-packaging ${base} --approve true --approved-by <name> --note "<packaging review notes>"`,
     youtube_publish_readiness: `node bin/goldflow.mjs youtube prepare ${base}`,
     youtube_studio_upload: `Use the youtube-studio-publish browser skill, upload privately first, verify every field, then run node bin/goldflow.mjs youtube record-upload ${base} --video-id <id> --watch-url <url> --visibility <private|unlisted|public|scheduled> --channel-verified true --initial-private-verified true --title-verified true --description-verified true --thumbnail-verified true --audience-verified true --monetization-verified true --mid-rolls-verified true --comments-verified true --checks-complete true --recorded-by <name>`,
-    youtube_pinned_comment: `After explicit comment approval, use the youtube-studio-publish browser skill, pin the exact manifest comment, then run node bin/goldflow.mjs youtube record-comment ${base} --comment-id <id> --text-verified true --post-approved true --post-approved-by <name> --pinned-verified true --recorded-by <name>`,
+    youtube_pinned_comment: `For an explicitly approved scheduled release, verify Studio and run node bin/goldflow.mjs youtube record-schedule ${base} --video-id <id> --schedule-at <ISO-timestamp> --time-zone <zone> --publish-approved true --publish-approved-by <name> --channel-verified true --schedule-verified true --existing-fields-verified true --checks-complete true --recorded-by <name>; after explicit comment approval, pin the exact manifest comment and run node bin/goldflow.mjs youtube record-comment ${base} --comment-id <id> --text-verified true --post-approved true --post-approved-by <name> --pinned-verified true --recorded-by <name>`,
   };
+  if (identity.image_provider === "openart_cli") {
+    const lockedOpenArtConcurrency = Number(identity.image_provider_options?.openart?.concurrency ?? identity.openart_contract?.concurrency ?? 1);
+    const referenceWorkers = Number.isInteger(lockedOpenArtConcurrency) && lockedOpenArtConcurrency > 0 ? Math.min(4, lockedOpenArtConcurrency) : 1;
+    Object.assign(commands, {
+      visual_reference_plan: `node bin/goldflow.mjs visual openart-bank ${base} --action plan --catalog <canonical-catalog.json>`,
+      reference_plan_approval: `node bin/goldflow.mjs visual openart-bank ${base} --action approve-plan --reviewer <name> --note "<reference plan review>"`,
+      reference_generation: `node bin/goldflow.mjs imagegen openart ${base} --references-only true --action prepare-ready --max-workers ${referenceWorkers}`,
+      reference_image_approval: `node bin/goldflow.mjs visual openart-bank ${base} --action approve-refs --reviewer <name> --note "<completed visual review>"`,
+      visual_prompt_plan: `node bin/goldflow.mjs visual openart-bank ${base} --action bind-shots --shot-plan <shot-plan.json>`,
+      visual_prompt_harden: `node bin/goldflow.mjs visual openart-bank ${base} --action harden`,
+      image_generation: `node bin/goldflow.mjs imagegen openart ${base} --action prepare --image-ids <next_exact_image_ids>`,
+    });
+  }
+  if (identity.image_provider === "fal_ai") {
+    Object.assign(commands, {
+      ...(identity.visual_restart?.fork_at === "visual_reference_plan" ? {
+        reference_generation: `node bin/goldflow.mjs imagegen fal ${base} --action prepare-references`,
+        image_generation: `node bin/goldflow.mjs imagegen fal ${base} --action prepare-validation`,
+      } : {
+        reference_image_approval: `node bin/goldflow.mjs imagegen fal ${base} --action prepare-validation`,
+        image_generation: `node bin/goldflow.mjs imagegen fal ${base} --action prepare-bulk --image-ids all`,
+      }),
+    });
+  }
   return options.override ?? commands[stageId] ?? null;
 }

@@ -10,24 +10,33 @@ import { desktopConfig } from "../desktop/config.mjs";
 const directory = await fs.mkdtemp(path.join(os.tmpdir(), "google-submit-gate-"));
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 try {
-  const gate = new GoogleSubmitGate({ directory, intervalMs: 60, pollMs: 5 });
+  const gate = new GoogleSubmitGate({ directory, intervalMs: 60, jitterMaxMs: 15, pollMs: 5 });
+  const transitionDir = path.join(directory, "stricter-host-transition");
+  const oldReceipt = await new GoogleSubmitGate({ directory: transitionDir, intervalMs: 5, pollMs: 1 }).submit({ provider: "google-flow", jobId: "old-policy", click: async () => {} });
+  const strictReceipt = await new GoogleSubmitGate({ directory: transitionDir, intervalMs: 60, jitterMaxMs: 15, pollMs: 1 }).submit({ provider: "google-gemini", jobId: "new-policy", click: async () => {} });
+  assert.ok(Date.parse(strictReceipt.attempted_at) - Date.parse(oldReceipt.click_finished_at) >= 60, "a stricter restarted host applies its minimum before its first click");
   let clicks = 0;
   await gate.submit({ provider: "google-flow", jobId: "slow-click", click: async () => { await pause(60); clicks += 1; } });
   const first = JSON.parse(await fs.readFile(gate.statePath, "utf8"));
   const moduleUrl = new URL("../desktop/google-submit-gate.mjs", import.meta.url).href;
   const code = `import { GoogleSubmitGate } from ${JSON.stringify(moduleUrl)};
-    await new GoogleSubmitGate({ directory: ${JSON.stringify(directory)}, intervalMs: 60, pollMs: 5 })
+    await new GoogleSubmitGate({ directory: ${JSON.stringify(directory)}, intervalMs: 60, jitterMaxMs: 15, pollMs: 5 })
       .submit({provider: "google-gemini", jobId: "other-process", click: async () => {}});`;
   const child = spawn(process.execPath, ["--input-type=module", "-e", code], { stdio: "inherit" });
   assert.equal(await new Promise((resolve, reject) => { child.once("exit", resolve); child.once("error", reject); }), 0);
   const second = JSON.parse(await fs.readFile(gate.statePath, "utf8"));
   assert.ok(Date.parse(second.attempted_at) - Date.parse(first.click_finished_at) >= 60, "independent processes and providers share post-click spacing");
-  await Promise.all(["flow", "gemini", "flow2"].map((id) => new GoogleSubmitGate({ directory, intervalMs: 60, pollMs: 5 }).submit({
+  await Promise.all(["flow", "gemini", "flow2"].map((id) => new GoogleSubmitGate({ directory, intervalMs: 60, jitterMaxMs: 15, pollMs: 5 }).submit({
     provider: id === "gemini" ? "google-gemini" : "google-flow", jobId: id, click: async () => { clicks += 1; await pause(15); },
   })));
   const rows = (await fs.readFile(path.join(directory, "submissions.jsonl"), "utf8")).trim().split("\n").map(JSON.parse);
   assert.equal(rows.length, 5);
-  for (let i = 1; i < rows.length; i += 1) assert.ok(Date.parse(rows[i].attempted_at) - Date.parse(rows[i - 1].click_finished_at) >= 60);
+  for (let i = 0; i < rows.length; i += 1) {
+    assert.equal(rows[i].interval_ms, 60, "jitter must not accumulate into the base interval");
+    assert.ok(rows[i].jitter_ms >= 0 && rows[i].jitter_ms <= 15);
+    assert.equal(rows[i].spacing_ms, 60 + rows[i].jitter_ms);
+    if (i) assert.ok(Date.parse(rows[i].attempted_at) - Date.parse(rows[i - 1].click_finished_at) >= rows[i - 1].spacing_ms, "both providers and processes honor the preceding post-click jittered interval");
+  }
   await assert.rejects(() => gate.submit({ provider: "google-flow", jobId: "ambiguous", click: async () => { clicks += 1; throw new Error("uncertain click"); } }), /uncertain click/);
   assert.equal(clicks, 5, "failed clicks are not retried");
   assert.equal(JSON.parse(await fs.readFile(gate.statePath, "utf8")).status, "ambiguous_or_failed_click");

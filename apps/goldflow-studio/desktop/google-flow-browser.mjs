@@ -195,6 +195,23 @@ async function waitForVisible(locator, { timeoutMs = 60_000, pollMs = 250 } = {}
   return null;
 }
 
+// Clicking a model option can resolve before Flow commits its React state.
+// Poll only the visible control; never re-click, change models, or submit work.
+export async function waitForFlowModelSelection(readControl, modelLabel, { timeoutMs = 10_000, pollMs = 100 } = {}) {
+  const escaped = String(modelLabel).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const expected = new RegExp(escaped, "i");
+  const deadline = Date.now() + timeoutMs;
+  let matchingReads = 0;
+  while (Date.now() < deadline) {
+    const control = await readControl();
+    const text = control ? String(await control.innerText().catch(() => "")).replace(/\s+/g, " ") : "";
+    matchingReads = expected.test(text) ? matchingReads + 1 : 0;
+    if (matchingReads >= 2) return { control, text };
+    await sleep(pollMs);
+  }
+  return null;
+}
+
 export function flowBlockingCode(text) {
   const value = String(text ?? "");
   if (/generation might violate (?:our )?polic(?:y|ies)|violat(?:e|es|ed|ion).*polic(?:y|ies)/i.test(value)) return "content_policy_rejected";
@@ -671,16 +688,21 @@ export class GoogleFlowBrowser {
           );
           if (!wantedModel) throw codedError("ui_contract_mismatch", `Expected Google Flow model ${this.flowModelLabel}.`);
           await wantedModel.click({ force: true });
+          const selected = await waitForFlowModelSelection(async () => (
+            await visibleLocator(page.getByRole("button", { name: "Select model family", exact: true }))
+            ?? await visibleLocator(page.getByRole("button", { name: /Nano Banana/i }))
+          ), this.flowModelLabel);
+          if (!selected) throw codedError("ui_contract_mismatch", `Google Flow did not retain model ${this.flowModelLabel}.`);
         }
 
         await page.keyboard.press("Escape").catch(() => {});
         bodyText = (await page.locator("body").innerText()).replace(/\s+/g, " ");
-        const configuredSettings = await visibleLocator(page.getByRole("button", {
+        const configured = await waitForFlowModelSelection(() => visibleLocator(page.getByRole("button", {
           name: "Settings trigger",
           exact: true,
-        }));
-        if (!configuredSettings) throw codedError("ui_contract_mismatch", "Google Flow image settings trigger disappeared after configuration.");
-        const configuredText = (await configuredSettings.innerText()).replace(/\s+/g, " ");
+        })), this.flowModelLabel);
+        if (!configured) throw codedError("ui_contract_mismatch", `Google Flow did not retain model ${this.flowModelLabel}.`);
+        const configuredText = configured.text;
         if (!new RegExp(escapedModelLabel, "i").test(configuredText)) {
           throw codedError("ui_contract_mismatch", `Google Flow did not retain model ${this.flowModelLabel}.`);
         }
@@ -725,12 +747,17 @@ export class GoogleFlowBrowser {
         const wantedModel = await waitForVisible(page.getByRole("menuitem").filter({ hasText: new RegExp(`^\\s*🍌?\\s*${this.flowModelLabel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*$`, "i") }), { timeoutMs: 10_000 });
         if (!wantedModel) throw codedError("ui_contract_mismatch", `Expected Google Flow model ${this.flowModelLabel}.`);
         await wantedModel.click();
+        const selected = await waitForFlowModelSelection(async () => (
+          await visibleLocator(settingsMenu.getByRole("button", { name: /Nano Banana/i }))
+          ?? await visibleLocator(page.getByRole("button", { name: /Nano Banana/i }))
+        ), this.flowModelLabel);
+        if (!selected) throw codedError("ui_contract_mismatch", `Google Flow did not retain model ${this.flowModelLabel}.`);
       }
       await page.keyboard.press("Escape").catch(() => {});
       bodyText = (await page.locator("body").innerText()).replace(/\s+/g, " ");
-      const configuredModel = await visibleLocator(page.getByRole("button", { name: new RegExp(this.flowModelLabel, "i") }));
-      if (!configuredModel) throw codedError("ui_contract_mismatch", `Google Flow did not retain model ${this.flowModelLabel}.`);
-      const configuredText = (await configuredModel.innerText()).replace(/\s+/g, " ");
+      const configured = await waitForFlowModelSelection(() => visibleLocator(page.getByRole("button", { name: new RegExp(this.flowModelLabel, "i") })), this.flowModelLabel);
+      if (!configured) throw codedError("ui_contract_mismatch", `Google Flow did not retain model ${this.flowModelLabel}.`);
+      const configuredText = configured.text;
       if (!/16:9|crop_16_9/.test(configuredText) || !/x1\b/.test(configuredText)) {
         throw codedError("ui_contract_mismatch", `Google Flow did not retain 16:9 x1 settings: ${configuredText}.`);
       }

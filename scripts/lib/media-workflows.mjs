@@ -8,6 +8,9 @@ export const GENERATED_VISUALS_WORKFLOW_VERSION = "2026-09-06.1";
 export const AVATAR_PILOT_WORKFLOW_ID = "avatar_footage_pilot_v1";
 export const AVATAR_PILOT_PROFILE_ID = "mcu_what_if_pilot_v1";
 export const AVATAR_PILOT_VERSION = "2026-09-06.1";
+export const TRUE_CRIME_PROOF_WORKFLOW_ID = "true_crime_hybrid_proof_v1";
+export const TRUE_CRIME_PROOF_PROFILE_ID = "true_crime_proof_v1";
+export const TRUE_CRIME_PROOF_VERSION = "2026-09-08.1";
 
 const GENERATED_WORKFLOW_ID = "generated_visuals_v1";
 const RESERVED_WORKFLOW_ID = "source_footage_v1";
@@ -36,8 +39,8 @@ function assertWorkflowId(id) {
   if (id === RESERVED_WORKFLOW_ID || normalizedReservedId(id) === RESERVED_WORKFLOW_ID) {
     throw new Error(`Media workflow ${RESERVED_WORKFLOW_ID} is reserved and unavailable; it has no executable stage registry. The standalone footage tools do not create a production workflow.`);
   }
-  if (![GENERATED_WORKFLOW_ID, AVATAR_PILOT_WORKFLOW_ID].includes(id)) {
-    throw new Error(`Unknown media workflow ${String(id)}. Available workflows: ${GENERATED_WORKFLOW_ID}, ${AVATAR_PILOT_WORKFLOW_ID} (90-second proof only).`);
+  if (![GENERATED_WORKFLOW_ID, AVATAR_PILOT_WORKFLOW_ID, TRUE_CRIME_PROOF_WORKFLOW_ID].includes(id)) {
+    throw new Error(`Unknown media workflow ${String(id)}. Available workflows: ${GENERATED_WORKFLOW_ID}, ${AVATAR_PILOT_WORKFLOW_ID} (90-second proof only), ${TRUE_CRIME_PROOF_WORKFLOW_ID} (private review only).`);
   }
 }
 
@@ -46,8 +49,8 @@ function currentContract(id = GENERATED_WORKFLOW_ID) {
   const payload = {
     schema: MEDIA_WORKFLOW_CONTRACT_SCHEMA,
     id,
-    version: id === AVATAR_PILOT_WORKFLOW_ID ? AVATAR_PILOT_VERSION : GENERATED_VISUALS_WORKFLOW_VERSION,
-    stage_registry_version: id === AVATAR_PILOT_WORKFLOW_ID ? AVATAR_PILOT_VERSION : GENERATED_VISUALS_STAGE_REGISTRY_VERSION,
+    version: id === TRUE_CRIME_PROOF_WORKFLOW_ID ? TRUE_CRIME_PROOF_VERSION : id === AVATAR_PILOT_WORKFLOW_ID ? AVATAR_PILOT_VERSION : GENERATED_VISUALS_WORKFLOW_VERSION,
+    stage_registry_version: id === TRUE_CRIME_PROOF_WORKFLOW_ID ? TRUE_CRIME_PROOF_VERSION : id === AVATAR_PILOT_WORKFLOW_ID ? AVATAR_PILOT_VERSION : GENERATED_VISUALS_STAGE_REGISTRY_VERSION,
   };
   return {
     ...payload,
@@ -83,6 +86,9 @@ export function resolveMediaWorkflow(identity = {}) {
   const hasWorkflow = Object.hasOwn(identity, "media_workflow");
   const hasContract = Object.hasOwn(identity, "workflow_contract");
   if (!hasWorkflow && !hasContract) {
+    if ([identity.content_profile, identity.content_profile_config?.id].includes(TRUE_CRIME_PROOF_PROFILE_ID)) {
+      throw new Error("True-crime proof requires its explicit private workflow; no legacy generated adapter is available.");
+    }
     if ([identity.content_profile, identity.content_profile_config?.id].includes(AVATAR_PILOT_PROFILE_ID)) {
       throw new Error("Avatar pilot requires its explicit proof workflow; no legacy generated adapter is available.");
     }
@@ -126,6 +132,9 @@ export function resolveMediaWorkflow(identity = {}) {
   if ((identity.media_workflow === AVATAR_PILOT_WORKFLOW_ID) !== (profile === AVATAR_PILOT_PROFILE_ID)) {
     throw new Error("Avatar pilot workflow and mcu_what_if_pilot_v1 must be selected together.");
   }
+  if ((identity.media_workflow === TRUE_CRIME_PROOF_WORKFLOW_ID) !== (profile === TRUE_CRIME_PROOF_PROFILE_ID)) {
+    throw new Error("True-crime proof workflow and true_crime_proof_v1 must be selected together.");
+  }
   return { ...expected, legacy: false, available: true };
 }
 
@@ -147,6 +156,9 @@ export function mediaWorkflowForPreflight({ contentProfile, mediaWorkflow } = {}
   assertWorkflowId(mediaWorkflow);
   if ((mediaWorkflow === AVATAR_PILOT_WORKFLOW_ID) !== (contentProfile === AVATAR_PILOT_PROFILE_ID)) {
     throw new Error("Avatar pilot preflight requires the exact pilot workflow/profile pair.");
+  }
+  if ((mediaWorkflow === TRUE_CRIME_PROOF_WORKFLOW_ID) !== (contentProfile === TRUE_CRIME_PROOF_PROFILE_ID)) {
+    throw new Error("True-crime proof preflight requires the exact private proof workflow/profile pair.");
   }
   return { media_workflow: mediaWorkflow, workflow_contract: currentContract(mediaWorkflow) };
 }

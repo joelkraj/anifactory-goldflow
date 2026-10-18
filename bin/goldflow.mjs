@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn, spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -17,8 +18,29 @@ import {
 import { creativeStageRerunDecisionForEpisode } from "../scripts/lib/creative-stage-rerun-policy.mjs";
 import { plannerRerunDecisionForEpisode } from "../scripts/lib/planner-rerun-policy.mjs";
 import { failedRenderResumeDecision } from "../scripts/lib/failed-render-resume.mjs";
-import { assertCommandWorkflowRoute } from "../scripts/lib/episode-workflow-routing.mjs";
+import { assertCommandWorkflowRoute, readEpisodeRoutingIdentity } from "../scripts/lib/episode-workflow-routing.mjs";
 import { canonicalContentProfileArgument } from "../scripts/lib/content-profiles.mjs";
+import { semanticRecoveryAdmission } from "../scripts/lib/semantic-planner-recovery.mjs";
+import { visualPromptRecoveryAdmission } from "../scripts/lib/visual-prompt-recovery.mjs";
+import { visualBeatRecoveryAdmission } from "../scripts/lib/visual-beat-recovery.mjs";
+import { visualBeatExactRepairAdmission } from "../scripts/lib/visual-beat-exact-repair.mjs";
+import { visualBeatDensityRepairAdmission } from "../scripts/lib/visual-beat-density-repair.mjs";
+import { exactVisualPromptRepairAdmission } from "../scripts/lib/visual-prompt-exact-repair.mjs";
+import { screenIdentityBlockerRepairAdmission } from "../scripts/lib/visual-screen-identity-blocker-repair.mjs";
+import { identityBindingRepairAdmission } from "../scripts/lib/visual-identity-binding-repair.mjs";
+import { reviewedReferenceScopeRepairAdmission } from "../scripts/lib/reviewed-reference-scope-repair.mjs";
+import { visualReferenceRecoveryAdmission } from "../scripts/lib/visual-reference-recovery.mjs";
+import { referenceImageQaRecoveryAdmission } from "../scripts/lib/reference-image-recovery.mjs";
+import { partialSceneImageQaRecoveryAdmission } from "../scripts/lib/partial-scene-image-recovery.mjs";
+import { orphanedImageStreamSealAdmission } from "../scripts/lib/orphaned-image-stream-seal.mjs";
+import { openartTriageAdmission } from "../scripts/lib/openart-visual-restart.mjs";
+import { falBlockedStageRecoveryAdmission } from "../scripts/lib/fal-production-state.mjs";
+import { interruptedQwenGuardAdmission } from "../scripts/lib/qwen-interrupted-guard.mjs";
+import { exactBlockedNarrationRetakeAdmission } from "../scripts/lib/narration-exact-retake-guard.mjs";
+import { asrOrthographyGuardAdmission } from "../scripts/lib/narration-asr-orthography-review.mjs";
+import { pronunciationGuardAdmission } from "../scripts/lib/narration-pronunciation-repair.mjs";
+import { contractionGuardAdmission } from "../scripts/lib/narration-contraction-repair.mjs";
+import { appendOnlyTailGuardAdmission } from "../scripts/lib/narration-append-only-tail.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
@@ -49,8 +71,11 @@ function isTrue(value) {
   return /^(true|1|yes)$/i.test(String(value ?? ""));
 }
 
-function commandStage(commandName, subcommandName, parsedFlags) {
-  return commandStageFor(commandName, subcommandName, parsedFlags);
+function commandStage(commandName, subcommandName, parsedFlags, episodeDir) {
+  // The private proof has its own stage controller and never enters the generated registry.
+  if (commandName === "crime-proof") return null;
+  const identity = episodeDir ? readEpisodeRoutingIdentity(episodeDir) ?? {} : {};
+  return commandStageFor(commandName, subcommandName, parsedFlags, identity);
 }
 
 function statusArgsFor(parsedFlags) {
@@ -64,10 +89,10 @@ function statusArgsFor(parsedFlags) {
   return null;
 }
 
-function enforceWorkflowGuard(commandName, subcommandName, scriptArgs) {
+function enforceWorkflowGuard(commandName, subcommandName, scriptArgs, episodeDir) {
   const parsedFlags = parseFlags(scriptArgs);
   if (isTrue(parsedFlags["workflow-bypass"]) || isTrue(process.env.GOLDFLOW_WORKFLOW_BYPASS)) return;
-  const expectedStage = commandStage(commandName, subcommandName, parsedFlags);
+  const expectedStage = commandStage(commandName, subcommandName, parsedFlags, episodeDir);
   if (!expectedStage) return;
   const statusArgs = statusArgsFor(parsedFlags);
   if (!statusArgs) return;
@@ -95,6 +120,206 @@ function enforceWorkflowGuard(commandName, subcommandName, scriptArgs) {
   const allowedStages = Array.isArray(result.allowed_command_stages)
     ? result.allowed_command_stages
     : [currentStage];
+  const tailCompletion = appendOnlyTailGuardAdmission(
+    result, commandName, subcommandName, parsedFlags,
+  );
+  if (tailCompletion.applicable) {
+    if (!tailCompletion.allowed) {
+      console.error(`Workflow guard blocked append-only tail completion: ${tailCompletion.reason}`);
+      if (result.next_command_shape) console.error(`Next valid command shape: ${result.next_command_shape}`);
+      process.exit(1);
+    }
+    return;
+  }
+  const interruptedQwen = interruptedQwenGuardAdmission(
+    result, commandName, subcommandName, parsedFlags,
+  );
+  if (interruptedQwen.applicable) {
+    if (!interruptedQwen.allowed) {
+      console.error(`Workflow guard blocked interrupted Qwen recovery: ${interruptedQwen.reason}`);
+      if (result.next_command_shape) console.error(`Next valid command shape: ${result.next_command_shape}`);
+      process.exit(1);
+    }
+    return;
+  }
+  const exactNarrationRetake = exactBlockedNarrationRetakeAdmission(
+    result, commandName, subcommandName, parsedFlags,
+  );
+  if (exactNarrationRetake.applicable) {
+    if (!exactNarrationRetake.allowed) {
+      console.error(`Workflow guard blocked narration retake: ${exactNarrationRetake.reason}`);
+      if (result.next_command_shape) console.error(`Next valid command shape: ${result.next_command_shape}`);
+      process.exit(1);
+    }
+    return;
+  }
+  const orthography = asrOrthographyGuardAdmission(
+    result, commandName, subcommandName, parsedFlags,
+  );
+  if (orthography.applicable) {
+    if (!orthography.allowed) {
+      console.error(`Workflow guard blocked ASR orthography review: ${orthography.reason}`);
+      if (result.next_command_shape) console.error(`Next valid command shape: ${result.next_command_shape}`);
+      process.exit(1);
+    }
+    return;
+  }
+  const pronunciation = pronunciationGuardAdmission(
+    result, commandName, subcommandName, parsedFlags,
+  );
+  if (pronunciation.applicable) {
+    if (!pronunciation.allowed) {
+      console.error(`Workflow guard blocked pronunciation recovery: ${pronunciation.reason}`);
+      if (result.next_command_shape) console.error(`Next valid command shape: ${result.next_command_shape}`);
+      process.exit(1);
+    }
+    return;
+  }
+  const contraction = contractionGuardAdmission(
+    result, commandName, subcommandName, parsedFlags,
+  );
+  if (contraction.applicable) {
+    if (!contraction.allowed) {
+      console.error(`Workflow guard blocked contraction expansion: ${contraction.reason}`);
+      if (result.next_command_shape) console.error(`Next valid command shape: ${result.next_command_shape}`);
+      process.exit(1);
+    }
+    return;
+  }
+  if (commandName === "voice" && subcommandName === "plan"
+    && currentStage === "voice_plan" && result.current_stage_state === "failed"
+    && !parsedFlags["performance-packet-ids"]
+    && String(result.next_command_shape ?? "").startsWith("node bin/goldflow.mjs voice plan ")) {
+    try {
+      const direction = JSON.parse(readFileSync(path.join(result.episode_dir, "narration_actionable_direction.json"), "utf8"));
+      const plan = JSON.parse(readFileSync(path.join(result.episode_dir, "narration_generation_plan.json"), "utf8"));
+      if (direction.status === "approved" && plan.status === "failed_repairable"
+        && direction.source_script_sha256 === plan.source_script_hash) return;
+    } catch { /* Retain the ordinary workflow guard on missing or malformed evidence. */ }
+  }
+  if (commandName === "imagegen" && subcommandName === "openart" && parsedFlags.action === "triage") {
+    const recovery = openartTriageAdmission(result, parsedFlags);
+    if (!recovery.allowed) {
+      console.error(`Workflow guard blocked OpenArt triage: ${recovery.reason}`);
+      process.exit(1);
+    }
+    return;
+  }
+  if (commandName === "imagegen" && subcommandName === "fal") {
+    const recovery = falBlockedStageRecoveryAdmission(result, parsedFlags);
+    if (recovery.applicable && !recovery.allowed) {
+      console.error(`Workflow guard blocked Fal recovery: ${recovery.reason}`);
+      process.exit(1);
+    }
+    if (recovery.applicable && recovery.allowed) return;
+  }
+  if (commandName === "imagegen" && subcommandName === "codex-work") {
+    const recovery = orphanedImageStreamSealAdmission(result, parsedFlags);
+    if (recovery.applicable && !recovery.allowed) {
+      console.error(`Workflow guard blocked orphan stream seal: ${recovery.reason}.`);
+      process.exit(1);
+    }
+    if (recovery.applicable && recovery.allowed) return;
+  }
+  if (commandName === "semantic" && subcommandName === "plan") {
+    const recovery = semanticRecoveryAdmission(result, parsedFlags);
+    if (recovery.applicable && !recovery.allowed) {
+      console.error(`Workflow guard blocked semantic recovery: ${recovery.reason}.`);
+      if (result.next_command_shape) console.error(`Next valid command shape: ${result.next_command_shape}`);
+      process.exit(1);
+    }
+  }
+  if (commandName === "visual" && subcommandName === "beats") {
+    const recovery = visualBeatRecoveryAdmission(result, parsedFlags);
+    if (recovery.applicable && !recovery.allowed) {
+      console.error(`Workflow guard blocked visual beat recovery: ${recovery.reason}.`);
+      if (result.next_command_shape) console.error(`Next valid command shape: ${result.next_command_shape}`);
+      process.exit(1);
+    }
+  }
+  if (commandName === "visual" && subcommandName === "repair-beats") {
+    const repair = visualBeatExactRepairAdmission(result, parsedFlags);
+    if (!repair.allowed) {
+      console.error(`Workflow guard blocked exact visual beat repair: ${repair.reason}.`);
+      if (result.next_command_shape) console.error(`Next valid command shape: ${result.next_command_shape}`);
+      process.exit(1);
+    }
+    return;
+  }
+  if (commandName === "visual" && subcommandName === "repair-beat-density") {
+    const repair = visualBeatDensityRepairAdmission(result, parsedFlags);
+    if (!repair.allowed) {
+      console.error(`Workflow guard blocked visual beat density repair: ${repair.reason}.`);
+      if (result.next_command_shape) console.error(`Next valid command shape: ${result.next_command_shape}`);
+      process.exit(1);
+    }
+    return;
+  }
+  if (commandName === "visual" && ["repair-prompt", "repair-prompt-multiplier"].includes(subcommandName)) {
+    const repair = exactVisualPromptRepairAdmission(result, parsedFlags);
+    if (!repair.allowed) {
+      console.error(`Workflow guard blocked exact visual prompt repair: ${repair.reason}.`);
+      process.exit(1);
+    }
+    return;
+  }
+  if (commandName === "visual" && subcommandName === "repair-screen-identity") {
+    const repair = screenIdentityBlockerRepairAdmission(result, parsedFlags);
+    if (!repair.allowed) {
+      console.error(`Workflow guard blocked screen identity repair: ${repair.reason}.`);
+      process.exit(1);
+    }
+    return;
+  }
+  if (commandName === "visual" && subcommandName === "repair-identity-binding") {
+    const repair = identityBindingRepairAdmission(result, parsedFlags);
+    if (!repair.allowed) {
+      console.error(`Workflow guard blocked identity binding repair: ${repair.reason}.`);
+      process.exit(1);
+    }
+    return;
+  }
+  if (commandName === "visual" && subcommandName === "repair-reviewed-ref-scope") {
+    const repair = reviewedReferenceScopeRepairAdmission(result, parsedFlags);
+    if (!repair.allowed) {
+      console.error(`Workflow guard blocked reviewed reference scope repair: ${repair.reason}.`);
+      process.exit(1);
+    }
+    return;
+  }
+  if (commandName === "visual" && subcommandName === "plan") {
+    const recovery = visualPromptRecoveryAdmission(result, parsedFlags);
+    if (recovery.applicable && !recovery.allowed) {
+      console.error(`Workflow guard blocked visual prompt recovery: ${recovery.reason}.`);
+      if (result.next_command_shape) console.error(`Next valid command shape: ${result.next_command_shape}`);
+      process.exit(1);
+    }
+    if (recovery.applicable && recovery.allowed) return;
+  }
+  if (commandName === "visual" && subcommandName === "refs") {
+    const recovery = visualReferenceRecoveryAdmission(result, parsedFlags);
+    if (recovery.applicable && !recovery.allowed) {
+      console.error(`Workflow guard blocked visual reference recovery: ${recovery.reason}.`);
+      if (result.next_command_shape) console.error(`Next valid command shape: ${result.next_command_shape}`);
+      process.exit(1);
+    }
+    if (recovery.applicable && recovery.allowed) return;
+  }
+  if (commandName === "imagegen" && subcommandName === "browser-pool") {
+    const partialRecovery = partialSceneImageQaRecoveryAdmission(result, parsedFlags);
+    if (partialRecovery.applicable && !partialRecovery.allowed) {
+      console.error(`Workflow guard blocked partial scene image QA recovery: ${partialRecovery.reason}.`);
+      process.exit(1);
+    }
+    if (partialRecovery.applicable && partialRecovery.allowed) return;
+    const recovery = referenceImageQaRecoveryAdmission(result, parsedFlags);
+    if (recovery.applicable && !recovery.allowed) {
+      console.error(`Workflow guard blocked reference image QA recovery: ${recovery.reason}.`);
+      if (result.next_command_shape) console.error(`Next valid command shape: ${result.next_command_shape}`);
+      process.exit(1);
+    }
+    if (recovery.applicable && recovery.allowed) return;
+  }
   if (allowedStages.includes(expectedStage)) return;
   const renderRecovery = failedRenderResumeDecision({ command: commandName, subcommand: subcommandName, flags: parsedFlags, status: result, repoRoot });
   if (renderRecovery.allowed) {
@@ -141,15 +366,11 @@ function run(script, scriptArgs = []) {
     process.exitCode = 1;
     return;
   }
-  enforceWorkflowGuard(command, subcommand, scriptArgs);
-  const stage = commandStage(command, subcommand, parsedFlags);
-  const plannerRerunDecision = plannerRerunDecisionForEpisode({
-    command,
-    subcommand,
-    stage,
-    flags: parsedFlags,
-    episodeDir,
-  });
+  enforceWorkflowGuard(command, subcommand, scriptArgs, episodeDir);
+  const stage = commandStage(command, subcommand, parsedFlags, episodeDir);
+  const plannerRerunDecision = command === "visual" && ["repair-beats", "repair-beat-density", "repair-prompt", "repair-prompt-multiplier", "repair-screen-identity", "repair-identity-binding", "repair-reviewed-ref-scope"].includes(subcommand)
+    ? { allowed: true }
+    : plannerRerunDecisionForEpisode({ command, subcommand, stage, flags: parsedFlags, episodeDir });
   if (!plannerRerunDecision.allowed) {
     console.error(`Planner rerun blocked: ${command} ${subcommand}`);
     console.error(`Reason: ${plannerRerunDecision.reason}. Prior attempts: ${plannerRerunDecision.prior_attempt_count}.`);
@@ -264,6 +485,12 @@ ${registryCommands}
   goldflow pilot use-local-concept-fallback Replace all three refused AI concept stills with source-bound local editorial composites; --input <request.json> --accept true --reviewer <name> --note <reason>
   goldflow pilot preview-style        Render an isolated 8–12-second local visual-review candidate at pilot_media; --input <request.json>; no approvals, provider calls, stage completion or publishing
   goldflow pilot preview-program      Extend an operator-accepted style preview into one separate exactly 90-second private review candidate; --input <request.json>; no exact-edit approval or official stage completion
+  goldflow crime-proof preflight    Lock the private CrimeDungeon hybrid proof; --episode-dir <new-dir> --identity <config.json>
+  goldflow crime-proof status       Show exact next stage/command; --episode-dir <dir> --format markdown
+  goldflow crime-proof begin-assets Bind --recipe <assets.json>, acquire selected inputs and prepare scoped external image requests
+  goldflow crime-proof finish-assets Retain inspected assets; --result <result.json> --attempt-token <exact-token>; no approval or publishing
+  goldflow crime-proof narrate      Produce the exact owned-voice narration candidate for whole-program listening
+  goldflow crime-proof render       Render the private review candidate from --manifest <render.json>; no release authority
   goldflow visual planner-ab       Run the diagnostic editorial A/B
   goldflow visual prompt-benchmark Run the locked 25-cut provider prompt benchmark
   goldflow visual parallax-proof-assets Build foreground/background layers for an isolated diagnostic proof
@@ -346,8 +573,17 @@ ${registryCommands}
   goldflow tts throughput-bakeoff  Run an isolated serial/batch-2/batch-4 Qwen/Liam diagnostic
   goldflow tts import-provider     Import hash-bound WAV results from the identity-locked TTS provider
   goldflow tts finalize-provider   Run delivery, continuity, stitch, mastering, and full-stream QA
+  goldflow tts repair-boundary     Repair only reviewed blocked Qwen sentence/word boundaries, then rerun narration QA
+  goldflow tts complete-tail       Append bounded silence to reviewed intact raw Qwen tails; no synthesis
+  goldflow tts repair-pronunciation  Create one user-heard phonetic-word candidate; require a second listen before selection
+  goldflow tts repair-pronunciation-auto  Create one reviewed automated-ASR phonetic-word candidate; select only after dual-ASR QA
+  goldflow tts review-contraction  Prepare exact one-unit TTS-only past-perfect expansion evidence
+  goldflow tts repair-contraction  Create one exact first-fragment expansion candidate; select only after fresh QA
+  goldflow tts adopt-interrupted   QA and adopt only hash-bound completed Qwen cohorts from an interrupted invocation
   goldflow tts approve-listen      Record hash-bound decisions for exact narration listen items
   goldflow tts approve-subjective  Approve the mandatory hash-bound whole-episode narration sample manifest
+  goldflow tts source-structure    Record reviewed narrative chapters separately from technical voice segments
+  goldflow tts low-margin-disposition Record an exact-unit advisory policy for passing voice measurements
   goldflow tts delivery-bank       Audit or promote the owned same-speaker delivery-reference bank
   goldflow tts provider-bakeoff    Prepare or approve a blind longform Qwen-versus-Fish/ElevenLabs bakeoff
 
@@ -399,7 +635,9 @@ Prompt-repair migration guardrails:
 `);
 }
 
-if (command === "pilot" && !helpRequested) {
+if (command === "crime-proof" && !helpRequested) {
+  run("true-crime-proof.mjs", ["--action", subcommand, ...flags]);
+} else if (command === "pilot" && !helpRequested) {
   try {
     const { executePilotCommand } = await import("../scripts/lib/avatar-pilot-workflow.mjs");
     const result = await executePilotCommand(subcommand, parseFlags(flags), { repoRoot });
@@ -414,6 +652,10 @@ if (command === "pilot" && !helpRequested) {
   help();
 } else if (command === "run" && subcommand === "preflight") {
   run("run-preflight.mjs", flags);
+} else if (command === "run" && subcommand === "restart-visuals") {
+  run("run-restart-visuals.mjs", flags);
+} else if (command === "run" && subcommand === "restart-visuals-fal") {
+  run("run-restart-visuals-fal.mjs", flags);
 } else if (command === "run" && subcommand === "relock-tts") {
   run("run-relock-tts.mjs", flags);
 } else if (command === "run" && subcommand === "codex-doctor") {
@@ -527,14 +769,34 @@ if (command === "pilot" && !helpRequested) {
   run("voice-direction-gate.mjs", flags);
 } else if (command === "tts" && subcommand === "narrate") {
   run("narration-tts-episode.mjs", flags);
+} else if (command === "tts" && subcommand === "adopt-interrupted") {
+  run("narration-tts-episode.mjs", ["--adopt-interrupted", "true", ...flags]);
+} else if (command === "tts" && subcommand === "finalize-interrupted") {
+  run("narration-tts-episode.mjs", ["--finalize-interrupted", "true", ...flags]);
 } else if (command === "tts" && subcommand === "import-provider") {
   run("narration-provider-output-import.mjs", flags);
 } else if (command === "tts" && subcommand === "finalize-provider") {
   run("narration-provider-output-finalize.mjs", flags);
+} else if (command === "tts" && subcommand === "repair-boundary") {
+  run("tts-exact-boundary-repair.mjs", flags);
+} else if (command === "tts" && subcommand === "complete-tail") {
+  run("tts-append-tail-completion.mjs", flags);
+} else if (command === "tts" && subcommand === "repair-pronunciation") {
+  run("tts-pronunciation-candidate.mjs", flags);
+} else if (command === "tts" && subcommand === "repair-pronunciation-auto") {
+  run("tts-pronunciation-candidate.mjs", ["--automated", "true", ...flags]);
+} else if (command === "tts" && subcommand === "review-contraction") {
+  run("tts-contraction-review.mjs", flags);
+} else if (command === "tts" && subcommand === "repair-contraction") {
+  run("tts-contraction-candidate.mjs", flags);
 } else if (command === "tts" && subcommand === "approve-listen") {
   run("narration-exact-listen-review.mjs", flags);
 } else if (command === "tts" && subcommand === "approve-subjective") {
   run("narration-subjective-review.mjs", flags);
+} else if (command === "tts" && subcommand === "source-structure") {
+  run("narration-source-structure.mjs", flags);
+} else if (command === "tts" && subcommand === "low-margin-disposition") {
+  run("narration-low-margin-disposition.mjs", flags);
 } else if (command === "tts" && subcommand === "delivery-bank") {
   run("narration-delivery-bank.mjs", flags);
 } else if (command === "tts" && subcommand === "provider-bakeoff") {
@@ -553,8 +815,18 @@ if (command === "pilot" && !helpRequested) {
   run("narration-tempo-normalize.mjs", flags);
 } else if (command === "timing" && subcommand === "bind") {
   run("timing-bind.mjs", flags);
+} else if (command === "visual" && subcommand === "openart-bank") {
+  run("openart-production.mjs", flags);
+} else if (command === "imagegen" && subcommand === "openart") {
+  run("openart-production.mjs", flags);
+} else if (command === "imagegen" && subcommand === "fal") {
+  run("fal-production.mjs", flags);
 } else if (command === "visual" && subcommand === "beats") {
   run("visual-beat-plan.mjs", flags);
+} else if (command === "visual" && subcommand === "repair-beats") {
+  run("visual-beat-exact-repair.mjs", flags);
+} else if (command === "visual" && subcommand === "repair-beat-density") {
+  run("visual-beat-density-repair.mjs", flags);
 } else if (command === "visual" && subcommand === "planner-ab") {
   run("visual-planner-ab.mjs", flags);
 } else if (command === "visual" && subcommand === "prompt-benchmark") {
@@ -567,10 +839,22 @@ if (command === "pilot" && !helpRequested) {
   run("visual-panel-assets.mjs", [...flags, "--action", "reconcile"]);
 } else if (command === "visual" && subcommand === "panel-plan") {
   run("visual-panel-plan.mjs", flags);
+} else if (command === "visual" && subcommand === "repair-prompt") {
+  run("visual-prompt-exact-repair.mjs", flags);
+} else if (command === "visual" && subcommand === "repair-prompt-multiplier") {
+  run("visual-prompt-multiplier-exact-repair.mjs", flags);
+} else if (command === "visual" && subcommand === "repair-screen-identity") {
+  run("visual-screen-identity-blocker-repair.mjs", flags);
+} else if (command === "visual" && subcommand === "repair-identity-binding") {
+  run("visual-identity-binding-repair.mjs", flags);
+} else if (command === "visual" && subcommand === "repair-reviewed-ref-scope") {
+  run("reviewed-reference-scope-repair.mjs", flags);
 } else if (command === "visual" && subcommand === "refs") {
   run("visual-reference-plan.mjs", flags);
 } else if (command === "visual" && subcommand === "approve-ref-plan") {
   run("visual-reference-plan-approve.mjs", flags);
+} else if (command === "visual" && subcommand === "repair-ref-plan") {
+  run("visual-reference-plan-exact-repair.mjs", flags);
 } else if (command === "visual" && subcommand === "approve-refs") {
   run("visual-reference-approve.mjs", flags);
 } else if (command === "visual" && subcommand === "review") {
@@ -635,6 +919,8 @@ if (command === "pilot" && !helpRequested) {
   run("youtube-publish.mjs", ["prepare", ...flags]);
 } else if (command === "youtube" && subcommand === "record-upload") {
   run("youtube-publish.mjs", ["record-upload", ...flags]);
+} else if (command === "youtube" && subcommand === "record-schedule") {
+  run("youtube-publish.mjs", ["record-schedule", ...flags]);
 } else if (command === "youtube" && subcommand === "record-ab-test") {
   run("youtube-publish.mjs", ["record-ab-test", ...flags]);
 } else if (command === "youtube" && subcommand === "record-thumbnail-update") {

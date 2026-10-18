@@ -59,6 +59,7 @@ try {
   await test('real cached picture preserves authored crops and reveal onset, with no audio', async () => {
     first = await buildPanelProductionPicture(options);
     assert.equal(first.status, 'passed'); assert.equal(first.media.audio_stream_count, 0); assert.equal(first.media.frame_count, 60);
+    assert.equal(first.picture_concurrency, 4); assert.deepEqual(first.chunks.map(row => row.index), [0, 1]);
     assert.equal(first.cache_stats.rendered_chunk_count, 2); assert.ok(first.cache_stats.unchanged_frame_reuse_count > 30);
     color(await pixel(first.videoPath, 0.8), 0); color(await pixel(first.videoPath, 1.1), 0); color(await pixel(first.videoPath, 1.5), 2);
     for (const [file, hash] of Object.entries(originals)) assert.equal(await sha256File(file), hash);
@@ -89,7 +90,7 @@ try {
     await assert.rejects(fs.access(rejected), { code: 'ENOENT' });
   });
   await test('production schema keeps a complete long audio timeline and private schemas remain bounded', () => {
-    const long = structuredClone(timeline); long.duration_sec = 3600; long.scenes.at(-1).end_sec = 3600; long.scenes.at(-1).layers.at(-1).end_sec = 3600; long.scenes.at(-1).layers.at(-1).keyframes.at(-1).at_sec = 3600;
+    const long = structuredClone(timeline); long.duration_sec = 4800; long.scenes.at(-1).end_sec = 4800; long.scenes.at(-1).layers.at(-1).end_sec = 4800; long.scenes.at(-1).layers.at(-1).keyframes.at(-1).at_sec = 4800;
     validatePanelTimeline(long, 'production_panel_composition');
     assert.throws(() => validatePanelTimeline({ ...long, schema: 'goldflow_panel_experiment_timeline_v1', intent: 'editing_experiment', experiment_identity: timeline.run_identity }, 'editing_experiment'), /duration_sec/);
   });

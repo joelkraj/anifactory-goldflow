@@ -14,6 +14,7 @@ import { resolveNarrationReportPath } from "./lib/narration-artifacts.mjs";
 import { narrationRenderMasterReuseDecision } from "./lib/narration-mastering.mjs";
 import { loadPanelProductionPlan } from "./lib/panel-production-plan.mjs";
 import { buildPanelProductionPicture, assertPanelProductionPictureCurrent } from "./lib/panel-production-renderer.mjs";
+import { contractionCaptionWordSpanForTests } from "./lib/narration-contraction-repair.mjs";
 
 const execFile = promisify(execFileCb);
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
@@ -309,8 +310,13 @@ function timedCaptionSegments(stitchReport) {
   let cursor = 0;
   return segments.map((segment) => {
     const duration = Math.max(0, Number(segment.duration_sec ?? segment.raw_audio_duration_sec ?? 0));
-    const start = cursor;
-    const end = cursor + duration;
+    const explicitStart = Number(segment.start_sec);
+    const explicitEnd = Number(segment.end_sec);
+    const exact = segment.tts_only_contraction_expansion
+      && Number.isFinite(explicitStart) && Number.isFinite(explicitEnd)
+      && explicitEnd > explicitStart;
+    const start = exact ? explicitStart : cursor;
+    const end = exact ? explicitEnd : cursor + duration;
     cursor = end;
     return {
       unit_id: String(segment.unit_id ?? "").trim(),
@@ -318,6 +324,7 @@ function timedCaptionSegments(stitchReport) {
       start_sec: start,
       end_sec: end,
       caption_text: String(segment.caption_text ?? segment.stripped_text ?? segment.text ?? "").trim(),
+      tts_only_contraction_expansion: segment.tts_only_contraction_expansion ?? null,
     };
   }).filter((segment) => (segment.unit_id || segment.segment_id) && segment.caption_text && segment.end_sec > segment.start_sec);
 }
@@ -673,8 +680,11 @@ export function alignExpandedZeroMultiplierCaptionsForTests(events, words) {
 
 function subtitleEventsFromScript(words, stitchReport) {
   const segments = timedCaptionSegments(stitchReport);
-  if (!segments.length) return null;
+  if (!segments.length || segments.length !== stitchReport?.segments?.length) return null;
   const sortedWords = [...words].sort((left, right) => Number(left.start_sec) - Number(right.start_sec));
+  const expansion = contractionCaptionWordSpanForTests({
+    segments: stitchReport?.segments, words: sortedWords,
+  });
   const events = [];
   let wordCursor = 0;
   for (const segment of segments) {
@@ -693,8 +703,14 @@ function subtitleEventsFromScript(words, stitchReport) {
     const firstAnchor = localAnchors[0] ?? null;
     const lastAnchor = localAnchors.at(-1) ?? null;
     let segmentWords;
+    const expansionStart = segment.tts_only_contraction_expansion
+      ? candidateGlobalIndices.indexOf(expansion.spoken_word_indices[0]) : -1;
+    if (segment.tts_only_contraction_expansion && expansionStart < 0) {
+      throw new Error("Contraction subtitle lost the first spoken word within its source unit.");
+    }
     if (firstAnchor && lastAnchor) {
-      segmentWords = candidateWords.slice(firstAnchor.word_index, lastAnchor.word_index + 1);
+      segmentWords = candidateWords.slice(expansionStart >= 0
+        ? expansionStart : firstAnchor.word_index, lastAnchor.word_index + 1);
       wordCursor = candidateGlobalIndices[lastAnchor.word_index] + 1;
     } else {
       segmentWords = candidateWords.filter((word) => {
@@ -702,13 +718,44 @@ function subtitleEventsFromScript(words, stitchReport) {
         return midpoint >= Number(segment.start_sec) && midpoint < Number(segment.end_sec);
       });
     }
-    events.push(...alignedCaptionEventsForUnit(segment, segmentWords));
+    const unitEvents = alignedCaptionEventsForUnit(segment, segmentWords);
+    if (segment.tts_only_contraction_expansion) {
+      const opening = unitEvents[0];
+      if (!opening?.text?.startsWith("She’d ")
+        || Number(opening.start_sec) > expansion.start_sec + 0.1
+        || Number(opening.end_sec) < expansion.end_sec - 0.05) {
+        throw new Error("Source subtitle She’d does not cover both spoken She and had.");
+      }
+    }
+    events.push(...unitEvents);
   }
   const aligned = coalesceOverlappingSubtitleEvents(
     events.filter((row) => row.text && row.end_sec > row.start_sec),
   );
   validateSubtitleTimeline(aligned);
   return aligned;
+}
+
+export function captionWordsWithContractionExpansionForTests(words, stitchReport) {
+  const sorted = [...(words ?? [])].sort((left, right) =>
+    Number(left.start_sec) - Number(right.start_sec));
+  const span = contractionCaptionWordSpanForTests({
+    segments: stitchReport?.segments, words: sorted,
+  });
+  if (!span) return sorted;
+  const [sheIndex, hadIndex] = span.spoken_word_indices;
+  if (hadIndex !== sheIndex + 1) {
+    throw new Error("Source caption contraction must bind adjacent spoken words.");
+  }
+  const mapped = sorted.map((row) => ({ ...row }));
+  mapped[sheIndex].word = "She’d";
+  mapped[sheIndex].end_sec = span.end_sec;
+  mapped.splice(hadIndex, 1);
+  // Visual-beat caption ranges index the locked source words. The extra
+  // spoken auxiliary has no source index, so restore contiguous source-word
+  // indices after joining its interval to the approved contraction.
+  mapped.forEach((row, index) => { row.index = index; });
+  return mapped;
 }
 
 function subtitleEventsFromVisualBeats(words, visualBeatPlan) {
@@ -776,6 +823,37 @@ function buildSubtitleEvents(wordTiming, audioStitchReport = null, visualBeatPla
     return {
       events: scriptEvents,
       source: "audio_stitch_caption_text_word_aligned_to_whisper",
+    };
+  }
+  if ((audioStitchReport?.segments ?? []).some(
+    (segment) => segment.tts_only_contraction_expansion)) {
+    const spokenWords = wordTiming.words ?? [];
+    const mappedWords = captionWordsWithContractionExpansionForTests(
+      spokenWords, audioStitchReport);
+    const span = contractionCaptionWordSpanForTests({
+      segments: audioStitchReport.segments, words: spokenWords,
+    });
+    // Editorial beats may have been locked against the raw Whisper word
+    // indices (including spoken "had") or against source-word indices. Use
+    // only the index domain the complete approved beat plan declares.
+    const beatEndIndices = (visualBeatPlan?.beats ?? []).map((beat) =>
+      Number(beat.source_word_end_index));
+    const beatEndIndex = beatEndIndices.length
+      ? Math.max(...beatEndIndices) : Number.NaN;
+    const beatWords = beatEndIndex === spokenWords.length - 1
+      ? spokenWords : beatEndIndex === mappedWords.length - 1
+        ? mappedWords : null;
+    const beatEvents = beatWords
+      ? subtitleEventsFromVisualBeats(beatWords, visualBeatPlan) : null;
+    if (!beatEvents?.length || !beatEvents.some((event) =>
+      /\bShe’d\b/u.test(event.text)
+      && Number(event.start_sec) <= span.start_sec + 0.05
+      && Number(event.end_sec) >= span.end_sec - 0.05)) {
+      throw new Error("Approved source captions do not bind spoken She had to She’d timing.");
+    }
+    return {
+      events: beatEvents,
+      source: "approved_visual_beat_script_text_with_exact_source_contraction",
     };
   }
   const beatEvents = subtitleEventsFromVisualBeats(wordTiming.words ?? [], visualBeatPlan);
@@ -2627,6 +2705,14 @@ async function main() {
   if (v2Run && visualBeatPlan?.status !== "passed") throw new Error(`Missing passed visual beat plan for locked-script captions: ${visualBeatPlanPath}`);
   if (visualBeatPlan?.status === "passed") await assertSourceHashesCurrent(visualBeatPlan, "Visual beat plan");
   const validatedSubtitleRows = buildSubtitleEvents(wordTiming, audioStitchReport, visualBeatPlan);
+  const contractionCaptionSpan = contractionCaptionWordSpanForTests({
+    segments: audioStitchReport?.segments, words: wordTiming?.words,
+  });
+  if (contractionCaptionSpan
+    && JSON.stringify(contractionCaptionSpan)
+      !== JSON.stringify(wordTiming.caption_spoken_expansion_alignment)) {
+    throw new Error("Source contraction caption timing differs from the approved word-timing map.");
+  }
   if (v2Run && validatedSubtitleRows.source === "whisper_recognized_words_fallback") throw new Error("V2 render refused Whisper-recognized caption text; provide approved visual-beat or stitch caption text timed by Whisper.");
   validateSubtitleTimeline(validatedSubtitleRows.events);
   if (!panelMode && v2Run && motionEditPlan?.status !== "passed") throw new Error(`Missing passed directed motion plan: ${motionEditPlanPath}`);
@@ -2657,7 +2743,7 @@ async function main() {
   if (panelMode && !panelAudioSettings.reuse_decision?.eligible) throw new Error("Panel render requires the current canonical narration master without loudness changes; requested settings must match the approved audio bed.");
   await fs.mkdir(renderDir, { recursive: true });
   await fs.mkdir(workDir, { recursive: true });
-  const panelPicture = panelMode ? await buildPanelProductionPicture({ episodeDir, loadedPlan: panelPlan, workDir, width, height, fps, onProgress: row => console.error(JSON.stringify(row)) }) : null;
+  const panelPicture = panelMode ? await buildPanelProductionPicture({ episodeDir, loadedPlan: panelPlan, workDir, width, height, fps, concurrency: Math.min(4, renderConcurrency), onProgress: row => console.error(JSON.stringify(row)) }) : null;
   const concat = panelPicture ? {
     prompt_count: panelPlan.timeline.scenes.length,
     motion_mode: "panel_composition_v1", clip_dir: path.dirname(panelPicture.videoPath),
@@ -2871,6 +2957,9 @@ async function main() {
     narration_report_path: audioStitchReportPath,
     audio_stitch_report_path: audioStitchReportPath,
     subtitle_text_source: subtitleRows.source,
+    ...(contractionCaptionSpan ? {
+      caption_spoken_expansion_alignment: contractionCaptionSpan,
+    } : {}),
     subtitle_timing_policy: subtitleRows.source === "audio_stitch_caption_text_word_aligned_to_whisper"
       ? "tts_unit_bounded_dynamic_word_alignment_v1"
       : "legacy_fallback",

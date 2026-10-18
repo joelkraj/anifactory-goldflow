@@ -15,6 +15,8 @@ const episode = flags.episode ?? "ep_01";
 const episodeDir = path.resolve(flags["episode-dir"] ?? path.join(dataRoot, "channels", channel, "weekly_runs", week, "episodes", episode));
 const scriptPath = path.join(episodeDir, "script_clean.md");
 const powerAuditPath = path.resolve(flags["power-system-audit"] ?? path.join(episodeDir, "power_system_comprehension_audit.json"));
+const acceptPowerSystemEditorialRisk = flags["accept-power-system-editorial-risk"] === "true";
+const powerSystemEditorialReason = String(flags["power-system-editorial-reason"] ?? "").trim();
 
 function parseFlags(parts) {
   const parsed = {};
@@ -45,6 +47,16 @@ async function main() {
   if (expectedHash && expectedHash !== scriptHash) {
     throw new Error(`Refusing approval: expected hash ${expectedHash}, current script hash is ${scriptHash}.`);
   }
+  if (acceptPowerSystemEditorialRisk) {
+    if (!/^[a-f0-9]{64}$/.test(String(flags.hash ?? ""))) {
+      throw new Error("Power-system editorial acceptance requires --hash <exact current script SHA-256>.");
+    }
+    if (powerSystemEditorialReason.replace(/\s+/g, " ").length < 40) {
+      throw new Error("Power-system editorial acceptance requires --power-system-editorial-reason with at least 40 characters describing the operator's exact-source release and accepted editorial risk.");
+    }
+  } else if (powerSystemEditorialReason) {
+    throw new Error("--power-system-editorial-reason requires --accept-power-system-editorial-risk true.");
+  }
   const metaScan = {
     ...scanScriptMetaContamination(script),
     source_script_hash: scriptHash,
@@ -56,22 +68,50 @@ async function main() {
     const preview = metaScan.blockers.slice(0, 5).map((row) => `${row.code} line ${row.line}: ${row.match}`).join("; ");
     throw new Error(`Refusing approval: script contains production/meta narration contamination (${preview}). Fix script_clean.md or pass --allow-script-meta-contamination true only for explicit diagnostic approval.`);
   }
-  let powerAudit;
+  let powerAuditBytes = null;
   try {
-    powerAudit = JSON.parse(await fs.readFile(powerAuditPath, "utf8"));
+    powerAuditBytes = await fs.readFile(powerAuditPath);
   } catch (error) {
-    if (error?.code === "ENOENT") {
+    if (error?.code === "ENOENT" && !acceptPowerSystemEditorialRisk) {
       throw new Error(`Refusing approval: required power-system comprehension audit is missing at ${powerAuditPath}. Run scripts/power-system-comprehension-audit.mjs before script approval.`);
     }
-    throw new Error(`Refusing approval: power-system comprehension audit is unreadable at ${powerAuditPath}: ${error instanceof Error ? error.message : String(error)}`);
+    if (error?.code !== "ENOENT") {
+      throw new Error(`Refusing approval: power-system comprehension audit is unreadable at ${powerAuditPath}: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
-  const powerAuditValidation = validatePowerSystemComprehensionAudit(powerAudit, script);
-  if (powerAudit.status !== "passed" || powerAuditValidation.status !== "passed") {
-    const preview = powerAuditValidation.blockers.slice(0, 8).map((row) => `${row.code}${row.ability_id ? ` (${row.ability_id})` : ""}`).join("; ");
-    throw new Error(`Refusing approval: power-system comprehension audit is missing, stale, or blocked (${preview || `artifact status ${powerAudit.status ?? "missing"}`}).`);
+  let powerAudit = null;
+  if (powerAuditBytes) {
+    try {
+      powerAudit = JSON.parse(powerAuditBytes.toString("utf8"));
+    } catch (error) {
+      throw new Error(`Refusing approval: power-system comprehension audit is unreadable at ${powerAuditPath}: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
-  const powerAuditHash = sha256(await fs.readFile(powerAuditPath));
+  const powerAuditValidation = powerAuditBytes
+    ? validatePowerSystemComprehensionAudit(powerAudit, script)
+    : null;
+  if (!acceptPowerSystemEditorialRisk
+    && (powerAudit?.status !== "passed" || powerAuditValidation?.status !== "passed")) {
+    const preview = powerAuditValidation?.blockers.slice(0, 8).map((row) => `${row.code}${row.ability_id ? ` (${row.ability_id})` : ""}`).join("; ");
+    throw new Error(`Refusing approval: power-system comprehension audit is missing, stale, or blocked (${preview || `artifact status ${powerAudit?.status ?? "missing"}`}).`);
+  }
+  const powerAuditHash = powerAuditBytes ? sha256(powerAuditBytes) : null;
   const approvedAt = new Date().toISOString();
+  const powerSystemEditorialException = acceptPowerSystemEditorialRisk ? {
+    schema: "goldflow_power_system_editorial_exception_v1",
+    status: powerAuditBytes
+      ? "existing_audit_preserved_editorial_risk_accepted"
+      : "not_performed_operator_editorial_exception",
+    approval_scope: "exact_script_hash",
+    source_script_hash: scriptHash,
+    operator_release_basis_and_editorial_risk: powerSystemEditorialReason,
+    comprehension_audit_pass_claimed: false,
+    existing_audit_path: powerAuditBytes ? powerAuditPath : null,
+    existing_audit_sha256: powerAuditHash,
+    existing_audit_status: powerAudit?.status ?? null,
+    existing_audit_validation: powerAuditValidation,
+    recorded_at: approvedAt,
+  } : null;
   const base = {
     channel,
     series_slug: series,
@@ -82,8 +122,9 @@ async function main() {
     script_hash: scriptHash,
     source_hash: scriptHash,
     source_script_hash: scriptHash,
-    power_system_comprehension_audit_path: powerAuditPath,
+    power_system_comprehension_audit_path: powerAuditBytes ? powerAuditPath : null,
     power_system_comprehension_audit_hash: powerAuditHash,
+    ...(powerSystemEditorialException ? { power_system_editorial_exception: powerSystemEditorialException } : {}),
     approved: true,
     operator_approved: true,
     status: "approved",
@@ -109,7 +150,7 @@ async function main() {
   await writeJson(path.join(episodeDir, "manual_agent_script_review.json"), manualReview);
   await writeJson(path.join(episodeDir, "operator_script_approval.json"), operatorApproval);
   await writeJson(path.join(episodeDir, "script_lock.json"), scriptLock);
-  console.log(JSON.stringify({ status: "approved", script_clean_hash: scriptHash, power_system_comprehension_audit_hash: powerAuditHash, files_written: ["script_meta_contamination_report.json", "manual_agent_script_review.json", "operator_script_approval.json", "script_lock.json"] }, null, 2));
+  console.log(JSON.stringify({ status: "approved", script_clean_hash: scriptHash, power_system_comprehension_audit_hash: powerAuditHash, ...(powerSystemEditorialException ? { power_system_editorial_exception: powerSystemEditorialException } : {}), files_written: ["script_meta_contamination_report.json", "manual_agent_script_review.json", "operator_script_approval.json", "script_lock.json"] }, null, 2));
 }
 
 main().catch((error) => {

@@ -694,6 +694,69 @@ ninthBeatSlot.release();
 for (const slot of beatSlots.slice(1)) slot.release();
 resetFederatedPlannerPoolForTests();
 
+// Real CLI failures may include echoed creative/schema text before ERROR lines.
+// Exercise circuit decisions, not only the classifier's regular expression.
+async function recordFixturePlannerFailure(message) {
+  const slot = await acquireFederatedPlannerSlot({
+    identity: federatedIdentity,
+    stageName: "ep_01_visual_plan_chunk_023",
+    env: { ...process.env, ANIFACTORY_CODEX_CLI_PATH: process.execPath },
+  });
+  slot.recordFailure(new Error(message));
+  slot.release();
+  return federatedPlannerPoolSnapshotForTests().health[slot.pool_scope_key];
+}
+const retainedCapacityError = `Codex ep_01_visual_plan_chunk_023 exited 1: ,
+    "ui_elements": [],
+    "forbidden_ref_ids": [],
+    "reference_slots": []
+Return that object as one minified JSON line. Do not use markdown fences or commentary.
+2026-09-22T06:02:48.812274Z WARN codex_skills::interface: ignoring interface.icon_small
+ERROR: Selected model is at capacity. Please try a different model.
+ERROR: Selected model is at capacity. Please try a different model.
+[truncated from 42357 chars]`;
+for (const message of [
+  retainedCapacityError,
+  "Selected model is at capacity. Please try a different model.",
+  'Codex fixture exited 1: {"forbidden_ref_ids":[],"oauth_panel":false}',
+  'Codex fixture exited 1: Story: forbidden chamber; authentication required is a sign; OAuth is a prop label.\nERROR: Selected model is at capacity. Please try a different model.',
+]) {
+  resetFederatedPlannerPoolForTests();
+  const health = await recordFixturePlannerFailure(message);
+  assert.equal(health.open, false, "prompt echo must not promote a transient failure to fatal auth");
+  assert.equal(health.consecutive_failures, 1, "duplicate diagnostic lines are one failed call");
+}
+for (const message of [
+  "Authentication required. Authentication timed out.",
+  "eligibility check failed",
+  "OAuth token expired",
+  "Unauthorized",
+  "HTTP 403 Forbidden",
+  "credentials invalid",
+  'Codex fixture exited 1: {"forbidden_ref_ids":[]}\nERROR: authentication required',
+  'Prompt says: Selected model is at capacity.\nERROR: Unauthorized',
+  "ERROR: Selected model is at capacity.\nFATAL: credentials missing",
+]) {
+  resetFederatedPlannerPoolForTests();
+  assert.equal((await recordFixturePlannerFailure(message)).open, true, "real auth/permission errors remain immediately fatal");
+}
+resetFederatedPlannerPoolForTests();
+for (let failure = 1; failure <= 3; failure += 1) {
+  const health = await recordFixturePlannerFailure(retainedCapacityError);
+  assert.equal(health.open, failure === 3, "three consecutive transient calls still open the circuit");
+  assert.equal(health.consecutive_failures, failure);
+}
+await Promise.race([
+  assert.rejects(acquireFederatedPlannerSlot({
+    identity: federatedIdentity,
+    stageName: "ep_01_visual_plan_chunk_024",
+    env: { ...process.env, ANIFACTORY_CODEX_CLI_PATH: process.execPath },
+  }), /All federated planner providers opened their circuit/),
+  new Promise((_, reject) => setImmediate(() => reject(new Error("An already-open circuit left an orphaned planner waiter.")))),
+]);
+assert.equal(federatedPlannerPoolSnapshotForTests().waiting, 0);
+resetFederatedPlannerPoolForTests();
+
 const legacyFederatedIdentity = {
   schema: "goldflow_run_identity_v2",
   channel: "planner-pool-fixture",

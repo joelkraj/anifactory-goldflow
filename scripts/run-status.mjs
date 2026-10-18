@@ -15,6 +15,7 @@ import {
 } from "./lib/pipeline-stage-registry.mjs";
 import { assertCommandWorkflowRoute, assertEpisodeWorkflowFlags, readEpisodeRoutingIdentity } from "./lib/episode-workflow-routing.mjs";
 import { referencePlanApprovalMatches } from "./lib/reference-plan-contract.mjs";
+import { readReferenceImageQaRecoveryScope } from "./lib/reference-image-recovery.mjs";
 import {
   parallaxApprovalMatches,
   parallaxAssetContractSha256,
@@ -25,6 +26,8 @@ import {
   creditExhaustedIdsFromRows,
 } from "./lib/image-fallback-policy.mjs";
 import { normalizeImageProvider } from "./lib/image-provider-routing.mjs";
+import { openartRestartBaselineState } from "./lib/openart-visual-restart.mjs";
+import { falRestartBaselineState } from "./lib/fal-visual-restart.mjs";
 import {
   federatedWebImageIdentityStatus,
   googleFlowPrimaryIdentityStatus,
@@ -35,6 +38,46 @@ import {
 } from "./lib/image-provider-policy.mjs";
 import { findSourceCompatibleHybridDeadletters } from "./hybrid-browser-image-pool.mjs";
 import { sha256File as streamSha256File } from "./lib/file-hash.mjs";
+import { reviewedBulkRepairRound } from "./lib/fal-reviewed-bulk-round.mjs";
+import {
+  verifyCompletedInterruptedQwenRunner,
+  verifyInterruptedQwenAdoptionReceipt,
+  verifyInterruptedQwenFinalRun,
+} from "./lib/qwen-interrupted-adoption.mjs";
+import { loadNarrationSourceStructure } from "./lib/narration-source-structure.mjs";
+import { loadLowMarginDisposition } from "./lib/narration-low-margin-disposition.mjs";
+import { loadAsrOrthographyReview } from "./lib/narration-asr-orthography-review.mjs";
+import {
+  APPEND_ONLY_TAIL_MODE, pcm16MonoWavFactsForTests,
+  validateAppendOnlyTailScopeForTests, verifyAppendOnlyTailLineage,
+  verifyAppendOnlyTailSelection,
+} from "./lib/narration-append-only-tail.mjs";
+import { projectVerifiedStructuralRecoveryReport, structuralProjectionManifestForReport, verifiedStructuralRecoveryFromManifest } from "./lib/narration-structural-finalizer-provenance.mjs";
+import { validateConfirmedRetryEvidenceForTests } from "./narration-tts-episode.mjs";
+import { loadPronunciationRecoveryState } from "./lib/narration-pronunciation-episode.mjs";
+import { loadAutomatedPronunciationState } from "./lib/narration-automated-pronunciation-episode.mjs";
+import { CONTRACTION_MODE, CONTRACTION_TARGET_UNIT_ID,
+  loadContractionRecoveryState,
+  validateAppliedContractionReview,
+  validateConsumedContractionForBlockedFullStream } from "./lib/narration-contraction-repair.mjs";
+import {
+  PRONUNCIATION_MODE,
+  AUTOMATED_PRONUNCIATION_MODE,
+  applyAutomatedPronunciationCandidateForTests,
+  validateAutomatedPronunciationEvidenceForTests,
+  validatePronunciationCandidateArtifactsForTests,
+  validatePronunciationCandidateReviewForTests,
+  validatePronunciationDefectEvidenceForTests,
+  validateSelectedPronunciationReviewForTests,
+} from "./lib/narration-pronunciation-repair.mjs";
+import {
+  NARRATION_CROSS_LEVEL_ASR_POLICY_VERSION,
+  crossLevelArticleFusionCandidate,
+} from "./lib/narration-cross-level-asr.mjs";
+import { validateAppliedFullStreamManualReview } from "./lib/narration-full-stream-manual-review.mjs";
+import { loadContextualAsrReconciliation, validateAppliedContextualAsrReconciliation,
+  validateCurrentContextualAsrDelivery } from "./lib/narration-full-stream-contextual-asr.mjs";
+import { loadFullStreamSpacingBridge, validateAppliedFullStreamSpacingBridge } from "./lib/narration-full-stream-spacing-bridge.mjs";
 import {
   EXTERNAL_NARRATION_TTS_PROVIDERS,
   hasExplicitLegacyQwenIdentity,
@@ -46,6 +89,7 @@ import {
   narrationUnitContractForQuality,
   narrationStitchContractForQuality,
   narrationTtsPolicyForIdentity,
+  narrationTtsRetryReportPolicy,
   QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT,
   QWEN_LIAM_PRIMARY_LOCK,
   QWEN_LIAM_RETRY_CONTRACT,
@@ -55,6 +99,8 @@ import {
 } from "./lib/narration-tts-policy.mjs";
 import {
   QWEN_LIAM_EXACT_UNIT_RECOVERY_MODE,
+  QWEN_LIAM_INCOMPLETE_UNIT_RESUME_MODE,
+  canonicalQwenBatchSha256,
   qwenBatchBindingByUnit,
   validateQwenLiamBatchPlan,
 } from "./lib/qwen-liam-batch-contract.mjs";
@@ -80,8 +126,11 @@ import {
 } from "./lib/generated-motion-contract.mjs";
 import { noLtxOverrideStatus } from "./lib/operator-motion-route-override.mjs";
 import { effectiveImageIdentityForEpisode } from "./lib/operator-image-route-override.mjs";
-import { semanticFailedUnitIds } from "./lib/semantic-planner-recovery.mjs";
+import { semanticFailedRecoveryScope } from "./lib/semantic-planner-recovery.mjs";
+import { readVisualBeatRecoveryScope } from "./lib/visual-beat-recovery.mjs";
+import { readVisualPromptRecoveryScope, visualPromptRecoveryAdmission } from "./lib/visual-prompt-recovery.mjs";
 import { hasTtsTerminalPunctuation } from "./lib/tts-text-boundaries.mjs";
+import { validateStructuralNoAudioRetryEvidence } from "./lib/tts-structural-no-audio-retry.mjs";
 import {
   ttsSpokenTextAuditMatches,
   ttsSpokenTextAuditSha256,
@@ -100,14 +149,20 @@ import {
 } from "./lib/planner-provider-registry.mjs";
 import {
   narrationQualityContractForIdentity,
+  narrationUsesAutomatedAsrAcceptance,
 } from "./lib/narration-quality-contract.mjs";
 import {
   validateNarrationTextIr,
 } from "./lib/narration-text-ir.mjs";
 import {
+  narrationProviderOutputManifestSha256,
+  narrationSynthesisIdentitySha256,
   validateNarrationProviderOutputManifest,
 } from "./lib/narration-provider-adapter.mjs";
+import { findExactBoundaryRepairResumeManifest } from "./lib/narration-boundary-resume.mjs";
+import { TRANSCRIPT_QA_COMPARISON_VERSION } from "./modelslab-qwen-episode-audio.mjs";
 import {
+  NARRATION_DELIVERY_CONSENSUS_VERSION,
   NARRATION_EXACT_LISTEN_REVIEW_PACKET_SCHEMA,
   narrationExactListenReviewPacketSha256,
   validateNarrationExactListenReviewDecision,
@@ -742,13 +797,27 @@ function commandFor(stage, identity) {
   return buildStageCommand(stage, identity);
 }
 
-export function semanticRecoveryCommandForTests(artifact, identity) {
-  const failedIds = semanticFailedUnitIds(artifact);
-  if (String(artifact?.status ?? "").toLowerCase() !== "blocked" || !failedIds.length) return null;
+export function semanticRecoveryCommandForTests(artifact, identity, sourceScriptHash = artifact?.source_script_hash) {
+  const failedIds = semanticFailedRecoveryScope(artifact, sourceScriptHash);
+  if (!failedIds.length) return null;
   const base = commandFor("semantic_scene_plan", identity)
     .replace(/\s+--semantic-chunk-ids\s+\S+/g, "")
     .replace(/\s+--resume-incomplete-chunks\s+true\b/g, "");
   return `${base} --semantic-chunk-ids ${failedIds.join(",")}`;
+}
+
+export function visualBeatRecoveryCommandForTests(scope, identity) {
+  if (!scope?.failed_chunk_ids?.length || scope.source_hashes_current !== true) return null;
+  const base = commandFor("visual_beat_plan", identity)
+    .replace(/\s+--resume-incomplete-chunks\s+true\b/g, "");
+  return `${base} --resume-incomplete-chunks true`;
+}
+
+export function visualPromptRecoveryCommandForTests(scope, identity) {
+  if (!scope?.failed_cut_ids?.length || scope.source_hashes_current !== true) return null;
+  const base = commandFor("visual_prompt_plan", identity)
+    .replace(/\s+--resume-incomplete-chunks\s+true\b/g, "");
+  return `${base} --cut-ids ${scope.failed_cut_ids.join(",")}`;
 }
 
 export function transitionRecoveryCommandForTests(artifact, identity) {
@@ -763,6 +832,14 @@ export function transitionRecoveryCommandForTests(artifact, identity) {
   return `${base} --boundary-ids ${failedBoundaryIds.join(",")}`;
 }
 
+export function blockedTransitionRecoveryStageForTests(next, artifact, identity) {
+  const exactCommand = transitionRecoveryCommandForTests(artifact, identity);
+  return next?.stage === "transition_edit_plan"
+    && next?.state === "blocked"
+    && Boolean(exactCommand)
+    && next.next_command_shape === exactCommand;
+}
+
 function inferredState(validation = {}) {
   if (validation.state) return validation.state;
   if (validation.done) return "passed";
@@ -773,10 +850,16 @@ function inferredState(validation = {}) {
   return "missing";
 }
 
-function stage(stageId, validation, identity, nextCommandOverride = null) {
+export function stageForTests(stageId, validation, identity, nextCommandOverride = null) {
   const definition = stageDefinition(stageId, identity);
   if (!definition) throw new Error(`Stage ${stageId} is missing from the pipeline registry.`);
   const state = inferredState(validation);
+  // A blocked narration report is a triage gate. Without an explicit,
+  // evidence-bound recovery command, the registry's generic narrate command
+  // would synthesize the whole episode and overwrite the operator's scope.
+  const blockedNarrationHold = stageId === "qwen_tts_stitch" && state === "blocked"
+    ? "Operator hold: inspect the current hash-bound narration QA and prepare only an exact reviewed repair; do not rerun all narration."
+    : null;
   return {
     stage: stageId,
     title: definition.title,
@@ -788,11 +871,14 @@ function stage(stageId, validation, identity, nextCommandOverride = null) {
     validator: definition.validator,
     exists: stageIsSatisfied(state),
     evidence: validation.evidence ?? null,
-    next_command_shape: stageIsSatisfied(state) ? null : nextCommandOverride ?? validation.next_command_shape ?? commandFor(stageId, identity),
+    next_command_shape: stageIsSatisfied(state) || (identity.image_provider === "fal_ai" && stageId === "image_generation" && state === "blocked" && !validation.next_command_shape)
+      ? null : nextCommandOverride ?? validation.next_command_shape ?? blockedNarrationHold ?? commandFor(stageId, identity),
   };
 }
 
-async function visualPromptPlanReviewHardenCommand(episodeDir, identity) {
+const stage = stageForTests;
+
+async function visualPromptPlanReviewHardenCommand(episodeDir, identity, recoveryScope = null) {
   const channel = identity.channel ?? "<channel>";
   const series = identity.series_slug ?? "<series>";
   const week = identity.week ?? "<week>";
@@ -800,12 +886,9 @@ async function visualPromptPlanReviewHardenCommand(episodeDir, identity) {
   const base = `--channel ${channel} --series ${series} --week ${week} --episode ${episode}`;
   const planCommand = commandFor("visual_prompt_plan", identity);
   const promptPlan = await readJson(path.join(episodeDir, "section_image_prompts.json"), null);
-  const failedPromptCutIds = Array.isArray(promptPlan?.planner?.partial_failure?.failed_cut_ids)
-    ? [...new Set(promptPlan.planner.partial_failure.failed_cut_ids.map(String).filter(Boolean))]
-    : [];
-  if (promptPlan?.status === "blocked" && Array.isArray(promptPlan.prompts) && failedPromptCutIds.length) {
-    const scopedBase = planCommand.replace(/\s+--resume-incomplete-chunks\s+true\b/g, "");
-    return `${scopedBase} --cut-ids ${failedPromptCutIds.join(",")}`;
+  if (promptPlan?.status === "blocked") {
+    return visualPromptRecoveryCommandForTests(recoveryScope, identity)
+      ?? "Manual triage required: blocked visual prompt base is incomplete, stale, or lacks exact unresolved scope.";
   }
   if (promptPlan?.status !== "passed" || !Array.isArray(promptPlan.prompts) || !promptPlan.prompts.length) return planCommand;
   const reviewedPlanPath = path.join(episodeDir, "section_image_prompts_reviewed.json");
@@ -825,6 +908,29 @@ async function visualPromptPlanReviewHardenCommand(episodeDir, identity) {
     return hardenOriginalCommand;
   }
   if (reviewedStatus === "needs_manual_agent_review") {
+    const manualReview = await readJson(manualReviewPath, null);
+    const blockers = manualReview?.unresolved_blockers ?? [];
+    const targetRow = reviewedPlan.prompts?.find((row) => row.image_id === manualReview?.image_ids?.[0]);
+    const beatPlan = await readJson(path.join(episodeDir, "visual_beat_plan.json"), null);
+    const targetBeat = beatPlan?.beats?.find((beat) => beat.visual_beat_id === targetRow?.visual_beat_id);
+    if (manualReview?.status === "needs_manual_agent_review" && blockers.length > 0
+      && blockers.length === manualReview.image_ids?.length
+      && blockers.every((item) => item.code === "required_source_identity_ambiguous"
+        && manualReview.image_ids.includes(item.image_id))) {
+      return `node bin/goldflow.mjs visual repair-identity-binding --episode-dir ${episodeDir} --repair-spec <reviewed-json>`;
+    }
+    if (manualReview?.status === "needs_manual_agent_review" && manualReview?.image_ids?.length === 1
+      && blockers.length === 1 && blockers[0]?.code === "visible_character_ref_scope_missing"
+      && blockers[0]?.image_id === manualReview.image_ids[0]
+      && targetRow?.narrative_overlays?.length === 1
+      && targetRow.narrative_overlays[0]?.kind === "speech_bubble"
+      && targetRow.narrative_overlays[0]?.speaker === blockers[0]?.character
+      && targetBeat?.screen_visible_entity_ids?.length === 1
+      && /\brobot\b/i.test(targetBeat?.visual_beat_script_excerpt ?? "")
+      && /\b(?:screen|promotional)\b/i.test(targetBeat?.visual_beat_script_excerpt ?? "")
+      && /\b(?:generic|promotional)\b/i.test(targetBeat?.local_continuity_note ?? "")) {
+      return `node bin/goldflow.mjs visual repair-screen-identity --episode-dir ${episodeDir} --repair-spec <reviewed-json>`;
+    }
     return `Manual agent review required: inspect ${manualReviewPath}; then patch detector/review logic or run a scoped visual review/replan for the listed cut ids before rerunning run status.`;
   }
   if (["blocked", "blocked_deadletter"].includes(reviewedStatus)) {
@@ -1291,7 +1397,7 @@ export async function imageReportComplete(episodeDir, episode, identity) {
   };
 }
 
-async function referenceGenerationComplete(episodeDir, identity) {
+async function referenceGenerationComplete(episodeDir, identity, currentScriptHash) {
   const planPath = path.join(episodeDir, "visual_reference_plan.json");
   const plan = await readJson(planPath, null);
   if (!plan) return { done: false, evidence: "visual_reference_plan.json missing" };
@@ -1328,6 +1434,14 @@ async function referenceGenerationComplete(episodeDir, identity) {
   }
   const duplicates = [...byHash.values()].filter((rows) => rows.length > 1);
   const duplicateSummary = duplicates.map((rows) => rows.join("="));
+  if (!missing.length && !duplicates.length && isBrowserPoolImageProvider(normalizeImageProvider(identity?.image_provider))) {
+    const recovery = await readReferenceImageQaRecoveryScope({ episodeDir, episode: identity.episode,
+      plan, currentScriptHash });
+    if (recovery) return { done: false, state: "blocked",
+      evidence: `reference_image_qa_${identity.episode}.json; current reviewed rejected refs=${recovery.rejected_ref_ids.join(",")}`,
+      next_command_shape: browserPoolCommand(identity, recovery.rejected_ref_ids, { references: true, qaRecovery: true, repair: true }),
+      reference_image_qa_recovery_scope: recovery };
+  }
   let fallbackCommand = null;
   let fallbackEvidence = "";
   if (missing.length && isBrowserPoolImageProvider(normalizeImageProvider(identity?.image_provider))) {
@@ -1531,6 +1645,9 @@ async function finalQaComplete(episodeDir, episode, identity) {
     }
     return { done: false, state: status === "failed" ? "failed" : "blocked", evidence: `${path.basename(reportPath)} status=${status}` };
   }
+  if (status === "needs_review" && Array.isArray(report.blockers) && report.blockers.length === 0) {
+    return { done: false, state: "needs_review", evidence: `${path.basename(reportPath)} advisory findings require recorded review` };
+  }
   if (status !== "passed") return { done: false, state: status === "failed" ? "failed" : "blocked", evidence: `${path.basename(reportPath)} status=${status || "missing"}` };
   const finalVideoPath = report.final_video_path;
   const finalVideoHash = finalVideoPath ? await fileSha256(finalVideoPath) : null;
@@ -1546,6 +1663,75 @@ async function finalQaComplete(episodeDir, episode, identity) {
     return { done: false, state: "blocked", evidence: `${path.basename(reportPath)} blockers=${report.blockers.join(",")}` };
   }
   return { done: true, evidence: `${path.basename(reportPath)} status=passed; hashes=current` };
+}
+
+export async function reviewedBulkQaRepairStatusForTests(episodeDir, report, qaPath) {
+  const ids = report.critical_rejected_image_ids;
+  const ledger = await readJson(path.join(episodeDir, "cut_execution_ledger.json"), null);
+  if (!Array.isArray(ids) || !ids.length || new Set(ids).size !== ids.length || !Array.isArray(ledger?.cuts))
+    throw new Error("Blocked Fal image QA lacks exact unique IDs or the current cut ledger.");
+  const qaHash = await fileSha256(qaPath);
+  const root = path.join(episodeDir, "fal");
+  let assignedCount = 0, completeCount = 0;
+  let heldRecovery = null;
+  for (const id of ids) {
+    const matches = ledger.cuts.filter(row => row.image_id === id);
+    if (matches.length !== 1 || !/^[a-f0-9]{64}$/.test(matches[0].image_sha256 ?? "")
+      || await fileSha256(matches[0].image_path) !== matches[0].image_sha256)
+      throw new Error(`Current rejected Fal cut is missing or changed: ${id}`);
+    const round = await reviewedBulkRepairRound({ root, imageId: id,
+      qaReportSha256: qaHash, rejectedImageSha256: matches[0].image_sha256 });
+    if (round.assignment) {
+      if (await exists(path.join(root, "bulk", "review-repair-failure-receipts", `${round.stem}.json`)))
+        throw new Error(`Current reviewed Fal repair has a provider failure receipt: ${id}`);
+      const holdPath = path.join(root, "bulk", "transport-holds", `${round.stem}.json`);
+      if (await exists(holdPath)) {
+        const hold = await readJson(holdPath, null);
+        if (hold?.image_id !== id || hold.assignment_sha256 !== round.assignment.assignment_sha256
+          || await exists(round.assignment.result_receipt_path))
+          throw new Error(`Current reviewed Fal transport hold binding changed: ${id}`);
+        const recoveryPath = path.join(root, "bulk", "review-repair-transport-recovery-assignments", `${round.stem}.json`);
+        const recovery = await readJson(recoveryPath, null);
+        const directivePath = path.join(root, "bulk", "review-repair-transport-recovery-directives", `${round.stem}.json`);
+        if (heldRecovery) throw new Error("Only one exact reviewed Fal transport hold can be recovered at a time.");
+        heldRecovery = { id, directivePath, pendingSubmission: !recovery || !await exists(recovery.submission_receipt_path) };
+        if (recovery) {
+          if (recovery.image_id !== id || recovery.previous_assignment_sha256 !== round.assignment.assignment_sha256
+            || recovery.source_hold_sha256 !== await fileSha256(holdPath)
+            || recovery.reviewed_directive_sha256 !== await fileSha256(directivePath)
+            || recovery.source_script_sha256 !== await fileSha256(path.join(episodeDir, "script_clean.md")))
+            throw new Error(`Current reviewed Fal transport recovery binding changed: ${id}`);
+          if (await exists(path.join(root, "bulk", "review-repair-transport-recovery-failure-receipts", `${round.stem}.json`)))
+            throw new Error(`Reviewed Fal transport recovery has a provider failure receipt: ${id}`);
+          if (await exists(path.join(root, "bulk", "transport-holds", `${round.stem}-recovery.json`)))
+            throw new Error(`Reviewed Fal transport recovery also has an unresolved hold: ${id}`);
+          if (await exists(recovery.submission_receipt_path)) {
+            const submitted = await readJson(recovery.submission_receipt_path, null);
+            if (submitted?.assignment_sha256 !== recovery.assignment_sha256
+              || submitted.request_id === recovery.previous_request_id)
+              throw new Error(`Reviewed Fal transport recovery submission changed: ${id}`);
+            if (await exists(recovery.result_receipt_path)) {
+              const result = await readJson(recovery.result_receipt_path, null);
+              if (result?.request_id !== submitted.request_id
+                || result?.output_path !== recovery.output_path
+                || await fileSha256(result.output_path) !== result.output_sha256)
+                throw new Error(`Reviewed Fal transport recovery result changed: ${id}`);
+            }
+          }
+          assignedCount++;
+          if (await exists(recovery.result_receipt_path)) completeCount++;
+        }
+        continue;
+      }
+      assignedCount++;
+      if (await exists(round.assignment.result_receipt_path)) completeCount++;
+    }
+  }
+  const next = heldRecovery?.pendingSubmission ? "recover-reviewed-bulk-hold" : assignedCount === ids.length
+    ? completeCount === ids.length ? "finalize-reviewed-bulk" : "observe-reviewed-bulk"
+    : "repair-reviewed-bulk";
+  return { next, assignedCount, completeCount, totalCount: ids.length,
+    ...(heldRecovery ? { heldRecovery } : {}) };
 }
 
 export async function imageOutputQaComplete(episodeDir, episode, identity) {
@@ -1588,6 +1774,14 @@ export async function imageOutputQaComplete(episodeDir, episode, identity) {
     }
   }
   if (status === "passed") return { done: true, evidence: `${path.basename(reportPath)} passed; risk_cuts=${report.risk_cut_count ?? "?"}` };
+  if (status === "blocked" && identity.image_provider === "fal_ai" && Array.isArray(report.critical_rejected_image_ids) && report.critical_rejected_image_ids.length) {
+    let repair;
+    try { repair = await reviewedBulkQaRepairStatusForTests(episodeDir, report, reportPath); }
+    catch (error) { return { done: false, state: "blocked", evidence: `Fal exact-ID visual review hold: ${error.message}` }; }
+    const { next, completeCount, totalCount, heldRecovery } = repair;
+    return { done: false, state: "blocked", evidence: `Fal exact-ID visual review repairs=${completeCount}/${totalCount}`,
+      next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action ${next}${next === "repair-reviewed-bulk" ? " --directives <absolute_reviewed_bulk_repair_directives.json> --confirm-spend exact_fal_reviewed_bulk_repair" : next === "recover-reviewed-bulk-hold" ? ` --image-id ${heldRecovery.id} --directives ${heldRecovery.directivePath} --confirm-spend exact_fal_reviewed_bulk_hold_recovery` : ""}` };
+  }
   return {
     done: false,
     evidence: `${path.basename(reportPath)} status=${status || "missing"}; blockers=${report.unresolved_blocker_count ?? "?"}`,
@@ -2288,6 +2482,67 @@ async function synthesizedNarrationArtifactsComplete({
   if (!fullQa || !qaStatusPassed(fullQa.status)) add(`narration_full_stream_qa_${episode}.json missing or status=${fullQa?.status ?? "missing"}`);
   if (unitQa?.source_script_hash !== currentScriptHash) add("unit QA source script hash is stale");
   if (fullQa?.source_script_hash !== currentScriptHash) add("full-stream QA source script hash is stale");
+  try {
+    await validateAppliedFullStreamManualReview(fullQa);
+    if (fullQa?.full_stream_manual_review) {
+      const manifestHash = await fileSha256(path.join(episodeDir, `narration_provider_output_manifest_${episode}.json`));
+      if (fullQa.provider_output_manifest_file_sha256 !== manifestHash) add("full-stream review provider manifest hash is stale");
+      for (const report of [ttsReport, stitchReport]) {
+        if (JSON.stringify(report?.full_stream_manual_review) !== JSON.stringify(fullQa.full_stream_manual_review)) {
+          add("full-stream manual review provenance differs across narration reports");
+        }
+      }
+    }
+  } catch (error) {
+    add(error.message);
+  }
+  try {
+    await validateAppliedContextualAsrReconciliation(fullQa);
+    if (fullQa?.full_stream_contextual_asr) {
+      const manifestPath = ttsReport?.provider_output_manifest_path;
+      await validateCurrentContextualAsrDelivery({
+        receipt: fullQa.full_stream_contextual_asr,
+        currentDeliveryPath: path.join(episodeDir,
+          `narration_unit_delivery_qa_${episode}.json`),
+      });
+      if (!manifestPath || fullQa.provider_output_manifest_file_sha256
+        !== await fileSha256(manifestPath)) {
+        add("contextual ASR provider manifest hash is stale");
+      }
+      for (const report of [ttsReport, stitchReport]) {
+        if (JSON.stringify(report?.full_stream_contextual_asr)
+          !== JSON.stringify(fullQa.full_stream_contextual_asr)) {
+          add("contextual ASR provenance differs across narration reports");
+        }
+      }
+    }
+  } catch (error) {
+    add(error.message);
+  }
+  try {
+    await validateAppliedFullStreamSpacingBridge(fullQa);
+    if (fullQa?.full_stream_spacing_bridge) {
+      const receipt = fullQa.full_stream_spacing_bridge;
+      if (receipt.unit_delivery_sha256 !== await fileSha256(path.join(episodeDir,
+        `narration_unit_delivery_qa_${episode}.json`))) {
+        add("full-stream spacing bridge unit delivery hash is stale");
+      }
+      // The receipt binds the immutable pre-review stitch report. Finalization
+      // adds this receipt to the canonical report, so its file hash must change.
+      const manifestPath = ttsReport?.provider_output_manifest_path;
+      if (!manifestPath || fullQa.provider_output_manifest_file_sha256
+        !== await fileSha256(manifestPath)) {
+        add("full-stream spacing bridge provider manifest hash is stale");
+      }
+      for (const report of [ttsReport, stitchReport]) {
+        if (JSON.stringify(report?.full_stream_spacing_bridge) !== JSON.stringify(receipt)) {
+          add("full-stream spacing bridge provenance differs across narration reports");
+        }
+      }
+    }
+  } catch (error) {
+    add(error.message);
+  }
 
   const planBoundArtifacts = [
     ["TTS report", ttsReport],
@@ -2354,6 +2609,7 @@ async function synthesizedNarrationArtifactsComplete({
   if (!exactOrderedIds(plannedIds, stitchUnitIds)) add("stitch segment unit IDs are missing, reordered, duplicated, or unexpected");
   let expectedBatchBindings = null;
   let synthesisRuns = [];
+  let interruptedAdoptionFinal = null;
   if (policy.synthesis_contract?.mode
     === QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT.mode) {
     const batchValidation = validateQwenLiamBatchPlan(
@@ -2389,6 +2645,22 @@ async function synthesizedNarrationArtifactsComplete({
     );
     if (!firstTakeRun) {
       add("TTS report lacks its batch-four first-take runner provenance");
+    } else if (firstTakeRun.status === "interrupted_after_completed_cohorts") {
+      try {
+        interruptedAdoptionFinal = await verifyInterruptedQwenFinalRun({
+          episodeDir,
+          outputDir: path.join(episodeDir, "assets/audio/narration_tts"),
+          identityPath: path.join(episodeDir, "run_identity.json"),
+          planPath, scriptPath: path.join(episodeDir, "script_clean.md"),
+          reportPath: path.join(episodeDir, `narration_tts_report_${episode}.json`),
+          unitQaPath, units: plannedUnits,
+          planSha256: canonicalPlanSha256,
+          batchPlan: batchValidation.expected,
+          policy, finalReport: ttsReport,
+        });
+      } catch (error) {
+        add(`interrupted Qwen final provenance is stale: ${error.message}`);
+      }
     } else {
       if (firstTakeRun.batch_plan_sha256
         !== plan?.qwen_liam_batch_plan?.batch_plan_sha256
@@ -2457,6 +2729,7 @@ async function synthesizedNarrationArtifactsComplete({
     add(`${finding.path}=${finding.actual ?? "missing"}; required ${finding.expected}`);
   }
 
+  let verifiedAppendOnlyTail = null;
   for (let index = 0; index < plannedUnits.length; index += 1) {
     const planned = plannedUnits[index];
     const result = results[index];
@@ -2590,6 +2863,142 @@ async function synthesizedNarrationArtifactsComplete({
         }
         if (!matchingRecoveryRunner) {
           add(`unit ${planned.unit_id} exact-unit recovery runner provenance is missing or stale`);
+        }
+      } else if (mode === QWEN_LIAM_INCOMPLETE_UNIT_RESUME_MODE) {
+        if (!interruptedAdoptionFinal?.resumed_unit_ids.includes(String(planned.unit_id))) {
+          add(`unit ${planned.unit_id} lacks the exact interrupted-Qwen resume receipt`);
+        }
+      } else if (mode === "exact_sentence_boundary_composite_v1") {
+        const provenance = result.recovery_provenance;
+        const request = provenance?.request_path
+          ? await readJson(provenance.request_path, null) : null;
+        const repair = provenance?.result_path
+          ? await readJson(provenance.result_path, null) : null;
+        const priorManifestPath = provenance?.request_path
+          ? path.join(path.dirname(provenance.request_path), "prior_manifest.json") : null;
+        const priorManifest = priorManifestPath
+          ? await readJson(priorManifestPath, null) : null;
+        const priorUnit = (priorManifest?.units ?? []).find(
+          (row) => row.unit_id === planned.unit_id);
+        const requestedUnit = (request?.units ?? []).find(
+          (row) => row.unit_id === planned.unit_id);
+        const repairedUnit = (repair?.units ?? []).find(
+          (row) => row.unit_id === planned.unit_id);
+        let valid = provenance?.schema === "goldflow_tts_exact_boundary_repair_provenance_v1"
+          && synthesisIdentity.schema === "goldflow_tts_exact_boundary_composite_identity_v1"
+          && result.synthesis_identity_sha256
+            === narrationSynthesisIdentitySha256(synthesisIdentity)
+          && request?.schema === "goldflow_tts_exact_boundary_repair_request_v1"
+          && repair?.schema === "goldflow_tts_exact_boundary_repair_result_v1"
+          && request?.request_sha256 === provenance.request_sha256
+          && request?.request_sha256 === canonicalQwenBatchSha256(
+            Object.fromEntries(Object.entries(request).filter(([key]) => key !== "request_sha256")))
+          && request?.request_sha256 === repair?.request_sha256
+          && request?.request_sha256 === synthesisIdentity.request_sha256
+          && provenance?.result_sha256 === await fileSha256(provenance.result_path)
+          && request?.prior_manifest_file_sha256 === await fileSha256(priorManifestPath)
+          && request?.prior_report_file_sha256 === await fileSha256(
+            path.join(path.dirname(provenance.request_path), "prior_report.json"))
+          && request?.prior_delivery_file_sha256 === await fileSha256(
+            path.join(path.dirname(provenance.request_path), "prior_delivery.json"))
+          && request?.prior_manifest_sha256 === priorManifest?.manifest_sha256
+          && request?.plan_sha256 === plan?.plan_sha256
+          && request?.model_id === policy.primary.model_id
+          && request?.model_revision === policy.primary.model_revision
+          && request?.voice_id === policy.primary.voice_id
+          && request?.voice_sha256 === policy.primary.voice_sha256
+          && requestedUnit?.spoken_text === planned.spoken_text
+          && requestedUnit?.spoken_text_sha256 === planned.spoken_text_sha256
+          && requestedUnit?.fragments?.join(" ") === planned.spoken_text
+          && requestedUnit?.fragments?.length >= 2
+          && requestedUnit?.prior_audio_sha256 === priorUnit?.audio_sha256
+          && requestedUnit?.prior_synthesis_identity_sha256
+            === priorUnit?.synthesis_identity_sha256
+          && synthesisIdentity.prior_audio_sha256 === priorUnit?.audio_sha256
+          && synthesisIdentity.prior_synthesis_identity_sha256
+            === priorUnit?.synthesis_identity_sha256
+          && repairedUnit?.audio_sha256 === result.audio_sha256
+          && repairedUnit?.audio_sha256 === synthesisIdentity.composite_audio_sha256
+          && repairedUnit?.audio_path === result.audio_path
+          && repairedUnit?.fragments?.length === requestedUnit?.fragments?.length
+          && await fileSha256(repairedUnit?.audio_path) === repairedUnit.audio_sha256;
+        if (valid) {
+          for (const [partIndex, fragment] of repairedUnit.fragments.entries()) {
+            const expectedText = requestedUnit.fragments[partIndex];
+            const identityPart = synthesisIdentity.fragments?.[partIndex];
+            if (fragment.text !== expectedText
+              || fragment.text_sha256 !== sha256(expectedText)
+              || fragment.audio_sha256 !== identityPart?.audio_sha256
+              || fragment.sidecar_sha256 !== identityPart?.sidecar_sha256
+              || fragment.text_sha256 !== identityPart?.text_sha256
+              || fragment.model_id !== policy.primary.model_id
+              || fragment.model_revision !== policy.primary.model_revision
+              || fragment.voice_id !== policy.primary.voice_id
+              || fragment.voice_sha256 !== policy.primary.voice_sha256
+              || fragment.token_limit_reached === true
+              || !Number.isFinite(Number(fragment.generated_token_count))
+              || Number(fragment.generated_token_count) < 0
+              || Number(fragment.generated_token_count) >= 1200
+              || await fileSha256(fragment.audio_path) !== fragment.audio_sha256
+              || await fileSha256(fragment.sidecar_path) !== fragment.sidecar_sha256) {
+              valid = false;
+              break;
+            }
+          }
+        }
+        if (!valid) add(`unit ${planned.unit_id} exact-boundary composite provenance is missing or stale`);
+      } else if (mode === CONTRACTION_MODE) {
+        const proof = ttsReport?.automated_contraction_expansion;
+        const provenance = result.recovery_provenance;
+        if (proof?.unit_id !== planned.unit_id
+          || proof.human_listening_performed !== false
+          || provenance?.schema !== "goldflow_tts_exact_contraction_candidate_provenance_v1"
+          || provenance?.prior_selected?.audio_sha256
+            !== synthesisIdentity.prior_audio_sha256
+          || synthesisIdentity.schema
+            !== "goldflow_tts_exact_contraction_composite_identity_v1"
+          || result.synthesis_identity_sha256
+            !== narrationSynthesisIdentitySha256(synthesisIdentity)
+          || synthesisIdentity.unit_id !== planned.unit_id
+          || synthesisIdentity.spoken_text_sha256 !== planned.spoken_text_sha256
+          || synthesisIdentity.composite_audio_sha256 !== result.audio_sha256
+          || synthesisIdentity.request_sha256 !== provenance?.request_sha256) {
+          add(`unit ${planned.unit_id} exact contraction expansion provenance is missing or stale`);
+        }
+      } else if (mode === APPEND_ONLY_TAIL_MODE) {
+        try {
+          if (!verifiedAppendOnlyTail) {
+            const manifestPath = ttsReport.provider_output_manifest_path;
+            const manifest = await readJson(manifestPath, null);
+            if (!manifest || await fileSha256(manifestPath)
+              !== ttsReport.provider_output_manifest_sha256) {
+              throw new Error("report-bound tail manifest is missing or hash-stale");
+            }
+            verifiedAppendOnlyTail = await verifyAppendOnlyTailLineage({
+              episodeDir, report: ttsReport, manifest, plan,
+              expectedManifestPath: manifestPath,
+            });
+          }
+          if (!verifiedAppendOnlyTail?.repaired_unit_ids.includes(planned.unit_id)) {
+            throw new Error("selected tail unit is not in the exact completion receipt");
+          }
+        } catch (error) {
+          add(`unit ${planned.unit_id} append-only tail provenance is invalid: ${error.message}`);
+        }
+      } else if (mode === PRONUNCIATION_MODE) {
+        const provenance = result.recovery_provenance;
+        const review = ttsReport.user_pronunciation_review;
+        if (provenance?.schema !== "goldflow_tts_pronunciation_candidate_provenance_v1"
+          || synthesisIdentity.schema !== "goldflow_tts_pronunciation_fragment_identity_v1"
+          || result.synthesis_identity_sha256
+            !== narrationSynthesisIdentitySha256(synthesisIdentity)
+          || synthesisIdentity.unit_id !== planned.unit_id
+          || synthesisIdentity.spoken_text_sha256 !== planned.spoken_text_sha256
+          || synthesisIdentity.composite_audio_sha256 !== result.audio_sha256
+          || synthesisIdentity.request_sha256 !== provenance.request_sha256
+          || review?.kind !== "candidate_approved"
+          || review?.unit_id !== planned.unit_id) {
+          add(`unit ${planned.unit_id} user-listened pronunciation candidate provenance is missing or stale`);
         }
       } else {
         add(`unit ${planned.unit_id} selected synthesis mode ${mode ?? "missing"} is not allowed by the batch-four contract`);
@@ -2958,6 +3367,1160 @@ async function wavPcm16SampleCount(filePath) {
   throw new Error(`Could not find WAV data chunk: ${filePath}`);
 }
 
+export async function narrationOperatorAsrRetryReportValidForTests(ttsReport, currentScriptHash) {
+  const expectedPolicy = narrationTtsRetryReportPolicy({
+    recoveryProvenances: (ttsReport.results ?? []).map((row) => row.recovery_provenance),
+  });
+  const expected = expectedPolicy.operator_authorized_asr_consensus_exceptions ?? [];
+  if (!expected.length || ttsReport.retry_policy?.retry_only_confirmed_skip_truncation_or_stutter
+      !== expectedPolicy.retry_only_confirmed_skip_truncation_or_stutter
+    || canonicalQwenBatchSha256(expected) !== canonicalQwenBatchSha256(
+      ttsReport.retry_policy?.operator_authorized_asr_consensus_exceptions ?? [])) return false;
+  const manifestPath = ttsReport.provider_output_manifest_path;
+  if (!manifestPath || await fileSha256(manifestPath) !== ttsReport.provider_output_manifest_sha256) return false;
+  const manifest = await readJson(manifestPath, null);
+  for (const exception of expected) {
+    const result = ttsReport.results.find((row) => row.unit_id === exception.unit_id);
+    const providerUnit = manifest?.units?.find((row) => row.unit_id === exception.unit_id);
+    const recovery = result?.recovery_provenance;
+    if (!recovery || Number(result.attempt) !== 2 || recovery.human_listening_performed !== false
+      || recovery.unit_id !== result.unit_id || !providerUnit
+      || providerUnit.audio_sha256 !== result.audio_sha256
+      || providerUnit.synthesis_identity_sha256 !== result.synthesis_identity_sha256
+      || canonicalQwenBatchSha256(providerUnit.recovery_provenance ?? null) !== canonicalQwenBatchSha256(recovery)
+      || !recovery.confirmed_evidence_path
+      || await fileSha256(recovery.confirmed_evidence_path) !== recovery.confirmed_evidence_sha256) return false;
+    const evidence = await readJson(recovery.confirmed_evidence_path, null);
+    const reviewed = evidence?.confirmed_units?.find((row) => row.unit_id === result.unit_id);
+    if (evidence?.schema !== "goldflow_confirmed_tts_retry_evidence_v2"
+      || evidence.evidence_basis !== "operator_authorized_asr_consensus"
+      || evidence.human_listening_performed !== false || evidence.attestation != null
+      || evidence.maximum_attempts_per_unit !== 1 || !String(evidence.operator_quote ?? "").trim()
+      || String(evidence.operator_reason ?? "").trim().length < 40
+      || evidence.source_script_sha256 !== currentScriptHash
+      || evidence.narration_generation_plan_sha256 !== ttsReport.narration_generation_plan_sha256
+      || evidence.narration_generation_plan_file_sha256 !== ttsReport.narration_generation_plan_file_sha256
+      || !reviewed || reviewed.selected_attempt !== 1
+      || !["truncation", "unexpected_words"].includes(reviewed.defect_type)
+      || canonicalQwenBatchSha256(recovery.trigger_codes) !== canonicalQwenBatchSha256([
+        `operator_authorized_asr_consensus_${reviewed.defect_type}`,
+      ])
+      || reviewed.audio_sha256 !== recovery.origin_audio_sha256
+      || reviewed.synthesis_identity_sha256 !== recovery.origin_synthesis_identity_sha256) return false;
+  }
+  return true;
+}
+
+async function reviewedAutomatedDeliveryRetryReportValid(ttsReport, currentScriptHash) {
+  const expectedPolicy = narrationTtsRetryReportPolicy({
+    recoveryProvenances: (ttsReport.results ?? []).map((row) => row.recovery_provenance),
+  });
+  const expected = expectedPolicy.reviewed_automated_delivery_repairs ?? [];
+  if (!expected.length || ttsReport.retry_policy?.retry_only_confirmed_skip_truncation_or_stutter !== false
+    || canonicalQwenBatchSha256(expected) !== canonicalQwenBatchSha256(
+      ttsReport.retry_policy?.reviewed_automated_delivery_repairs ?? [])) return false;
+  for (const exception of expected) {
+    const result = (ttsReport.results ?? []).find((row) => row.unit_id === exception.unit_id);
+    const recovery = result?.recovery_provenance;
+    if (!recovery || Number(result.attempt) !== 2
+      || recovery.evidence_basis !== "reviewed_automated_delivery_qa"
+      || recovery.human_listening_performed !== false
+      || !recovery.confirmed_evidence_path
+      || await fileSha256(recovery.confirmed_evidence_path) !== recovery.confirmed_evidence_sha256) return false;
+    const evidence = await readJson(recovery.confirmed_evidence_path, null);
+    const reviewed = evidence?.confirmed_units?.find((row) => row.unit_id === result.unit_id);
+    if (evidence?.schema !== "goldflow_confirmed_tts_retry_evidence_v2"
+      || evidence.evidence_basis !== "reviewed_automated_delivery_qa"
+      || evidence.authorization_origin !== "user_authorized_autonomous_asr_qa"
+      || evidence.human_listening_performed !== false
+      || evidence.source_script_sha256 !== currentScriptHash
+      || evidence.narration_generation_plan_sha256 !== ttsReport.narration_generation_plan_sha256
+      || evidence.narration_generation_plan_file_sha256 !== ttsReport.narration_generation_plan_file_sha256
+      || !reviewed || reviewed.defect_type !== "delivery"
+      || canonicalQwenBatchSha256(recovery.trigger_codes)
+        !== canonicalQwenBatchSha256(["reviewed_automated_delivery_qa_delivery"])
+      || reviewed.audio_sha256 !== recovery.origin_audio_sha256
+      || reviewed.synthesis_identity_sha256 !== recovery.origin_synthesis_identity_sha256) return false;
+  }
+  return true;
+}
+
+export async function narrationStructuralNoAudioRetryReportValidForTests(ttsReport, currentScriptHash) {
+  const results = ttsReport?.results ?? [];
+  const expectedPolicy = narrationTtsRetryReportPolicy({
+    recoveryProvenances: results.map((row) => row.recovery_provenance),
+  });
+  const expected = expectedPolicy.reviewed_structural_no_audio_repairs ?? [];
+  const hashValid = (value) => /^[a-f0-9]{64}$/u.test(String(value ?? ""));
+  if (expected.length !== 1
+    || canonicalQwenBatchSha256(expected)
+      !== canonicalQwenBatchSha256(ttsReport.retry_policy?.reviewed_structural_no_audio_repairs ?? [])
+    || ttsReport.retry_policy?.retry_only_confirmed_skip_truncation_or_stutter !== false
+    || ttsReport.source_script_hash !== currentScriptHash) return false;
+  const unitId = expected[0].unit_id;
+  const result = results.find((row) => row.unit_id === unitId);
+  const recovery = result?.recovery_provenance;
+  const scope = ttsReport.recovery_scope;
+  const priorReportPath = scope?.pre_retry_narration_report_archive_path;
+  const priorQaPath = scope?.pre_retry_unit_qa_archive_path;
+  const planPath = ttsReport.narration_generation_plan_path;
+  const manifestPath = ttsReport.provider_output_manifest_path;
+  const episodeRoot = planPath ? path.resolve(path.dirname(planPath)) : null;
+  const withinEpisode = (filePath) => Boolean(episodeRoot
+    && path.isAbsolute(String(filePath ?? ""))
+    && path.resolve(filePath).startsWith(`${episodeRoot}${path.sep}`));
+  if (!result || results.filter((row) => row.unit_id === unitId).length !== 1
+    || Number(result.attempt) !== 2 || !hashValid(result.audio_sha256)
+    || recovery?.schema !== "goldflow_qwen_exact_unit_recovery_provenance_v1"
+    || recovery.evidence_basis !== "reviewed_structural_no_audio"
+    || recovery.human_listening_performed !== false
+    || recovery.origin_audio_sha256 !== null
+    || recovery.recovery_mode !== QWEN_LIAM_EXACT_UNIT_RECOVERY_MODE
+    || canonicalQwenBatchSha256(recovery.trigger_codes)
+      !== canonicalQwenBatchSha256(["tts_batch_token_limit_reached"])
+    || !withinEpisode(priorReportPath) || !withinEpisode(priorQaPath)
+    || !planPath || !withinEpisode(manifestPath)
+    || !hashValid(scope.pre_retry_narration_report_sha256)
+    || !hashValid(scope.pre_retry_unit_qa_sha256)
+    || !hashValid(ttsReport.narration_generation_plan_file_sha256)
+    || await fileSha256(priorReportPath) !== scope.pre_retry_narration_report_sha256
+    || await fileSha256(priorQaPath) !== scope.pre_retry_unit_qa_sha256
+    || await fileSha256(planPath) !== ttsReport.narration_generation_plan_file_sha256
+    || await fileSha256(manifestPath) !== ttsReport.provider_output_manifest_sha256
+    || !recovery.confirmed_evidence_path
+    || await fileSha256(recovery.confirmed_evidence_path) !== recovery.confirmed_evidence_sha256) return false;
+  const [priorReport, priorUnitQa, plan, manifest, evidence] = await Promise.all([
+    readJson(priorReportPath, null), readJson(priorQaPath, null),
+    readJson(planPath, null), readJson(manifestPath, null),
+    readJson(recovery.confirmed_evidence_path, null),
+  ]);
+  const oldCandidate = (priorUnitQa?.candidates ?? []).find((row) => row.unit_id === unitId);
+  const runnerPath = oldCandidate?.runner_report_path;
+  if (!withinEpisode(runnerPath)) return false;
+  const runnerReport = await readJson(runnerPath, null);
+  try {
+    validateStructuralNoAudioRetryEvidence({
+      evidence, requestedUnitIds: [unitId], sourceScriptSha256: currentScriptHash,
+      planSha256: plan?.plan_sha256, planFileSha256: ttsReport.narration_generation_plan_file_sha256,
+      priorReport, priorReportSha256: scope.pre_retry_narration_report_sha256,
+      priorUnitQa, priorUnitQaSha256: scope.pre_retry_unit_qa_sha256,
+      runnerReport, runnerReportSha256: await fileSha256(runnerPath),
+      units: narrationPlanUnitsForStatus(plan), batchPlan: plan?.qwen_liam_batch_plan,
+    });
+  } catch {
+    return false;
+  }
+  const providerUnit = (manifest?.units ?? []).find((row) => row.unit_id === unitId);
+  return Boolean(providerUnit
+    && (manifest.units ?? []).filter((row) => row.unit_id === unitId).length === 1
+    && providerUnit.audio_path
+    && providerUnit.audio_sha256 === result.audio_sha256
+    && providerUnit.synthesis_identity_sha256 === result.synthesis_identity_sha256
+    && providerUnit.spoken_text_sha256 === result.spoken_text_sha256
+    && canonicalQwenBatchSha256(providerUnit.recovery_provenance ?? null)
+      === canonicalQwenBatchSha256(recovery)
+    && await fileSha256(providerUnit.audio_path) === result.audio_sha256);
+}
+
+// After an exact ASR delivery retake, the new passed provider manifest is
+// written before no-synthesis finalization. The old blocked narration report
+// remains valid for the immutable pre-retry WAVs, but binds the predecessor
+// manifest. Admit only that exact completed cohort to the guarded finalizer.
+export async function completedExactDeliveryRetakeFinalizationForTests({
+  episodeDir, episode, ttsReport, ttsReportPath, manifest, manifestPath,
+  plan, planFileSha256, qualityContract, policy, currentScriptHash,
+} = {}) {
+  const insideEpisode = (target) => path.isAbsolute(String(target ?? ""))
+    && path.resolve(target).startsWith(`${path.resolve(episodeDir)}${path.sep}`);
+  const manifestFileSha256 = await fileSha256(manifestPath);
+  if (ttsReport?.status !== "blocked" || manifest?.status !== "passed"
+    || policy?.primary?.provider !== "qwen_local"
+    || !insideEpisode(manifestPath)
+    || ttsReport.provider_output_manifest_path !== manifestPath
+    || ttsReport.provider_output_manifest_sha256 === manifestFileSha256
+    || ttsReport.source_script_hash !== currentScriptHash
+    || plan?.source_script_hash !== currentScriptHash
+    || ttsReport.narration_generation_plan_sha256 !== plan?.plan_sha256
+    || ttsReport.narration_generation_plan_file_sha256 !== planFileSha256) {
+    throw new Error("Completed exact delivery retake lacks the blocked predecessor and current plan bindings.");
+  }
+  const retryEvidencePath = path.join(episodeDir,
+    `narration_confirmed_retry_evidence_${episode}.json`);
+  const retryEvidence = await readJson(retryEvidencePath, null);
+  const retryEvidenceSha256 = await fileSha256(retryEvidencePath);
+  const priorReportPath = retryEvidence?.pre_retry_narration_report_path;
+  const priorReportSha256 = await fileSha256(ttsReportPath);
+  if (!insideEpisode(priorReportPath)
+    || path.resolve(priorReportPath) === path.resolve(ttsReportPath)
+    || await fileSha256(priorReportPath) !== priorReportSha256
+    || retryEvidence?.pre_retry_narration_report_sha256 !== priorReportSha256
+    || retryEvidence?.evidence_basis !== "reviewed_automated_delivery_qa") {
+    throw new Error("Completed exact delivery retake has no immutable current-report-bound evidence.");
+  }
+  const requestedIds = (retryEvidence.confirmed_units ?? []).map((row) => String(row.unit_id));
+  const priorResults = ttsReport.results ?? [];
+  const manifestUnits = manifest.units ?? [];
+  const expectedUnits = narrationPlanUnitsForStatus(plan);
+  const requested = new Set(requestedIds);
+  const priorById = new Map(priorResults.map((row) => [row.unit_id, row]));
+  const currentById = new Map(manifestUnits.map((row) => [row.unit_id, row]));
+  if (!requested.size || requested.size !== requestedIds.length
+    || priorById.size !== expectedUnits.length || currentById.size !== expectedUnits.length
+    || priorResults.length !== expectedUnits.length || manifestUnits.length !== expectedUnits.length
+    || validateNarrationProviderOutputManifest(manifest, expectedUnits, {
+      generationPlanSha256: plan.plan_sha256,
+      generationPlanFileSha256: planFileSha256,
+      qualityContractSha256: qualityContract.contract_sha256,
+      provider: policy.primary.provider,
+      voiceId: policy.primary.voice_id,
+      voiceSha256: policy.primary.voice_sha256,
+    }).status !== "passed") {
+    throw new Error("Completed exact delivery retake has missing, duplicate, or stale provider units.");
+  }
+  validateConfirmedRetryEvidenceForTests({
+    evidence: retryEvidence, requestedUnitIds: requestedIds,
+    planSha256: plan.plan_sha256, priorReport: ttsReport,
+    priorReportSha256, currentCandidates: priorResults,
+    sourceScriptSha256: currentScriptHash, planFileSha256,
+  });
+  const evidenceById = new Map(retryEvidence.confirmed_units.map((row) => [row.unit_id, row]));
+  const runnerPaths = new Set();
+  for (const unit of expectedUnits) {
+    const old = priorById.get(unit.unit_id);
+    const current = currentById.get(unit.unit_id);
+    if (!old || !current || current.spoken_text_sha256 !== unit.spoken_text_sha256
+      || !insideEpisode(current.audio_path)
+      || await fileSha256(current.audio_path) !== current.audio_sha256) {
+      throw new Error(`Completed exact delivery retake has a stale selected WAV: ${unit.unit_id}.`);
+    }
+    if (!requested.has(unit.unit_id)) {
+      if (Number(current.attempt) !== Number(old.attempt)
+        || current.audio_path !== old.audio_path
+        || current.audio_sha256 !== old.audio_sha256
+        || current.synthesis_identity_sha256 !== old.synthesis_identity_sha256) {
+        throw new Error(`Completed exact delivery retake changed a preserved WAV: ${unit.unit_id}.`);
+      }
+      continue;
+    }
+    const reviewed = evidenceById.get(unit.unit_id);
+    const recovery = current.recovery_provenance;
+    if (Number(current.attempt) !== 2 || current.status !== "accepted"
+      || recovery?.evidence_basis !== "reviewed_automated_delivery_qa"
+      || recovery.human_listening_performed !== false
+      || recovery.unit_id !== unit.unit_id
+      || recovery.origin_audio_sha256 !== reviewed.audio_sha256
+      || recovery.origin_synthesis_identity_sha256 !== reviewed.synthesis_identity_sha256
+      || recovery.confirmed_evidence_path !== retryEvidencePath
+      || recovery.confirmed_evidence_sha256 !== retryEvidenceSha256
+      || !insideEpisode(current.runner_report_path)
+      || !current.runner_report_sha256) {
+      throw new Error(`Completed exact delivery retake lacks exact recovery provenance: ${unit.unit_id}.`);
+    }
+    runnerPaths.add(current.runner_report_path);
+  }
+  if (runnerPaths.size !== 1) {
+    throw new Error("Completed exact delivery retake does not have one scoped runner.");
+  }
+  const [runnerPath] = runnerPaths;
+  const runnerSha256 = await fileSha256(runnerPath);
+  const indexedRuns = (manifest.provider_execution?.synthesis_runs ?? [])
+    .filter((row) => row.report_path === runnerPath
+      && row.report_sha256 === runnerSha256 && Number(row.attempt) === 2);
+  if (indexedRuns.length !== 1) {
+    throw new Error("Completed exact delivery retake runner is absent or duplicated in the manifest inventory.");
+  }
+  const runner = await readJson(runnerPath, null);
+  const results = runner?.results ?? [];
+  const runnerById = new Map(results.map((row) => [row.unit_id, row]));
+  if (runner?.status !== "passed" || results.length !== requested.size
+    || runnerById.size !== requested.size
+    || !results.every((row) => requested.has(row.unit_id))) {
+    throw new Error("Completed exact delivery retake runner scope differs from the reviewed IDs.");
+  }
+  for (const unitId of requested) {
+    const current = currentById.get(unitId);
+    const row = runnerById.get(unitId);
+    if (current.runner_report_sha256 !== runnerSha256
+      || row?.status !== "generated" || Number(row.attempt) !== 2
+      || row.output_path !== current.audio_path
+      || row.output_sha256 !== current.audio_sha256
+      || row.synthesis_identity_sha256 !== current.synthesis_identity_sha256
+      || row.spoken_text_sha256 !== current.spoken_text_sha256
+      || row.token_limit_reached !== false) {
+      throw new Error(`Completed exact delivery retake runner differs from selected unit ${unitId}.`);
+    }
+  }
+  const orthographyPath = path.join(episodeDir,
+    `narration_asr_orthography_review_${episode}.json`);
+  if (await exists(orthographyPath)) {
+    const review = await loadAsrOrthographyReview({ episodeDir, episode, plan,
+      identityFileSha256: await fileSha256(path.join(episodeDir, "run_identity.json")),
+      sourceScriptSha256: currentScriptHash, planFileSha256,
+      qualityContractSha256: qualityContract.contract_sha256,
+      currentManifest: manifest });
+    if (ttsReport.asr_orthography_review?.evidence_sha256 !== review?.evidence_sha256) {
+      throw new Error("Completed exact delivery retake changed the applied orthography review.");
+    }
+  }
+  return { manifestPath, retainedUnitCount: expectedUnits.length - requested.size,
+    repairedUnitIds: requestedIds };
+}
+
+export function structuralNoAudioEvidenceConsumedForTests({
+  ttsReport, evidence, evidencePath, evidenceSha256,
+}) {
+  const reviewed = evidence?.confirmed_units;
+  const unitId = reviewed?.[0]?.unit_id;
+  const matches = (ttsReport?.results ?? []).filter((row) => row.unit_id === unitId);
+  if (!matches.length) return false;
+  const result = matches[0];
+  const recovery = result.recovery_provenance;
+  if (evidence?.schema !== "goldflow_qwen_structural_no_audio_retry_evidence_v1"
+    || evidence.evidence_basis !== "reviewed_structural_no_audio"
+    || reviewed.length !== 1 || matches.length !== 1
+    || Number(result.attempt) !== 2
+    || !/^[a-f0-9]{64}$/u.test(String(result.audio_sha256 ?? ""))
+    || result.spoken_text_sha256 !== reviewed[0].spoken_text_sha256
+    || recovery?.schema !== "goldflow_qwen_exact_unit_recovery_provenance_v1"
+    || recovery.unit_id !== unitId
+    || recovery.evidence_basis !== "reviewed_structural_no_audio"
+    || recovery.human_listening_performed !== false
+    || recovery.origin_audio_sha256 !== null
+    || recovery.origin_synthesis_identity_sha256 !== reviewed[0].synthesis_identity_sha256
+    || recovery.confirmed_evidence_path !== evidencePath
+    || recovery.confirmed_evidence_sha256 !== evidenceSha256
+    || canonicalQwenBatchSha256(recovery.trigger_codes)
+      !== canonicalQwenBatchSha256(["tts_batch_token_limit_reached"])) {
+    throw new Error("Selected token-limit unit lacks exact consumed structural-retry provenance.");
+  }
+  return true;
+}
+
+export async function narrationHeardPronunciationRetryReportValidForTests(ttsReport, currentScriptHash) {
+  const results = ttsReport?.results ?? [];
+  const expectedPolicy = narrationTtsRetryReportPolicy({
+    recoveryProvenances: results.map((row) => row.recovery_provenance),
+  });
+  const expected = expectedPolicy.operator_confirmed_pronunciation_exceptions ?? [];
+  const hashValid = (value) => /^[a-f0-9]{64}$/u.test(String(value ?? ""));
+  if (expected.length !== 1 || !hashValid(currentScriptHash)
+    || ttsReport.source_script_hash !== currentScriptHash
+    || ttsReport.retry_policy?.retry_only_confirmed_skip_truncation_or_stutter
+      !== expectedPolicy.retry_only_confirmed_skip_truncation_or_stutter
+    || canonicalQwenBatchSha256(expected) !== canonicalQwenBatchSha256(
+      ttsReport.retry_policy?.operator_confirmed_pronunciation_exceptions ?? [])) return false;
+  const planPath = ttsReport.narration_generation_plan_path;
+  const manifestPath = ttsReport.provider_output_manifest_path;
+  if (!planPath || !manifestPath
+    || !hashValid(ttsReport.narration_generation_plan_sha256)
+    || !hashValid(ttsReport.narration_generation_plan_file_sha256)
+    || await fileSha256(planPath) !== ttsReport.narration_generation_plan_file_sha256
+    || await fileSha256(manifestPath) !== ttsReport.provider_output_manifest_sha256) return false;
+  const [plan, manifest] = await Promise.all([readJson(planPath, null), readJson(manifestPath, null)]);
+  if (plan?.plan_sha256 !== ttsReport.narration_generation_plan_sha256
+    || plan?.source_script_hash !== currentScriptHash) return false;
+  const unitId = expected[0].unit_id;
+  const matching = (rows) => (rows ?? []).filter((row) => row.unit_id === unitId);
+  const resultRows = matching(results);
+  const providerRows = matching(manifest?.units);
+  const planRows = matching(narrationPlanUnitsForStatus(plan));
+  if (resultRows.length !== 1 || providerRows.length !== 1 || planRows.length !== 1) return false;
+  const [result] = resultRows;
+  const [providerUnit] = providerRows;
+  const [unit] = planRows;
+  const recovery = result.recovery_provenance;
+  const spokenHash = sha256(String(unit.spoken_text ?? ""));
+  if (Number(result.attempt) !== 2 || Number(providerUnit.attempt) !== 2
+    || recovery?.schema !== "goldflow_qwen_exact_unit_recovery_provenance_v1"
+    || recovery.recovery_mode !== QWEN_LIAM_EXACT_UNIT_RECOVERY_MODE
+    || recovery.evidence_basis !== "operator_confirmed_pronunciation"
+    || recovery.human_listening_performed !== true || recovery.unit_id !== unitId
+    || unit.spoken_text_sha256 !== spokenHash || result.spoken_text_sha256 !== spokenHash
+    || providerUnit.spoken_text_sha256 !== spokenHash || recovery.spoken_text_sha256 !== spokenHash
+    || canonicalQwenBatchSha256(recovery.trigger_codes) !== canonicalQwenBatchSha256(["operator_confirmed_pronunciation"])
+    || !hashValid(result.audio_sha256) || !hashValid(result.synthesis_identity_sha256)
+    || providerUnit.audio_sha256 !== result.audio_sha256
+    || providerUnit.synthesis_identity_sha256 !== result.synthesis_identity_sha256
+    || !providerUnit.audio_path || await fileSha256(providerUnit.audio_path) !== result.audio_sha256
+    || canonicalQwenBatchSha256(providerUnit.recovery_provenance ?? null) !== canonicalQwenBatchSha256(recovery)
+    || !recovery.confirmed_evidence_path || !hashValid(recovery.confirmed_evidence_sha256)
+    || await fileSha256(recovery.confirmed_evidence_path) !== recovery.confirmed_evidence_sha256) return false;
+  const evidence = await readJson(recovery.confirmed_evidence_path, null);
+  const reviewed = evidence?.confirmed_units?.[0];
+  const word = String(reviewed?.expected_spoken_word ?? "").trim();
+  const heard = String(reviewed?.heard_pronunciation ?? "").trim();
+  if (evidence?.schema !== "goldflow_confirmed_tts_retry_evidence_v2"
+    || evidence.evidence_basis !== "operator_confirmed_pronunciation"
+    || evidence.human_listening_performed !== true
+    || evidence.attestation !== "operator_heard_pronunciation_in_exact_selected_audio"
+    || evidence.maximum_attempts_per_unit !== 1
+    || !String(evidence.operator_quote ?? "").trim()
+    || String(evidence.operator_reason ?? "").trim().length < 40
+    || !String(evidence.authorized_by ?? "").trim() || !Number.isFinite(Date.parse(evidence.authorized_at))
+    || evidence.source_script_sha256 !== currentScriptHash
+    || evidence.narration_generation_plan_sha256 !== ttsReport.narration_generation_plan_sha256
+    || evidence.narration_generation_plan_file_sha256 !== ttsReport.narration_generation_plan_file_sha256
+    || evidence.confirmed_units?.length !== 1 || reviewed?.unit_id !== unitId
+    || reviewed.selected_attempt !== 1 || reviewed.defect_type !== "pronunciation"
+    || !String(reviewed.listen_note ?? "").trim()
+    || !/^[\p{L}]+(?:['’][\p{L}]+)*$/u.test(word)
+    || !(String(unit.spoken_text).match(/[\p{L}]+(?:['’][\p{L}]+)*/gu) ?? []).includes(word)
+    || !heard || heard.toLocaleLowerCase() === word.toLocaleLowerCase()
+    || reviewed.spoken_text_sha256 !== spokenHash
+    || reviewed.audio_sha256 !== recovery.origin_audio_sha256
+    || reviewed.synthesis_identity_sha256 !== recovery.origin_synthesis_identity_sha256
+    || !evidence.pre_retry_narration_report_path || !hashValid(evidence.pre_retry_narration_report_sha256)
+    || await fileSha256(evidence.pre_retry_narration_report_path) !== evidence.pre_retry_narration_report_sha256) return false;
+  const prior = await readJson(evidence.pre_retry_narration_report_path, null);
+  const priorRows = matching(prior?.results);
+  const original = priorRows[0];
+  if (prior?.schema !== "goldflow_narration_tts_report_v1" || prior.status !== "blocked"
+    || prior.source_script_hash !== currentScriptHash
+    || prior.narration_generation_plan_sha256 !== ttsReport.narration_generation_plan_sha256
+    || prior.narration_generation_plan_file_sha256 !== ttsReport.narration_generation_plan_file_sha256
+    || priorRows.length !== 1 || Number(original?.attempt) !== 1
+    || original.spoken_text_sha256 !== spokenHash
+    || original.audio_sha256 !== recovery.origin_audio_sha256
+    || original.synthesis_identity_sha256 !== recovery.origin_synthesis_identity_sha256
+    || !hashValid(original.audio_sha256) || !hashValid(original.synthesis_identity_sha256)
+    || !original.audio_path || await fileSha256(original.audio_path) !== original.audio_sha256) return false;
+  return true;
+}
+
+function blockedNarrationComparatorRefreshEligible({
+  ttsReport, unitDelivery, providerOutput, plan, planFileSha256,
+  currentScriptHash, qualityContractSha256, providerValidation,
+  providerAudioHashesValid, providerOutputPath, providerOutputFileSha256,
+}) {
+  const blockedKeys = (rows) => (rows ?? [])
+    .map((row) => `${row?.unit_id ?? ""}|${row?.code ?? ""}`).sort();
+  const reportBlockers = blockedKeys(ttsReport?.blockers);
+  const deliveryBlockers = blockedKeys(unitDelivery?.blockers);
+  const recordedConsensusVersions = new Set((unitDelivery?.units ?? [])
+    .map((row) => row?.decision?.adjudication_version));
+  const staleConsensus = recordedConsensusVersions.size === 1
+    && !recordedConsensusVersions.has(undefined)
+    && !recordedConsensusVersions.has(NARRATION_DELIVERY_CONSENSUS_VERSION);
+  const staleComparison = Boolean(unitDelivery?.transcript_comparison_version)
+    && unitDelivery.transcript_comparison_version !== TRANSCRIPT_QA_COMPARISON_VERSION;
+  return ttsReport?.status === "blocked"
+    && ttsReport?.unit_qa_status === "blocked"
+    && ttsReport?.full_stream_qa_status === "not_run_due_to_unit_blockers"
+    && unitDelivery?.status === "blocked"
+    && (staleComparison || staleConsensus)
+    && reportBlockers.length > 0
+    && JSON.stringify(reportBlockers) === JSON.stringify(deliveryBlockers)
+    && reportBlockers.every((key) => key.includes("|narration_confirmed_"))
+    && ttsReport.provider_output_manifest_path === providerOutputPath
+    && ttsReport.provider_output_manifest_sha256 === providerOutputFileSha256
+    && ttsReport.source_script_hash === currentScriptHash
+    && unitDelivery.source_script_hash === currentScriptHash
+    && plan?.source_script_hash === currentScriptHash
+    && ttsReport.narration_generation_plan_sha256 === plan?.plan_sha256
+    && unitDelivery.narration_generation_plan_sha256 === plan?.plan_sha256
+    && providerOutput?.narration_generation_plan_sha256 === plan?.plan_sha256
+    && ttsReport.narration_generation_plan_file_sha256 === planFileSha256
+    && unitDelivery.narration_generation_plan_file_sha256 === planFileSha256
+    && providerOutput?.narration_generation_plan_file_sha256 === planFileSha256
+    && ttsReport.narration_quality_contract_sha256 === qualityContractSha256
+    && unitDelivery.quality_contract_sha256 === qualityContractSha256
+    && providerOutput?.narration_quality_contract_sha256 === qualityContractSha256
+    && providerOutput?.status === "passed"
+    && providerValidation?.status === "passed"
+    && providerAudioHashesValid === true;
+}
+
+async function blockedFullStreamPolicyRefreshEligible({
+  episodeDir, ttsReport, stitchReport, fullQa, unitDelivery,
+  providerOutput, providerValidation, plan, planFileSha256,
+  currentScriptHash, qualityContractSha256,
+}) {
+  const manifestPath = ttsReport?.provider_output_manifest_path;
+  if (!manifestPath || !path.isAbsolute(manifestPath)
+    || !path.resolve(manifestPath).startsWith(`${path.resolve(episodeDir)}${path.sep}`)) return false;
+  const manifestHash = await fileSha256(manifestPath);
+  const masterPath = fullQa?.audio_path;
+  if (!masterPath || !path.isAbsolute(masterPath)
+    || !path.resolve(masterPath).startsWith(`${path.resolve(episodeDir)}${path.sep}`)) return false;
+  const masterHash = await fileSha256(masterPath);
+  const rawPath = stitchReport?.raw_output_path;
+  if (!rawPath || !path.isAbsolute(rawPath)
+    || !path.resolve(rawPath).startsWith(`${path.resolve(episodeDir)}${path.sep}`)) return false;
+  const rawHash = await fileSha256(rawPath);
+  const checkpointPath = path.join(path.dirname(rawPath),
+    `narration-finalization-checkpoint-${path.basename(episodeDir)}.json`);
+  const checkpoint = await readJson(checkpointPath, null);
+  const cachedStitch = checkpoint?.stages?.semantic_stitch;
+  const preparedInputs = cachedStitch?.payload?.stitch?.prepared_inputs;
+  const segments = stitchReport?.segments;
+  if (ttsReport?.status !== "blocked"
+    || !statusPassed(ttsReport.unit_qa_status)
+    || ttsReport.full_stream_qa_status !== "blocked"
+    || !statusPassed(unitDelivery?.status)
+    || Number(unitDelivery?.blocked_unit_count ?? -1) !== 0
+    || (unitDelivery.blockers ?? []).length !== 0
+    || stitchReport?.status !== "blocked"
+    || stitchReport?.sample_accounting?.exact_sample_accounting !== true
+    || stitchReport?.join_qa?.status !== "passed"
+    || fullQa?.status !== "blocked"
+    || fullQa.cross_level_asr_policy_version === NARRATION_CROSS_LEVEL_ASR_POLICY_VERSION
+    || fullQa.transcript_comparison_version !== TRANSCRIPT_QA_COMPARISON_VERSION
+    || !fullQa.delivery_consensus_version
+    || (fullQa.blockers ?? []).length !== 1
+    || fullQa.blockers[0]?.code !== "narration_confirmed_word_omission"
+    || (fullQa.confirmation_windows ?? []).filter((window) => (
+      window?.decision?.status === "blocked"
+    )).length !== 1
+    || !(fullQa.confirmation_windows ?? []).some((window) => (
+      crossLevelArticleFusionCandidate(window)
+      && window.window_id === fullQa.blockers[0].confirmation_window_id
+    ))
+    || ttsReport.provider_output_manifest_sha256 !== manifestHash
+    || fullQa.provider_output_manifest_file_sha256 !== manifestHash
+    || providerOutput?.status !== "passed"
+    || providerValidation?.status !== "passed"
+    || ttsReport.source_script_hash !== currentScriptHash
+    || stitchReport.source_script_hash !== currentScriptHash
+    || fullQa.source_script_hash !== currentScriptHash
+    || unitDelivery.source_script_hash !== currentScriptHash
+    || plan?.source_script_hash !== currentScriptHash
+    || ttsReport.narration_generation_plan_sha256 !== plan?.plan_sha256
+    || stitchReport.narration_generation_plan_sha256 !== plan?.plan_sha256
+    || fullQa.narration_generation_plan_sha256 !== plan?.plan_sha256
+    || unitDelivery.narration_generation_plan_sha256 !== plan?.plan_sha256
+    || ttsReport.narration_generation_plan_file_sha256 !== planFileSha256
+    || stitchReport.narration_generation_plan_file_sha256 !== planFileSha256
+    || fullQa.narration_generation_plan_file_sha256 !== planFileSha256
+    || unitDelivery.narration_generation_plan_file_sha256 !== planFileSha256
+    || ttsReport.narration_quality_contract_sha256 !== qualityContractSha256
+    || stitchReport.narration_quality_contract_sha256 !== qualityContractSha256
+    || fullQa.narration_quality_contract_sha256 !== qualityContractSha256
+    || unitDelivery.quality_contract_sha256 !== qualityContractSha256
+    || ttsReport.final_wav !== masterPath
+    || stitchReport.output_path !== masterPath
+    || ttsReport.final_wav_sha256 !== masterHash
+    || stitchReport.output_sha256 !== masterHash
+    || fullQa.audio_sha256 !== masterHash
+    || !rawHash || ttsReport.raw_wav !== rawPath
+    || ttsReport.raw_wav_sha256 !== rawHash
+    || stitchReport.raw_output_sha256 !== rawHash
+    || cachedStitch?.status !== "passed"
+    || cachedStitch.payload?.raw_wav_path !== rawPath
+    || cachedStitch.payload?.raw_wav_sha256 !== rawHash
+    || cachedStitch.payload?.stitch?.status !== "passed"
+    || !Array.isArray(preparedInputs)
+    || !Array.isArray(segments)
+    || preparedInputs.length !== segments.length
+    || preparedInputs.length !== (providerOutput?.units ?? []).length) return false;
+  for (let index = 0; index < preparedInputs.length; index += 1) {
+    const prepared = preparedInputs[index];
+    const segment = segments[index];
+    const providerUnit = providerOutput.units[index];
+    const preparedHash = segment?.prepared_audio_sha256;
+    const preparedPath = segment?.prepared_audio_path;
+    if (!preparedPath || !path.isAbsolute(preparedPath)
+      || !path.resolve(preparedPath).startsWith(`${path.resolve(episodeDir)}${path.sep}`)
+      || !preparedHash || await fileSha256(preparedPath) !== preparedHash
+      || prepared.prepared_wav !== preparedPath
+      || prepared.prepared_audio_sha256 !== preparedHash
+      || prepared.unit_id !== segment.unit_id
+      || providerUnit?.unit_id !== segment.unit_id
+      || prepared.source_wav !== providerUnit.audio_path) return false;
+  }
+  for (const row of providerOutput.units ?? []) {
+    if (!row.audio_path || !row.audio_sha256
+      || await fileSha256(row.audio_path) !== row.audio_sha256) return false;
+  }
+  return true;
+}
+
+async function appendOnlyTailCompletionStatus({
+  episodeDir, episode, ttsReportPath, ttsReport, currentScriptHash,
+}) {
+  if (ttsReport?.status !== "blocked") return null;
+  const evidencePath = path.join(episodeDir,
+    `narration_append_only_tail_evidence_${episode}.json`);
+  if (!await exists(evidencePath)) return null;
+  const manifestPath = ttsReport.provider_output_manifest_path;
+  if (!manifestPath || !path.isAbsolute(manifestPath)
+    || !path.resolve(manifestPath).startsWith(`${path.resolve(episodeDir)}${path.sep}`)) {
+    return { done: false, state: "blocked",
+      evidence: "Append-only tail evidence exists, but the report-bound manifest path is invalid",
+      next_command_shape: "Operator hold: restore exact narration manifest provenance; do not synthesize." };
+  }
+  try {
+    const planPath = path.join(episodeDir, "narration_generation_plan.json");
+    const identityPath = path.join(episodeDir, "run_identity.json");
+    const deliveryPath = path.join(episodeDir,
+      `narration_unit_delivery_qa_${episode}.json`);
+    const [evidence, manifest, plan, delivery] = await Promise.all([
+      readJson(evidencePath, null), readJson(manifestPath, null),
+      readJson(planPath, null), readJson(deliveryPath, null),
+    ]);
+    if ((manifest?.repair_history ?? []).some((row) =>
+      row?.mode === APPEND_ONLY_TAIL_MODE)) {
+      await verifyAppendOnlyTailLineage({
+        episodeDir, report: ttsReport, manifest, plan,
+        expectedManifestPath: manifestPath,
+      });
+      return null;
+    }
+    const hashes = {
+      script: currentScriptHash,
+      identity: await fileSha256(identityPath),
+      plan: await fileSha256(planPath),
+      report: await fileSha256(ttsReportPath),
+      delivery: await fileSha256(deliveryPath),
+      manifest: await fileSha256(manifestPath),
+      evidence: await fileSha256(evidencePath),
+    };
+    // Old evidence after another exact repair must not authorize a new edit.
+    if (evidence?.prior_report_file_sha256 !== hashes.report) return null;
+    const audioFacts = {};
+    for (const row of evidence.units ?? []) {
+      const selected = (manifest.units ?? []).find((unit) =>
+        unit.unit_id === row.unit_id);
+      if (!selected?.audio_path || await fileSha256(selected.audio_path)
+        !== selected.audio_sha256) {
+        throw new Error(`Selected raw WAV is missing or changed: ${row.unit_id}`);
+      }
+      audioFacts[row.unit_id] = pcm16MonoWavFactsForTests(
+        await fs.readFile(selected.audio_path));
+    }
+    const scope = validateAppendOnlyTailScopeForTests({
+      evidence, episodeDir, report: ttsReport, delivery,
+      manifest, plan, hashes, audioFacts,
+    });
+    const candidateRoot = path.join(episodeDir,
+      "assets/audio/narration_tts/append_only_tail_completions");
+    const matches = [];
+    for (const name of await fs.readdir(candidateRoot).catch(() => [])) {
+      if (!/^[a-f0-9]{64}$/u.test(name)) continue;
+      const dir = path.join(candidateRoot, name);
+      const requestPath = path.join(dir, "request.json");
+      const request = await readJson(requestPath, null);
+      if (request?.prior_report_file_sha256 === hashes.report
+        && request?.evidence_file_sha256 === hashes.evidence) {
+        if (await fileSha256(requestPath) !== name) {
+          throw new Error("Append-only tail request directory/hash differs");
+        }
+        matches.push(dir);
+      }
+    }
+    if (matches.length > 1) throw new Error("Multiple exact tail completion candidates require triage");
+    if (matches.length === 1) {
+      const candidatePath = path.join(matches[0], "provider-output-manifest.json");
+      if (await exists(candidatePath)) {
+        const candidate = await readJson(candidatePath, null);
+        if (candidate?.manifest_sha256 !== narrationProviderOutputManifestSha256(candidate)
+          || candidate?.status !== "passed") {
+          throw new Error("Derived append-only tail manifest is invalid");
+        }
+        const verified = await verifyAppendOnlyTailSelection({
+          episodeDir, report: ttsReport, manifest: candidate,
+          plan, expectedManifestPath: candidatePath,
+        });
+        if (!exactOrderedIds(scope.selected_unit_ids, verified.repaired_unit_ids)) {
+          throw new Error("Derived append-only tail unit set differs from reviewed scope");
+        }
+        return { done: false, state: "blocked",
+          evidence: `${scope.selected_unit_ids.length} intact raw tails have only silence appended; all other selected audio is preserved. Re-adjudicate without synthesis`,
+          next_command_shape: `node bin/goldflow.mjs tts finalize-provider --episode-dir ${episodeDir} --manifest ${candidatePath}` };
+      }
+    }
+    return { done: false, state: "blocked",
+      evidence: `${scope.selected_unit_ids.length} exact intact low-energy raw tails have reviewed automated evidence; append silence only`,
+      next_command_shape: `node bin/goldflow.mjs tts complete-tail --episode-dir ${episodeDir} --evidence ${evidencePath}` };
+  } catch (error) {
+    return { done: false, state: "blocked",
+      evidence: `Append-only tail evidence is invalid or stale: ${error.message}`,
+      next_command_shape: "Operator hold: repair exact tail evidence; do not rerun narration." };
+  }
+}
+
+export async function consumedContractionFullStreamStatusForTests({
+  episodeDir, episode, currentScriptHash, ttsReport, unitDelivery,
+  fullQa, providerOutput, providerOutputPath,
+  validateApplied = validateConsumedContractionForBlockedFullStream,
+} = {}) {
+  if (!ttsReport?.automated_contraction_expansion) return null;
+  const hold = () => ({ kind: "hold", done: false, state: "blocked",
+    evidence: "The applied one-unit contraction candidate or its immutable prior snapshots are stale, or unit delivery has new blockers",
+    next_command_shape: "Operator hold: inspect the applied contraction lineage and current unit QA; do not synthesize again." });
+  const unitPassed = ["passed", "passed_with_warnings"].includes(unitDelivery?.status);
+  const fullBlocker = fullQa?.blockers?.[0];
+  if (ttsReport.status !== "blocked"
+    || !["passed", "passed_with_warnings"].includes(ttsReport.unit_qa_status)
+    || ttsReport.full_stream_qa_status !== "blocked"
+    || !unitPassed || Number(unitDelivery.blocked_unit_count) !== 0
+    || (unitDelivery.blockers ?? []).length !== 0
+    || (ttsReport.blockers ?? []).length !== 0
+    || fullQa?.status !== "blocked"
+    || fullQa.blockers?.length !== 1
+    || fullBlocker?.code !== "narration_confirmed_tts_transcript_protected_value_mismatch"
+    || fullBlocker.operations?.length !== 1
+    || fullBlocker.operations[0]?.type !== "substitution"
+    || fullBlocker.operations[0]?.intended !== "num:1"
+    || fullBlocker.operations[0]?.recognized !== "what"
+    || !Array.isArray(fullBlocker.unit_ids)
+    || !fullBlocker.unit_ids.includes("narr_voice_seg_08_u001-003_168f265ecf0e")
+    || !path.isAbsolute(String(providerOutputPath ?? ""))
+    || !path.resolve(providerOutputPath).startsWith(`${path.resolve(episodeDir)}${path.sep}`)) {
+    return hold();
+  }
+  try {
+    const valid = await validateApplied({
+      episodeDir, episode, sourceScriptSha256: currentScriptHash,
+      ttsReport, unitDelivery, blockedFullStreamQa: fullQa,
+      providerOutput, providerOutputPath,
+    });
+    return valid ? { kind: "consumed" } : hold();
+  } catch { return hold(); }
+}
+
+async function qwenExactBoundaryRepairStatus({
+  episodeDir, episode, ttsReportPath, ttsReport, currentScriptHash,
+}) {
+  // New triage receipts supersede earlier ones; a stale latest receipt must
+  // never fall back to an older repair scope.
+  const base = `manual_blocker_triage_qwen_tts_stitch_${episode}`;
+  const triageNames = (await fs.readdir(episodeDir)).map((name) => {
+    if (name === `${base}.json`) return { name, version: 1 };
+    if (!name.startsWith(`${base}_v`)) return null;
+    const suffix = name.slice(`${base}_v`.length);
+    const match = /^([1-9]\d*)\.json$/u.exec(suffix);
+    const version = match ? Number(match[1]) : null;
+    return Number.isSafeInteger(version) && version >= 2 ? { name, version } : null;
+  }).filter(Boolean).sort((left, right) => right.version - left.version);
+  const selectedPath = triageNames.length
+    ? path.join(episodeDir, triageNames[0].name) : null;
+  const triage = selectedPath ? await readJson(selectedPath, null) : null;
+  if (ttsReport?.status !== "blocked"
+    || triage?.status !== "operator_hold_pending_exact_boundary_recovery"
+    || triage.source_script_sha256 !== currentScriptHash
+    || triage.blocked_report_sha256 !== await fileSha256(ttsReportPath)) return null;
+  const repairSpecPath = triage.repair_spec_path ?? path.join(episodeDir,
+    `narration_exact_boundary_repair_spec_${episode}.json`);
+  return { done: false, state: "blocked",
+    evidence: "Reviewed exact narration blockers remain; only the specified units may receive a guarded boundary repair",
+    next_command_shape: await exists(repairSpecPath)
+      && (!triage.repair_spec_sha256
+        || triage.repair_spec_sha256 === await fileSha256(repairSpecPath))
+      ? `node bin/goldflow.mjs tts repair-boundary --episode-dir ${episodeDir} --spec ${repairSpecPath}`
+      : "Operator hold: implement a guarded exact-boundary repair for the material defects; do not rerun all narration units or waive confirmed omissions." };
+}
+
+export async function qwenReviewedBoundaryOrAutomatedPronunciationStatusForTests({
+  episodeDir, episode, ttsReportPath, ttsReport, currentScriptHash,
+  loadAutomated = loadAutomatedPronunciationState,
+}) {
+  // A new report-bound boundary triage supersedes an older, now-stale phonetic
+  // candidate receipt. The latest triage is checked against the current report
+  // before the earlier candidate can place the episode on hold.
+  const exactBoundaryRepair = await qwenExactBoundaryRepairStatus({
+    episodeDir, episode, ttsReportPath, ttsReport, currentScriptHash,
+  });
+  if (exactBoundaryRepair) return exactBoundaryRepair;
+  try {
+    const automated = await loadAutomated({
+      episodeDir, episode, sourceScriptSha256: currentScriptHash,
+    });
+    if (automated?.kind === "evidence_reviewed") {
+      return { done: false, state: "blocked",
+        evidence: `Reviewed automated delivery evidence authorizes one exact phonetic opening fragment for ${automated.unit_id}; no human listening is claimed`,
+        next_command_shape: `node bin/goldflow.mjs tts repair-pronunciation-auto --episode-dir ${episodeDir} --evidence ${automated.evidence_path}` };
+    }
+    if (automated?.kind === "candidate_ready") {
+      return { done: false, state: "blocked",
+        evidence: `One hash-bound phonetic candidate exists for ${automated.unit_id}; fresh dual-ASR, acoustic, voice and full-stream QA must decide it`,
+        next_command_shape: `node bin/goldflow.mjs tts finalize-provider --episode-dir ${episodeDir} --manifest ${automated.manifest_path} --automated-pronunciation-evidence ${automated.evidence_path}` };
+    }
+  } catch (error) {
+    return { done: false, state: "blocked",
+      evidence: `Automated pronunciation evidence is stale or incomplete: ${error.message}`,
+      next_command_shape: "Operator hold: inspect the exact one-unit automated pronunciation evidence; do not rerun narration." };
+  }
+  return null;
+}
+
+export async function reviewedAutomatedRetryStatusForTests({
+  episodeDir, episode, ttsReport, ttsReportPath, currentScriptHash,
+} = {}) {
+  const evidencePath = path.join(episodeDir,
+    `narration_confirmed_retry_evidence_${episode}.json`);
+  const evidence = await readJson(evidencePath, null);
+  if (!evidence) return null;
+  const hold = (reason) => ({ done: false, state: "blocked",
+    evidence: `Exact narration retake evidence requires review: ${reason}`,
+    next_command_shape: "Operator hold: repair the current hash-bound exact-unit evidence; do not rerun narration." });
+  try {
+    const blockedIds = new Set((ttsReport?.blockers ?? [])
+      .map((row) => String(row.unit_id ?? "")).filter(Boolean));
+    const requestedIds = (evidence.confirmed_units ?? [])
+      .map((row) => String(row.unit_id ?? ""));
+    const planPath = path.join(episodeDir, "narration_generation_plan.json");
+    const plan = await readJson(planPath, null);
+    const planFileSha256 = await fileSha256(planPath);
+    const reportSha256 = await fileSha256(ttsReportPath);
+    const selected = new Map((ttsReport.results ?? [])
+      .map((row) => [String(row.unit_id), row]));
+    // A completed exact retake keeps its immutable authorization at this
+    // path. Once every reviewed unit is selected as attempt two, validate its
+    // lineage and let the current blockers proceed to exact-boundary triage.
+    // Otherwise the historical receipt looks like a stale new retry request.
+    if (requestedIds.length && requestedIds.every((id) => Number(selected.get(id)?.attempt) === 2)) {
+      const archivePath = evidence.pre_retry_narration_report_path;
+      const archiveInside = path.isAbsolute(String(archivePath ?? ""))
+        && path.resolve(archivePath).startsWith(`${path.resolve(episodeDir)}${path.sep}`)
+        && path.resolve(archivePath) !== path.resolve(ttsReportPath);
+      const archive = archiveInside ? await readJson(archivePath, null) : null;
+      const archiveSha256 = archiveInside ? await fileSha256(archivePath) : null;
+      if (evidence.evidence_basis !== "reviewed_automated_delivery_qa"
+        || evidence.source_script_sha256 !== currentScriptHash
+        || evidence.narration_generation_plan_sha256 !== plan?.plan_sha256
+        || evidence.narration_generation_plan_file_sha256 !== planFileSha256
+        || archiveSha256 !== evidence.pre_retry_narration_report_sha256
+        || !archive) throw new Error("consumed retake receipt has stale source, plan or immutable report");
+      validateConfirmedRetryEvidenceForTests({
+        evidence, requestedUnitIds: requestedIds,
+        planSha256: plan.plan_sha256, priorReport: archive,
+        priorReportSha256: archiveSha256,
+        currentCandidates: archive.results ?? [],
+        sourceScriptSha256: currentScriptHash, planFileSha256,
+      });
+      const receiptSha256 = await fileSha256(evidencePath);
+      for (const reviewed of evidence.confirmed_units) {
+        const current = selected.get(reviewed.unit_id);
+        let priorSelected = current;
+        if (priorSelected?.recovery_provenance?.schema
+          === "goldflow_tts_exact_contraction_candidate_provenance_v1") {
+          const contraction = priorSelected.recovery_provenance;
+          const within = (target) => path.isAbsolute(String(target ?? ""))
+            && path.resolve(target).startsWith(`${path.resolve(episodeDir)}${path.sep}`);
+          const prior = contraction.prior_selected;
+          if (!within(contraction.request_path) || !within(contraction.result_path)
+            || !within(prior?.audio_path)
+            || await fileSha256(contraction.result_path) !== contraction.result_sha256
+            || await fileSha256(prior.audio_path) !== prior.audio_sha256
+            || contraction.prior_audio_sha256 !== prior.audio_sha256
+            || contraction.prior_synthesis_identity_sha256
+              !== prior.synthesis_identity_sha256) {
+            throw new Error(`superseding contraction provenance is stale for ${reviewed.unit_id}`);
+          }
+          priorSelected = prior;
+        }
+        const seenBoundaryRequests = new Set();
+        for (let depth = 0; priorSelected?.recovery_provenance?.schema
+          === "goldflow_tts_exact_boundary_repair_provenance_v1"; depth += 1) {
+          if (depth >= 8) throw new Error(`boundary ancestry is too deep for ${reviewed.unit_id}`);
+          const boundary = priorSelected.recovery_provenance;
+          const inside = (target) => path.isAbsolute(String(target ?? ""))
+            && path.resolve(target).startsWith(`${path.resolve(episodeDir)}${path.sep}`);
+          if (!inside(boundary.request_path) || !inside(boundary.result_path)
+            || seenBoundaryRequests.has(boundary.request_path)
+            || await fileSha256(boundary.result_path) !== boundary.result_sha256
+            || !inside(priorSelected.audio_path)
+            || await fileSha256(priorSelected.audio_path) !== priorSelected.audio_sha256) {
+            throw new Error(`superseding boundary provenance is stale for ${reviewed.unit_id}`);
+          }
+          seenBoundaryRequests.add(boundary.request_path);
+          const repairDir = path.dirname(boundary.request_path);
+          const request = await readJson(boundary.request_path, null);
+          const priorManifestPath = path.join(repairDir, "prior_manifest.json");
+          const priorManifest = await readJson(priorManifestPath, null);
+          const earlier = (priorManifest?.units ?? []).find((row) => row.unit_id === reviewed.unit_id);
+          if (request?.request_sha256 !== boundary.request_sha256
+            || request?.prior_manifest_file_sha256 !== await fileSha256(priorManifestPath)
+            || request?.prior_report_file_sha256 !== await fileSha256(
+              path.join(repairDir, "prior_report.json"))
+            || boundary.prior_audio_sha256 !== earlier?.audio_sha256
+            || boundary.prior_synthesis_identity_sha256
+              !== earlier?.synthesis_identity_sha256
+            || !inside(earlier?.audio_path)
+            || await fileSha256(earlier.audio_path) !== earlier.audio_sha256) {
+            throw new Error(`superseding boundary input is stale for ${reviewed.unit_id}`);
+          }
+          priorSelected = earlier;
+        }
+        const recovery = priorSelected?.recovery_provenance;
+        if (recovery?.evidence_basis !== "reviewed_automated_delivery_qa"
+          || recovery.confirmed_evidence_path !== evidencePath
+          || recovery.confirmed_evidence_sha256 !== receiptSha256
+          || recovery.origin_audio_sha256 !== reviewed.audio_sha256
+          || recovery.origin_synthesis_identity_sha256 !== reviewed.synthesis_identity_sha256
+          || !path.isAbsolute(String(current.audio_path ?? ""))
+          || !path.resolve(current.audio_path).startsWith(`${path.resolve(episodeDir)}${path.sep}`)
+          || await fileSha256(current.audio_path) !== current.audio_sha256) {
+          throw new Error(`consumed retake provenance is stale for ${reviewed.unit_id}`);
+        }
+      }
+      return null;
+    }
+    if (ttsReport?.status !== "blocked"
+      || evidence.evidence_basis !== "reviewed_automated_delivery_qa"
+      || !requestedIds.length || requestedIds.some((id) => !blockedIds.has(id))
+      || plan?.source_script_hash !== currentScriptHash) {
+      throw new Error("receipt is not a subset of the current blocked source and plan");
+    }
+    if (requestedIds.length < blockedIds.size) {
+      const archivePath = evidence.pre_retry_narration_report_path;
+      const archiveInfo = path.isAbsolute(String(archivePath ?? ""))
+        && path.resolve(archivePath).startsWith(`${path.resolve(episodeDir)}${path.sep}`)
+        && path.resolve(archivePath) !== path.resolve(ttsReportPath)
+        ? await fs.lstat(archivePath).catch(() => null) : null;
+      if (!archiveInfo?.isFile() || archiveInfo.nlink !== 1
+        || await fileSha256(archivePath) !== reportSha256) {
+        throw new Error("subset receipt lacks an immutable exact blocked-report snapshot");
+      }
+    }
+    validateConfirmedRetryEvidenceForTests({
+      evidence, requestedUnitIds: requestedIds,
+      planSha256: plan.plan_sha256, priorReport: ttsReport,
+      priorReportSha256: reportSha256,
+      currentCandidates: ttsReport.results ?? [],
+      sourceScriptSha256: currentScriptHash, planFileSha256,
+    });
+    for (const id of requestedIds) {
+      const audio = selected.get(id);
+      if (!path.isAbsolute(String(audio?.audio_path ?? ""))
+        || !path.resolve(audio.audio_path).startsWith(`${path.resolve(episodeDir)}${path.sep}`)
+        || await fileSha256(audio.audio_path) !== audio.audio_sha256) {
+        throw new Error(`selected audio changed for ${id}`);
+      }
+    }
+    return { done: false, state: "blocked",
+      evidence: `Reviewed exact delivery QA permits one retake of ${requestedIds.length} of ${blockedIds.size} blocked units; every other selected WAV remains preserved`,
+      next_command_shape: `node bin/goldflow.mjs tts narrate --episode-dir ${episodeDir} --confirmed-retry-unit-ids ${requestedIds.join(",")} --confirmed-retry-evidence ${evidencePath}` };
+  } catch (error) {
+    return hold(error instanceof Error ? error.message : String(error));
+  }
+}
+
+async function appliedPronunciationReviewValid({
+  episodeDir, episode, sourceScriptSha256, plan, planFileSha256,
+  ttsReport, unitDelivery, providerOutput, providerOutputPath,
+}) {
+  const proof = ttsReport?.user_pronunciation_review;
+  const pronunciationRows = (providerOutput?.units ?? []).filter(
+    (row) => row.synthesis_mode === PRONUNCIATION_MODE);
+  if (!proof) return pronunciationRows.length === 0;
+  const within = (name) => typeof name === "string" && path.isAbsolute(name)
+    && path.resolve(name).startsWith(`${path.resolve(episodeDir)}${path.sep}`);
+  if (proof.schema !== "goldflow_tts_exact_user_pronunciation_review_v1"
+    || !["selected_approved", "candidate_approved"].includes(proof.kind)
+    || proof.human_listening_performed !== true
+    || !within(proof.evidence_path)
+    || !within(proof.prior_report_snapshot_path)
+    || !within(proof.prior_delivery_snapshot_path)
+    || proof.manifest_path !== providerOutputPath
+    || proof.manifest_file_sha256 !== ttsReport.provider_output_manifest_sha256
+    || await fileSha256(proof.evidence_path) !== proof.evidence_sha256
+    || await fileSha256(proof.prior_report_snapshot_path)
+      !== proof.prior_report_snapshot_sha256
+    || await fileSha256(proof.prior_delivery_snapshot_path)
+      !== proof.prior_delivery_snapshot_sha256
+    || unitDelivery?.user_pronunciation_review?.evidence_sha256 !== proof.evidence_sha256
+    || pronunciationRows.length !== (proof.kind === "candidate_approved" ? 1 : 0)) return false;
+  const [review, priorReport, priorDelivery] = await Promise.all([
+    readJson(proof.evidence_path, null), readJson(proof.prior_report_snapshot_path, null),
+    readJson(proof.prior_delivery_snapshot_path, null),
+  ]);
+  if (!review || !priorReport || !priorDelivery || priorReport.status !== "blocked"
+    || priorDelivery.status !== "blocked" || priorReport.blockers?.length !== 1
+    || priorReport.blockers[0]?.unit_id !== proof.unit_id
+    || priorReport.blockers[0]?.code !== "narration_confirmed_opening_token_mismatch") return false;
+  const unit = providerOutput.units.find((row) => row.unit_id === proof.unit_id);
+  if (!unit || await fileSha256(unit.audio_path) !== unit.audio_sha256) return false;
+  if (proof.kind === "selected_approved") {
+    try {
+      validateSelectedPronunciationReviewForTests({
+        review, reviewFileSha256: proof.evidence_sha256,
+        sourceScriptSha256, plan, planFileSha256, report: priorReport,
+        reportFileSha256: proof.prior_report_snapshot_sha256,
+        delivery: priorDelivery,
+        deliveryFileSha256: proof.prior_delivery_snapshot_sha256,
+        manifest: providerOutput, manifestFileSha256: proof.manifest_file_sha256,
+        selectedAudioFileSha256: unit.audio_sha256,
+      });
+      return true;
+    } catch { return false; }
+  }
+  const provenance = unit.recovery_provenance;
+  if (!within(provenance?.request_path) || !within(provenance?.result_path)
+    || !within(provenance?.defect_evidence_path)
+    || await fileSha256(provenance.request_path) === null
+    || await fileSha256(provenance.result_path) !== provenance.result_sha256) return false;
+  const [request, result, defect] = await Promise.all([
+    readJson(provenance.request_path, null), readJson(provenance.result_path, null),
+    readJson(provenance.defect_evidence_path, null),
+  ]);
+  const priorManifestPath = request?.prior_manifest_path;
+  if (!within(priorManifestPath)
+    || await fileSha256(priorManifestPath) !== request?.prior_manifest_file_sha256) return false;
+  const priorManifest = await readJson(priorManifestPath, null);
+  const made = result?.unit;
+  for (const name of [made?.audio_path, made?.phonetic_fragment?.audio_path,
+    made?.phonetic_fragment?.sidecar_path, made?.retained_remainder?.audio_path,
+    made?.retained_remainder?.sidecar_path]) if (!within(name)) return false;
+  try {
+    if (request.prior_report_file_sha256 !== proof.prior_report_snapshot_sha256
+      || request.prior_delivery_file_sha256 !== proof.prior_delivery_snapshot_sha256
+      || defect.prior_narration_report_sha256 !== proof.prior_report_snapshot_sha256
+      || defect.prior_unit_delivery_qa_sha256 !== proof.prior_delivery_snapshot_sha256) return false;
+    const priorSelected = (priorManifest?.units ?? []).find(
+      (row) => row.unit_id === proof.unit_id);
+    const priorBoundaryRequestPath = request.prior_boundary_request_path;
+    const priorBoundaryResultPath = request.prior_boundary_result_path;
+    if (!within(priorSelected?.audio_path) || !within(priorBoundaryRequestPath)
+      || !within(priorBoundaryResultPath)
+      || await fileSha256(priorBoundaryRequestPath)
+        !== request.prior_boundary_request_file_sha256
+      || await fileSha256(priorBoundaryResultPath)
+        !== request.prior_boundary_result_file_sha256) return false;
+    validatePronunciationDefectEvidenceForTests({
+      evidence: defect,
+      evidenceFileSha256: await fileSha256(provenance.defect_evidence_path),
+      sourceScriptSha256, plan, planFileSha256,
+      report: priorReport, reportFileSha256: proof.prior_report_snapshot_sha256,
+      delivery: priorDelivery,
+      deliveryFileSha256: proof.prior_delivery_snapshot_sha256,
+      manifest: priorManifest,
+      manifestFileSha256: await fileSha256(priorManifestPath),
+      selectedAudioFileSha256: await fileSha256(priorSelected.audio_path),
+      priorBoundaryRequest: await readJson(priorBoundaryRequestPath, null),
+      priorBoundaryResult: await readJson(priorBoundaryResultPath, null),
+      priorBoundaryResultFileSha256: await fileSha256(priorBoundaryResultPath),
+    });
+    validatePronunciationCandidateArtifactsForTests({
+      defect, defectFileSha256: await fileSha256(provenance.defect_evidence_path),
+      request, requestFileSha256: await fileSha256(provenance.request_path),
+      result, resultFileSha256: await fileSha256(provenance.result_path),
+      priorManifest, priorManifestFileSha256: await fileSha256(priorManifestPath),
+      candidateManifest: providerOutput, candidateAudioFileSha256: unit.audio_sha256,
+      phoneticAudioFileSha256: await fileSha256(made.phonetic_fragment.audio_path),
+      phoneticSidecarFileSha256: await fileSha256(made.phonetic_fragment.sidecar_path),
+      remainderAudioFileSha256: await fileSha256(made.retained_remainder.audio_path),
+      remainderSidecarFileSha256: await fileSha256(made.retained_remainder.sidecar_path),
+    });
+    validatePronunciationCandidateReviewForTests({
+      review, defect, request, result, candidateManifest: providerOutput,
+      reviewFileSha256: proof.evidence_sha256,
+      defectFileSha256: await fileSha256(provenance.defect_evidence_path),
+      requestFileSha256: await fileSha256(provenance.request_path),
+      resultFileSha256: await fileSha256(provenance.result_path),
+      candidateManifestFileSha256: proof.manifest_file_sha256,
+      candidateAudioFileSha256: unit.audio_sha256,
+    });
+    return true;
+  } catch { return false; }
+}
+
+async function appliedAutomatedPronunciationReviewValid({
+  episodeDir, sourceScriptSha256, plan, planFileSha256,
+  ttsReport, unitDelivery, providerOutput, providerOutputPath,
+}) {
+  const proof = ttsReport?.automated_pronunciation_review;
+  const candidateRows = (providerOutput?.units ?? []).filter(
+    (row) => row.synthesis_mode === AUTOMATED_PRONUNCIATION_MODE);
+  if (!proof) return candidateRows.length === 0;
+  const within = (name) => typeof name === "string" && path.isAbsolute(name)
+    && path.resolve(name).startsWith(`${path.resolve(episodeDir)}${path.sep}`);
+  if (proof.schema !== "goldflow_tts_exact_automated_pronunciation_review_v1"
+    || proof.human_listening_performed !== false
+    || proof.acceptance_basis !== "fresh_independent_dual_asr_and_normal_audio_qa"
+    || candidateRows.length !== 1 || candidateRows[0].unit_id !== proof.unit_id
+    || !within(proof.evidence_path) || !within(proof.prior_report_snapshot_path)
+    || !within(proof.prior_delivery_snapshot_path)
+    || proof.manifest_path !== providerOutputPath
+    || proof.manifest_file_sha256 !== ttsReport.provider_output_manifest_sha256
+    || await fileSha256(proof.evidence_path) !== proof.evidence_sha256
+    || await fileSha256(proof.prior_report_snapshot_path)
+      !== proof.prior_report_snapshot_sha256
+    || await fileSha256(proof.prior_delivery_snapshot_path)
+      !== proof.prior_delivery_snapshot_sha256
+    || unitDelivery?.automated_pronunciation_review?.evidence_sha256 !== proof.evidence_sha256) {
+    return false;
+  }
+  try {
+    const [evidence, priorReport, priorDelivery] = await Promise.all([
+      readJson(proof.evidence_path, null),
+      readJson(proof.prior_report_snapshot_path, null),
+      readJson(proof.prior_delivery_snapshot_path, null),
+    ]);
+    const priorManifestPath = priorReport?.provider_output_manifest_path;
+    if (!within(priorManifestPath)
+      || priorReport.provider_output_manifest_sha256 !== await fileSha256(priorManifestPath)) return false;
+    const priorManifest = await readJson(priorManifestPath, null);
+    const priorSelected = priorManifest?.units?.find((row) => row.unit_id === proof.unit_id);
+    const priorBoundaryRequestPath = priorSelected?.recovery_provenance?.request_path;
+    const priorBoundaryResultPath = priorSelected?.recovery_provenance?.result_path;
+    if (!within(priorSelected?.audio_path) || !within(priorBoundaryRequestPath)
+      || !within(priorBoundaryResultPath)) return false;
+    validateAutomatedPronunciationEvidenceForTests({
+      evidence, evidenceFileSha256: proof.evidence_sha256,
+      sourceScriptSha256, plan, planFileSha256,
+      report: priorReport, reportFileSha256: proof.prior_report_snapshot_sha256,
+      delivery: priorDelivery,
+      deliveryFileSha256: proof.prior_delivery_snapshot_sha256,
+      manifest: priorManifest,
+      manifestFileSha256: await fileSha256(priorManifestPath),
+      selectedAudioFileSha256: await fileSha256(priorSelected.audio_path),
+      priorBoundaryRequest: await readJson(priorBoundaryRequestPath, null),
+      priorBoundaryResult: await readJson(priorBoundaryResultPath, null),
+      priorBoundaryResultFileSha256: await fileSha256(priorBoundaryResultPath),
+    });
+    const selected = candidateRows[0];
+    const provenance = selected.recovery_provenance;
+    if (!within(selected.audio_path) || !within(provenance?.request_path)
+      || !within(provenance?.result_path)
+      || provenance.defect_evidence_path !== proof.evidence_path
+      || provenance.defect_evidence_sha256 !== proof.evidence_sha256
+      || await fileSha256(selected.audio_path) !== selected.audio_sha256
+      || await fileSha256(provenance.result_path) !== provenance.result_sha256) return false;
+    const [request, result] = await Promise.all([
+      readJson(provenance.request_path, null), readJson(provenance.result_path, null),
+    ]);
+    const made = result?.unit;
+    for (const name of [made?.audio_path, made?.phonetic_fragment?.audio_path,
+      made?.phonetic_fragment?.sidecar_path, made?.retained_remainder?.audio_path,
+      made?.retained_remainder?.sidecar_path]) if (!within(name)) return false;
+    if (request?.prior_report_file_sha256 !== proof.prior_report_snapshot_sha256
+      || request?.prior_delivery_file_sha256 !== proof.prior_delivery_snapshot_sha256
+      || request?.defect_evidence_sha256 !== proof.evidence_sha256
+      || request?.expected_word !== proof.expected_word
+      || request?.tts_only_phonetic_word !== proof.phonetic_word) return false;
+    validatePronunciationCandidateArtifactsForTests({
+      defect: evidence, defectFileSha256: proof.evidence_sha256,
+      request, requestFileSha256: await fileSha256(provenance.request_path),
+      result, resultFileSha256: await fileSha256(provenance.result_path),
+      priorManifest, priorManifestFileSha256: await fileSha256(priorManifestPath),
+      candidateManifest: providerOutput,
+      candidateAudioFileSha256: await fileSha256(made.audio_path),
+      phoneticAudioFileSha256: await fileSha256(made.phonetic_fragment.audio_path),
+      phoneticSidecarFileSha256: await fileSha256(made.phonetic_fragment.sidecar_path),
+      remainderAudioFileSha256: await fileSha256(made.retained_remainder.audio_path),
+      remainderSidecarFileSha256: await fileSha256(made.retained_remainder.sidecar_path),
+      synthesisMode: AUTOMATED_PRONUNCIATION_MODE,
+      candidateReviewStatus: "pending_automated_asr",
+    });
+    const delivered = (unitDelivery?.units ?? []).find((row) => row.unit_id === proof.unit_id);
+    if (delivered?.audio_sha256 !== selected.audio_sha256
+      || delivered?.decision?.automated_pronunciation_review?.evidence_sha256
+        !== proof.evidence_sha256) return false;
+    const adjudicated = applyAutomatedPronunciationCandidateForTests({
+      decision: { status: "blocked", warnings: [], blockers: [{
+        code: "narration_confirmed_opening_token_mismatch",
+      }] },
+      unitId: proof.unit_id, reviewedUnitId: proof.unit_id,
+      evidenceSha256: proof.evidence_sha256,
+      expectedWord: proof.expected_word, phoneticWord: proof.phonetic_word,
+      primaryTranscriptQa: delivered.transcript_qa,
+      confirmationTranscriptQa: delivered.confirmation_transcript_qa,
+    });
+    return adjudicated.blockers.length === 0;
+  } catch { return false; }
+}
+
 async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash, identity) {
   if (!currentScriptHash) return { done: false, evidence: "script_clean.md missing" };
   const narrationQualityContract = narrationQualityContractForIdentity(identity);
@@ -2974,10 +4537,20 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
   }
   const ttsReportPath = path.join(episodeDir, `narration_tts_report_${episode}.json`);
   const stitchReportPath = path.join(episodeDir, `audio_stitch_report_${episode}-narration.json`);
-  const [ttsReport, stitchReport] = await Promise.all([
+  let [ttsReport, stitchReport] = await Promise.all([
     readJson(ttsReportPath, null),
     readJson(stitchReportPath, null),
   ]);
+  // A new or removed policy receipt invalidates only derived review decisions,
+  // never the retained synthesis. Re-finalization reuses exact QA checkpoints.
+  try {
+    await loadLowMarginDisposition({ episodeDir, episode,
+      expectedBinding: ttsReport?.voice_low_margin_disposition ?? null });
+  } catch (error) {
+    return { done: false, state: "blocked",
+      evidence: `Narration low-margin disposition provenance requires review refresh: ${error.message}`,
+      next_command_shape: `node bin/goldflow.mjs tts finalize-provider --episode-dir ${episodeDir}` };
+  }
   if (!ttsReport) {
     if (EXTERNAL_NARRATION_TTS_PROVIDERS.includes(policy.primary?.provider)) {
       const providerOutputPath = path.join(
@@ -2997,9 +4570,460 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
         next_command_shape: `node bin/goldflow.mjs tts finalize-provider --episode-dir ${episodeDir}`,
       };
     }
+    const inventoryPath = path.join(episodeDir,
+      `narration_interrupted_qwen_triage_inventory_${episode}.json`);
+    const adoptionQaPath = path.join(episodeDir,
+      `narration_interrupted_qwen_adoption_qa_${episode}.json`);
+    const adoptionQa = await readJson(adoptionQaPath, null);
+    if (adoptionQa) {
+      return { done: false, state: "blocked",
+        evidence: `Interrupted Qwen adoption QA status=${adoptionQa.status ?? "unknown"}; inspect ${adoptionQaPath} before any further synthesis` };
+    }
+    if (policy.primary?.provider === "qwen_local" && await exists(inventoryPath)) {
+      return { done: false, state: "blocked",
+        evidence: "Interrupted Qwen raw cohorts require hash verification and ordinary unit/voice QA before any remaining synthesis",
+        next_command_shape: `node bin/goldflow.mjs tts adopt-interrupted --episode-dir ${episodeDir} --inventory ${inventoryPath}` };
+    }
     return { done: false, evidence: `narration_tts_report_${episode}.json missing` };
   }
+  if (policy.primary?.provider === "qwen_local") {
+    try {
+      const rootManifestPath = path.join(episodeDir,
+        `narration_provider_output_manifest_${episode}.json`);
+      const rootManifest = await readJson(rootManifestPath, null);
+      if ((rootManifest?.units ?? []).some((row) =>
+        row?.recovery_provenance?.evidence_basis === "reviewed_structural_no_audio")) {
+        const { manifestPath, manifest } = await structuralProjectionManifestForReport({
+          episodeDir, report: ttsReport, rootManifestPath, rootManifest,
+        });
+        const planPath = path.join(episodeDir, "narration_generation_plan.json");
+        const plan = await readJson(planPath, null);
+        const manifestFileSha256 = await fileSha256(manifestPath);
+        const structuralRecovery = await verifiedStructuralRecoveryFromManifest({
+          episodeDir, manifest, manifestPath, plan,
+          planFileSha256: await fileSha256(planPath),
+          sourceScriptSha256: currentScriptHash,
+        });
+        if (ttsReport.status === "blocked"
+          && ttsReport.provider_output_manifest_sha256 !== manifestFileSha256) {
+          const exactRetake = await completedExactDeliveryRetakeFinalizationForTests({
+            episodeDir, episode, ttsReport, ttsReportPath,
+            manifest, manifestPath, plan,
+            planFileSha256: await fileSha256(planPath),
+            qualityContract: narrationQualityContract,
+            policy, currentScriptHash,
+          });
+          return { done: false, state: "blocked",
+            evidence: `Completed exact ASR delivery retake preserves ${exactRetake.retainedUnitCount} selected WAVs and has ${exactRetake.repairedUnitIds.length} hash-verified attempt-two WAVs; structural archives remain valid. Finalize the current manifest without synthesis`,
+            next_command_shape: `node bin/goldflow.mjs tts finalize-provider --episode-dir ${episodeDir} --manifest ${manifestPath}` };
+        }
+        ttsReport = projectVerifiedStructuralRecoveryReport({
+          report: ttsReport, manifest, manifestFileSha256,
+          structuralRecovery, qualityContract: narrationQualityContract,
+        });
+      }
+    } catch (error) {
+      return { done: false, state: "blocked",
+        evidence: `Structural retry provenance is stale or invalid: ${error.message}`,
+        next_command_shape: "Operator hold: preserve selected audio and repair exact structural provenance; do not rerun narration." };
+    }
+  }
+  const orthographyPath = path.join(episodeDir,
+    `narration_asr_orthography_review_${episode}.json`);
+  if (await exists(orthographyPath) || ttsReport.asr_orthography_review) {
+    if (!(await exists(orthographyPath))) {
+      return { done: false, state: "blocked",
+        evidence: "Applied narration ASR orthography receipt is missing; restore exact evidence before continuing" };
+    }
+    try {
+      const planPath = path.join(episodeDir, "narration_generation_plan.json");
+      const rootManifestPath = path.join(episodeDir,
+        `narration_provider_output_manifest_${episode}.json`);
+      const manifestPath = ttsReport.provider_output_manifest_path ?? rootManifestPath;
+      if (!path.isAbsolute(manifestPath)
+        || !path.resolve(manifestPath).startsWith(`${path.resolve(episodeDir)}${path.sep}`)
+        || await fileSha256(manifestPath) !== ttsReport.provider_output_manifest_sha256) {
+        throw new Error("Narration report-bound provider manifest is missing or hash-stale");
+      }
+      const [plan, currentManifest] = await Promise.all([
+        readJson(planPath, null), readJson(manifestPath, null),
+      ]);
+      const review = await loadAsrOrthographyReview({ episodeDir, episode,
+        plan, identityFileSha256: await fileSha256(path.join(episodeDir, "run_identity.json")),
+        sourceScriptSha256: currentScriptHash,
+        planFileSha256: await fileSha256(planPath),
+        qualityContractSha256: narrationQualityContract?.contract_sha256,
+        currentManifest });
+      if (ttsReport.asr_orthography_review?.evidence_sha256 !== review.evidence_sha256) {
+        if (ttsReport.status !== "blocked") {
+          throw new Error("Narration report applied-orthography binding is missing or stale");
+        }
+        const [activeReportSha256, activeDeliverySha256, activeManifestSha256] = await Promise.all([
+          fileSha256(path.join(episodeDir, `narration_tts_report_${episode}.json`)),
+          fileSha256(path.join(episodeDir, `narration_unit_delivery_qa_${episode}.json`)),
+          fileSha256(manifestPath),
+        ]);
+        if (activeReportSha256 !== review.pre_review_narration_report_sha256
+          || activeDeliverySha256 !== review.pre_review_unit_delivery_qa_sha256
+          || activeManifestSha256 !== review.pre_review_provider_manifest_sha256) {
+          throw new Error("Current blocked report, delivery QA, or manifest differs from reviewed immutable snapshots");
+        }
+        return { done: false, state: "blocked",
+          evidence: `Reviewed exact ASR orthography for ${review.unit_ids.length} retained units needs no-synthesis re-adjudication`,
+          next_command_shape: `node bin/goldflow.mjs tts finalize-provider --episode-dir ${episodeDir}${manifestPath === rootManifestPath ? "" : ` --manifest ${manifestPath}`} --asr-orthography-evidence ${review.evidence_path}` };
+      }
+    } catch (error) {
+      return { done: false, state: "blocked",
+        evidence: `Narration ASR orthography review is stale or invalid: ${error.message}` };
+    }
+  }
   if (!statusPassed(ttsReport.status)) {
+    if (ttsReport.status === "blocked" && policy.primary.provider === "qwen_local") {
+      const structuralEvidencePath = path.join(episodeDir,
+        `narration_structural_no_audio_retry_evidence_${episode}.json`);
+      if (await exists(structuralEvidencePath)) {
+        try {
+          const evidence = await readJson(structuralEvidencePath, null);
+          const unitId = evidence?.confirmed_units?.[0]?.unit_id;
+          const consumed = structuralNoAudioEvidenceConsumedForTests({
+            ttsReport, evidence, evidencePath: structuralEvidencePath,
+            evidenceSha256: await fileSha256(structuralEvidencePath),
+          });
+          if (consumed) {
+            if (!await narrationStructuralNoAudioRetryReportValidForTests(
+              ttsReport, currentScriptHash,
+            )) {
+              throw new Error("Consumed token-limit retry does not validate against its archived predecessor and selected WAV.");
+            }
+          } else {
+            const planPath = path.join(episodeDir, "narration_generation_plan.json");
+            const unitQaPath = path.join(episodeDir,
+              `narration_tts_unit_qa_${episode}.json`);
+            const [plan, unitQa] = await Promise.all([
+              readJson(planPath, null), readJson(unitQaPath, null),
+            ]);
+            const candidate = (unitQa?.candidates ?? []).find((row) => (
+              String(row?.unit_id) === String(unitId)
+            ));
+            const runnerPath = candidate?.runner_report_path;
+            if (!runnerPath || !path.isAbsolute(runnerPath)
+              || !path.resolve(runnerPath).startsWith(`${path.resolve(episodeDir)}${path.sep}`)) {
+              throw new Error("Original runner report path is absent or outside the episode.");
+            }
+            const runnerReport = await readJson(runnerPath, null);
+            validateStructuralNoAudioRetryEvidence({
+              evidence, requestedUnitIds: [unitId],
+              sourceScriptSha256: currentScriptHash,
+              planSha256: plan?.plan_sha256 ?? null,
+              planFileSha256: await fileSha256(planPath),
+              priorReport: ttsReport,
+              priorReportSha256: await fileSha256(ttsReportPath),
+              priorUnitQa: unitQa,
+              priorUnitQaSha256: await fileSha256(unitQaPath),
+              runnerReport,
+              runnerReportSha256: await fileSha256(runnerPath),
+              units: narrationPlanUnitsForStatus(plan),
+              batchPlan: plan?.qwen_liam_batch_plan,
+            });
+            return { done: false, state: "blocked",
+              evidence: `Reviewed token-limit no-audio failure authorizes one exact-unit Qwen retry for ${unitId}; all accepted WAVs remain immutable`,
+              next_command_shape: `node bin/goldflow.mjs tts narrate --episode-dir ${episodeDir} --confirmed-retry-unit-ids ${unitId} --confirmed-retry-evidence ${structuralEvidencePath}` };
+          }
+        } catch (error) {
+          return { done: false, state: "blocked",
+            evidence: `Structural no-audio retry evidence is stale or invalid: ${error.message}`,
+            next_command_shape: "Operator hold: correct the exact hash-bound structural retry evidence; do not rerun narration." };
+        }
+      }
+    }
+    if (ttsReport.status === "interrupted_adoption_partial") {
+      const receiptPath = path.join(episodeDir,
+        `narration_interrupted_qwen_adoption_${episode}.json`);
+      try {
+        const planPath = path.join(episodeDir, "narration_generation_plan.json");
+        const plan = await readJson(planPath, null);
+        const outputDir = path.join(episodeDir, "assets/audio/narration_tts");
+        const runsDir = path.join(outputDir, "runs");
+        const completedRunners = [];
+        for (const name of await fs.readdir(runsDir).catch(() => [])) {
+          if (!name.endsWith(".json")) continue;
+          const candidatePath = path.join(runsDir, name);
+          const candidate = await readJson(candidatePath, null);
+          if (candidate?.synthesis_mode === "serial_incomplete_unit_resume_v1"
+            && candidate?.schema === "goldflow_local_tts_production_run_v2") {
+            completedRunners.push(candidatePath);
+          }
+        }
+        if (completedRunners.length) {
+          if (completedRunners.length !== 1) {
+            throw new Error("multiple completed serial runner reports require exact operator triage");
+          }
+          await verifyCompletedInterruptedQwenRunner({
+            runnerReportPath: completedRunners[0], receiptPath, episodeDir,
+            outputDir,
+            identityPath: path.join(episodeDir, "run_identity.json"),
+            planPath, scriptPath: path.join(episodeDir, "script_clean.md"),
+            reportPath: ttsReportPath,
+            unitQaPath: path.join(episodeDir, `narration_tts_unit_qa_${episode}.json`),
+            units: narrationPlanUnitsForStatus(plan),
+            planSha256: plan?.plan_sha256 ?? await fileSha256(planPath),
+            batchPlan: plan?.qwen_liam_batch_plan, policy,
+          });
+          return { done: false, state: "blocked",
+            evidence: "Exact serial Qwen runner is complete; its outputs need no-model canonical QA and stitching",
+            next_command_shape: `node bin/goldflow.mjs tts finalize-interrupted --episode-dir ${episodeDir} --interrupted-adoption-receipt ${receiptPath} --completed-runner-report ${completedRunners[0]}` };
+        }
+        const receipt = await verifyInterruptedQwenAdoptionReceipt({
+          receiptPath, episodeDir,
+          outputDir,
+          identityPath: path.join(episodeDir, "run_identity.json"),
+          planPath, scriptPath: path.join(episodeDir, "script_clean.md"),
+          reportPath: ttsReportPath,
+          unitQaPath: path.join(episodeDir, `narration_tts_unit_qa_${episode}.json`),
+          units: narrationPlanUnitsForStatus(plan),
+          planSha256: plan?.plan_sha256 ?? await fileSha256(planPath),
+        });
+        if (receipt.receipt.source_script_sha256 !== currentScriptHash) {
+          throw new Error("source script changed after adoption");
+        }
+        return { done: false, state: "blocked",
+          evidence: `${receipt.receipt.accepted_unit_ids.length} Qwen first takes were QA-accepted; ${receipt.receipt.never_submitted_unit_ids.length} units remain unsubmitted`,
+          next_command_shape: `node bin/goldflow.mjs tts narrate --episode-dir ${episodeDir} --concurrency 1 --batch-size ${policy.synthesis_contract?.nominal_batch_size ?? 1} --interrupted-adoption-receipt ${receiptPath}` };
+      } catch (error) {
+        return { done: false, state: "blocked",
+          evidence: `Interrupted Qwen recovery evidence is stale or incomplete: ${error.message}`,
+          next_command_shape: "Operator hold: inspect the exact serial runner and adoption evidence; do not rerun Qwen." };
+      }
+    }
+    // A changed transcript comparator can clear a blocked ASR spelling while
+    // retaining every immutable provider WAV. Route only a hash-verified,
+    // comparison-sensitive blocked report to the guarded finalizer.
+    if (narrationQualityContract && policy.primary.provider === "qwen_local"
+      && ttsReport.status === "blocked") {
+      const planPath = path.join(episodeDir, "narration_generation_plan.json");
+      const unitDeliveryPath = path.join(episodeDir, `narration_unit_delivery_qa_${episode}.json`);
+      const unitDelivery = await readJson(unitDeliveryPath, null);
+      const plan = await readJson(planPath, null);
+      const planFileSha256 = await fileSha256(planPath);
+      const boundaryResume = await findExactBoundaryRepairResumeManifest({
+        episodeDir, episode, identity, plan,
+        planUnits: narrationPlanUnitsForStatus(plan), planFileSha256,
+        qualityContractSha256: narrationQualityContract.contract_sha256,
+        policy, ttsReport, unitDelivery, currentScriptHash,
+        currentComparisonVersion: TRANSCRIPT_QA_COMPARISON_VERSION,
+      });
+      if (boundaryResume) {
+        return { done: false, state: "blocked",
+          evidence: `Completed exact-boundary repair has ${boundaryResume.repairedUnitIds.length} hash-verified composite WAVs in its derived provider manifest; the blocked report selected the prior manifest. Re-adjudicate the derived manifest without synthesis`,
+          next_command_shape: `node bin/goldflow.mjs tts finalize-provider --episode-dir ${episodeDir} --manifest ${boundaryResume.manifestPath}` };
+      }
+      const fullQa = await readJson(path.join(episodeDir,
+        `narration_full_stream_qa_${episode}.json`), null);
+      const reportBoundManifestPath = ttsReport.provider_output_manifest_path;
+      const reportBoundManifest = reportBoundManifestPath
+        && path.isAbsolute(reportBoundManifestPath)
+        && path.resolve(reportBoundManifestPath).startsWith(`${path.resolve(episodeDir)}${path.sep}`)
+        ? await readJson(reportBoundManifestPath, null) : null;
+      const reportBoundValidation = validateNarrationProviderOutputManifest(
+        reportBoundManifest, narrationPlanUnitsForStatus(plan), {
+          generationPlanSha256: plan?.plan_sha256 ?? planFileSha256,
+          generationPlanFileSha256: planFileSha256,
+          qualityContractSha256: narrationQualityContract.contract_sha256,
+          provider: policy.primary.provider,
+          voiceId: policy.primary.voice_id,
+          voiceSha256: policy.primary.voice_sha256,
+        },
+      );
+      if (await blockedFullStreamPolicyRefreshEligible({
+        episodeDir, ttsReport, stitchReport, fullQa, unitDelivery,
+        providerOutput: reportBoundManifest, providerValidation: reportBoundValidation,
+        plan, planFileSha256, currentScriptHash,
+        qualityContractSha256: narrationQualityContract.contract_sha256,
+      })) {
+        return { done: false, state: "blocked",
+          evidence: "Full-stream-only ASR blocker uses a stale derived cross-level decision. The exact report-bound manifest, retained WAVs, stitch accounting, and current plan are hash-verified; re-adjudicate without synthesis",
+          next_command_shape: `node bin/goldflow.mjs tts finalize-provider --episode-dir ${episodeDir} --manifest ${reportBoundManifestPath}` };
+      }
+      if (reportBoundManifestPath && reportBoundValidation.status === "passed") {
+        let providerAudioHashesValid = true;
+        for (const row of reportBoundManifest.units ?? []) {
+          if (!row.audio_path || !row.audio_sha256
+            || !(await exists(row.audio_path))
+            || await fileSha256(row.audio_path) !== row.audio_sha256) {
+            providerAudioHashesValid = false;
+            break;
+          }
+        }
+        if (blockedNarrationComparatorRefreshEligible({
+          ttsReport, unitDelivery, providerOutput: reportBoundManifest, plan, planFileSha256,
+          currentScriptHash, qualityContractSha256: narrationQualityContract.contract_sha256,
+          providerValidation: reportBoundValidation, providerAudioHashesValid,
+          providerOutputPath: reportBoundManifestPath,
+          providerOutputFileSha256: await fileSha256(reportBoundManifestPath),
+        })) {
+          return { done: false, state: "blocked",
+            evidence: "Stored blocked narration unit-delivery decisions use an older comparator or consensus. The exact report-bound provider manifest and every selected WAV hash validate; re-adjudicate without synthesis",
+            next_command_shape: `node bin/goldflow.mjs tts finalize-provider --episode-dir ${episodeDir} --manifest ${reportBoundManifestPath}` };
+        }
+      }
+      const contextualEvidencePath = path.join(episodeDir,
+        `narration_full_stream_contextual_asr_evidence_${episode}.json`);
+      if (await exists(contextualEvidencePath)) {
+        try {
+          const resolved = await loadContextualAsrReconciliation({
+            evidencePath: contextualEvidencePath,
+            currentReportPath: path.join(episodeDir,
+              `narration_full_stream_qa_${episode}.json`),
+            currentUnitDeliveryPath: unitDeliveryPath,
+            currentStitchReportPath: path.join(episodeDir,
+              `audio_stitch_report_${episode}-narration.json`),
+          });
+          if (resolved.scope.length !== 1 || reportBoundValidation.status !== "passed") {
+            throw new Error("other unresolved full-stream blockers remain");
+          }
+          return { done: false, state: "blocked",
+            evidence: "The sole full-stream omission is covered by exact unit dual-ASR and stitch/master waveform evidence; re-adjudicate retained media without synthesis",
+            next_command_shape: `node bin/goldflow.mjs tts finalize-provider --episode-dir ${episodeDir} --manifest ${reportBoundManifestPath} --contextual-asr-evidence ${contextualEvidencePath}` };
+        } catch (error) {
+          return { done: false, state: "blocked",
+            evidence: `Contextual ASR evidence is stale or invalid: ${error.message}`,
+            next_command_shape: "Operator hold: repair only the exact contextual ASR evidence; do not rerun narration." };
+        }
+      }
+      const spacingEvidencePath = path.join(episodeDir,
+        `narration_full_stream_spacing_bridge_evidence_${episode}.json`);
+      if (await exists(spacingEvidencePath)) {
+        try {
+          const resolved = await loadFullStreamSpacingBridge({
+            evidencePath: spacingEvidencePath,
+            currentReportPath: path.join(episodeDir,
+              `narration_full_stream_qa_${episode}.json`),
+            currentUnitDeliveryPath: unitDeliveryPath,
+            currentStitchReportPath: path.join(episodeDir,
+              `audio_stitch_report_${episode}-narration.json`),
+          });
+          if (resolved.scope.length !== 2 || reportBoundValidation.status !== "passed") {
+            throw new Error("other unresolved full-stream blockers remain");
+          }
+          return { done: false, state: "blocked",
+            evidence: "The sole paired full-stream spacing discrepancy is bound to an accepted exact-unit review and retained PCM; re-adjudicate retained audio without synthesis",
+            next_command_shape: `node bin/goldflow.mjs tts finalize-provider --episode-dir ${episodeDir} --manifest ${reportBoundManifestPath} --full-stream-spacing-bridge-evidence ${spacingEvidencePath}` };
+        } catch (error) {
+          return { done: false, state: "blocked",
+            evidence: `Full-stream spacing evidence is stale or invalid: ${error.message}`,
+            next_command_shape: "Operator hold: repair only the exact full-stream spacing evidence; do not rerun narration." };
+        }
+      }
+    }
+    if (ttsReport.status === "blocked" && policy.primary.provider === "qwen_local") {
+      const receiptPath = path.join(episodeDir,
+        `narration_automated_contraction_expansion_${episode}.json`);
+      if (!(await exists(receiptPath))
+        && ttsReport.blockers?.length === 1
+        && ttsReport.blockers[0]?.unit_id === CONTRACTION_TARGET_UNIT_ID
+        && ttsReport.blockers[0]?.code
+          === "narration_confirmed_opening_token_mismatch") {
+        const selectedManifest = await readJson(
+          ttsReport.provider_output_manifest_path, null);
+        const selected = (selectedManifest?.units ?? []).find(
+          (row) => row.unit_id === CONTRACTION_TARGET_UNIT_ID);
+        if (selected?.synthesis_mode === "exact_sentence_boundary_composite_v1"
+          && selected.recovery_provenance?.schema
+            === "goldflow_tts_exact_boundary_repair_provenance_v1") {
+          return { done: false, state: "blocked",
+            evidence: `The sole blocked unit ${CONTRACTION_TARGET_UNIT_ID} has the exact past-perfect opening and a selected two-fragment boundary composite; prepare a machine-validated TTS-only expansion receipt`,
+            next_command_shape: `node bin/goldflow.mjs tts review-contraction --episode-dir ${episodeDir}` };
+        }
+      }
+      if (ttsReport.automated_contraction_expansion) {
+        // Finalization consumed the candidate and overwrote the active blocked
+        // report. Validate its immutable pre-candidate snapshots, then let a
+        // separate full-stream-only blocker reach exact-boundary triage.
+        const providerOutputPath = ttsReport.provider_output_manifest_path;
+        const [unitDelivery, fullQa, providerOutput] = await Promise.all([
+          readJson(path.join(episodeDir, `narration_unit_delivery_qa_${episode}.json`), null),
+          readJson(path.join(episodeDir, `narration_full_stream_qa_${episode}.json`), null),
+          providerOutputPath && path.isAbsolute(providerOutputPath)
+            && path.resolve(providerOutputPath).startsWith(`${path.resolve(episodeDir)}${path.sep}`)
+            ? readJson(providerOutputPath, null) : null,
+        ]);
+        const consumed = await consumedContractionFullStreamStatusForTests({
+          episodeDir, episode, currentScriptHash, ttsReport, unitDelivery,
+          fullQa, providerOutput, providerOutputPath,
+        });
+        if (consumed?.kind === "hold") return consumed;
+      } else {
+        try {
+          const contraction = await loadContractionRecoveryState({
+            episodeDir, episode, sourceScriptSha256: currentScriptHash,
+          });
+          if (contraction?.kind === "evidence_reviewed") {
+            return { done: false, state: "blocked",
+              evidence: `One exact past-perfect TTS-only expansion is reviewed for ${contraction.unit_id}; source and captions stay unchanged`,
+              next_command_shape: `node bin/goldflow.mjs tts repair-contraction --episode-dir ${episodeDir} --evidence ${contraction.evidence_path}` };
+          }
+          if (contraction?.kind === "candidate_ready") {
+            return { done: false, state: "blocked",
+              evidence: `One exact contraction candidate is hash-bound for ${contraction.unit_id}; fresh dual-ASR, acoustic, voice, and full-stream QA remain required`,
+              next_command_shape: `node bin/goldflow.mjs tts finalize-provider --episode-dir ${episodeDir} --manifest ${contraction.candidate_manifest_path} --contraction-expansion-evidence ${contraction.evidence_path}` };
+          }
+        } catch (error) {
+          return { done: false, state: "blocked",
+            evidence: `Contraction expansion receipt is stale or incomplete: ${error.message}`,
+            next_command_shape: "Operator hold: inspect the one-unit contraction candidate; do not synthesize again." };
+        }
+      }
+    }
+    if (ttsReport.status === "blocked" && policy.primary.provider === "qwen_local") {
+      try {
+        const pronunciation = await loadPronunciationRecoveryState({
+          episodeDir, episode, sourceScriptSha256: currentScriptHash,
+        });
+        if (pronunciation?.kind === "defect_reviewed") {
+          return { done: false, state: "blocked",
+            evidence: `User-heard pronunciation defect is bound to ${pronunciation.unit_id}; only one phonetic opening fragment may be attempted, with the source and remaining audio retained`,
+            next_command_shape: `node bin/goldflow.mjs tts repair-pronunciation --episode-dir ${episodeDir} --evidence ${pronunciation.defect_path}` };
+        }
+        if (pronunciation?.kind === "candidate_pending_user_listening") {
+          return { done: false, state: "blocked",
+            evidence: `One phonetic pronunciation candidate is available for ${pronunciation.unit_id}: ${pronunciation.candidate_audio_path} (sha256 ${pronunciation.candidate_audio_sha256}). It is not selected; genuine user listening is required`,
+            next_command_shape: "Operator hold: record an exact hash-bound user listening decision for the candidate; do not finalize or synthesize again." };
+        }
+        if (pronunciation?.kind === "selected_approved"
+          || pronunciation?.kind === "candidate_approved") {
+          return { done: false, state: "blocked",
+            evidence: `User listened to the exact ${pronunciation.unit_id} selected WAV and confirmed the opening; re-adjudicate the hash-bound manifest without synthesis`,
+            next_command_shape: `node bin/goldflow.mjs tts finalize-provider --episode-dir ${episodeDir} --manifest ${pronunciation.manifest_path} --pronunciation-review-evidence ${pronunciation.review_path}` };
+        }
+      } catch (error) {
+        return { done: false, state: "blocked",
+          evidence: `Pronunciation recovery receipt is stale or invalid: ${error.message}`,
+          next_command_shape: "Operator hold: inspect the exact one-unit pronunciation receipt; do not rerun narration." };
+      }
+    }
+    const tailCompletion = await appendOnlyTailCompletionStatus({
+      episodeDir, episode, ttsReportPath, ttsReport, currentScriptHash,
+    });
+    if (tailCompletion) return tailCompletion;
+    if (ttsReport.status === "blocked" && policy.primary.provider === "qwen_local") {
+      const recovery = await qwenReviewedBoundaryOrAutomatedPronunciationStatusForTests({
+        episodeDir, episode, ttsReportPath, ttsReport, currentScriptHash,
+      });
+      if (recovery) return recovery;
+    }
+    if (narrationQualityContract && ttsReport.status === "blocked"
+      && policy.primary.provider === "qwen_local") {
+      const exactRetry = await reviewedAutomatedRetryStatusForTests({
+        episodeDir, episode, ttsReport, ttsReportPath, currentScriptHash,
+      });
+      if (exactRetry) return exactRetry;
+    }
+    if (ttsReport.status === "blocked" && (ttsReport.results ?? []).some((row) =>
+      row.recovery_provenance?.evidence_basis === "reviewed_structural_no_audio")) {
+      return { done: false, state: "blocked",
+        evidence: "The exact token-limit retry is complete; remaining delivery blockers require a current hash-bound orthography review or exact-unit retake evidence",
+        next_command_shape: "Operator hold: review the current delivery QA and prepare only exact hash-bound repairs; do not rerun all narration." };
+    }
     return { done: false, evidence: `narration_tts_report_${episode}.json status=${ttsReport.status ?? "missing"}` };
   }
   if (!stitchReport) return { done: false, evidence: `audio_stitch_report_${episode}-narration.json missing` };
@@ -3027,10 +5051,14 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
       episodeDir,
       `narration_unit_delivery_qa_${episode}.json`,
     );
-    const providerOutputPath = path.join(
-      episodeDir,
-      `narration_provider_output_manifest_${episode}.json`,
-    );
+    const providerOutputPath = ttsReport.provider_output_manifest_path;
+    if (!providerOutputPath || !path.isAbsolute(providerOutputPath)
+      || !providerOutputPath.startsWith(`${path.resolve(episodeDir)}${path.sep}`)
+      || await fileSha256(providerOutputPath)
+        !== ttsReport.provider_output_manifest_sha256) {
+      return { done: false, state: "blocked",
+        evidence: "Narration report provider manifest path or file hash is missing or stale" };
+    }
     const listenPacketPath = path.join(
       episodeDir,
       `narration_exact_listen_review_packet_${episode}.json`,
@@ -3062,11 +5090,47 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
       },
     );
     const v2Findings = [];
+    if (!await appliedPronunciationReviewValid({
+      episodeDir, episode, sourceScriptSha256: currentScriptHash,
+      plan, planFileSha256, ttsReport, unitDelivery,
+      providerOutput, providerOutputPath,
+    })) v2Findings.push("user_pronunciation_review_stale_or_missing");
+    if (!await appliedAutomatedPronunciationReviewValid({
+      episodeDir, sourceScriptSha256: currentScriptHash,
+      plan, planFileSha256, ttsReport, unitDelivery,
+      providerOutput, providerOutputPath,
+    })) v2Findings.push("automated_pronunciation_review_stale_or_missing");
+    if (!await validateAppliedContractionReview({
+      episodeDir, episode, sourceScriptSha256: currentScriptHash,
+      ttsReport, unitDelivery, providerOutput, providerOutputPath,
+    })) v2Findings.push("contraction_expansion_review_stale_or_missing");
+    try {
+      await loadLowMarginDisposition({ episodeDir, episode,
+        expectedBinding: unitDelivery?.voice_low_margin_disposition ?? null });
+    } catch (error) {
+      return { done: false, state: "blocked", evidence: `Narration low-margin delivery binding is stale: ${error.message}`,
+        next_command_shape: `node bin/goldflow.mjs tts finalize-provider --episode-dir ${episodeDir}` };
+    }
     if (!qaStatusPassed(unitDelivery?.status)
       || unitDelivery?.quality_contract_sha256
         !== narrationQualityContract.contract_sha256
       || Number(unitDelivery?.blocked_unit_count ?? 0) !== 0
       || (unitDelivery?.blockers ?? []).length !== 0) {
+      const retryEvidencePath = path.join(episodeDir, `narration_confirmed_retry_evidence_${episode}.json`);
+      const retryEvidence = await readJson(retryEvidencePath, null);
+      const blockedIds = [...new Set((unitDelivery?.blockers ?? []).map((row) => row.unit_id).filter(Boolean))];
+      const retryIds = (retryEvidence?.confirmed_units ?? []).map((row) => row.unit_id);
+      if (policy.primary.provider === "qwen_local" && blockedIds.length
+        && retryEvidence?.evidence_basis === "reviewed_automated_delivery_qa"
+        && retryEvidence.source_script_sha256 === currentScriptHash
+        && retryEvidence.narration_generation_plan_sha256 === plan?.plan_sha256
+        && retryEvidence.pre_retry_narration_report_sha256 === await fileSha256(ttsReportPath)
+        && canonicalQwenBatchSha256([...blockedIds].sort())
+          === canonicalQwenBatchSha256([...retryIds].sort())) {
+        return { done: false, state: "blocked",
+          evidence: `Reviewed automated delivery QA requires exact retakes of ${blockedIds.length} units; accepted units remain immutable`,
+          next_command_shape: `node bin/goldflow.mjs tts narrate --episode-dir ${episodeDir} --confirmed-retry-unit-ids ${blockedIds.join(",")} --confirmed-retry-evidence ${retryEvidencePath}` };
+      }
       v2Findings.push("unit_delivery_qa");
     }
     if (providerValidation.status !== "passed") {
@@ -3101,7 +5165,8 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
         }
       }
     }
-    if (listenPacketCurrent && expectedListenCount > 0) {
+    if (!narrationUsesAutomatedAsrAcceptance(narrationQualityContract)
+      && listenPacketCurrent && expectedListenCount > 0) {
       const listenDecisionValidation = validateNarrationExactListenReviewDecision(
         listenPacket,
         listenDecision,
@@ -3173,6 +5238,22 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
         readJson(subjectiveManifestPath, null),
         readJson(subjectiveDecisionPath, null),
       ]);
+      try {
+        await loadNarrationSourceStructure({
+          episodeDir, episode, plan,
+          sourceScriptSha256: currentScriptHash,
+          generationPlanSha256: plan?.plan_sha256 ?? planFileSha256,
+          generationPlanFileSha256: planFileSha256,
+          expectedBinding: subjectiveManifest?.source_structure ?? null,
+        });
+      } catch (error) {
+        return {
+          done: false,
+          state: "blocked",
+          evidence: `Narration source-structure review provenance failed: ${error.message}`,
+          next_command_shape: `node bin/goldflow.mjs tts finalize-provider --episode-dir ${episodeDir}`,
+        };
+      }
       const subjectiveValidation = validateNarrationSubjectiveReviewManifest(
         subjectiveManifest,
       );
@@ -3352,8 +5433,27 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
         && ttsReport.retry_policy?.structural_failure_action
           === "stop_and_emit_exact_unit_repair_scope"
       : true;
+    const hasOperatorAsrRetry = (ttsReport.results ?? []).some((row) => (
+      row.recovery_provenance?.evidence_basis === "operator_authorized_asr_consensus"
+    )) || (ttsReport.retry_policy?.operator_authorized_asr_consensus_exceptions?.length ?? 0) > 0;
+    const hasHeardPronunciationRetry = (ttsReport.results ?? []).some((row) => (
+      row.recovery_provenance?.evidence_basis === "operator_confirmed_pronunciation"
+    )) || (ttsReport.retry_policy?.operator_confirmed_pronunciation_exceptions?.length ?? 0) > 0;
+    const hasReviewedAutomatedRetry = (ttsReport.results ?? []).some((row) => (
+      row.recovery_provenance?.evidence_basis === "reviewed_automated_delivery_qa"
+    )) || (ttsReport.retry_policy?.reviewed_automated_delivery_repairs?.length ?? 0) > 0;
+    const hasReviewedStructuralRetry = (ttsReport.results ?? []).some((row) => (
+      row.recovery_provenance?.evidence_basis === "reviewed_structural_no_audio"
+    )) || (ttsReport.retry_policy?.reviewed_structural_no_audio_repairs?.length ?? 0) > 0;
+    const exactRetryTypePolicyPassed = hasOperatorAsrRetry || hasHeardPronunciationRetry || hasReviewedAutomatedRetry || hasReviewedStructuralRetry
+      ? narrationQualityContract
+        && (!hasOperatorAsrRetry || await narrationOperatorAsrRetryReportValidForTests(ttsReport, currentScriptHash))
+        && (!hasHeardPronunciationRetry || await narrationHeardPronunciationRetryReportValidForTests(ttsReport, currentScriptHash))
+        && (!hasReviewedAutomatedRetry || await reviewedAutomatedDeliveryRetryReportValid(ttsReport, currentScriptHash))
+        && (!hasReviewedStructuralRetry || await narrationStructuralNoAudioRetryReportValidForTests(ttsReport, currentScriptHash))
+      : ttsReport.retry_policy?.retry_only_confirmed_skip_truncation_or_stutter === true;
     if (ttsReport.retry_policy?.uncertain_asr_findings_are_warning_only !== true
-      || ttsReport.retry_policy?.retry_only_confirmed_skip_truncation_or_stutter !== true
+      || !exactRetryTypePolicyPassed
       || (explicitSingleSubmissionRepairPolicy
         ? ttsReport.retry_policy?.automatic_retry_limited_to_failed_empty_or_objectively_truncated_audio !== false
         : ttsReport.retry_policy?.automatic_retry_limited_to_failed_empty_or_objectively_truncated_audio !== true)
@@ -4158,6 +6258,9 @@ async function visualReferencePlanComplete(episodeDir, currentScriptHash, identi
   const partialPath = path.join(episodeDir, `visual_reference_partial_${identity.episode ?? "ep_01"}.json`);
   const partial = await readJson(partialPath, null);
   if (["needs_chunk_repair", "needs_global_repair", "needs_explicit_repair"].includes(String(partial?.status ?? ""))) {
+    if (!currentScriptHash || partial.source_script_hash !== currentScriptHash) {
+      return { done: false, state: "stale", evidence: `${path.basename(partialPath)} source script hash is missing or stale` };
+    }
     const failedChunks = Array.isArray(partial.failed_chunks) ? partial.failed_chunks : [];
     const failedChunkIds = [...new Set(failedChunks.map((row) => String(row?.chunk_id ?? "")).filter(Boolean))];
     const failedSceneIds = [...new Set(failedChunks.flatMap((row) => row?.scene_ids ?? []).map(String).filter(Boolean))];
@@ -4174,7 +6277,23 @@ async function visualReferencePlanComplete(episodeDir, currentScriptHash, identi
       state: "blocked",
       evidence: `${path.basename(partialPath)} status=${partial.status}; passed_chunks=${partial.passed_chunk_count ?? partial.passed_chunks?.length ?? 0}; failed_chunks=${failedChunks.length}; passed candidates preserved`,
       next_command_shape: nextCommand,
+      recovery_scope: {
+        source_script_hash: currentScriptHash,
+        source_hash_current: true,
+        partial_sha256: await fileSha256(partialPath),
+      },
     };
+  }
+  const authoringArtifacts = [
+    visualPlanPath,
+    inventoryLedgerPath,
+    characterRefsPath,
+    partialPath,
+    path.join(episodeDir, "reference_evidence_ledger.json"),
+    path.join(episodeDir, "location_contract_ledger.json"),
+  ];
+  if (!(await Promise.all(authoringArtifacts.map(exists))).some(Boolean)) {
+    return { done: false, state: "missing", evidence: "visual reference authoring artifacts not created" };
   }
   const visual = await jsonStatusWithSourceHashesComplete(visualPlanPath, "visual_reference_plan.json");
   const visualPlan = await readJson(visualPlanPath, null);
@@ -4327,6 +6446,12 @@ async function main() {
     assertCommandWorkflowRoute({ command: "run", subcommand: "status", script: "run-status.mjs", flags, episodeDir });
   }
   const mediaWorkflow = assertEpisodeWorkflowFlags(runIdentity, persistedRunIdentity ? flags : {});
+  if (mediaWorkflow.id === "true_crime_hybrid_proof_v1") {
+    const { trueCrimeProofStatus, formatTrueCrimeProofStatus } = await import("./lib/true-crime-proof-workflow.mjs");
+    const report = await trueCrimeProofStatus({ proofDir: episodeDir });
+    console.log(flags.format === "markdown" ? formatTrueCrimeProofStatus(report) : JSON.stringify(report, null, 2));
+    return;
+  }
   if (mediaWorkflow.id === "avatar_footage_pilot_v1") {
     const { pilotStatus, formatPilotStatus } = await import("./lib/avatar-pilot-workflow.mjs");
     const report = await pilotStatus(episodeDir);
@@ -4347,6 +6472,7 @@ async function main() {
     audio_target: flags["audio-target"] ?? runIdentity.audio_target ?? "narrator_only",
     image_provider: flags["image-provider"] ?? flags.provider ?? runIdentity.image_provider ?? "chatgpt_web_gpt_image",
     image_provider_options: runIdentity.image_provider_options ?? {},
+    visual_restart: runIdentity.visual_restart ?? null,
     ...ttsIdentityFields,
     image_output_qa_required: runIdentity.image_output_qa_required ?? runIdentity.production_gates?.image_output_qa_required_before_render ?? false,
     production_gates: runIdentity.production_gates ?? {},
@@ -4394,11 +6520,27 @@ async function main() {
   const semanticPlanPath = path.join(episodeDir, "semantic_scene_plan.json");
   const semanticPlan = await jsonStatusWithSourceHashesComplete(semanticPlanPath, "semantic_scene_plan.json");
   const semanticPlanArtifact = await readJson(semanticPlanPath, null);
-  const semanticRecoveryCommand = semanticRecoveryCommandForTests(semanticPlanArtifact, identity);
+  const semanticManualRepairV2Path = path.join(episodeDir, "semantic_reconciliation_evidence_repair_v2.json");
+  const semanticManualRepairPath = await exists(semanticManualRepairV2Path)
+    ? semanticManualRepairV2Path
+    : path.join(episodeDir, "semantic_reconciliation_evidence_repair.json");
+  const semanticManualRepair = await readJson(semanticManualRepairPath, null);
+  const semanticRecoveryBase = semanticRecoveryCommandForTests(semanticPlanArtifact, identity, scriptHash);
+  const semanticRecoveryCommand = semanticRecoveryBase
+    && semanticManualRepair?.schema === "goldflow_semantic_reconciliation_repair_v1"
+    && semanticManualRepair?.status === "approved"
+    && semanticManualRepair?.source_script_hash === scriptHash
+    && /--semantic-chunk-ids global_reconciliation\b/.test(semanticRecoveryBase)
+    ? `${semanticRecoveryBase} --manual-reconciliation-evidence ${semanticManualRepairPath}`
+    : semanticRecoveryBase;
   const storyFactLedger = await jsonStatusWithSourceHashesComplete(path.join(episodeDir, "story_fact_ledger.json"), "story_fact_ledger.json");
   const timedScenePlan = await jsonStatusWithSourceHashesComplete(path.join(episodeDir, "timed_scene_plan.json"), "timed_scene_plan.json");
   const visualBeatPlanPath = path.join(episodeDir, "visual_beat_plan.json");
   let visualBeatPlan = await jsonStatusWithSourceHashesComplete(visualBeatPlanPath, "visual_beat_plan.json");
+  const visualBeatRepairScope = !legacyIdentity
+    ? await readVisualBeatRecoveryScope({ episodeDir, sourceScriptHash: scriptHash, identity }) : null;
+  const visualBeatRecoveryCommand = visualBeatRecoveryCommandForTests(visualBeatRepairScope, identity);
+  if (visualBeatRecoveryCommand) visualBeatPlan = { ...visualBeatPlan, next_command_shape: visualBeatRecoveryCommand };
   if (!legacyIdentity && visualBeatPlan.done) {
     const [beatArtifact, beatApproval, beatPlanHash] = await Promise.all([
       readJson(visualBeatPlanPath, null),
@@ -4453,8 +6595,9 @@ async function main() {
       } catch (error) { Object.assign(state, { done: false, state: "stale", evidence: `${file}: ${error.message}` }); }
     }
   }
+  const visualPromptRepairScope = await readVisualPromptRecoveryScope({ episodeDir, sourceScriptHash: scriptHash, identity });
   const longformMix = await longformMixComplete(episodeDir, episode, identity);
-  const referenceGeneration = await referenceGenerationComplete(episodeDir, identity);
+  const referenceGeneration = await referenceGenerationComplete(episodeDir, identity, scriptHash);
   const referenceImageApproval = await referenceImageApprovalComplete(episodeDir, episode);
   const legacyCharacterRefs = await readJson(path.join(episodeDir, "character_state_refs.json"), null);
   const legacyCharacterRefStatus = String(legacyCharacterRefs?.status ?? "").toLowerCase();
@@ -4486,7 +6629,7 @@ async function main() {
   const youtubePinnedCommentReceipt = youtubeContractCurrent
     ? await youtubePinnedCommentReceiptComplete(episodeDir, episode)
     : null;
-  const visualPromptNextCommand = await visualPromptPlanReviewHardenCommand(episodeDir, identity);
+  const visualPromptNextCommand = await visualPromptPlanReviewHardenCommand(episodeDir, identity, visualPromptRepairScope);
   const panelAssetNextCommand = panelComposition && await exists(path.join(episodeDir, `panel_asset_packet_${episode}.json`))
     ? `node bin/goldflow.mjs visual panel-assets ${commandBase(identity)} --plan <authored-panel-asset-candidate.json>`
     : `node bin/goldflow.mjs visual panel-assets ${commandBase(identity)}`;
@@ -4545,7 +6688,14 @@ async function main() {
   const runIdentityTts = runIdentityTtsComplete(runIdentity);
   const runIdentityWhisper = runIdentityWhisperComplete(runIdentity);
   const runIdentityPlanning = runIdentityPlanningComplete(runIdentity);
-  const runIdentityImage = isFederatedWebImageProvider(identity.image_provider)
+  const openartBaseline = runIdentity.image_provider === "openart_cli"
+    ? await openartRestartBaselineState({ episodeDir, identity: runIdentity }) : null;
+  const falBaseline = runIdentity.image_provider === "fal_ai"
+    ? await falRestartBaselineState({ episodeDir, identity: runIdentity }) : null;
+  const visualRestartBaseline = openartBaseline ?? falBaseline;
+  const runIdentityImage = visualRestartBaseline
+    ? visualRestartBaseline
+    : isFederatedWebImageProvider(identity.image_provider)
     ? await federatedWebImageIdentityStatus(identity)
     : isGoogleFlowPrimaryProvider(identity.image_provider)
       ? await googleFlowPrimaryIdentityStatus(identity)
@@ -4642,6 +6792,39 @@ async function main() {
       : { state: "skipped_with_waiver", evidence: "run predates pinned-comment receipt contract" },
   };
 
+  if (openartBaseline) {
+    if (!openartBaseline.done) {
+      validationByStage.run_identity = { done: false, state: "blocked", evidence: openartBaseline.evidence };
+    } else {
+      Object.assign(validationByStage, openartBaseline.stageStates);
+      const { openartProductionStageStates } = await import("./lib/openart-production-state.mjs");
+      const openart = await openartProductionStageStates({ episodeDir, identity: runIdentity });
+      const ownedStages = new Set(["visual_reference_plan", "reference_plan_approval", "reference_generation", "reference_image_approval", "visual_prompt_plan", "visual_prompt_harden", "visual_prompt_blocker_repair", "image_generation"]);
+      for (const [stageId, state] of Object.entries(openart.stageStates ?? {})) {
+        if (!ownedStages.has(stageId)) throw new Error(`OpenArt adapter cannot replace native ${stageId} gate.`);
+        validationByStage[stageId] = state;
+      }
+    }
+  }
+
+  if (falBaseline) {
+    if (!falBaseline.done) {
+      validationByStage.run_identity = { done: false, state: "blocked", evidence: falBaseline.evidence };
+    } else {
+      Object.assign(validationByStage, falBaseline.stageStates);
+      const { falProductionStageStates } = await import("./lib/fal-production-state.mjs");
+      const fal = await falProductionStageStates({ episodeDir, identity: runIdentity });
+      const ownedStages = runIdentity.visual_restart?.fork_at === "visual_reference_plan"
+        ? new Set(["reference_generation", "reference_image_approval", "image_generation"])
+        : new Set(["reference_image_approval", "image_generation"]);
+      for (const [stageId, state] of Object.entries(fal.stageStates ?? {})) {
+        if (!ownedStages.has(stageId)) throw new Error(`Fal adapter cannot replace native ${stageId} gate.`);
+        validationByStage[stageId] = stageId === "image_generation" && panelComposition && state.done
+          ? await imageReportComplete(episodeDir, episode, runIdentity) : state;
+      }
+    }
+  }
+
   const rows = stageRegistry.map((definition) => {
     const validation = validationByStage[definition.id] ?? { state: "missing", evidence: "validator not materialized" };
     return stage(definition.id, validation, identity, validation.next_command_shape);
@@ -4649,14 +6832,33 @@ async function main() {
 
   const next = rows.find((row) => !stageIsSatisfied(row.state)) ?? null;
   const readyCommandStages = readyStageIds(rows, identity);
-  const repairCommandStages = next?.stage === "visual_prompt_harden" && next?.state === "blocked"
+  const semanticRepairUnitIds = next?.stage === "semantic_scene_plan" && next?.state === "blocked"
+    ? semanticFailedRecoveryScope(semanticPlanArtifact, scriptHash)
+    : [];
+  const promptRecoveryStatus = { current_stage: next?.stage, current_stage_state: next?.state,
+    identity, stage_ledger: rows, visual_prompt_recovery_scope: visualPromptRepairScope };
+  const promptRecoveryAllowed = visualPromptRecoveryAdmission(promptRecoveryStatus,
+    { "cut-ids": visualPromptRepairScope?.failed_cut_ids?.join(",") ?? "" }).allowed;
+  const repairCommandStages = semanticRepairUnitIds.length
+    ? ["semantic_scene_plan"]
+    : next?.stage === "voice_plan" && next?.state === "blocked"
+      && /voice plan\b.*--performance-packet-ids\s+\S+/.test(String(next.next_command_shape ?? ""))
+    ? ["voice_plan"]
+    : next?.stage === "visual_beat_plan" && next?.state === "blocked" && visualBeatRepairScope
+    ? ["visual_beat_plan"]
+    : promptRecoveryAllowed
+    ? ["visual_prompt_plan"]
+    : next?.stage === "visual_prompt_harden" && next?.state === "blocked"
     ? ["visual_prompt_harden", "visual_prompt_blocker_repair"]
+    : blockedTransitionRecoveryStageForTests(next, transitionPlanArtifact, identity)
+    ? ["transition_edit_plan"]
     : next?.stage === "qwen_tts_stitch"
       && next?.state === "blocked"
-      && /tts (?:approve-listen|narrate)\b/.test(String(next.next_command_shape ?? ""))
+      && /tts (?:approve-listen|narrate|finalize-provider|repair-boundary|review-contraction|repair-contraction)\b/.test(String(next.next_command_shape ?? ""))
       ? ["qwen_tts_stitch"]
     : ["reference_generation", "image_generation"].includes(next?.stage)
       && next?.state === "blocked"
+      && !(next?.stage === "reference_generation" && referenceGeneration.reference_image_qa_recovery_scope)
       && /imagegen browser-pool\b.*--(?:reference|image)-ids\s+\S+.*--repair-reason\b/.test(String(next.next_command_shape ?? ""))
       ? [next.stage]
     : next?.stage === "image_output_qa"
@@ -4674,6 +6876,16 @@ async function main() {
     run_identity_path: await exists(runIdentityPath) ? runIdentityPath : null,
     current_stage: next?.stage ?? "complete",
     current_stage_state: next?.state ?? "passed",
+    ...(semanticRepairUnitIds.length ? {
+      semantic_recovery_scope: { failed_unit_ids: semanticRepairUnitIds, source_script_hash: scriptHash },
+    } : {}),
+    ...(next?.stage === "visual_beat_plan" && next?.state === "blocked" && visualBeatRepairScope
+      ? { visual_beat_recovery_scope: visualBeatRepairScope } : {}),
+    ...(next?.stage === "reference_generation" && next?.state === "blocked" && referenceGeneration.reference_image_qa_recovery_scope
+      ? { reference_image_qa_recovery_scope: referenceGeneration.reference_image_qa_recovery_scope } : {}),
+    ...(next?.stage === "visual_reference_plan" && next?.state === "blocked" && visualReferencePlan.recovery_scope
+      ? { visual_reference_recovery_scope: visualReferencePlan.recovery_scope } : {}),
+    ...(promptRecoveryAllowed ? { visual_prompt_recovery_scope: visualPromptRepairScope } : {}),
     allowed_command_stages: [...new Set([
       ...readyCommandStages,
       ...repairCommandStages,
@@ -4715,6 +6927,12 @@ if (path.resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {
 }
 
 export {
+  qwenExactBoundaryRepairStatus as qwenExactBoundaryRepairStatusForTests,
+  blockedNarrationComparatorRefreshEligible as blockedNarrationComparatorRefreshEligibleForTests,
+  blockedFullStreamPolicyRefreshEligible as blockedFullStreamPolicyRefreshEligibleForTests,
+  referenceGenerationComplete as referenceGenerationCompleteForTests,
+  inferredState as inferredStateForTests,
+  visualReferencePlanComplete as visualReferencePlanCompleteForTests,
   hybridDeadletteredAssetIds as hybridDeadletteredAssetIdsForTests,
   runIdentityPlanningComplete as runIdentityPlanningCompleteForTests,
   runIdentityTtsComplete as runIdentityTtsCompleteForTests,

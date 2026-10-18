@@ -32,7 +32,10 @@ import {
   normalizeNarrationPerformanceIntent,
   validateActionableNarrationDirection,
 } from "./lib/narration-performance-contract.mjs";
-import { authorNarrationPerformanceDirection } from "./lib/narration-performance-author.mjs";
+import { authorNarrationPerformanceDirection, resolveNarrationSubmissionPolicy, assertCoherentNarrationEditorialContract } from "./lib/narration-performance-author.mjs";
+import { COHERENT_THOUGHT_SUBMISSION_POLICY, coherentThoughtSubmissionContract,
+  narrationSubmissionSourceConstraint, coherentNarrationGroupFindings,
+} from "./lib/narration-submission-contract.mjs";
 import {
   buildNarrationQualityContract,
   narrationQualityContractForIdentity,
@@ -1915,7 +1918,7 @@ function repairConsecutiveTagRuns(segments, maxSameTagRun = 4) {
   return segments;
 }
 
-function buildSegments(script, tags, speakabilityRules = {}, dialogueContext = {}) {
+function buildSegments(script, tags, speakabilityRules = {}, dialogueContext = {}, submissionPolicy = null) {
   const units = paragraphUnits(script, tags, speakabilityRules, dialogueContext).flatMap((unit) => splitLongDialogueUnit(unit));
   const segments = [];
   const shortSlice = Number.isFinite(maxDurationSec) && maxDurationSec > 0 && maxDurationSec <= 60;
@@ -2040,6 +2043,7 @@ function buildSegments(script, tags, speakabilityRules = {}, dialogueContext = {
         fish_generation_required: false,
         semantic_voice_context: recentNarrationContext,
         performance_units: current.map((unit) => ({
+          ...(submissionPolicy === COHERENT_THOUGHT_SUBMISSION_POLICY ? { submission_source_constraint: narrationSubmissionSourceConstraint(unit) } : {}),
           kind: unit.kind,
           speaker: unit.speaker,
           text: unit.text,
@@ -2103,6 +2107,7 @@ function buildSegments(script, tags, speakabilityRules = {}, dialogueContext = {
       fish_generation_required: true,
       semantic_voice_context: recentNarrationContext,
       performance_units: current.map((unit) => ({
+        ...(submissionPolicy === COHERENT_THOUGHT_SUBMISSION_POLICY ? { submission_source_constraint: narrationSubmissionSourceConstraint(unit) } : {}),
         kind: unit.kind,
         speaker: unit.speaker,
         text: unit.text,
@@ -2334,9 +2339,26 @@ export function minimumPauseEventsForProfile(contentProfile = {}, {
   return longformMinimum;
 }
 
+export function countProviderPauseEvents(segments, {
+  ttsProvider = "qwen_local",
+  narrationGenerationPlan = null,
+} = {}) {
+  if (isQwenLocalProvider(ttsProvider)) {
+    // Qwen Base ICL cannot perform Fish pause tags. Reveal boundaries are
+    // realized by the semantic stitch as 450–800 ms holds; count each unit once.
+    return new Set((narrationGenerationPlan?.units ?? [])
+      .filter((unit) => unit.boundary_after === "reveal")
+      .map((unit) => unit.unit_id)).size;
+  }
+  return segments
+    .filter((segment) => segment.fish_generation_required !== false && segment.delivery_mode !== "sound_design")
+    .reduce((sum, segment) => sum + (segment.pause_plan?.length ?? 0), 0);
+}
+
 function qualityReport(segments, {
   ttsProvider = "qwen_local",
   contentProfile = {},
+  narrationGenerationPlan = null,
 } = {}) {
   const unitBasedNarrator = isUnitBasedNarratorProvider(ttsProvider);
   const voicedSegments = segments.filter((segment) => segment.fish_generation_required !== false && segment.delivery_mode !== "sound_design");
@@ -2353,7 +2375,7 @@ function qualityReport(segments, {
   }
   const midSentenceTags = voicedSegments.filter((segment) => /[a-z0-9],?\s+\[[^\]]+\]\s+[a-z0-9]/.test(segment.text)).length;
   const physicalTags = voicedSegments.reduce((sum, segment) => sum + (segment.physical_tags?.length ?? 0), 0);
-  const pauseEvents = voicedSegments.reduce((sum, segment) => sum + (segment.pause_plan?.length ?? 0), 0);
+  const pauseEvents = countProviderPauseEvents(segments, { ttsProvider, narrationGenerationPlan });
   const dialogueSegments = voicedSegments.filter((segment) => segment.dialogue_turn_count > 0 || segment.delivery_mode === "character_dialogue");
   const dialogueCovered = dialogueSegments.filter((segment) => !/calm,\s*cinematic narration|calm cinematic|cinematic narration|generic/i.test(segment.tag)).length;
   const genericTags = tags.filter((tag) => /calm, cinematic narration|calm cinematic|generic/i.test(tag)).length;
@@ -2566,6 +2588,7 @@ function qualityReport(segments, {
     pause_event_count: pauseEvents,
     pause_event_policy: {
       content_profile: contentProfile?.id ?? null,
+      source: isQwenLocalProvider(ttsProvider) ? "authored_reveal_stitch_boundaries" : "performance_pause_tags",
       longform_minimum_pause_events: Number.isInteger(contentProfile?.voice?.longform_minimum_pause_events)
         ? contentProfile.voice.longform_minimum_pause_events
         : 2,
@@ -2705,6 +2728,7 @@ export function qwenGenerationPlanForTests(segments, {
   ttsProvider = "qwen_local",
   actionableDirectionArtifact = null,
   sourceScriptSha256 = null,
+  submissionPolicy = null,
 } = {}) {
   return buildQwenGenerationPlan(
     segments,
@@ -2715,6 +2739,7 @@ export function qwenGenerationPlanForTests(segments, {
     undefined,
     actionableDirectionArtifact,
     sourceScriptSha256,
+    submissionPolicy,
   );
 }
 
@@ -2734,10 +2759,10 @@ export function applyActionableNarrationDirectionForTests({
 
 export function buildExactSpokenPlanForDiagnostics(
   script,
-  { ttsOverrides = {}, ttsProvider = "supertonic_local", dialogueContext = {} } = {},
+  { ttsOverrides = {}, ttsProvider = "supertonic_local", dialogueContext = {}, submissionPolicy = null, actionableDirectionArtifact = null } = {},
 ) {
-  const segments = buildSegments(String(script ?? ""), palette(), {}, dialogueContext);
-  const plan = buildQwenGenerationPlan(segments, {}, dialogueContext, ttsProvider, ttsOverrides);
+  const segments = buildSegments(String(script ?? ""), palette(), {}, dialogueContext, submissionPolicy);
+  const plan = buildQwenGenerationPlan(segments, {}, dialogueContext, ttsProvider, ttsOverrides, undefined, actionableDirectionArtifact, sha256Text(script), submissionPolicy);
   const sourceScriptHash = sha256Text(script);
   const textIntegrityCoverage = qwenTextIntegrityCoverageForTests(script, plan, {
     ttsOverrides,
@@ -3622,7 +3647,9 @@ function applyActionableNarrationDirection(
   }
   if (validation.status !== "passed") {
     return {
-      units: compactQwenLiamNarrationUnits(atomicUnits, providerContext, qualityContract),
+      units: providerContext.submission_policy === COHERENT_THOUGHT_SUBMISSION_POLICY
+        ? atomicUnits.map((unit) => structuredClone(unit))
+        : compactQwenLiamNarrationUnits(atomicUnits, providerContext, qualityContract),
       provenance: {
         authoring_kind: "deterministic_fallback",
         artifact_path: null,
@@ -3675,7 +3702,13 @@ function applyActionableNarrationDirection(
         ...authoredPunctuationTransform,
       ],
       spoken_text_lineage: spokenTextLineage,
-      grouping_policy: "llm_authored_actionable_boundaries_v1",
+      grouping_policy: artifact.submission_policy ?? "llm_authored_actionable_boundaries_v1",
+      ...(artifact.submission_policy === COHERENT_THOUGHT_SUBMISSION_POLICY ? {
+        submission_policy: artifact.submission_policy,
+        grouping_rationale: group.grouping_rationale, boundary_intent: group.boundary_intent,
+        ...(group.short_unit_reason ? { short_unit_reason: group.short_unit_reason } : {}),
+        ...(group.length_exception_reason ? { length_exception_reason: group.length_exception_reason } : {}),
+      } : {}),
       actionable_direction: {
         authoring_kind: "llm_authored",
         dialogue_separation: group.dialogue_separation ?? "preserve",
@@ -3706,7 +3739,9 @@ function applyActionableNarrationDirection(
   };
 }
 
-function sentenceCompleteUnitBoundaryIntegrity(units, enabled) {
+function sentenceCompleteUnitBoundaryIntegrity(units, enabled, submissionPolicy = null) {
+  const coherent = submissionPolicy === COHERENT_THOUGHT_SUBMISSION_POLICY;
+  let crossSegmentCount = 0;
   if (!enabled) {
     return {
       status: "not_applicable",
@@ -3737,14 +3772,21 @@ function sentenceCompleteUnitBoundaryIntegrity(units, enabled) {
       ...(unit?.source_segment_ids ?? []),
       ...refs.map((ref) => ref?.segment_id),
     ].map((value) => String(value ?? "").trim()).filter(Boolean))];
-    if (sourceSegmentIds.length > 1) {
+    if (sourceSegmentIds.length > 1) crossSegmentCount += 1;
+    if (!coherent && sourceSegmentIds.length > 1) {
       blockers.push({
         code: "tts_unit_crosses_voice_segment_boundary",
         unit_id: unit?.unit_id ?? null,
         source_segment_ids: sourceSegmentIds,
       });
     }
-    if (!/^[\p{L}\p{N}"“‘(\[]/u.test(sourceText)) {
+    if (coherent) {
+      blockers.push(...coherentNarrationGroupFindings(unit, refs.map((ref) => ({
+        ...ref.submission_synthesis_identity, submission_source_constraint: ref.submission_source_constraint,
+      }))).map((finding) => ({ ...finding, unit_id: unit.unit_id })));
+    }
+    const startText = sourceText.replace(/^(?:\*\*|__)(?=[\p{L}\p{N}])/u, "");
+    if (!/^[\p{L}\p{N}"“‘(\[]/u.test(startText)) {
       blockers.push({
         code: "tts_unit_possible_mid_sentence_start",
         unit_id: unit?.unit_id ?? null,
@@ -3778,11 +3820,17 @@ function sentenceCompleteUnitBoundaryIntegrity(units, enabled) {
     terminal_punctuation_count: units.length - blockers.filter((row) => row.code === "tts_unit_missing_terminal_punctuation").length,
     within_hard_word_maximum_count: units.length
       - blockers.filter((row) => row.code === "tts_unit_exceeds_hard_word_maximum").length,
-    within_voice_segment_boundary_count: units.length
-      - blockers.filter((row) => row.code === "tts_unit_crosses_voice_segment_boundary").length,
+    within_voice_segment_boundary_count: units.length - crossSegmentCount,
+    ...(coherent ? {
+      submission_policy: submissionPolicy,
+      within_submission_boundary_count: units.length - new Set(blockers.filter((row) => row.code.startsWith("submission_")).map((row) => row.unit_id)).size,
+      planning_segment_crossing_count: crossSegmentCount,
+    } : {}),
     blocker_count: blockers.length,
     blockers: blockers.slice(0, 50),
-    policy: "Every request is assembled only from complete source sentences or atomic system/dialogue units, stays inside one voice-direction segment, starts on a clean sentence or paragraph boundary, ends on terminal punctuation, and contains no more than 60 spoken words. Voice-segment crossing and mid-sentence slicing are forbidden.",
+    policy: coherent
+      ? "LLM-authored coherent thoughts use whole exact source components. Planning segments are provenance; explicit atomic/chapter/delivery boundaries and actual voice changes remain protected. Short units and semantic boundaries require authored reasons; all requests end on terminal punctuation and stay within 60 words."
+      : "Every request is assembled only from complete source sentences or atomic system/dialogue units, stays inside one voice-direction segment, starts on a clean sentence or paragraph boundary, ends on terminal punctuation, and contains no more than 60 spoken words. Voice-segment crossing and mid-sentence slicing are forbidden.",
   };
 }
 
@@ -3812,7 +3860,12 @@ function buildQwenGenerationPlan(
   }, {}, ttsProvider),
   actionableDirectionArtifact = null,
   sourceScriptSha256 = null,
+  submissionPolicy = null,
 ) {
+  submissionPolicy ??= actionableDirectionArtifact?.submission_policy ?? providerContext.submission_policy ?? null;
+  if (submissionPolicy && submissionPolicy !== COHERENT_THOUGHT_SUBMISSION_POLICY) throw new Error("Unknown narration submission policy.");
+  const coherent = submissionPolicy === COHERENT_THOUGHT_SUBMISSION_POLICY;
+  providerContext = { ...providerContext, ...(coherent ? { submission_policy: submissionPolicy } : {}) };
   const unitRows = [];
   let segmentRows = [];
   const appliedOverrideRules = new Map();
@@ -3876,6 +3929,15 @@ function buildQwenGenerationPlan(
         caption_text: captionText,
         caption_text_sha256: sha256Text(captionText),
       };
+      const submissionSourceConstraint = unit.submission_source_constraint ?? narrationSubmissionSourceConstraint(unit, segment);
+      if (coherent) {
+        sourceUnitRef.submission_source_constraint = submissionSourceConstraint;
+        sourceUnitRef.submission_synthesis_identity = {
+          speaker, reference_id: primaryControls.voice_id ?? null,
+          reference_audio_path: primaryControls.reference_audio_path ?? null,
+          voice_source_policy: primaryControls.voice_continuity_contract ?? null,
+        };
+      }
       const sourceMergeBarrier = sourceUnitHasExplicitMergeBarrier(unit);
       const stableUnitId = stableNarrationUnitId(segment.segment_id, [sourceUnitRef]);
       sourceUnitRef.source_unit_id = stableUnitId;
@@ -3926,6 +3988,7 @@ function buildQwenGenerationPlan(
           ...unit,
           speaker: sourceSpeaker,
         }, protectedTerms),
+        ...(coherent ? { submission_source_constraint: submissionSourceConstraint } : {}),
         source_merge_barrier: sourceMergeBarrier,
         merge_barrier: sourceMergeBarrier || riskFlags.includes("system_ui_atomic") || riskFlags.includes("speaker_or_performance_turn") || riskFlags.includes("tts_override_applied"),
         boundary_before: qwenUnits.length === 0 ? "segment" : null,
@@ -4084,6 +4147,7 @@ function buildQwenGenerationPlan(
   const sentenceBoundaryIntegrity = sentenceCompleteUnitBoundaryIntegrity(
     unitRows,
     isUnitBasedNarratorProvider(providerContext.primary_provider),
+    submissionPolicy,
   );
   const qwenBatchPlan = providerContext.primary_provider === "qwen_local"
     ? buildQwenLiamBatchPlan(
@@ -4142,6 +4206,7 @@ function buildQwenGenerationPlan(
     referenceTextSha256: primaryControls.reference_text_sha256 ?? null,
     synthesisContract: providerContext.qwen3.synthesis_contract ?? null,
     actionableDirection: directionProvenance,
+    submissionPolicy,
     preferredWordsMin: Number(
       providerContext.narration_quality_contract?.unitization?.preferred_words_min
         ?? 20,
@@ -4205,6 +4270,7 @@ function buildQwenGenerationPlan(
   }
   return {
     schema: "goldflow_tts_generation_plan_v2",
+    ...(coherent ? { submission_policy: submissionPolicy, submission_contract: coherentThoughtSubmissionContract() } : {}),
     status: sentenceBoundaryIntegrity.status === "blocked" ? "blocked" : "passed",
     provider: providerContext.primary_provider,
     primary_provider: providerContext.primary_provider,
@@ -4964,6 +5030,9 @@ async function main() {
   const kokoroLocal = isKokoroLocalProvider(ttsProvider);
   const unitBasedNarrator = isUnitBasedNarratorProvider(ttsProvider);
   const providerContext = providerPlanContext(runIdentity, providerRouting, ttsProvider);
+  const submissionPolicy = qwenLocal
+    ? await resolveNarrationSubmissionPolicy({ episodeDir }) : null;
+  if (submissionPolicy) providerContext.submission_policy = submissionPolicy;
   if (qwenLocal && runIdentity.narration_delivery_reference_bank?.path) {
     const loadedDeliveryBank = await loadNarrationDeliveryReferenceBank(
       runIdentity.narration_delivery_reference_bank.path,
@@ -5007,7 +5076,7 @@ async function main() {
     actionableDirectionArtifact.artifact_path = actionableDirectionPath;
   }
   const voiceQualityAdjustedSegments = repairConsecutiveTagRuns(ensureMinimumPhysicalTags(
-    balanceTempoClassifications(buildSegments(script, tags, speakabilityRules, dialogueContext)),
+    balanceTempoClassifications(buildSegments(script, tags, speakabilityRules, dialogueContext, submissionPolicy)),
     tags,
   ));
   const applied = unitBasedNarrator
@@ -5031,6 +5100,9 @@ async function main() {
   );
   if (providerNeutralPerformanceDirection) {
     const atomicUnits = narrationPlanDraft._performance_authoring_atomic_units ?? [];
+    if (submissionPolicy === COHERENT_THOUGHT_SUBMISSION_POLICY && effectiveActionableDirection?.status === "approved") {
+      await assertCoherentNarrationEditorialContract({ episodeDir, artifact: effectiveActionableDirection, atomicUnits, sourceScriptSha256: sourceScriptHash, contentProfile });
+    }
     const existingValidation = validateActionableNarrationDirection({
       artifact: effectiveActionableDirection,
       atomicUnits,
@@ -5042,6 +5114,7 @@ async function main() {
         atomicUnits,
         sourceScriptSha256: sourceScriptHash,
         contentProfile,
+        submissionPolicy,
         episodeDir,
         repoRoot,
         provider: "codex_cli",
@@ -5207,7 +5280,7 @@ async function main() {
     },
     audio_performance_segments: segments,
   };
-  const report = qualityReport(segments, { ttsProvider, contentProfile });
+  const report = qualityReport(segments, { ttsProvider, contentProfile, narrationGenerationPlan });
   if (narrationTextIntegrityCoverage.status !== "passed") {
     const textIntegrityFailure = {
       code: "narration_text_integrity_coverage_failed",

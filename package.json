@@ -25,17 +25,18 @@
     "status": "git status --short",
     "test:stage-contract": "node scripts/tests/stage-contract-tests.mjs",
     "test:planner": "node scripts/tests/planner-tests.mjs",
+    "test:narration-submission": "node scripts/tests/narration-submission-grouping-tests.mjs && node scripts/tests/narration-submission-audit-tests.mjs && node scripts/tests/narration-stitch-implementation-tests.mjs && node scripts/tests/narration-pre-synthesis-gate-tests.mjs && node scripts/tests/tts-submission-diagnostic-tests.mjs",
     "test:voice-boundary": "node scripts/tests/voice-direction-boundary-tests.mjs && node scripts/tests/narration-performance-profile-tests.mjs",
     "test:media": "node scripts/tests/media-tests.mjs",
     "test:reference-parallax": "node scripts/tests/reference-parallax-policy-tests.mjs",
     "test:production-direction": "node scripts/tests/production-direction-tests.mjs",
     "test:performance": "node scripts/tests/run-performance-audit-tests.mjs",
-    "test:visual-prompt": "node scripts/tests/visual-prompt-quality-tests.mjs && node scripts/tests/image-semantic-audit-tests.mjs && node scripts/tests/appendable-image-work-manifest-tests.mjs && node scripts/tests/hero-image-candidate-tests.mjs",
+    "test:visual-prompt": "node scripts/tests/visual-prompt-quality-tests.mjs && node scripts/tests/visual-prompt-text-policy-tests.mjs && node scripts/tests/image-semantic-audit-tests.mjs && node scripts/tests/appendable-image-work-manifest-tests.mjs && node scripts/tests/reference-state-source-dependency-tests.mjs && node scripts/tests/hero-image-candidate-tests.mjs",
     "test:motion-quality": "node scripts/tests/generated-motion-coherence-audit-tests.mjs && node scripts/tests/generated-motion-pipeline-tests.mjs",
     "test:master-quality": "node scripts/tests/final-master-integrity-tests.mjs",
-    "test:scheduler-quality": "node scripts/tests/critical-path-priority-tests.mjs && node scripts/tests/planner-reservation-tests.mjs && node scripts/tests/planner-adaptive-telemetry-tests.mjs && node scripts/tests/creative-stage-rerun-policy-tests.mjs && node scripts/tests/provider-readiness-tests.mjs",
+    "test:scheduler-quality": "node scripts/tests/critical-path-priority-tests.mjs && node scripts/tests/planner-reservation-tests.mjs && node scripts/tests/planner-adaptive-telemetry-tests.mjs && node scripts/tests/creative-stage-rerun-policy-tests.mjs && node scripts/tests/provider-readiness-tests.mjs && node scripts/tests/google-image-scheduling-tests.mjs",
     "test:telemetry-quality": "node scripts/tests/provider-task-telemetry-tests.mjs",
-    "test:narration-quality": "node scripts/tests/narration-quality-v2-tests.mjs && node scripts/tests/narration-delivery-manual-review-tests.mjs && node scripts/tests/narration-pre-synthesis-gate-tests.mjs && python3 scripts/tests/tts-pre-synthesis-runner-tests.py",
+  "test:narration-quality": "node scripts/tests/narration-transcript-phonetic-spelling-tests.mjs && node scripts/tests/narration-transcript-comparison-tests.mjs && node scripts/tests/narration-protected-consensus-tests.mjs && node scripts/tests/narration-opening-spelling-consensus-tests.mjs && node scripts/tests/narration-quality-v2-tests.mjs && node scripts/tests/narration-asr-orthography-review-tests.mjs && node scripts/tests/narration-pronunciation-repair-tests.mjs && node scripts/tests/narration-boundary-resume-tests.mjs && node scripts/tests/narration-source-structure-tests.mjs && node scripts/tests/narration-delivery-manual-review-tests.mjs && node scripts/tests/narration-full-stream-manual-review-tests.mjs && node scripts/tests/narration-pre-synthesis-gate-tests.mjs && python3 scripts/tests/tts-pre-synthesis-runner-tests.py",
     "test:analytics-quality": "node scripts/tests/youtube-analytics-winner-lineage-tests.mjs && node scripts/tests/youtube-script-origin-tests.mjs && node scripts/tests/youtube-analytics-monitor-tests.mjs && node scripts/tests/analytics-learning-policy-tests.mjs && node scripts/tests/analytics-learning-proposal-tests.mjs && node scripts/tests/analytics-imessage-notification-tests.mjs",
     "test:source-quality": "node scripts/tests/first-class-story-contract-tests.mjs && node scripts/tests/source-opening-audio-audition-tests.mjs && node scripts/tests/source-mixed-viewer-shadow-tests.mjs",
     "test:audiovisual-quality": "node scripts/tests/audiovisual-quality-tests.mjs && node scripts/tests/narrative-overlay-tests.mjs",
@@ -46,12 +47,15 @@
     "docs:workflow:check": "node scripts/generate-workflow-guidance.mjs --check",
     "test:panel-workbench": "node scripts/tests/panel-original-import-tests.mjs && node scripts/tests/panel-composition-authoring-tests.mjs && node scripts/tests/panel-experiment-renderer-tests.mjs && node scripts/tests/panel-workbench-tests.mjs",
     "test:recap-source": "node scripts/tests/recap-source-package-tests.mjs && node scripts/tests/recap-adaptation-tests.mjs",
-    "test:panel-production": "node scripts/tests/panel-production-policy-tests.mjs && node scripts/tests/panel-production-assets-tests.mjs && node scripts/tests/panel-production-plan-tests.mjs && node scripts/tests/panel-production-renderer-tests.mjs"
+    "test:panel-production": "node scripts/tests/panel-production-policy-tests.mjs && node scripts/tests/panel-production-assets-tests.mjs && node scripts/tests/panel-production-plan-tests.mjs && node scripts/tests/panel-production-renderer-tests.mjs",
+    "test:openart": "node scripts/tests/openart-cli-provider-tests.mjs && node scripts/tests/openart-asset-bank-tests.mjs && node scripts/tests/openart-visual-restart-tests.mjs && node scripts/tests/openart-reference-board-tests.mjs && node --test scripts/tests/openart-production-tests.mjs scripts/tests/openart-shot-binding-tests.mjs",
+    "test:fal": "node --test scripts/tests/fal-provider-tests.mjs scripts/tests/fal-validation-selector-tests.mjs scripts/tests/fal-reference-bank-reuse-tests.mjs scripts/tests/fal-portable-bank-transport-recovery-tests.mjs scripts/tests/fal-repair-failure-tests.mjs scripts/tests/fal-retry-budget-tests.mjs scripts/tests/fal-reviewed-bulk-source-receipt-tests.mjs"
   },
   "engines": {
     "node": ">=20"
   },
   "dependencies": {
+    "@fal-ai/client": "^1.10.1",
     "playwright-core": "1.62.1",
     "sharp": "0.35.0"
   }

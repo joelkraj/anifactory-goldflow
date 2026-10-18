@@ -10,6 +10,7 @@ import sharp from 'sharp';
 import { mediaWorkflowForPreflight } from '../lib/media-workflows.mjs';
 import { createPanelProductionContract } from '../lib/panel-production-policy.mjs';
 import { preparePanelAssetPlan, writePanelAssetPlan, loadPanelAssetPlan, validatePanelAssetPlan, panelAssetOwnerRows, expandPanelAssetPrompts, assertPanelPromptAllocation, materializePanelAssetAliases, reconcilePanelAssetReport } from '../lib/panel-production-assets.mjs';
+import { falArtworkOrders, completeFalPanelArtwork } from '../lib/fal-panel-artwork.mjs';
 import { imageReportComplete } from '../run-status.mjs';
 import { plannerRecoveryPlaceholderForTests } from '../visual-plan.mjs';
 import { mergeScopedPromptReplacements } from '../lib/visual-resolution-utils.mjs';
@@ -18,13 +19,13 @@ import { createCodexWorkManifest } from '../lib/codex-image-work-contract.mjs';
 const sha = value => createHash('sha256').update(value).digest('hex');
 const json = async (file, value) => { const bytes = JSON.stringify(value); await fs.writeFile(file, bytes); return sha(bytes); };
 const exec = promisify(execFile);
-async function fixture(t) {
+async function fixture(t, imageProvider = 'codex_imagegen') {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'panel-allocation-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const dir = path.join(root, 'channels', 'test', 'weekly_runs', 'test', 'episodes', 'ep_01');
   await fs.mkdir(dir, { recursive: true });
   const p = file => path.join(dir, file);
-  const identity = { ...mediaWorkflowForPreflight({ contentProfile: 'manhwa_recap_v1', mediaWorkflow: 'generated_visuals_v1' }), schema: 'goldflow_run_identity_v2', run_intent: 'production', episode: 'ep_01', channel: 'test', week: 'test', content_profile: 'manhwa_recap_v1', media_workflow: 'generated_visuals_v1', render_profile: 'panel_composition_v1', panel_composition_contract: createPanelProductionContract(), audio_target: 'narrator_only', generated_motion_policy: 'disabled', parallax_policy: 'disabled', image_provider: 'codex_imagegen' };
+  const identity = { ...mediaWorkflowForPreflight({ contentProfile: 'manhwa_recap_v1', mediaWorkflow: 'generated_visuals_v1' }), schema: 'goldflow_run_identity_v2', run_intent: 'production', episode: 'ep_01', channel: 'test', week: 'test', content_profile: 'manhwa_recap_v1', media_workflow: 'generated_visuals_v1', render_profile: 'panel_composition_v1', panel_composition_contract: createPanelProductionContract(), audio_target: 'narrator_only', generated_motion_policy: 'disabled', parallax_policy: 'disabled', image_provider: imageProvider };
   await json(p('run_identity.json'), identity);
   const script = 'He opens the letter. His eyes linger on the signature. He faces the doorway.';
   await fs.writeFile(p('script_clean.md'), script);
@@ -187,3 +188,45 @@ test('actual provider import creates alias and ledger entries; complete stage wa
   assert.equal(repaired.some(row => row.planner_recovery_required), false);
   await assertPanelPromptAllocation({ episodeDir: f.dir, prompts: repaired });
  });
+
+
+test('Fal validation and paid bulk scope include only authored artwork owners', async t => {
+  const f = await fixture(t, 'fal_ai');
+  const owners = await falArtworkOrders({ episodeDir: f.dir, prompts: f.prompts });
+  assert.deepEqual(owners.map(row => row.image_id), ['ep_01-cut-001', 'ep_01-cut-003']);
+  await assert.rejects(falArtworkOrders({ episodeDir: f.dir, prompts: f.prompts, imageIds: ['ep_01-cut-002'] }), /owners/);
+  const changed = structuredClone(f.prompts); changed[1].provider_submission_required = true;
+  await assert.rejects(falArtworkOrders({ episodeDir: f.dir, prompts: changed }), /allocation/);
+});
+
+test('Fal accepted owners produce all panel aliases with zero additional requests and current ledger provenance', async t => {
+  const f = await fixture(t, 'fal_ai');
+  const results = [], cuts = [], protectedFiles = {};
+  for (const [i, prompt] of (await falArtworkOrders({ episodeDir: f.dir, prompts: f.prompts })).entries()) {
+    const output = f.p(`${prompt.image_id}.png`), receiptPath = f.p(`${prompt.image_id}-result.json`);
+    await sharp({ create: { width: 320, height: 180, channels: 3, background: i ? '#aa3344' : '#3366aa' } }).png().toFile(output);
+    const hash = sha(await fs.readFile(output));
+    const receipt = { schema: 'goldflow_fal_result_receipt_v1', output_path: output, output_sha256: hash, request_id: `request-${i}` };
+    const receiptHash = await json(receiptPath, receipt);
+    protectedFiles[output] = hash; protectedFiles[receiptPath] = receiptHash;
+    results.push({ image_id: prompt.image_id, status: 'generated', image_path: output, generated: { ...receipt, provider: 'fal_ai', result_receipt_path: receiptPath, result_receipt_sha256: receiptHash } });
+    cuts.push({ image_id: prompt.image_id, image_path: output, image_sha256: hash, provider: 'fal_ai' });
+  }
+  const completed = await completeFalPanelArtwork({ episodeDir: f.dir, prompts: f.prompts, results, cuts });
+  assert.equal(completed.results.length, 3); assert.equal(completed.cuts.length, 3);
+  const alias = completed.results.find(row => row.image_id === 'ep_01-cut-002');
+  assert.equal(alias.status, 'editorial_reuse'); assert.equal(alias.generated.estimated_cost_usd, 0);
+  assert.equal(completed.cuts[1].reuse_source_image_id, 'ep_01-cut-001');
+  assert.equal(completed.cuts[1].start_sec, 4); assert.equal(completed.cuts[1].panel_asset_plan_sha256, f.allocation.planSha256);
+  for (const [file, hash] of Object.entries(protectedFiles)) assert.equal(sha(await fs.readFile(file)), hash);
+  await json(f.p('imagegen_report_ep_01.json'), { status: 'passed', prompt_plan_hash: sha(await fs.readFile(f.promptPath)), expected_image_count: 3, image_count: 3, missing_image_count: 0, results: completed.results });
+  await json(f.p('cut_execution_ledger.json'), { cuts: completed.cuts });
+  assert.equal((await imageReportComplete(f.dir, 'ep_01', f.allocation.identity)).done, true);
+  await fs.unlink(alias.image_path);
+  assert.equal((await imageReportComplete(f.dir, 'ep_01', f.allocation.identity)).done, false);
+  const reconciled = await reconcilePanelAssetReport({ episodeDir: f.dir, promptsPath: f.promptPath, imagegenReportPath: f.p('imagegen_report_ep_01.json'), cutExecutionLedgerPath: f.p('cut_execution_ledger.json') });
+  assert.equal(reconciled.materialized_alias_count, 1);
+  assert.equal((await imageReportComplete(f.dir, 'ep_01', f.allocation.identity)).done, true);
+  await fs.appendFile(results[0].generated.result_receipt_path, ' ');
+  await assert.rejects(completeFalPanelArtwork({ episodeDir: f.dir, prompts: f.prompts, results, cuts }), /receipt changed/);
+});

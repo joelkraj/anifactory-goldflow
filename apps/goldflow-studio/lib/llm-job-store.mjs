@@ -47,7 +47,7 @@ function normalizedRequest(request) {
     : [];
   if (!messages.length) throw new Error("Chat completion requires at least one message.");
   return {
-    model: String(request?.model ?? "gpt-5.6-sol").trim() || "gpt-5.6-sol",
+    model: String(request?.model ?? "gpt-6-sol").trim() || "gpt-6-sol",
     messages,
     temperature: request?.temperature ?? null,
     top_p: request?.top_p ?? null,

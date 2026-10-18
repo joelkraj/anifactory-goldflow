@@ -50,7 +50,7 @@ export async function validateOpeningFinalizationNamespace(episodeDir, outputNam
 
 export function validateOpeningFinalizationFlags(flags = {}) {
   for (const flag of ["workflow-bypass", "accept-asr-delivery-blockers", "accept-review-warnings", "skip-subjective-review",
-    "delivery-waiver-reason", "manual-review-evidence", "listen-decision", "output-dir", "checkpoint"]) {
+    "delivery-waiver-reason", "manual-review-evidence", "full-stream-review-evidence", "listen-decision", "output-dir", "checkpoint"]) {
     demand(!Object.hasOwn(flags, flag), `--${flag} is unavailable for the initial opening phase`);
   }
 }

@@ -281,6 +281,7 @@ import {
   validateNarrationTtsPolicyForTests,
 } from "./narration-tts-episode.mjs";
 import {
+  blockedTransitionRecoveryStageForTests,
   hybridDeadletteredAssetIdsForTests,
   qwenLiamBoundaryContractFindingsForTests,
   runIdentityPlanningCompleteForTests,
@@ -426,6 +427,7 @@ function testAuthoritativeStageRegistry() {
   assert.equal(commandStageFor("youtube", "approve-packaging"), "upload_packaging");
   assert.equal(commandStageFor("youtube", "prepare"), "youtube_publish_readiness");
   assert.equal(commandStageFor("youtube", "record-upload"), "youtube_studio_upload");
+  assert.equal(commandStageFor("youtube", "record-schedule"), "youtube_pinned_comment");
   assert.equal(commandStageFor("youtube", "record-comment"), "youtube_pinned_comment");
   assert.equal(narratorOnly.every((row) => row.validator), true);
 }
@@ -1394,6 +1396,23 @@ function testScopedOnlyPlannerRerunPolicy() {
     episode: "ep_01",
     audio_target: "narrator_only",
   }), /--boundary-ids boundary_003,boundary_002$/);
+  const transitionIdentity = {
+    channel: "test", series_slug: "series", week: "week", episode: "ep_01", audio_target: "narrator_only",
+  };
+  const blockedTransition = { status: "blocked", failed_boundary_ids: ["boundary_003", "boundary_002"] };
+  const exactTransitionCommand = transitionRecoveryCommandForTests(blockedTransition, transitionIdentity);
+  assert.equal(blockedTransitionRecoveryStageForTests({
+    stage: "transition_edit_plan", state: "blocked", next_command_shape: exactTransitionCommand,
+  }, blockedTransition, transitionIdentity), true);
+  assert.equal(blockedTransitionRecoveryStageForTests({
+    stage: "transition_edit_plan", state: "blocked", next_command_shape: exactTransitionCommand.replace("boundary_003,boundary_002", "boundary_003"),
+  }, blockedTransition, transitionIdentity), false);
+  assert.equal(blockedTransitionRecoveryStageForTests({
+    stage: "transition_edit_plan", state: "passed", next_command_shape: exactTransitionCommand,
+  }, blockedTransition, transitionIdentity), false);
+  assert.equal(blockedTransitionRecoveryStageForTests({
+    stage: "transition_edit_plan", state: "blocked", next_command_shape: exactTransitionCommand,
+  }, { status: "blocked", failed_boundary_ids: [] }, transitionIdentity), false);
   assert.equal(plannerRerunDecision({
     stage: "visual_prompt_plan",
     flags: { "resume-incomplete-chunks": "true" },
@@ -1438,7 +1457,7 @@ function testVisualWavefrontBatchPolicy() {
   }, {
     "workflow-bypass": "true",
     "beat-ids": "beat_1,beat_2",
-  }), true);
+  }), false);
   assert.equal(exactPromptRecoveryAllowedForTests({
     current_stage: "visual_prompt_plan",
     current_stage_state: "blocked",
@@ -2349,12 +2368,13 @@ async function testCumulativeImagegenHistoryAndEpisodeTruth() {
 }
 
 function testPinnedCodexRuntimeContracts() {
-  assert.equal(DEFAULT_CODEX_MODEL, "gpt-5.6-sol");
+  assert.equal(DEFAULT_CODEX_MODEL, "gpt-6-sol");
   assert.equal(DEFAULT_CODEX_REASONING_EFFORT, "medium");
   const oldCli = parseCodexVersion("codex-cli 0.141.0");
   const qualifyingBundledCli = parseCodexVersion("codex-cli 0.144.0-alpha.4");
-  assert.equal(codexVersionSupportsModel(oldCli, DEFAULT_CODEX_MODEL), false);
-  assert.equal(codexVersionSupportsModel(qualifyingBundledCli, DEFAULT_CODEX_MODEL), true);
+  const versionGatedModel = "gpt-5.6-sol";
+  assert.equal(codexVersionSupportsModel(oldCli, versionGatedModel), false);
+  assert.equal(codexVersionSupportsModel(qualifyingBundledCli, versionGatedModel), true);
   assert.equal(compareCodexVersions(qualifyingBundledCli, oldCli) > 0, true);
 
   const promptHash = sha256("fixture prompt");
@@ -5170,8 +5190,8 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
   assert.equal(identity.git.commit.length, 40);
   assert.equal(identity.stage_registry_version.length > 0, true);
   assert.equal(identity.model_versions.planning_model, "stage_routed");
-  assert.equal(identity.provider_locks.planning_provider_models.chatgpt_web, "gpt-5.6-sol");
-  assert.equal(identity.provider_locks.planning_provider_models.codex_cli, "gpt-5.6-sol");
+  assert.equal(identity.provider_locks.planning_provider_models.chatgpt_web, "gpt-6-sol");
+  assert.equal(identity.provider_locks.planning_provider_models.codex_cli, "gpt-6-sol");
   assert.equal(identity.model_versions.tts_model, QWEN_JOEL_PRIMARY_LOCK.model_id);
   assert.equal(identity.model_versions.tts_model_revision, QWEN_JOEL_PRIMARY_LOCK.model_revision);
   assert.equal(identity.model_versions.fallback_tts_model, null);

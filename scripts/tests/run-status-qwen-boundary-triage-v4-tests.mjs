@@ -1,0 +1,88 @@
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { promises as fs } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import {
+  qwenExactBoundaryRepairStatusForTests,
+  qwenReviewedBoundaryOrAutomatedPronunciationStatusForTests,
+} from "../run-status.mjs";
+
+const sha256 = (value) => createHash("sha256").update(value).digest("hex");
+const temp = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-qwen-boundary-triage-"));
+
+try {
+  const episode = "ep_01";
+  const sourceScriptHash = sha256("locked source");
+  const ttsReport = { status: "blocked" };
+  const reportPath = path.join(temp, `narration_tts_report_${episode}.json`);
+  const reportText = `${JSON.stringify(ttsReport)}\n`;
+  await fs.writeFile(reportPath, reportText);
+  const oldSpecPath = path.join(temp, "old-spec.json");
+  const newSpecPath = path.join(temp, "new-spec.json");
+  await fs.writeFile(oldSpecPath, "old scope\n");
+  await fs.writeFile(newSpecPath, "one current unit\n");
+  const triage = (specPath, specHash) => ({
+    status: "operator_hold_pending_exact_boundary_recovery",
+    source_script_sha256: sourceScriptHash,
+    blocked_report_sha256: sha256(reportText),
+    repair_spec_path: specPath,
+    repair_spec_sha256: specHash,
+  });
+  const v3Path = path.join(temp, `manual_blocker_triage_qwen_tts_stitch_${episode}_v3.json`);
+  const v4Path = path.join(temp, `manual_blocker_triage_qwen_tts_stitch_${episode}_v4.json`);
+  const v5Path = path.join(temp, `manual_blocker_triage_qwen_tts_stitch_${episode}_v5.json`);
+  const v10Path = path.join(temp, `manual_blocker_triage_qwen_tts_stitch_${episode}_v10.json`);
+  await fs.writeFile(v3Path, JSON.stringify(triage(oldSpecPath, sha256("old scope\n"))));
+  await fs.writeFile(v4Path, JSON.stringify(triage(newSpecPath, sha256("one current unit\n"))));
+  await fs.writeFile(v5Path, JSON.stringify(triage(oldSpecPath, sha256("old scope\n"))));
+  await fs.writeFile(v10Path, JSON.stringify(triage(newSpecPath, sha256("one current unit\n"))));
+
+  const status = () => qwenExactBoundaryRepairStatusForTests({
+    episodeDir: temp, episode, ttsReportPath: reportPath, ttsReport,
+    currentScriptHash: sourceScriptHash,
+  });
+  let staleAutomatedReads = 0;
+  const statusWithStaleAutomated = () => qwenReviewedBoundaryOrAutomatedPronunciationStatusForTests({
+    episodeDir: temp, episode, ttsReportPath: reportPath, ttsReport,
+    currentScriptHash: sourceScriptHash,
+    loadAutomated: async () => {
+      staleAutomatedReads += 1;
+      throw new Error("prior candidate receipt is stale");
+    },
+  });
+  assert.equal((await status()).next_command_shape,
+    `node bin/goldflow.mjs tts repair-boundary --episode-dir ${temp} --spec ${newSpecPath}`);
+  assert.equal((await statusWithStaleAutomated()).next_command_shape,
+    `node bin/goldflow.mjs tts repair-boundary --episode-dir ${temp} --spec ${newSpecPath}`,
+    "current report-bound boundary triage must supersede stale automated-pronunciation evidence");
+  assert.equal(staleAutomatedReads, 0, "a current boundary triage must not load stale phonetic evidence");
+  await fs.rm(v10Path);
+  assert.equal((await status()).next_command_shape,
+    `node bin/goldflow.mjs tts repair-boundary --episode-dir ${temp} --spec ${oldSpecPath}`);
+  await fs.writeFile(v5Path, JSON.stringify({
+    ...triage(oldSpecPath, sha256("old scope\n")),
+    blocked_report_sha256: sha256("stale report"),
+  }));
+  assert.equal(await status(), null, "a stale v5 receipt must not fall back to v4");
+  assert.match((await statusWithStaleAutomated()).next_command_shape,
+    /^Operator hold: inspect the exact one-unit automated pronunciation evidence/,
+    "stale latest boundary triage must not bypass the older pronunciation hold");
+  assert.equal(staleAutomatedReads, 1);
+  await fs.rm(v5Path);
+  assert.equal((await status()).next_command_shape,
+    `node bin/goldflow.mjs tts repair-boundary --episode-dir ${temp} --spec ${newSpecPath}`);
+  await fs.writeFile(v4Path, JSON.stringify(triage(newSpecPath, sha256("wrong spec"))));
+  assert.match((await status()).next_command_shape, /^Operator hold:/);
+  await fs.writeFile(v4Path, JSON.stringify({
+    ...triage(newSpecPath, sha256("one current unit\n")),
+    blocked_report_sha256: sha256("stale report"),
+  }));
+  assert.equal(await status(), null, "a stale v4 receipt must not fall back to v3");
+  await fs.rm(v4Path);
+  assert.equal((await status()).next_command_shape,
+    `node bin/goldflow.mjs tts repair-boundary --episode-dir ${temp} --spec ${oldSpecPath}`);
+  console.log("PASS Qwen boundary triage latest-version priority, exact route, and stale hold");
+} finally {
+  await fs.rm(temp, { recursive: true, force: true });
+}

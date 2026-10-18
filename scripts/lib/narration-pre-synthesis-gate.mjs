@@ -12,6 +12,7 @@ import {
 } from "./tts-spoken-text-audit.mjs";
 import { hasTtsTerminalPunctuation } from "./tts-text-boundaries.mjs";
 import { validateQwenLiamBatchPlan } from "./qwen-liam-batch-contract.mjs";
+import { COHERENT_THOUGHT_SUBMISSION_POLICY, validateCoherentNarrationPlan } from "./narration-submission-contract.mjs";
 
 export const NARRATION_PRE_SYNTHESIS_GATE_SCHEMA =
   "goldflow_narration_pre_synthesis_gate_v2";
@@ -347,12 +348,19 @@ function validateUnits(plan, policy, findings) {
     }
   }
   const boundary = plan?.sentence_unit_boundary_integrity;
+  const coherentSubmissions = plan?.submission_policy === COHERENT_THOUGHT_SUBMISSION_POLICY;
+  if (coherentSubmissions) {
+    const submission = validateCoherentNarrationPlan(plan);
+    for (const finding of submission.findings) {
+      addFinding(findings, "pre_synthesis_submission_boundary_invalid", { submission_finding: finding });
+    }
+  }
   if (boundary?.status !== "passed"
     || Number(boundary?.unit_count) !== units.length
     || Number(boundary?.clean_start_count) !== units.length
     || Number(boundary?.terminal_punctuation_count) !== units.length
     || Number(boundary?.within_hard_word_maximum_count) !== units.length
-    || Number(boundary?.within_voice_segment_boundary_count) !== units.length
+    || Number(coherentSubmissions ? boundary?.within_submission_boundary_count : boundary?.within_voice_segment_boundary_count) !== units.length
     || Number(boundary?.blocker_count) !== 0
     || (boundary?.blockers ?? []).length !== 0) {
     addFinding(findings, "pre_synthesis_sentence_boundary_coverage_stale");

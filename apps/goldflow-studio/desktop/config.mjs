@@ -64,6 +64,7 @@ export function desktopConfig(flags = {}, environment = process.env) {
     stateDir,
     googleSubmitGateDir: path.resolve(flags["google-submit-gate-dir"] ?? environment.GOLDFLOW_GOOGLE_SUBMIT_GATE_DIR ?? path.join(stateDir, "google-account-submit-gate")),
     googleSubmitIntervalMs: boundedNumber(flags["google-submit-interval-ms"] ?? environment.GOLDFLOW_GOOGLE_SUBMIT_INTERVAL_MS, 30_000, 30_000, 60_000),
+    googleSubmitJitterMaxMs: boundedNumber(flags["google-submit-jitter-max-ms"] ?? environment.GOLDFLOW_GOOGLE_SUBMIT_JITTER_MAX_MS, 0, 0, 5_000),
     profileDir: path.resolve(flags["profile-dir"] ?? environment.GOLDFLOW_DESKTOP_PROFILE_DIR ?? path.join(stateDir, `${browserProvider}-browser-profile`)),
     downloadsRoot: path.resolve(flags["downloads-root"] ?? environment.GOLDFLOW_STUDIO_DOWNLOADS_ROOT ?? path.join(os.homedir(), "Downloads", "GoldflowStudio")),
     chromeExecutable: path.resolve(flags["chrome-executable"] ?? environment.GOLDFLOW_DESKTOP_CHROME_EXECUTABLE ?? defaultChromeExecutable()),

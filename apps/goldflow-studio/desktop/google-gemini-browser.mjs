@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { chromium } from "playwright-core";
 
-import { findReferenceEcho, normalizedImagePixels } from "../lib/image-pixel-contract.mjs";
+import { findReferenceEcho, imagePixelDimensions, normalizedImagePixels } from "../lib/image-pixel-contract.mjs";
 import { clearLoginMarker, markLoginVerified } from "./browser-login.mjs";
 
 const GEMINI_IMAGES_URL = "https://gemini.google.com/images";
@@ -26,6 +26,16 @@ function safeName(value) {
   return String(value ?? "asset").replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "asset";
 }
 
+function diagnosticText(value) {
+  return String(value ?? "")
+    .replace(/\b(?:https?:\/\/|blob:|data:)[^\s<>"']+/gi, "[REDACTED URL]")
+    .replace(/\bBearer\s+[^\s,;)"']+/gi, "Bearer [REDACTED]")
+    .replace(/\b(?:cookie|set-cookie|authorization|proxy-authorization)\s*:[^\r\n]*/gi, "[REDACTED HEADER]")
+    .replace(/\b[\w-]*(?:token|secret|password|session|auth|cookie|api[_-]?key)[\w-]*["']?\s*[=:]\s*["']?[^\s,;)"']+/gi, "[REDACTED CREDENTIAL]")
+    .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, "[REDACTED EMAIL]")
+    .slice(0, 2_000);
+}
+
 export function observedGeminiImageFilename(body, expectedFilename) {
   const lines = new Set(String(body ?? "").split(/\r?\n/).map((line) => line.trim()));
   if (lines.has(expectedFilename)) return expectedFilename;
@@ -33,6 +43,15 @@ export function observedGeminiImageFilename(body, expectedFilename) {
   const stem = expectedFilename.replace(/\.(?:png|jpe?g|webp)$/i, "");
   // Gemini's image composer transcodes uploads while retaining the exact stem.
   return [`${stem}.jpg`, `${stem}.jpeg`].find((name) => lines.has(name)) ?? null;
+}
+
+export function isProportionalReferenceDownscale(source, preview) {
+  const values = [source?.width, source?.height, preview?.width, preview?.height];
+  if (!values.every((value) => Number.isInteger(value) && value > 0)) return false;
+  if (preview.width >= source.width || preview.height >= source.height) return false;
+  // Both proportional dimensions may round by at most one output pixel.
+  return Math.abs(preview.height - source.height * preview.width / source.width) <= 1
+    && Math.abs(preview.width - source.width * preview.height / source.height) <= 1;
 }
 
 function sha256Bytes(value) {
@@ -379,7 +398,7 @@ export class GoogleGeminiBrowser {
     const expectedUrl = type === "llm" ? GEMINI_APP_URL : GEMINI_IMAGES_URL;
     const isCorrectSurface = () => (type === "llm"
       ? /^https:\/\/gemini\.google\.com\/app(?:[/?#]|$)/i.test(page.url())
-      : isGeminiImageSurfaceUrl(page.url()) || isGeminiConversationUrl(page.url()));
+      : isGeminiImageSurfaceUrl(page.url()));
     let composer = isCorrectSurface()
       ? await waitForVisible(page.locator(PROMPT_SELECTOR), 2_000)
       : null;
@@ -442,7 +461,7 @@ export class GoogleGeminiBrowser {
       } else readySince = null;
       await sleep(250);
     }
-    throw codedError("ui_contract_mismatch", "Gemini reference uploads did not finish processing before submission.");
+    throw codedError("ui_contract_mismatch", "Gemini could not verify the complete ordered reference set before submission; attachment count or upload readiness did not pass.");
   }
 
   async newJobPage(type = "image") {
@@ -705,16 +724,29 @@ export class GoogleGeminiBrowser {
       const extension = downloaded.mimeType.includes("png") ? "png" : downloaded.mimeType.includes("webp") ? "webp" : "jpg";
       const filename = `${String(slot).padStart(2, "0")}-${safeName(reference.ref_id)}-${sourceSha256.slice(0, 12)}.${extension}`;
       files.push({ name: filename, mimeType: downloaded.mimeType, buffer: downloaded.bytes });
-      referenceInputs.push({ slot, ref_id: reference.ref_id, normalized_pixels: await normalizedImagePixels(downloaded.bytes) });
+      referenceInputs.push({ slot, ref_id: reference.ref_id, normalized_pixels: await normalizedImagePixels(downloaded.bytes),
+        source_dimensions: await imagePixelDimensions(downloaded.bytes) });
       orderedReferences.push({ slot, ref_id: reference.ref_id, source_sha256: sourceSha256, upload_filename: filename });
     }
     if (!files.length) return { referenceInputs, orderedReferences };
     const uploadTools = await waitForGeminiUploadTools(page);
     if (!uploadTools) throw codedError("ui_contract_mismatch", "Gemini Upload & tools control is missing.");
     const verifiedReferenceIds = new Set();
+    const uploadVerification = [];
+    try {
     for (let index = 0; index < files.length; index += 1) {
       const file = files[index];
       const baselineImageUrls = new Set(await this.imageComposerPreviewUrls(page));
+      const verification = { slot: index + 1, ref_id: diagnosticText(orderedReferences[index].ref_id),
+        source_sha256: orderedReferences[index].source_sha256, baseline_preview_count: baselineImageUrls.size,
+        eligible_preview_count: null, fresh_eligible_preview_count: null, expected_count: index + 1,
+        observed_count: null, no_pending_uploads: null, upload_ready: null,
+        filename_observed: false, filename_transcoded: false, pixel_threshold: null,
+        source_dimensions: referenceInputs[index].source_dimensions, preview_dimensions: null, proportional_downscale: false,
+        preview_read_attempted: false, preview_read_succeeded: false, pixel_comparison_succeeded: false,
+        latest_pixel_mae: null, minimum_pixel_mae: null, pixel_match: false,
+        stability_reached: false, matching_preview_retained: null, verified: false };
+      uploadVerification.push(verification);
       // The /images surface retains stale hidden/disabled menu rows after a
       // previous attachment. Reopen the active tools menu and target its
       // enabled menu item instead of clicking the first matching text node.
@@ -753,37 +785,64 @@ export class GoogleGeminiBrowser {
         const body = await page.locator("body").innerText();
         // Upload-name notifications can disappear before preview pixels load.
         observedFilename = observedGeminiImageFilename(body, file.name) ?? observedFilename;
-        const countMatches = await this.visibleImageComposerAttachmentCount(page) === index + 1;
-        if (observedFilename === file.name && countMatches) {
-          verifiedReferenceIds.add(orderedReferences[index].ref_id);
-          orderedReferences[index].observed_upload_filename = observedFilename;
-          orderedReferences[index].verification_method = "exact_filename_and_attachment_count";
-          break;
-        }
-        for (const sourceUrl of (await this.imageComposerPreviewUrls(page)).filter((url) => !baselineImageUrls.has(url))) {
-          if (!countMatches) break;
+        const uploadState = await this.imageUploadState(page, index + 1);
+        const previewUrls = await this.imageComposerPreviewUrls(page);
+        const freshPreviewUrls = previewUrls.filter((url) => !baselineImageUrls.has(url));
+        Object.assign(verification, { eligible_preview_count: previewUrls.length, fresh_eligible_preview_count: freshPreviewUrls.length,
+          observed_count: uploadState.observed_count, no_pending_uploads: uploadState.no_pending_uploads, upload_ready: uploadState.ready,
+          filename_observed: Boolean(observedFilename), filename_transcoded: Boolean(observedFilename && observedFilename !== file.name),
+          pixel_threshold: observedFilename && observedFilename !== file.name ? 3 : 1,
+          preview_dimensions: null, proportional_downscale: false,
+          preview_read_attempted: false, preview_read_succeeded: false, pixel_comparison_succeeded: false,
+          latest_pixel_mae: null, pixel_match: false, stability_reached: false, matching_preview_retained: null });
+        for (const sourceUrl of freshPreviewUrls) {
+          if (!uploadState.ready) break;
+          let match;
           try {
+            Object.assign(verification, { preview_read_attempted: true, preview_read_succeeded: false,
+              pixel_comparison_succeeded: false, latest_pixel_mae: null });
             const bytes = await this.imageBytes(page, sourceUrl);
-            const match = await findReferenceEcho(bytes, [referenceInputs[index]], {
-              // Allow only bounded lossy-preview drift when the hash-bearing
-              // filename stem also matches. Generated-output checks stay strict.
-              threshold: observedFilename && observedFilename !== file.name ? 3 : 1,
+            verification.preview_read_succeeded = true;
+            verification.preview_dimensions = await imagePixelDimensions(bytes);
+            verification.proportional_downscale = isProportionalReferenceDownscale(
+              referenceInputs[index].source_dimensions, verification.preview_dimensions);
+            verification.pixel_threshold = (observedFilename && observedFilename !== file.name) || verification.proportional_downscale ? 3 : 1;
+            match = await findReferenceEcho(bytes, [referenceInputs[index]], {
+              // Existing upload-only lossy tolerance also covers evidenced proportional
+              // thumbnails; filename snackbars may disappear. Generated checks stay strict.
+              threshold: verification.pixel_threshold,
+              onComparison: (mae) => {
+                verification.pixel_comparison_succeeded = true;
+                verification.latest_pixel_mae = mae;
+                verification.minimum_pixel_mae = verification.minimum_pixel_mae === null ? mae : Math.min(verification.minimum_pixel_mae, mae);
+              },
             });
-            if (match) {
-              verifiedReferenceIds.add(orderedReferences[index].ref_id);
-              orderedReferences[index].observed_upload_filename = observedFilename;
-              orderedReferences[index].verification_method = "preview_pixels_and_attachment_count";
-              orderedReferences[index].preview_mean_absolute_difference = match.mean_absolute_difference;
-              break;
-            }
           } catch {
             // The attachment preview can exist before its rendered pixels are readable.
           }
+          verification.pixel_match = Boolean(match);
+          if (!match) continue;
+          // A filename notification proves selection, not a finished upload.
+          // Settle this exact preview before opening the next file chooser.
+          await this.waitForImageUploads(page, index + 1, { timeoutMs: Math.max(0, deadline - Date.now()) });
+          verification.stability_reached = true;
+          verification.matching_preview_retained = (await this.imageComposerPreviewUrls(page)).includes(sourceUrl);
+          if (!verification.matching_preview_retained) continue;
+          verifiedReferenceIds.add(orderedReferences[index].ref_id);
+          verification.verified = true;
+          orderedReferences[index].observed_upload_filename = observedFilename;
+          orderedReferences[index].verification_method = "preview_pixels_and_attachment_count";
+          orderedReferences[index].preview_mean_absolute_difference = match.mean_absolute_difference;
+          orderedReferences[index].preview_pixel_threshold = verification.pixel_threshold;
+          orderedReferences[index].preview_proportional_downscale = verification.proportional_downscale;
+          orderedReferences[index].source_dimensions = verification.source_dimensions;
+          orderedReferences[index].preview_dimensions = verification.preview_dimensions;
+          break;
         }
         if (!verifiedReferenceIds.has(orderedReferences[index].ref_id)) await sleep(250);
       }
       if (!verifiedReferenceIds.has(orderedReferences[index].ref_id)) {
-        throw codedError("ui_contract_mismatch", `Gemini did not visibly retain ordered reference ${file.name} before submission.`);
+        throw codedError("ui_contract_mismatch", `Gemini could not verify ordered references at slot ${index + 1} (${file.name}) before submission; this does not identify which attachment failed.`);
       }
     }
     if (!orderedReferences.every((row) => verifiedReferenceIds.has(row.ref_id))) {
@@ -792,6 +851,11 @@ export class GoogleGeminiBrowser {
     await this.waitForImageUploads(page, files.length);
     await onPhase("references_attached");
     return { referenceInputs, orderedReferences };
+    } catch (error) {
+      // At most four latest slot records; never retain URLs, image bytes or raw exceptions.
+      error.reference_upload_verification = uploadVerification;
+      throw error;
+    }
   }
 
   async pastePrompt(page, prompt) {
@@ -921,7 +985,7 @@ export class GoogleGeminiBrowser {
       const body = await this.providerStatusText(page, priorResponseIds);
       const blockingCode = geminiBlockingCode(body);
       if (blockingCode) throw codedError(blockingCode, body.slice(-1600));
-      if (Date.now() - startedAt > 60_000 && /^https:\/\/gemini\.google\.com\/app\/?(?:[?#].*)?$/.test(page.url())
+      if (Date.now() - startedAt > 60_000 && /^https:\/\/gemini\.google\.com\/(?:app|images)\/?(?:[?#].*)?$/.test(page.url())
         && await page.locator("user-query").count() === 0 && await page.locator("model-response").count() === 0) {
         throw codedError("provider_response_timeout", "Gemini returned to an empty home page after submission; no request or response was retained. Do not resubmit automatically.");
       }
@@ -996,6 +1060,88 @@ export class GoogleGeminiBrowser {
     return { ...receipt.reference_binding, evidence: { receipt_path: receiptPath, receipt_sha256: await sha256File(receiptPath), screenshot_path: screenshotPath, screenshot_sha256: receipt.screenshot_sha256 } };
   }
 
+  async imageFailureDiagnostics(page, job, error) {
+    const directory = path.join(this.downloadsRoot, "_google-gemini-ui-diagnostics");
+    await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+    const stamp = `${new Date().toISOString().replace(/[:.]/g, "-")}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+    const screenshotPath = path.join(directory, `${stamp}.png`);
+    const receiptPath = path.join(directory, `${stamp}.json`);
+    const readVisible = async (selector) => {
+      const snapshot = await page.locator(selector).evaluateAll((nodes) => {
+        const isVisible = (node) => {
+          if (node.closest('user-query, [data-message-author-role="user"], [contenteditable="true"], textarea, nav, aside, [role="navigation"], [hidden], [aria-hidden="true"]')) return false;
+          const style = node.ownerDocument.defaultView.getComputedStyle(node);
+          return node.getClientRects().length && style.visibility !== "hidden" && style.visibility !== "collapse";
+        };
+        const label = (node) => {
+          // A status/dialog container may contain a prompt or hidden descendant.
+          const walker = node.ownerDocument.createTreeWalker(node, 4);
+          let text = "", child;
+          while (text.length < 2_000 && (child = walker.nextNode())) {
+            if (child.parentElement && isVisible(child.parentElement)) text += `${child.textContent}\n`;
+          }
+          return { text: text.slice(0, 2_000),
+            alt: String(node.getAttribute("alt") ?? "").slice(0, 2_000),
+            title: String(node.getAttribute("title") ?? "").slice(0, 2_000),
+            aria_label: String(node.getAttribute("aria-label") ?? "").slice(0, 2_000) };
+        };
+        const visible = nodes.filter(isVisible);
+        return { matched_count: nodes.length, visible_count: visible.length,
+          visible_items: visible.slice(0, 12).map((node) => ({ ...label(node),
+            ...(node.tagName === "IMG" ? { rendered_image: {
+              complete: node.complete === true, has_offset_parent: node.offsetParent !== null,
+              natural_width: node.naturalWidth, natural_height: node.naturalHeight,
+            } } : {}),
+            visible_error_labels: [...node.querySelectorAll('[role="alert"], [class*="error" i]')]
+              .filter(isVisible).slice(0, 8).map(label),
+          })) };
+      }).catch(() => null);
+      const sanitizedLabel = (item) => ({ text: diagnosticText(item.text), alt: diagnosticText(item.alt),
+        title: diagnosticText(item.title), aria_label: diagnosticText(item.aria_label) });
+      return snapshot && { ...snapshot, visible_items: snapshot.visible_items.map((item) => ({
+        ...sanitizedLabel(item), visible_error_labels: item.visible_error_labels.map(sanitizedLabel),
+        ...(item.rendered_image ? { rendered_image: item.rendered_image } : {}),
+      })) };
+    };
+    // Counts stay independent: mixed attachment UI is evidence, not a new admission rule.
+    const attachments = await readVisible("gem-attachment");
+    const previews = await readVisible('img[alt="attachment"]');
+    const loading = [];
+    for (const selector of GEMINI_UPLOAD_PENDING_SELECTOR.split(", ")) {
+      loading.push({ selector, observed: await readVisible(selector) });
+    }
+    const errors = await readVisible('[role="alert"], [role="status"], [role="dialog"], [class*="error" i]');
+    let screenshot = null;
+    try {
+      const bytes = await page.screenshot({ fullPage: false, timeout: 5_000, mask: [
+        page.locator('user-query, [data-message-author-role="user"], [contenteditable="true"], input, textarea, nav, aside, [role="navigation"]'),
+        page.getByText(/https?:\/\/|blob:|data:|Bearer\s+|(?:cookie|authorization|token|secret|password|session|api[_-]?key)\s*[=:]|[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i),
+      ] });
+      await fs.writeFile(screenshotPath, bytes, { flag: "wx", mode: 0o600 });
+      screenshot = { path: screenshotPath, sha256: sha256Bytes(bytes) };
+    } catch { /* Text evidence remains useful when the page cannot be captured. */ }
+    const receipt = {
+      schema: "goldflow_google_gemini_image_failure_diagnostic_v1",
+      captured_at: new Date().toISOString(), browser_provider: "google-gemini",
+      manifest_id: job.manifest_id, asset_id: job.asset_id,
+      expected_reference_count: Array.isArray(job.references) ? job.references.length : 0,
+      expected_references: (Array.isArray(job.references) ? job.references : []).slice(0, 4).map((reference, index) => {
+        const sourceSha256 = SHA256_PATTERN.test(reference.sha256) ? reference.sha256 : null;
+        const refId = diagnosticText(reference.ref_id);
+        const stem = sourceSha256 ? `${String(index + 1).padStart(2, "0")}-${safeName(refId)}-${sourceSha256.slice(0, 12)}` : null;
+        return { slot: index + 1, ref_id: refId, source_sha256: sourceSha256,
+          expected_upload_name_stem: stem,
+          expected_mime_dependent_upload_names: stem ? ["png", "webp", "jpg"].map((extension) => `${stem}.${extension}`) : [] };
+      }),
+      failure: { code: diagnosticText(error?.code), message: diagnosticText(error?.message) },
+      reference_upload_verification: error?.reference_upload_verification ?? null,
+      attachments, previews, loading, visible_error_containers: errors, screenshot,
+      observation_scope: "Visible UI only; historical errors are not attributed to this submission.",
+    };
+    await fs.writeFile(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`, { flag: "wx", mode: 0o600 });
+    return receiptPath;
+  }
+
   async runJob({ slot = 0, job, client, onPhase = async () => {}, submitGeneration = async (click) => click() }) {
     if (job.type === "llm") return this.runLlmJob({ slot, job, onPhase });
     if (job.type !== "image") throw codedError("ui_contract_mismatch", `Gemini browser received unsupported ${job.type} work.`);
@@ -1066,6 +1212,10 @@ export class GoogleGeminiBrowser {
       };
     } catch (error) {
       preservePage = ["auth_required", "ui_contract_mismatch"].includes(error?.code);
+      try {
+        const diagnosticPath = await this.imageFailureDiagnostics(page, job, error);
+        this.log(`Gemini image failure diagnostics: ${diagnosticPath}`, "warn");
+      } catch { /* Diagnostics must never replace or modify the original job failure. */ }
       throw error;
     } finally {
       if (!persistentWorker && !preservePage) await page.close().catch(() => {});

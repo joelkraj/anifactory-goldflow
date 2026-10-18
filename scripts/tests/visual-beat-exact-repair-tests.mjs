@@ -1,0 +1,408 @@
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { promises as fs } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { groupingLockHash } from "../lib/editorial-beat-director.mjs";
+import { CURRENT_VISUAL_BEAT_CONTRACT_VERSION } from "../lib/visual-beat-contract.mjs";
+import { commandStageFor } from "../lib/pipeline-stage-registry.mjs";
+import { beginStageExecution, finishStageExecution } from "../lib/execution-provenance.mjs";
+import { applyVisualBeatExactRepair, repairVisualBeatPlan, visualBeatExactRepairAdmission } from "../lib/visual-beat-exact-repair.mjs";
+
+const hash = (value) => createHash("sha256").update(value).digest("hex");
+const bytes = (value) => Buffer.from(`${JSON.stringify(value, null, 2)}\n`);
+const read = async (file) => JSON.parse(await fs.readFile(file));
+const excerpts = [
+  "Joey checks the bank balance.",
+  "Joey studies an unopened box at the counter.",
+  "Joey leaves the box on the counter.",
+];
+const beat = (number, place, id) => ({
+  visual_beat_id: `beat_w${String(number).padStart(6, "0")}_w${String(number).padStart(6, "0")}`,
+  image_id_hint: `ep_01-w${String(number).padStart(6, "0")}-w${String(number).padStart(6, "0")}`,
+  source_atom_ids: [`atom_w${String(number).padStart(6, "0")}_w${String(number).padStart(6, "0")}`],
+  source_word_start_index: number,
+  source_word_end_index: number,
+  start_sec: number,
+  end_sec: number + 1,
+  parent_scene_id: "scene_01",
+  visual_beat_script_excerpt: excerpts[number],
+  visual_beat_action: "Joey looks at the box.",
+  visual_beat_action_evidence: "Joey studies",
+  location_id: id,
+  location: place,
+  local_location: place,
+  location_timeline_label: `${Math.floor(number / 60)}:${String(number % 60).padStart(2, "0")} ${place}`,
+  ref_needs: [
+    { kind: "character", ref_id: "joey", subject: "Joey" },
+    { kind: "location", ref_id: id, subject: place },
+  ],
+  beat_ref_requirements: [
+    { kind: "character", ref_id: "joey", subject: "Joey" },
+    { kind: "location", ref_id: id, subject: place },
+  ],
+  active_state_constraints: { location_id: id, wardrobe_state_id: "jacket" },
+  visual_beat_focus: "A simple composition",
+  visual_novelty_directive: "A simple composition",
+  local_continuity_note: "Current clothing remains on.",
+  physically_visible_entity_ids: ["joey"],
+  preview_visible_entity_ids: [],
+  preview_visible_characters: [],
+  screen_visible_entity_ids: [],
+  visible_entities: [{ entity_id: "joey", display_name: "Joey", kind: "person" }],
+  visual_beat_quality_findings: [],
+});
+
+async function fixture() {
+  const episodeDir = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-exact-beat-repair-"));
+  const identity = { schema: "goldflow_run_identity_v2", channel: "c", series_slug: "s",
+    week: "w", episode: "ep_01", content_profile: "manhwa_recap_v1", media_workflow: "generated_visuals_v1" };
+  const identityBytes = bytes(identity);
+  const scriptBytes = Buffer.from(`${excerpts.join(" ")}\n`);
+  const facts = { canonical_locations: [
+    { location_id: "home_desk", display_name: "Home desk" },
+    { location_id: "alder_mill", display_name: "Alder Mill" },
+  ] };
+  const sources = {};
+  const sourceContents = {
+    "script_clean.md": scriptBytes,
+    "story_fact_ledger.json": bytes(facts),
+    "timed_scene_plan.json": bytes({ status: "passed" }),
+    "narration_word_timing_ep_01.json": bytes({ status: "passed" }),
+  };
+  for (const [name, value] of Object.entries(sourceContents)) {
+    await fs.writeFile(path.join(episodeDir, name), value);
+    sources[path.join(episodeDir, name)] = hash(value);
+  }
+  await fs.writeFile(path.join(episodeDir, "run_identity.json"), identityBytes);
+  const beats = [beat(0, "Home desk", "home_desk"), beat(1, "Home desk", "home_desk"),
+    beat(2, "Alder Mill", "alder_mill")];
+  delete beats[1].active_state_constraints;
+  beats[2].physically_visible_entity_ids = [];
+  beats[2].preview_visible_entity_ids = ["joey"];
+  beats[2].preview_visible_characters = ["Joey"];
+  const grouping = groupingLockHash(beats);
+  const plan = { schema: "goldflow_visual_beat_plan_v2", status: "passed",
+    visual_beat_contract_version: CURRENT_VISUAL_BEAT_CONTRACT_VERSION,
+    channel: "c", series_slug: "s", week: "w", episode: "ep_01",
+    source_script_hash: hash(scriptBytes), source_hashes: sources,
+    visual_beat_count: beats.length, editorial_director: { grouping_lock_sha256: grouping },
+    beats, location_timeline: [], visual_beat_quality_findings: [
+      { code: "location_mention_not_in_beat_location", severity: "warning",
+        visual_beat_id: beats[1].visual_beat_id, beat_location: "Home desk" },
+    ],
+    visual_beat_quality_summary: { finding_count: 1, warning_count: 1, blocker_count: 0,
+      codes: { location_mention_not_in_beat_location: 1 } },
+    beat_settings: { retention_ramp_sec: 180 },
+    updated_at: "2026-01-01T00:00:00Z" };
+  const planPath = path.join(episodeDir, "visual_beat_plan.json");
+  const planBytes = bytes(plan);
+  await fs.writeFile(planPath, planBytes);
+  const approval = { schema: "goldflow_visual_beat_approval_v1", status: "approved",
+    approval_kind: "grouping_lock", visual_beat_plan_path: planPath,
+    visual_beat_plan_sha256: hash(planBytes), grouping_lock_sha256: grouping,
+    approved_by: "original-director", approval_note: "Original editorial approval." };
+  const approvalBytes = bytes(approval);
+  await fs.writeFile(path.join(episodeDir, "visual_beat_approval.json"), approvalBytes);
+  const status = { episode_dir: episodeDir, identity, media_workflow: { id: "generated_visuals_v1" },
+    current_stage: "visual_reference_plan", current_stage_state: "missing",
+    stage_ledger: [
+      { stage: "visual_beat_plan", state: "passed" },
+      { stage: "visual_reference_plan", state: "missing" },
+      { stage: "reference_plan_approval", state: "stale" },
+      { stage: "reference_generation", state: "missing" },
+      { stage: "visual_prompt_blocker_repair", state: "blocked" },
+    ] };
+  const ids = [beats[1].visual_beat_id, beats[2].visual_beat_id];
+  const spec = { schema: "goldflow_visual_beat_exact_repair_v1", status: "approved",
+    episode_dir: episodeDir, run_identity_sha256: hash(identityBytes), source_script_sha256: hash(scriptBytes),
+    base_visual_beat_plan_sha256: hash(planBytes), base_visual_beat_approval_sha256: hash(approvalBytes),
+    grouping_lock_sha256: grouping, approved_by: "codex-agent",
+    review_note: "Manual correction against approved script and visual direction.",
+    repairs: [
+      { visual_beat_id: ids[0], source_atom_ids: beats[1].source_atom_ids,
+        evidence_note: "This beat is now at Alder Mill.",
+        location: { before_location_id: "home_desk", before_location: "Home desk",
+          to_location_id: "alder_mill", to_location: "Alder Mill office" } },
+      { visual_beat_id: ids[1], source_atom_ids: beats[2].source_atom_ids,
+        evidence_note: "The approved script calls for visible blue light on the power source.",
+        focus: { before: "A simple composition", to: "Blue light glows from the power source." },
+        continuity_note: { before: "Current clothing remains on.", to: "Keep the current jacket visible." },
+        visibility: { entity_id: "joey", from: "preview", to: "physical" } },
+    ] };
+  const specPath = path.join(episodeDir, "repair_spec.json");
+  await fs.writeFile(specPath, bytes(spec));
+  return { episodeDir, identity, status, ids, spec, specPath, plan, planBytes, approvalBytes };
+}
+
+async function withFixture(callback) {
+  const value = await fixture();
+  try { await callback(value); }
+  finally { await fs.rm(value.episodeDir, { recursive: true, force: true }); }
+}
+
+assert.equal(commandStageFor("visual", "repair-beats", {}, {}), "visual_beat_plan");
+await withFixture(async ({ episodeDir, status, ids, specPath, plan, planBytes, approvalBytes }) => {
+  const flags = { "episode-dir": episodeDir, "repair-spec": specPath, "beat-ids": ids.join(",") };
+  assert.equal(visualBeatExactRepairAdmission(status, flags).allowed, true);
+  for (const denied of [
+    { ...flags, "beat-ids": `${ids[0]},${ids[0]}` },
+    { ...flags, "workflow-bypass": "true" },
+    { ...flags, "beat-ids": "" },
+  ]) assert.equal(visualBeatExactRepairAdmission(status, denied).allowed, false);
+  for (const deniedStatus of [
+    { ...status, current_stage: "visual_beat_plan" },
+    { ...status, current_stage_state: "blocked" },
+    { ...status, stage_ledger: status.stage_ledger.map((row) => row.stage === "reference_generation"
+      ? { ...row, state: "passed" } : row) },
+  ]) assert.equal(visualBeatExactRepairAdmission(deniedStatus, flags).allowed, false);
+  const oldEvent = { schema: "goldflow_execution_event_v1", event_type: "stage_completed",
+    stage: "visual_beat_plan", execution_id: "old", status: "passed" };
+  await fs.writeFile(path.join(episodeDir, "execution_events.jsonl"), `${JSON.stringify(oldEvent)}\n`);
+  const execution = await beginStageExecution({ stage: "visual_beat_plan", command: "visual repair-beats",
+    flags, args: ["--episode-dir", episodeDir, "--repair-spec", specPath, "--beat-ids", ids.join(",")] });
+  const result = await applyVisualBeatExactRepair({ episodeDir, specPath, beatIds: ids, status });
+  await finishStageExecution(execution, { exitCode: 0 });
+  assert.equal(result.status, "passed");
+  const after = await read(path.join(episodeDir, "visual_beat_plan.json"));
+  const approval = await read(path.join(episodeDir, "visual_beat_approval.json"));
+  assert.equal(groupingLockHash(after.beats), groupingLockHash(plan.beats));
+  assert.equal(after.editorial_director.grouping_lock_sha256, groupingLockHash(plan.beats));
+  assert.deepEqual(after.beats[0], plan.beats[0], "unselected beat is byte-equivalent after JSON serialization");
+  assert.equal(after.beats[1].location_id, "alder_mill");
+  assert.equal(after.beats[1].active_state_constraints, undefined, "repair must not invent absent state projection");
+  assert.equal(after.beats[1].location, "Alder Mill office");
+  assert.equal(after.beats[1].location_timeline_label, "0:01 Alder Mill office");
+  assert.deepEqual(after.beats[1].ref_needs, [{ kind: "character", ref_id: "joey", subject: "Joey" }]);
+  assert.deepEqual(after.beats[1].beat_ref_requirements, after.beats[1].ref_needs);
+  assert.equal(after.visual_beat_quality_summary.finding_count, 0);
+  assert.equal(after.beats[2].visual_beat_focus, "Blue light glows from the power source.");
+  assert.equal(after.beats[2].visual_novelty_directive, after.beats[2].visual_beat_focus);
+  assert.deepEqual(after.beats[2].physically_visible_entity_ids, ["joey"]);
+  assert.deepEqual(after.beats[2].preview_visible_entity_ids, []);
+  assert.deepEqual(after.beats[2].preview_visible_characters, []);
+  assert.equal(after.location_timeline[1].location, "Alder Mill office");
+  assert.equal(approval.visual_beat_plan_sha256, hash(await fs.readFile(path.join(episodeDir, "visual_beat_plan.json"))));
+  assert.equal(approval.grouping_lock_sha256, groupingLockHash(after.beats));
+  const receipt = await read(result.receipt_path);
+  assert.deepEqual(receipt.visual_beat_ids, ids);
+  assert.equal(receipt.previous_visual_beat_plan_sha256, hash(planBytes));
+  assert.equal(receipt.provider_cost_usd, 0);
+  assert.equal(receipt.changes.find((change) => change.field === "location")?.before.location_timeline_label,
+    "0:01 Home desk");
+  assert.equal(receipt.changes.find((change) => change.field === "location")?.after.location_timeline_label,
+    "0:01 Alder Mill office");
+  assert.equal(receipt.changes.find((change) => change.field === "location_quality_findings")?.before.length, 1);
+  assert.deepEqual(await fs.readFile(path.join(path.dirname(result.receipt_path), "before_plan.json")), planBytes);
+  assert.deepEqual(await fs.readFile(path.join(path.dirname(result.receipt_path), "before_approval.json")), approvalBytes);
+  const events = (await fs.readFile(path.join(episodeDir, "execution_events.jsonl"), "utf8"))
+    .split("\n").filter(Boolean).map(JSON.parse);
+  assert.deepEqual(events[0], oldEvent, "prior provenance line is append-only");
+  assert.equal(events.filter((row) => row.event_type === "stage_started").length, 1);
+  assert.equal(events.filter((row) => row.event_type === "stage_completed").length, 2);
+  const scoped = events.at(-1);
+  assert.deepEqual(scoped.scope.beat_ids, ids);
+  assert.equal(scoped.output_hashes["visual_beat_plan.json"], result.visual_beat_plan_sha256);
+  assert.equal(scoped.output_hashes["visual_beat_approval.json"], result.visual_beat_approval_sha256);
+  assert.equal((await read(scoped.immutable_report_path)).status, "passed");
+  await assert.rejects(
+    applyVisualBeatExactRepair({ episodeDir, specPath, beatIds: ids, status }),
+    /stale against episode/,
+    "same spec cannot be applied twice",
+  );
+});
+
+await withFixture(async ({ episodeDir, status, ids, spec, specPath, plan, planBytes, approvalBytes }) => {
+  const id = ids[0];
+  const before = plan.beats[1];
+  spec.repairs = [{ visual_beat_id: id, source_atom_ids: before.source_atom_ids,
+    evidence_note: "The beat depicts examining an unopened box, before any purchase is complete.",
+    action: { before: before.visual_beat_action, to: "Joey examines the unopened box at the counter." },
+    action_evidence: { before: before.visual_beat_action_evidence,
+      to: "Joey studies an unopened box at the counter" } }];
+  await fs.writeFile(specPath, bytes(spec));
+  const result = await applyVisualBeatExactRepair({ episodeDir, specPath, beatIds: [id], status });
+  const after = await read(path.join(episodeDir, "visual_beat_plan.json"));
+  const approval = await read(path.join(episodeDir, "visual_beat_approval.json"));
+  assert.equal(after.beats[1].visual_beat_action, spec.repairs[0].action.to);
+  assert.equal(after.beats[1].visual_beat_action_evidence, spec.repairs[0].action_evidence.to);
+  assert.deepEqual(after.beats[0], plan.beats[0]);
+  assert.deepEqual(after.beats[2], plan.beats[2]);
+  for (const field of ["source_atom_ids", "source_word_start_index", "source_word_end_index",
+    "start_sec", "end_sec", "visual_beat_id", "image_id_hint", "visual_beat_script_excerpt"])
+    assert.deepEqual(after.beats[1][field], before[field], `${field} is locked`);
+  const unchanged = structuredClone(after.beats[1]);
+  unchanged.visual_beat_action = before.visual_beat_action;
+  unchanged.visual_beat_action_evidence = before.visual_beat_action_evidence;
+  assert.deepEqual(unchanged, before, "only the reviewed action and quote changed on the target beat");
+  const unchangedPlan = structuredClone(after);
+  unchangedPlan.beats[1] = before;
+  unchangedPlan.updated_at = plan.updated_at;
+  assert.deepEqual(unchangedPlan, plan, "action repair preserves every other plan field");
+  assert.equal(groupingLockHash(after.beats), groupingLockHash(plan.beats));
+  assert.equal(approval.visual_beat_plan_sha256,
+    hash(await fs.readFile(path.join(episodeDir, "visual_beat_plan.json"))));
+  assert.equal(approval.grouping_lock_sha256, groupingLockHash(plan.beats));
+  assert.equal(approval.previous_visual_beat_plan_sha256, hash(planBytes));
+  assert.equal(approval.previous_visual_beat_approval_sha256, hash(approvalBytes));
+  const receipt = await read(result.receipt_path);
+  assert.equal(receipt.changes.find((row) => row.field === "visual_beat_action")?.source_quote,
+    spec.repairs[0].action_evidence.to);
+  assert.equal(receipt.changes.find((row) => row.field === "visual_beat_action_evidence")?.before,
+    before.visual_beat_action_evidence);
+  assert.deepEqual(await fs.readFile(path.join(path.dirname(result.receipt_path), "before_plan.json")), planBytes);
+  assert.deepEqual(await fs.readFile(path.join(path.dirname(result.receipt_path), "before_approval.json")), approvalBytes);
+});
+
+await withFixture(async ({ episodeDir, status, ids, spec, specPath, plan }) => {
+  const before = plan.beats[1];
+  spec.repairs = [{ visual_beat_id: ids[0], source_atom_ids: before.source_atom_ids,
+    evidence_note: "The existing source quote already supports the revised action.",
+    action: { before: before.visual_beat_action, to: "Joey studies the box." } }];
+  await fs.writeFile(specPath, bytes(spec));
+  await applyVisualBeatExactRepair({ episodeDir, specPath, beatIds: [ids[0]], status });
+  const after = await read(path.join(episodeDir, "visual_beat_plan.json"));
+  assert.equal(after.beats[1].visual_beat_action, spec.repairs[0].action.to);
+  assert.equal(after.beats[1].visual_beat_action_evidence, before.visual_beat_action_evidence);
+});
+
+for (const [name, change, pattern] of [
+  ["stale action before", (repair) => { repair.action.before = "stale"; }, /Action before-value changed/],
+  ["action no-op", (repair) => { repair.action.to = repair.action.before; }, /Action correction is a no-op/],
+  ["stale evidence before", (repair) => { repair.action_evidence.before = "stale"; }, /Action evidence before-value changed/],
+  ["evidence no-op", (repair) => { repair.action_evidence.to = repair.action_evidence.before; }, /Action evidence correction is a no-op/],
+  ["unsupported action field", (repair) => { repair.action.extra = "unreviewed"; }, /Invalid action correction/],
+  ["malformed evidence", (repair) => { repair.action_evidence.to = ""; }, /Invalid action_evidence correction/],
+  ["unsubstantiated evidence", (repair) => { repair.action_evidence.to = "Joey buys the box"; }, /Action evidence is absent/],
+  ["evidence without action", (repair) => { delete repair.action; }, /Invalid exact beat repair/],
+]) {
+  await withFixture(async ({ episodeDir, status, ids, spec, specPath, plan, planBytes, approvalBytes }) => {
+    const before = plan.beats[1];
+    spec.repairs = [{ visual_beat_id: ids[0], source_atom_ids: before.source_atom_ids,
+      evidence_note: `Rejected ${name} correction.`,
+      action: { before: before.visual_beat_action, to: "Joey examines the unopened box." },
+      action_evidence: { before: before.visual_beat_action_evidence,
+        to: "Joey studies an unopened box" } }];
+    change(spec.repairs[0]);
+    await fs.writeFile(specPath, bytes(spec));
+    await assert.rejects(applyVisualBeatExactRepair({ episodeDir, specPath,
+      beatIds: [ids[0]], status }), pattern, name);
+    assert.deepEqual(await fs.readFile(path.join(episodeDir, "visual_beat_plan.json")), planBytes);
+    assert.deepEqual(await fs.readFile(path.join(episodeDir, "visual_beat_approval.json")), approvalBytes);
+  });
+}
+
+await withFixture(async ({ episodeDir, status, ids, spec, specPath, plan }) => {
+  plan.beats[1].visual_beat_script_excerpt += " A receipt appears.";
+  const planBytes = bytes(plan);
+  await fs.writeFile(path.join(episodeDir, "visual_beat_plan.json"), planBytes);
+  const approvalPath = path.join(episodeDir, "visual_beat_approval.json");
+  const approval = await read(approvalPath);
+  approval.visual_beat_plan_sha256 = hash(planBytes);
+  const approvalBytes = bytes(approval);
+  await fs.writeFile(approvalPath, approvalBytes);
+  spec.base_visual_beat_plan_sha256 = hash(planBytes);
+  spec.base_visual_beat_approval_sha256 = hash(approvalBytes);
+  spec.repairs = [{ visual_beat_id: ids[0], source_atom_ids: plan.beats[1].source_atom_ids,
+    evidence_note: "This purported receipt has no approved source support.",
+    action: { before: plan.beats[1].visual_beat_action, to: "Joey examines a receipt." },
+    action_evidence: { before: plan.beats[1].visual_beat_action_evidence,
+      to: "A receipt appears" } }];
+  await fs.writeFile(specPath, bytes(spec));
+  await assert.rejects(applyVisualBeatExactRepair({ episodeDir, specPath,
+    beatIds: [ids[0]], status }), /Action evidence is absent from approved script/);
+  assert.deepEqual(await fs.readFile(path.join(episodeDir, "visual_beat_plan.json")), planBytes);
+  assert.deepEqual(await fs.readFile(approvalPath), approvalBytes);
+});
+
+for (const change of [
+  ({ spec }) => { spec.run_identity_sha256 = "f".repeat(64); },
+  ({ spec }) => { spec.base_visual_beat_approval_sha256 = "f".repeat(64); },
+  ({ spec }) => { spec.repairs[0].location.before_location = "wrong"; },
+  ({ spec }) => { spec.repairs[0].source_atom_ids = ["atom_w999999_w999999"]; },
+  ({ spec }) => { spec.grouping_lock_sha256 = "f".repeat(64); },
+]) {
+  await withFixture(async (f) => {
+    change(f);
+    await fs.writeFile(f.specPath, bytes(f.spec));
+    await assert.rejects(applyVisualBeatExactRepair({ episodeDir: f.episodeDir, specPath: f.specPath,
+      beatIds: f.ids, status: f.status }));
+    assert.deepEqual(await fs.readFile(path.join(f.episodeDir, "visual_beat_plan.json")), f.planBytes);
+    assert.deepEqual(await fs.readFile(path.join(f.episodeDir, "visual_beat_approval.json")), f.approvalBytes);
+  });
+}
+
+await withFixture(async ({ episodeDir, status, ids, specPath, planBytes }) => {
+  await fs.writeFile(path.join(episodeDir, "story_fact_ledger.json"), "{}\n");
+  await assert.rejects(applyVisualBeatExactRepair({ episodeDir, specPath, beatIds: ids, status }),
+    /source artifact changed/);
+  assert.deepEqual(await fs.readFile(path.join(episodeDir, "visual_beat_plan.json")), planBytes);
+});
+await withFixture(async ({ episodeDir, status, ids, specPath, planBytes }) => {
+  await fs.writeFile(path.join(episodeDir, "execution_events.jsonl"), `${JSON.stringify({
+    event_type: "stage_started", stage: "visual_reference_plan" })}\n`);
+  await assert.rejects(applyVisualBeatExactRepair({ episodeDir, specPath, beatIds: ids, status }),
+    /Downstream stage already started/);
+  assert.deepEqual(await fs.readFile(path.join(episodeDir, "visual_beat_plan.json")), planBytes);
+});
+
+await withFixture(async ({ plan }) => {
+  const memory = structuredClone(plan);
+  const target = memory.beats[0];
+  target.depiction_mode = "memory_or_flashback";
+  target.visual_beat_script_excerpt = "Word zero recalls the original bedroom reset.";
+  target.active_state_constraints = { location_id: "home_desk", entities: {
+    joey: { status: "Future level", wardrobe: "Future coat" },
+    caleb: { wardrobe: "Future quarry coat" },
+  }, applied_through_source_word_index: target.source_word_end_index };
+  target.visible_entities.push({ entity_id: "caleb", display_name: "Caleb", kind: "person" });
+  target.physically_visible_entity_ids = [];
+  target.preview_visible_entity_ids = ["joey", "caleb"];
+  target.preview_visible_characters = ["Joey", "Caleb"];
+  target.ref_needs[1].ref_id = "future_room_ref";
+  target.beat_ref_requirements = structuredClone(target.ref_needs);
+  const lock = groupingLockHash(memory.beats);
+  memory.editorial_director.grouping_lock_sha256 = lock;
+  const change = { visual_beat_id: target.visual_beat_id, source_atom_ids: target.source_atom_ids,
+    evidence_note: "The approved source recalls the original bedroom reset, before later gear exists.",
+    visibility_corrections: [
+      { entity_id: "joey", from: "preview", to: "physical" },
+      { entity_id: "caleb", from: "preview", to: "physical" },
+    ],
+    memory_state: { before: structuredClone(target.active_state_constraints),
+      to: { location_id: "home_desk", entities: {
+        joey: { status: "At the original reset", wardrobe: "Original clothes" },
+        caleb: { wardrobe: "Original clothes" },
+      }, applied_through_source_word_index: target.source_word_end_index },
+      source_quote: "original bedroom reset" },
+    location_ref_removals: [{ ref_id: "future_room_ref", subject: "Home desk" }] };
+  const spec = { grouping_lock_sha256: lock, repairs: [change] };
+  const facts = { canonical_locations: [{ location_id: "home_desk" }] };
+  const repaired = repairVisualBeatPlan(memory, spec, facts);
+  const fixed = repaired.plan.beats[0];
+  assert.deepEqual(fixed.active_state_constraints, change.memory_state.to);
+  assert.deepEqual(fixed.preview_visible_entity_ids, []);
+  assert.deepEqual(fixed.physically_visible_entity_ids, ["joey", "caleb"]);
+  assert.deepEqual(fixed.ref_needs, [{ kind: "character", ref_id: "joey", subject: "Joey" }]);
+  assert.deepEqual(fixed.beat_ref_requirements, fixed.ref_needs);
+  assert.deepEqual(repaired.plan.beats.slice(1), memory.beats.slice(1));
+  assert.equal(groupingLockHash(repaired.plan.beats), lock);
+  assert.equal(repaired.changes.filter((row) => row.field === "visibility").length, 2);
+  const wrongState = structuredClone(spec);
+  wrongState.repairs[0].memory_state.before.entities.joey.status = "Wrong";
+  assert.throws(() => repairVisualBeatPlan(memory, wrongState, facts), /Historical memory state/);
+  const wrongRef = structuredClone(spec);
+  wrongRef.repairs[0].location_ref_removals[0].ref_id = "unrelated_ref";
+  assert.throws(() => repairVisualBeatPlan(memory, wrongRef, facts), /Historical location-reference mismatch/);
+  const movedMemory = structuredClone(spec);
+  movedMemory.repairs[0].location = { before_location_id: "home_desk", before_location: "Home desk",
+    to_location_id: null, to_location: "Earlier training passage" };
+  movedMemory.repairs[0].memory_state.to.location_id = null;
+  delete movedMemory.repairs[0].location_ref_removals;
+  const relocated = repairVisualBeatPlan(memory, movedMemory, facts).plan.beats[0];
+  assert.equal(relocated.location, "Earlier training passage");
+  assert.equal(relocated.location_id, null);
+  assert.equal(relocated.active_state_constraints.location_id, null);
+  assert.deepEqual(relocated.ref_needs, [{ kind: "character", ref_id: "joey", subject: "Joey" }]);
+});
+console.log("visual-beat-exact-repair-tests passed");

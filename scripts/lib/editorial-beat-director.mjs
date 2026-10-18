@@ -6,6 +6,8 @@ import {
   visualBeatQualityContractSchema,
 } from "./visual-beat-quality-contract.mjs";
 
+const SOURCE_SCENE_LOCATION_SCHEMA = "goldflow_editorial_source_scene_location_v1";
+
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
 }
@@ -497,8 +499,19 @@ export function retimeLockedEditorialBeats(lockedBeats, freshAtoms) {
     const dominantSceneId = [...sceneDurations.entries()]
       .sort((left, right) => right[1] - left[1])[0]?.[0] ?? first.scene_id ?? beat.parent_scene_id ?? beat.scene_id ?? null;
     const dominantAtom = selected.find((atom) => atom.scene_id === dominantSceneId) ?? first;
+    let sourceLocationFields = {};
+    if (beat.location_id === null || beat.location_provenance?.schema === SOURCE_SCENE_LOCATION_SCHEMA) {
+      const sourceLocation = sourceSceneLocation(selected);
+      if (!isSourceSceneLocationBeat(beat) || !sourceLocation
+        || sourceLocation.location !== beat.location
+        || sourceLocation.provenance.scene_id !== beat.location_provenance.scene_id) {
+        throw new Error(`Locked beat ${beat.visual_beat_id ?? "unknown"} source scene location changed or lost its evidence. Explicit location repair is required.`);
+      }
+      sourceLocationFields = { location_provenance: sourceLocation.provenance };
+    }
     return {
       ...beat,
+      ...sourceLocationFields,
       parent_scene_id: dominantSceneId,
       scene_id: dominantSceneId,
       semantic_location: dominantAtom.semantic_location ?? beat.semantic_location ?? null,
@@ -558,6 +571,60 @@ function canonicalAssetId(value, rows, idField) {
     ...(row.aliases ?? []),
   ].some((candidate) => canonicalId(candidate) === label));
   return matches.length === 1 ? matches[0][idField] : null;
+}
+
+function sourceSceneLocation(atoms, canonicalLocations = []) {
+  if (!atoms.length) return null;
+  const sceneId = atoms[0]?.scene_id;
+  const location = atoms[0]?.semantic_scene?.location;
+  if (typeof sceneId !== "string" || !sceneId.trim()
+    || typeof location !== "string" || !location.trim()) return null;
+  if (atoms.some((atom) => atom?.scene_id !== sceneId
+    || atom.semantic_scene?.scene_id !== sceneId
+    || atom.semantic_scene?.location !== location
+    || atom.semantic_location !== location)) return null;
+  const locationKey = canonicalId(location);
+  if (canonicalLocations.some((row) => [row.location_id, row.display_name, ...(row.aliases ?? [])]
+    .some((label) => canonicalId(label) === locationKey))) return null;
+
+  // These atoms come from the current, hash-bound timed scene plan. Preserve
+  // its literal location; do not infer a venue or manufacture a canonical ID.
+  const evidence = atoms.map((atom) => ({
+    atom_id: atom.atom_id,
+    source_word_start_index: atom.source_word_start_index,
+    source_word_end_index: atom.source_word_end_index,
+    text: atom.text,
+    scene_id: atom.scene_id,
+    semantic_location: atom.semantic_location,
+    semantic_scene: { scene_id: atom.semantic_scene.scene_id, location: atom.semantic_scene.location },
+  }));
+  return {
+    location,
+    provenance: {
+      schema: SOURCE_SCENE_LOCATION_SCHEMA,
+      source: "semantic_scene.location",
+      scene_id: sceneId,
+      location,
+      source_atom_ids: atoms.map((atom) => atom.atom_id),
+      scene_location_sha256: sha256(JSON.stringify({ scene_id: sceneId, location })),
+      source_atom_evidence_sha256: sha256(JSON.stringify(evidence)),
+    },
+  };
+}
+
+export function isSourceSceneLocationBeat(beat) {
+  const provenance = beat?.location_provenance;
+  return beat?.location_id === null
+    && provenance?.schema === SOURCE_SCENE_LOCATION_SCHEMA
+    && provenance.source === "semantic_scene.location"
+    && typeof provenance.scene_id === "string" && Boolean(provenance.scene_id.trim())
+    && provenance.scene_id === beat.scene_id && provenance.scene_id === beat.parent_scene_id
+    && typeof provenance.location === "string" && Boolean(provenance.location.trim())
+    && provenance.location === beat.location && provenance.location === beat.local_location
+    && Array.isArray(provenance.source_atom_ids) && provenance.source_atom_ids.length > 0
+    && JSON.stringify(provenance.source_atom_ids) === JSON.stringify(beat.source_atom_ids)
+    && provenance.scene_location_sha256 === sha256(JSON.stringify({ scene_id: provenance.scene_id, location: provenance.location }))
+    && /^[a-f0-9]{64}$/.test(provenance.source_atom_evidence_sha256 ?? "");
 }
 
 export function buildEditorialDirectorPrompt(atoms, factLedger, timedScenes = [], options = {}) {
@@ -789,7 +856,10 @@ function groupingFindings(rows, atoms, factLedger, options = {}) {
     if (atomRows.slice(1).some(({ atom }) => atom.transition_barrier_before)) {
       findings.push({ severity: "blocker", code: "editorial_crossed_transition_barrier", row_index: rowIndex });
     }
-    if (!locationIds.has(String(row.location_id ?? ""))) findings.push({ severity: "blocker", code: "editorial_unknown_location", row_index: rowIndex });
+    const sourceLocation = row.location_id === null
+      ? sourceSceneLocation(atomRows.map(({ atom }) => atom), dictionaries.locations)
+      : null;
+    if (!sourceLocation && !locationIds.has(String(row.location_id ?? ""))) findings.push({ severity: "blocker", code: "editorial_unknown_location", row_index: rowIndex });
     for (const prop of row.props ?? []) {
       const propId = prop && typeof prop === "object" ? canonicalId(prop.prop_id ?? prop.canonical_id) : "";
       if (propId && !propIds.has(propId)) findings.push({ severity: "blocker", code: "editorial_unknown_prop", row_index: rowIndex, prop_id: propId });
@@ -866,7 +936,7 @@ export function normalizeEditorialGrouping(raw, atoms, factLedger, episode, opti
   const rows = Array.isArray(raw?.beats) ? raw.beats.map((row) => ({
     ...row,
     ...normalizeVisualBeatQuality(row),
-    location_id: canonicalId(row.location_id),
+    location_id: row.location_id === null ? null : canonicalId(row.location_id),
     physically_visible_entity_ids: (row.physically_visible_entity_ids ?? []).map(canonicalId).filter(Boolean),
     screen_visible_entity_ids: (row.screen_visible_entity_ids ?? []).map(canonicalId).filter(Boolean),
     preview_visible_entity_ids: (row.preview_visible_entity_ids ?? []).map(canonicalId).filter(Boolean),
@@ -930,6 +1000,9 @@ export function normalizeEditorialGrouping(raw, atoms, factLedger, episode, opti
     ]);
     const mentionedIds = unique(row.mentioned_only_entity_ids ?? []).filter((id) => !visibleIds.includes(id));
     const scene = first.semantic_scene ?? {};
+    const sourceLocation = row.location_id === null ? sourceSceneLocation(selected, dictionaries.locations) : null;
+    const location = sourceLocation?.location
+      ?? locationMap.get(String(row.location_id))?.display_name ?? String(row.location_id);
     return {
       ...scene,
       scene_id: first.scene_id ?? scene.scene_id,
@@ -949,9 +1022,10 @@ export function normalizeEditorialGrouping(raw, atoms, factLedger, episode, opti
       visual_job: String(row.visual_job),
       suggested_shot_job: String(row.shot_job),
       depiction_mode: String(row.depiction_mode),
-      location_id: String(row.location_id),
-      location: locationMap.get(String(row.location_id))?.display_name ?? String(row.location_id),
-      local_location: locationMap.get(String(row.location_id))?.display_name ?? String(row.location_id),
+      location_id: row.location_id === null ? null : String(row.location_id),
+      location,
+      local_location: location,
+      ...(sourceLocation ? { location_provenance: sourceLocation.provenance } : {}),
       physically_visible_entity_ids: unique(row.physically_visible_entity_ids ?? []),
       screen_visible_entity_ids: unique(row.screen_visible_entity_ids ?? []),
       preview_visible_entity_ids: unique(row.preview_visible_entity_ids ?? []),

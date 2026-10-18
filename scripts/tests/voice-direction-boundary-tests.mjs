@@ -318,7 +318,7 @@ try {
   let creativeSubmissionCount = 0;
   const invalidPlannerExecutor = async () => {
     creativeSubmissionCount += 1;
-    return { content: "{}", provider: "codex_cli", model: "gpt-5.6-sol", reasoning_effort: "medium" };
+    return { content: "{}", provider: "codex_cli", model: "gpt-6-sol", reasoning_effort: "medium" };
   };
   await assert.rejects(() => authorNarrationPerformanceDirection({
     atomicUnits,
@@ -386,7 +386,7 @@ try {
     assert.ok(options.timeoutMs <= 480_000);
     return {
       provider: "codex_cli",
-      model: "gpt-5.6-sol",
+      model: "gpt-6-sol",
       reasoning_effort: "medium",
       content: JSON.stringify({
         chapters: [{

@@ -1756,19 +1756,32 @@ function transcriptInputText(value) {
     : String(value ?? "");
 }
 
+export const TRANSCRIPT_QA_COMPARISON_VERSION = "unicode_words_exact_im_numeric_currency_cents_half_scale_v10";
+
+const TRANSCRIPT_PUNCTUATION = new Set([".", ",", ";", ":", "!", "?", "…"]);
+
 function rawTranscriptTokens(value) {
   return (transcriptInputText(value)
-    .replace(/\b(\d{1,3})\s+,(\d{3})\b/g, "$1$2")
-    .replace(/\b(\d{1,3}),?\s+(?=\d{3}\b)/g, "$1")
-    .replace(/\bI['’]d\s+not\b/gi, "I did not")
+    .normalize("NFC")
+    .replace(/−/g, "-")
+    .replace(/\b(\d{1,3})\s+,(\d{3})\b/g, "$1,$2")
+    .replace(/([+-])\s*\$\s*(?=\d)/g, (_match, sign) => `$${sign}`)
+    .replace(/\$\s*([+-])\s+(?=\d)/g, (_match, sign) => `$${sign}`)
+    // Comparison equivalence only: preserve the source and recognized text.
+    // Do not expand ambiguous 's/'d forms or an unpunctuated name such as Im.
+    .replace(/(?<![\p{L}\p{M}])I['’]m(?![\p{L}\p{M}])/giu, "I am")
     .replace(/\b(thousand|million|billion)fold\b/gi, "$1 fold")
-    .replace(/([A-Za-z])[-‐‑‒–—]([A-Za-z])/gu, "$1 $2")
-    .match(/[+-]?\d[\d,]*(?:\.\d+)?(?:st|nd|rd|th|%|[xXsS])?|[A-Za-z]+(?:['’][A-Za-z]+)?\.?|[/%]/g) ?? [])
+    .replace(/([\p{L}\p{M}])[-‐‑‒–—]([\p{L}\p{M}])/gu, "$1 $2")
+    .match(/[+-]?\d+(?:,\d{3})*(?:\.\d+)?(?:st|nd|rd|th|%|[xXsS])?|\bSt\.|[\p{L}\p{M}]+(?:['’][\p{L}\p{M}]+)?|[/$%.,;:!?…]/giu) ?? [])
     .map((raw) => {
       const lower = raw.toLowerCase();
       if (lower === "st.") return "saint";
-      if (/^[+-]?\d/.test(lower) || lower === "/" || lower === "%") return lower.replaceAll(",", "");
-      return lower.replace(/[.'’]/g, "").replace(/[^a-z0-9]+/g, "");
+      // Preserve the lexical contraction; stripping its apostrophe creates the
+      // unrelated protected initialism ID. Its had/would sense is not inferred.
+      if (/^i['’]d$/.test(lower)) return "i'd";
+      if (TRANSCRIPT_PUNCTUATION.has(lower)) return lower;
+      if (/^[+-]?\d/.test(lower) || ["/", "%", "$"].includes(lower)) return lower.replaceAll(",", "");
+      return lower.replace(/[.'’]/g, "").replace(/[^\p{L}\p{M}0-9]+/gu, "");
     })
     .filter(Boolean);
 }
@@ -1777,6 +1790,35 @@ function normalizedNumberString(value) {
   if (!Number.isFinite(value)) return null;
   if (Number.isInteger(value)) return String(value);
   return String(Number(value.toFixed(12)));
+}
+
+function parseBelowHundred(tokens, start) {
+  const token = tokens[start];
+  if (NUMBER_UNITS.has(token)) return { value: NUMBER_UNITS.get(token), end: start + 1 };
+  if (!NUMBER_TENS.has(token)) return null;
+  const unit = NUMBER_UNITS.get(tokens[start + 1]);
+  return unit > 0 && unit < 10
+    ? { value: NUMBER_TENS.get(token) + unit, end: start + 2 }
+    : { value: NUMBER_TENS.get(token), end: start + 1 };
+}
+
+function parseCardinalGroup(tokens, start) {
+  let group = tokens[start] === "a" && tokens[start + 1] === "hundred"
+    ? { value: 1, end: start + 1 }
+    : parseBelowHundred(tokens, start);
+  if (tokens[start] === "hundred") group = { value: 100, end: start + 1 };
+  else if (group?.value > 0 && tokens[group.end] === "hundred") {
+    // Conventional forms include "twelve hundred" and "twenty-five hundred".
+    group = { value: group.value * 100, end: group.end + 1 };
+  }
+  else return group;
+  const remainderStart = group.end + (tokens[group.end] === "and" ? 1 : 0);
+  const remainder = parseBelowHundred(tokens, remainderStart);
+  // "One hundred and two hundred" is two amounts, not 102 * 100.
+  if (remainder && tokens[remainder.end] !== "hundred") {
+    return { value: group.value + remainder.value, end: remainder.end };
+  }
+  return group;
 }
 
 function parseNumberAt(tokens, start) {
@@ -1795,6 +1837,11 @@ function parseNumberAt(tokens, start) {
   if (direct) {
     let value = Number(direct[1]);
     let end = start + 1;
+    if (!direct[2] && tokens[end] === "and" && tokens[end + 1] === "a"
+      && tokens[end + 2] === "half" && NUMBER_SCALES.has(tokens[end + 3])) {
+      value += 0.5;
+      end += 3;
+    }
     if (!direct[2] && NUMBER_SCALES.has(tokens[end])) {
       value *= NUMBER_SCALES.get(tokens[end]);
       end += 1;
@@ -1811,63 +1858,62 @@ function parseNumberAt(tokens, start) {
     negative = true;
     index += 1;
   }
+  const implicitArticle = tokens[index] === "a"
+    && (tokens[index + 1] === "hundred" || NUMBER_SCALES.has(tokens[index + 1]));
   let total = 0;
-  let current = 0;
+  let previousScale = Infinity;
   let sawNumber = false;
-  let decimalDigits = "";
   while (index < tokens.length) {
-    const token = tokens[index];
-    if (NUMBER_UNITS.has(token)) {
-      current += NUMBER_UNITS.get(token);
-      sawNumber = true;
-      index += 1;
-      continue;
-    }
-    if (NUMBER_TENS.has(token)) {
-      current += NUMBER_TENS.get(token);
-      sawNumber = true;
-      index += 1;
-      continue;
-    }
-    if (token === "hundred") {
-      current = Math.max(1, current) * 100;
-      sawNumber = true;
-      index += 1;
-      continue;
-    }
-    if (NUMBER_SCALES.has(token) && sawNumber) {
-      total += Math.max(1, current) * NUMBER_SCALES.get(token);
-      current = 0;
-      index += 1;
-      continue;
-    }
-    if (token === "and" && sawNumber && (current >= 100 || total > 0)
-      && (NUMBER_UNITS.has(tokens[index + 1]) || NUMBER_TENS.has(tokens[index + 1]) || tokens[index + 1] === "hundred")) {
-      index += 1;
-      continue;
-    }
-    if (token === "point" && sawNumber) {
-      let cursor = index + 1;
+    let groupStart = index;
+    // A comma/and may connect descending scales, but never independent amounts
+    // with repeated/increasing scales. Other punctuation always ends a number.
+    if (sawNumber && tokens[groupStart] === ",") groupStart += 1;
+    if (sawNumber && tokens[groupStart] === "and") groupStart += 1;
+    const group = tokens[groupStart] === "a" && NUMBER_SCALES.has(tokens[groupStart + 1])
+      ? { value: 1, end: groupStart + 1 }
+      : !sawNumber && NUMBER_SCALES.has(tokens[groupStart])
+      ? { value: 1, end: groupStart }
+      : parseCardinalGroup(tokens, groupStart);
+    if (!group) break;
+    let value = group.value;
+    let end = group.end;
+    if (tokens[end] === "point") {
+      let decimalDigits = "";
+      let cursor = end + 1;
       while (NUMBER_UNITS.has(tokens[cursor]) && NUMBER_UNITS.get(tokens[cursor]) <= 9) {
         decimalDigits += String(NUMBER_UNITS.get(tokens[cursor]));
         cursor += 1;
       }
-      if (decimalDigits) index = cursor;
-      break;
+      if (decimalDigits) {
+        value = Number(`${value}.${decimalDigits}`);
+        end = cursor;
+      }
     }
-    break;
+    // A fractional scale such as "nineteen and a half million" is one
+    // amount. Require the scale so unrelated adjacent numbers remain separate.
+    if (tokens[end] === "and" && tokens[end + 1] === "a"
+      && tokens[end + 2] === "half" && NUMBER_SCALES.has(tokens[end + 3])) {
+      value += 0.5;
+      end += 3;
+    }
+    const scale = NUMBER_SCALES.get(tokens[end]) ?? 1;
+    if (scale >= previousScale || value * scale >= previousScale) break;
+    total += value * scale;
+    sawNumber = true;
+    index = end + (scale > 1 ? 1 : 0);
+    if (scale === 1) break;
+    previousScale = scale;
   }
   if (!sawNumber) return null;
-  const integer = total + current;
-  const value = decimalDigits ? Number(`${integer}.${decimalDigits}`) : integer;
   return {
-    value: normalizedNumberString(negative ? -value : value),
+    value: normalizedNumberString(negative ? -total : total),
     end: index,
     suffix: null,
+    implicit_article: implicitArticle,
   };
 }
 
-function canonicalTranscriptTokensWithoutAliases(value) {
+function canonicalTranscriptTokensWithoutAliases(value, preserveBoundaries = false) {
   const base = rawTranscriptTokens(value);
   const compounds = [];
   for (let index = 0; index < base.length; index += 1) {
@@ -1889,17 +1935,56 @@ function canonicalTranscriptTokensWithoutAliases(value) {
     } else if (base[index] === "after" && base[index + 1] === "life") {
       compounds.push("afterlife");
       index += 1;
+    } else if (base[index] === "all" && base[index + 1] === "right") {
+      // These spellings are acoustically indistinguishable. Preserve both
+      // source and ASR transcripts while comparing one spoken token.
+      compounds.push("alright");
+      index += 1;
+    } else if (base[index] === "door" && base[index + 1] === "frame") {
+      compounds.push("doorframe");
+      index += 1;
+    } else if (base[index] === "bed" && base[index + 1] === "frame") {
+      compounds.push("bedframe");
+      index += 1;
+    } else if (base[index] === "cold" && base[index + 1] === "water") {
+      compounds.push("coldwater");
+      index += 1;
+    } else if (base[index] === "wi" && base[index + 1] === "fi") {
+      compounds.push("wifi");
+      index += 1;
+    } else if (base[index] === "every" && base[index + 1] === "body") {
+      compounds.push("everybody");
+      index += 1;
     } else {
       compounds.push(base[index]);
     }
   }
   const output = [];
   for (let index = 0; index < compounds.length;) {
-    const parsed = parseNumberAt(compounds, index);
+    if (TRANSCRIPT_PUNCTUATION.has(compounds[index])) {
+      if (preserveBoundaries) output.push("transcript_boundary");
+      index += 1;
+      continue;
+    }
+    const dollarSymbol = compounds[index] === "$";
+    const parsed = parseNumberAt(compounds, index + (dollarSymbol ? 1 : 0));
     if (parsed?.value != null) {
-      const ratioMarker = compounds[parsed.end] === "/" || (
+      if (compounds[index - 1] === "the" && output.at(-1) === "the") {
+        output[output.length - 1] = "numeric_article:the";
+      }
+      const dollarWord = /^dollars?$/.test(compounds[parsed.end] ?? "")
+        ? compounds[parsed.end] : null;
+      const cents = dollarWord && compounds[parsed.end + 1] === "and"
+        ? parseNumberAt(compounds, parsed.end + 2) : null;
+      const dollarCents = cents && compounds[cents.end] === "cents"
+        && !cents.suffix && Number.isInteger(Number(cents.value))
+        && Number(cents.value) > 0 && Number(cents.value) < 100
+        ? { value: normalizedNumberString(Number(parsed.value) + Number(cents.value) / 100),
+          end: cents.end + 1 } : null;
+      const amountValue = dollarCents?.value ?? parsed.value;
+      const ratioMarker = !dollarCents && (compounds[parsed.end] === "/" || (
         compounds[parsed.end] === "out" && compounds[parsed.end + 1] === "of"
-      );
+      ));
       const ratioStart = compounds[parsed.end] === "/" ? parsed.end + 1 : parsed.end + 2;
       const right = ratioMarker ? parseNumberAt(compounds, ratioStart) : null;
       if (right?.value != null) {
@@ -1910,16 +1995,28 @@ function canonicalTranscriptTokensWithoutAliases(value) {
       const suffix = parsed.suffix
         ?? (compounds[parsed.end] === "%" || compounds[parsed.end] === "percent" ? "percent" : null)
         ?? (compounds[parsed.end] === "times" ? "times" : null);
-      output.push(suffix === "%" || suffix === "percent"
-        ? `pct:${parsed.value}`
+      const numberToken = suffix === "%" || suffix === "percent"
+        ? `pct:${amountValue}`
         : suffix === "x" || suffix === "times"
-        ? `times:${parsed.value}`
+        ? `times:${amountValue}`
         : suffix === "ordinal"
-        ? `ord:${parsed.value}`
+        ? `ord:${amountValue}`
         : suffix === "decade"
-        ? `decade:${parsed.value}`
-        : `num:${parsed.value}`);
+        ? `decade:${amountValue}`
+        : `${dollarSymbol ? "usd" : "num"}:${amountValue}`;
+      output.push(parsed.implicit_article ? `implicit_article:${numberToken}` : numberToken);
       index = parsed.end + (parsed.suffix ? 0 : suffix ? 1 : 0);
+      if (dollarCents) {
+        output.push(`currency_unit:${dollarWord}`);
+        index = dollarCents.end;
+        continue;
+      }
+      // Retain source adjacency before punctuation is discarded. An unrelated
+      // "Dollars" in the following sentence cannot supply this amount's unit.
+      if (!suffix && /^dollars?$/.test(compounds[index] ?? "")) {
+        output.push(`currency_unit:${compounds[index]}`);
+        index += 1;
+      }
       continue;
     }
     if (/^[a-z]$/.test(compounds[index])) {
@@ -1928,6 +2025,7 @@ function canonicalTranscriptTokensWithoutAliases(value) {
       while (end < compounds.length && /^[a-z]$/.test(compounds[end])) {
         letters += compounds[end];
         end += 1;
+        if (compounds[end] === ".") end += 1;
       }
       if (letters.length >= 2) {
         output.push(`abbr:${letters}`);
@@ -1963,8 +2061,8 @@ function replaceTokenSequence(tokens, pattern, replacement) {
   return output;
 }
 
-function transcriptTokens(value, equivalentPhrases = []) {
-  let tokens = canonicalTranscriptTokensWithoutAliases(value);
+function transcriptTokens(value, equivalentPhrases = [], preserveBoundaries = false) {
+  let tokens = canonicalTranscriptTokensWithoutAliases(value, preserveBoundaries);
   const aliases = equivalentPhrases.flatMap((row, index) => {
     const from = canonicalTranscriptTokensWithoutAliases(row?.from ?? "");
     const to = canonicalTranscriptTokensWithoutAliases(row?.to ?? "");
@@ -1974,6 +2072,54 @@ function transcriptTokens(value, equivalentPhrases = []) {
   }).sort((left, right) => right.pattern.length - left.pattern.length);
   for (const { pattern, alias } of aliases) tokens = replaceTokenSequence(tokens, pattern, alias);
   return tokens;
+}
+
+function alignTranscriptNotation(intendedTokens, recognizedTokens) {
+  const stripSymbol = (token) => token.replace(/^implicit_article:/, "")
+    .replace(/^usd:/, "num:").replace(/^(?:currency_unit|numeric_article):/, "");
+  const intended = intendedTokens.map(stripSymbol);
+  const recognized = recognizedTokens.map(stripSymbol);
+  if (![...intendedTokens, ...recognizedTokens].some((token) => /^(?:implicit_article:)?usd:|^implicit_article:/.test(token))) {
+    return { intended, recognized };
+  }
+  const intendedUnits = new Map();
+  const recognizedUnits = new Map();
+  const intendedArticles = new Map();
+  const recognizedArticles = new Map();
+  const dollarSymbol = (token) => /^(?:implicit_article:)?usd:/.test(token);
+  const dollarUnit = (token) => /^currency_unit:dollars?$/.test(token ?? "");
+  let left = 0;
+  let right = 0;
+  // The symbol supplies a spoken currency unit only beside an aligned equal
+  // amount. Without a symbol, an omitted "dollar" remains an omitted word.
+  for (const operation of transcriptAlignment(intended, recognized)) {
+    if (operation.type === "match" && operation.intended.startsWith("num:")) {
+      // Restore only an actual consumed "a", opposite an adjacent literal
+      // "the". "The thousand" / "a thousand" is an article substitution;
+      // plain 1000 cannot invent an article or hide an omitted "the".
+      if (intendedTokens[left].startsWith("implicit_article:")
+        && recognizedTokens[right - 1] === "numeric_article:the") intendedArticles.set(left, "a");
+      if (recognizedTokens[right].startsWith("implicit_article:")
+        && intendedTokens[left - 1] === "numeric_article:the") recognizedArticles.set(right, "a");
+      if (dollarSymbol(intendedTokens[left])
+        && dollarUnit(recognizedTokens[right + 1]) && !dollarUnit(intendedTokens[left + 1])) {
+        intendedUnits.set(left, recognized[right + 1]);
+      }
+      if (dollarSymbol(recognizedTokens[right])
+        && dollarUnit(intendedTokens[left + 1]) && !dollarUnit(recognizedTokens[right + 1])) {
+        recognizedUnits.set(right, intended[left + 1]);
+      }
+    }
+    if (operation.type !== "insertion") left += 1;
+    if (operation.type !== "deletion") right += 1;
+  }
+  const withNotation = (tokens, articles, units) => tokens.flatMap((token, index) => (
+    [...(articles.has(index) ? [articles.get(index)] : []), token, ...(units.has(index) ? [units.get(index)] : [])]
+  ));
+  return {
+    intended: withNotation(intended, intendedArticles, intendedUnits),
+    recognized: withNotation(recognized, recognizedArticles, recognizedUnits),
+  };
 }
 
 function transcriptAlignment(intended, recognized) {
@@ -2028,17 +2174,158 @@ function longestRun(operations, type) {
   return longest;
 }
 
+function transcriptBoundaryPositions(text, expectedLength, equivalentPhrases) {
+  const tokens = transcriptTokens(text, equivalentPhrases, true);
+  let wordIndex = 0;
+  const positions = new Set();
+  for (const token of tokens) {
+    if (token === "transcript_boundary") positions.add(wordIndex);
+    else wordIndex += 1;
+  }
+  // Currency/article expansion or an alias spanning punctuation changes the
+  // coordinates. Do not guess an alignment in that case.
+  return wordIndex === expectedLength ? positions : null;
+}
+
+function alignContractionRecognition(operations, intended, recognized, intendedText, recognizedText, equivalentPhrases) {
+  if (!operations.some((row) => row.type !== "match" && [row.intended, row.recognized].includes("gonna"))) return [];
+  const leftBoundaries = transcriptBoundaryPositions(intendedText, intended.length, equivalentPhrases);
+  const rightBoundaries = transcriptBoundaryPositions(recognizedText, recognized.length, equivalentPhrases);
+  if (!leftBoundaries || !rightBoundaries) return [];
+  const normalized = [];
+  const equivalences = [];
+  let left = 0;
+  let right = 0;
+  for (let index = 0; index < operations.length; index += 1) {
+    const pair = operations.slice(index, index + 2);
+    const source = pair.flatMap((row) => row.intended == null ? [] : [row.intended]);
+    const heard = pair.flatMap((row) => row.recognized == null ? [] : [row.recognized]);
+    const expanded = source.join(" ") === "going to" && heard.join(" ") === "gonna"
+      && !leftBoundaries.has(left + 1);
+    const contracted = source.join(" ") === "gonna" && heard.join(" ") === "going to"
+      && !rightBoundaries.has(right + 1);
+    if (pair.length === 2 && (expanded || contracted)
+      && leftBoundaries.has(left) === rightBoundaries.has(right)
+      && leftBoundaries.has(left + source.length) === rightBoundaries.has(right + heard.length)) {
+      // Rewrite only recognition notation at this aligned span. The intended
+      // tokens retain stable source coordinates and omissions retain both words.
+      normalized.push(...source.map((token) => ({ type: "match", intended: token, recognized: token })));
+      equivalences.push({ intended_index: left, recognized_index: right, intended: source.join(" "), recognized: heard.join(" "), rule: "explicit_going_to_gonna" });
+      left += source.length;
+      right += heard.length;
+      index += 1;
+    } else {
+      const operation = operations[index];
+      normalized.push(operation);
+      if (operation.type !== "insertion") left += 1;
+      if (operation.type !== "deletion") right += 1;
+    }
+  }
+  operations.splice(0, operations.length, ...normalized);
+  recognized.splice(0, recognized.length, ...normalized.flatMap((row) => row.recognized == null ? [] : [row.recognized]));
+  return equivalences;
+}
+
+function alignTwoRecognitionSpelling(operations, intended, recognized, intendedText, recognizedText, equivalentPhrases) {
+  if (!operations.some((row) => row.type === "substitution"
+    && ((row.intended === "num:2" && row.recognized === "too")
+      || (row.intended === "too" && row.recognized === "num:2")))) return [];
+  const leftBoundaries = transcriptBoundaryPositions(intendedText, intended.length, equivalentPhrases);
+  const rightBoundaries = transcriptBoundaryPositions(recognizedText, recognized.length, equivalentPhrases);
+  if (!leftBoundaries || !rightBoundaries) return [];
+  const equivalences = [];
+  let left = 0;
+  let right = 0;
+  for (let index = 0; index < operations.length; index += 1) {
+    const operation = operations[index];
+    const previous = operations[index - 1];
+    const next = operations[index + 1];
+    if (operation.type === "substitution"
+      && ((operation.intended === "num:2" && operation.recognized === "too")
+        || (operation.intended === "too" && operation.recognized === "num:2"))
+      && (!previous || previous.type === "match") && (!next || next.type === "match")
+      && leftBoundaries.has(left) === rightBoundaries.has(right)
+      && leftBoundaries.has(left + 1) === rightBoundaries.has(right + 1)
+      && (operation.intended !== "too" || leftBoundaries.has(left + 1))) {
+      // The approved value supplies meaning; ASR supplies an explicit homophone
+      // at that same position. Never invent a missing token or reinterpret "to".
+      recognized[right] = operation.intended;
+      operations[index] = { type: "match", intended: operation.intended, recognized: operation.intended };
+      equivalences.push({ intended_index: left, recognized_index: right, intended: operation.intended, recognized: operation.recognized, rule: "aligned_two_too_spelling" });
+    }
+    if (operation.type !== "insertion") left += 1;
+    if (operation.type !== "deletion") right += 1;
+  }
+  return equivalences;
+}
+
+const ALIGNED_HOMOPHONE_SPELLINGS = new Map([
+  ["flour", "flower"], ["flower", "flour"],
+  ["queue", "cue"], ["cue", "queue"],
+]);
+
+function alignLiteralHomophoneRecognition(operations, intended, recognized, intendedText, recognizedText, equivalentPhrases) {
+  if (!operations.some((row) => row.type === "substitution"
+    && ALIGNED_HOMOPHONE_SPELLINGS.get(row.intended) === row.recognized)) return [];
+  const leftBoundaries = transcriptBoundaryPositions(intendedText, intended.length, equivalentPhrases);
+  const rightBoundaries = transcriptBoundaryPositions(recognizedText, recognized.length, equivalentPhrases);
+  if (!leftBoundaries || !rightBoundaries) return [];
+  const equivalences = [];
+  let left = 0;
+  let right = 0;
+  for (let index = 0; index < operations.length; index += 1) {
+    const operation = operations[index];
+    const previous = operations[index - 1];
+    const next = operations[index + 1];
+    if (operation.type === "substitution"
+      && ALIGNED_HOMOPHONE_SPELLINGS.get(operation.intended) === operation.recognized
+      && (!previous || previous.type === "match") && (!next || next.type === "match")
+      && (previous?.type === "match" || next?.type === "match")
+      && leftBoundaries.has(left) === rightBoundaries.has(right)
+      && leftBoundaries.has(left + 1) === rightBoundaries.has(right + 1)) {
+      // Only the ASR spelling changes at this already aligned spoken word.
+      // Source tokens, missing words, adjacent edits, and sentence boundaries
+      // remain available to the delivery gate.
+      recognized[right] = operation.intended;
+      operations[index] = { type: "match", intended: operation.intended, recognized: operation.intended };
+      equivalences.push({
+        intended_index: left, recognized_index: right,
+        intended: operation.intended, recognized: operation.recognized,
+        rule: "aligned_literal_homophone_spelling",
+      });
+    }
+    if (operation.type !== "insertion") left += 1;
+    if (operation.type !== "deletion") right += 1;
+  }
+  return equivalences;
+}
+
 function transcriptQa(intendedText, recognizedText, {
   maxWer = unitQaMaxWer,
   equivalentPhrases = [],
   blockAnySubstitution = true,
   blockIsolatedEdits = true,
 } = {}) {
-  const intendedRaw = rawTranscriptTokens(intendedText);
-  const recognizedRaw = rawTranscriptTokens(recognizedText);
-  const intended = transcriptTokens(intendedText, equivalentPhrases);
-  const recognized = transcriptTokens(recognizedText, equivalentPhrases);
+  const wordsOnly = (tokens) => tokens.filter((token) => !TRANSCRIPT_PUNCTUATION.has(token) && token !== "$");
+  const intendedRaw = wordsOnly(rawTranscriptTokens(intendedText));
+  const recognizedRaw = wordsOnly(rawTranscriptTokens(recognizedText));
+  const { intended, recognized } = alignTranscriptNotation(
+    transcriptTokens(intendedText, equivalentPhrases), transcriptTokens(recognizedText, equivalentPhrases),
+  );
   const operations = transcriptAlignment(intended, recognized);
+  const phoneticSpellingEquivalences = alignContractionRecognition(
+    operations, intended, recognized, intendedText, recognizedText, equivalentPhrases,
+  );
+  phoneticSpellingEquivalences.push(...alignTwoRecognitionSpelling(
+    operations, intended, recognized, intendedText, recognizedText, equivalentPhrases,
+  ));
+  phoneticSpellingEquivalences.push(...alignLiteralHomophoneRecognition(
+    operations, intended, recognized, intendedText, recognizedText, equivalentPhrases,
+  ));
+  // Preserve edge identity for dual-ASR delivery QA. A clipped syllable can
+  // align as a substitution rather than a missing word.
+  const firstIntendedOperation = operations.find((row) => row.intended != null);
+  const lastIntendedOperation = operations.findLast((row) => row.intended != null);
   const deletions = operations.filter((row) => row.type === "deletion").length;
   const insertions = operations.filter((row) => row.type === "insertion").length;
   const substitutions = operations.filter((row) => row.type === "substitution").length;
@@ -2110,6 +2397,8 @@ function transcriptQa(intendedText, recognizedText, {
     });
   }
   return {
+    comparison_version: TRANSCRIPT_QA_COMPARISON_VERSION,
+    phonetic_spelling_equivalences: phoneticSpellingEquivalences,
     intended_word_count: intendedRaw.length,
     recognized_word_count: recognizedRaw.length,
     intended_canonical_token_count: intended.length,
@@ -2124,6 +2413,8 @@ function transcriptQa(intendedText, recognizedText, {
     longest_insertion_run: insertionRun,
     leading_deletion_run: leadingDeletionRun,
     trailing_deletion_run: trailingDeletionRun,
+    first_token_ok: firstIntendedOperation?.type === "match",
+    last_token_ok: lastIntendedOperation?.type === "match",
     operations,
     findings,
   };
@@ -2903,6 +3194,7 @@ async function prepareStitchInput(row, index, options = {}) {
       sampleCount: sourceSampleCount,
       sampleRate: stitchSampleRate,
       alignment: row.unit_qa?.edge_alignment ?? null,
+      waveformActivity: metrics,
       contract: qualityContract,
     });
     if (editPlan.status !== "passed" || editPlan.retained_sample_count <= 0) {

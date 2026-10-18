@@ -14,6 +14,7 @@ import {
 } from "../apps/goldflow-studio/lib/goldflow-bridge.mjs";
 import {
   appendCodexWorkManifestStream,
+  beginCodexWorkManifestDrain,
   codexWorkSourceRowSha256,
   createCodexWorkManifest,
   getCodexWorkStatus,
@@ -56,7 +57,10 @@ import {
   isHybridWebFlowProvider,
   isStyleReferenceTarget,
 } from "./lib/image-provider-policy.mjs";
+import { reviewedOrphanPromptRepairEvidence } from "./lib/reviewed-orphan-prompt-repair.mjs";
 import { effectiveImageIdentityForEpisode } from "./lib/operator-image-route-override.mjs";
+import { googleImageSchedulingForIdentity } from "./lib/google-image-scheduling.mjs";
+import { PARTIAL_SCENE_QA_SCHEMA, readPartialSceneImageQaRecoveryScope } from "./lib/partial-scene-image-recovery.mjs";
 import { buildImageSemanticAudit } from "./lib/image-semantic-audit.mjs";
 import {
   buildHeroCandidatePromptPlan,
@@ -294,6 +298,7 @@ async function runElectronChatGptManifest({
         browserProvider: "chatgpt",
       });
       if (lease.status !== "leased") {
+        if (lease.no_work_reason === "manifest_draining") return;
         const status = await getCodexWorkStatus({ manifestPath });
         if (status.counts.pending === 0) return;
         await delay(1_000);
@@ -560,22 +565,22 @@ export async function findSourceCompatibleHybridDeadletters({
   return compatibleById;
 }
 
-async function findApprovedManualPromptRepairEvidence({ episodeDir, episode, requestedIds }) {
+async function findApprovedManualPromptRepairEvidence({ episodeDir, episode, currentRows, requestedIds }) {
+  const evidenceById = await reviewedOrphanPromptRepairEvidence({ episodeDir, episode, currentRows, requestedIds });
   const triagePath = path.join(episodeDir, `visual_manual_blocker_triage_${episode}.json`);
   const triage = await readJson(triagePath, null);
-  if (triage?.status !== "approved") return new Map();
+  if (triage?.status !== "approved") return evidenceById;
   const approvedIds = new Set((triage.dispositions ?? [])
     .filter((row) => row?.disposition === "manual_exact_cut_prompt_repair")
     .map((row) => String(row?.image_id ?? ""))
     .filter(Boolean));
-  const wanted = [...requestedIds].filter((assetId) => approvedIds.has(assetId));
-  if (!wanted.length) return new Map();
+  const wanted = [...requestedIds].filter((assetId) => approvedIds.has(assetId) && !evidenceById.has(assetId));
+  if (!wanted.length) return evidenceById;
 
   const stagingRoot = path.join(episodeDir, "assets", "images", "codex_worker_staging");
   const entries = (await fs.readdir(stagingRoot, { withFileTypes: true }).catch(() => []))
     .filter((entry) => entry.isDirectory())
     .sort((left, right) => right.name.localeCompare(left.name));
-  const evidenceById = new Map();
   for (const assetId of wanted) {
     for (const entry of entries) {
       const deadletterPath = path.join(stagingRoot, entry.name, "deadletters", `${assetId}.json`);
@@ -712,7 +717,7 @@ export async function findSourceCompatibleHybridCompletions({
   return selectedById;
 }
 
-async function resolveRepairEvidence({
+export async function resolveRepairEvidence({
   episodeDir,
   episode,
   mode,
@@ -764,6 +769,19 @@ async function resolveRepairEvidence({
       ? path.join(episodeDir, `reference_image_qa_${episode}.json`)
       : path.join(episodeDir, `image_output_qa_${episode}.json`);
     const report = await readJson(reportPath, null);
+    if (mode === "scene" && report?.schema === PARTIAL_SCENE_QA_SCHEMA) {
+      const scope = readPartialSceneImageQaRecoveryScope({ episodeDir, episode });
+      const requested = [...requestedIds];
+      const currentById = new Map(currentRows.map(row => [row.image_id, row]));
+      const rejectedById = new Map(scope.rejected_images.map(row => [row.image_id, row]));
+      if (!requested.length || requested.some(id => !rejectedById.has(id)
+        || !currentById.has(id) || codexWorkSourceRowSha256(currentById.get(id)) !== rejectedById.get(id).source_row_sha256)) {
+        throw new Error("Partial scene QA repair scope is not backed by still-current rejected rasters and corrected prompt rows.");
+      }
+      return { schema: "goldflow_hybrid_image_repair_evidence_v1", kind: "image_output_qa_blockers",
+        authorized_asset_ids: requested,
+        records: [{ path: scope.qa_report_path, sha256: scope.qa_report_sha256 }] };
+    }
     const authorizedIds = [...new Set((report?.findings ?? [])
       .filter((finding) => finding?.severity === "blocker" && (finding?.image_id || finding?.ref_id))
       .map((finding) => String(finding.image_id ?? finding.ref_id)))];
@@ -789,7 +807,9 @@ async function resolveRepairEvidence({
     requestedIds,
   });
   const manualPromptRepairEvidenceById = mode === "scene"
-    ? await findApprovedManualPromptRepairEvidence({ episodeDir, episode, requestedIds })
+    ? await findApprovedManualPromptRepairEvidence({ episodeDir, episode, currentRows,
+        requestedIds: new Set([...requestedIds].filter(id => !evidenceById.has(id))),
+      })
     : new Map();
   const duplicateEvidenceById = new Map();
   const duplicateRecords = [];
@@ -888,6 +908,7 @@ export async function assertHostRuntime(runtimePath, expectedProvider, {
   expectedModelLabel = null,
   requirePreparedWorkerPool = false,
   expectedConcurrency: expectedConcurrencyOverride = null,
+  googleScheduling = null,
 } = {}) {
   const providerLabel = expectedProvider === GOOGLE_FLOW_BROWSER_PROVIDER
     ? "Google Flow"
@@ -929,6 +950,15 @@ export async function assertHostRuntime(runtimePath, expectedProvider, {
       const stateRoot = path.resolve(path.dirname(runtimePath), "..", "..");
       const workerRuntimePath = path.join(stateRoot, `${expectedProvider}-desktop-worker-runtime.json`);
       const workerRuntime = await readJson(workerRuntimePath, null);
+      if (googleScheduling) {
+        const dispatch = workerRuntime?.dispatch_policy ?? {};
+        if (dispatch.google_submit_gate_dir !== path.join(stateRoot, "google-account-submit-gate")
+          || dispatch.google_submit_interval_ms !== googleScheduling.minimum_submit_interval_ms
+          || dispatch.google_submit_jitter_max_ms !== googleScheduling.submit_jitter_max_ms
+          || JSON.stringify(workerRuntime?.types) !== JSON.stringify(["image"])) {
+          throw new Error(`${providerLabel} host does not match the identity-locked shared Google submission gate and image-only worker policy.`);
+        }
+      }
       const expectedConcurrency = expectedConcurrencyOverride == null
         ? (expectedProvider === GOOGLE_FLOW_BROWSER_PROVIDER
             ? HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY
@@ -967,6 +997,7 @@ async function assertMonitoredProviderRuntimes(providerRuntimes, recoveryStarted
         expectedModelLabel: runtime.modelLabel,
         requirePreparedWorkerPool: true,
         expectedConcurrency: runtime.expectedConcurrency,
+        googleScheduling: runtime.googleScheduling,
       });
       recoveryStartedAt.delete(runtime.provider);
     } catch (error) {
@@ -986,8 +1017,9 @@ export function monitoredProviderRuntimes(runtimes, {
   styleOnly = false,
   geminiOnly = false,
   chatgptOnly = false,
+  schedulingRequired = false,
 } = {}) {
-  if (!federated || styleOnly || geminiOnly || chatgptOnly) return runtimes;
+  if (schedulingRequired || !federated || styleOnly || geminiOnly || chatgptOnly) return runtimes;
   const flowRuntimes = runtimes.filter((runtime) => runtime.provider === GOOGLE_FLOW_BROWSER_PROVIDER);
   return flowRuntimes.length ? flowRuntimes : runtimes;
 }
@@ -1000,13 +1032,19 @@ export function hybridManifestDispatchOptions({
   federated = false,
   federatedChatGptEnabled = false,
   mode = "scene",
-  flowConcurrency = HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY,
+  flowConcurrency = null,
   persistentWorkerPool = false,
+  googleScheduling = null,
 } = {}) {
-  const effectiveFlowConcurrency = validateFlowRuntimeConcurrency(flowConcurrency);
+  const effectiveFlowConcurrency = validateFlowRuntimeConcurrency(flowConcurrency ?? googleScheduling?.google_flow_concurrency ?? HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY);
+  if (googleScheduling && effectiveFlowConcurrency > googleScheduling.google_flow_concurrency) {
+    throw new Error("Flow runtime concurrency exceeds the identity-locked Google image scheduling limit.");
+  }
+  const geminiConcurrency = googleScheduling?.google_gemini_concurrency ?? GOOGLE_GEMINI_IMAGE_CONCURRENCY;
   const hybridTotalConcurrency = effectiveFlowConcurrency + HYBRID_CHATGPT_IMAGE_CONCURRENCY;
-  const federatedTotalConcurrency = effectiveFlowConcurrency + GOOGLE_GEMINI_IMAGE_CONCURRENCY
-    + (federatedChatGptEnabled ? HYBRID_CHATGPT_IMAGE_CONCURRENCY : 0);
+  const federatedTotalConcurrency = Math.min(googleScheduling?.total_concurrency ?? Infinity,
+    effectiveFlowConcurrency + geminiConcurrency
+      + (federatedChatGptEnabled ? HYBRID_CHATGPT_IMAGE_CONCURRENCY : 0));
   if (flowOnly && chatgptOnly) throw new Error("A phase cannot be both Flow-only and ChatGPT-only.");
   if (geminiOnly && (flowOnly || chatgptOnly)) throw new Error("A Gemini-only phase cannot select another browser provider.");
   if (styleOnly && geminiOnly) throw new Error("A style-only phase cannot also be Gemini-only.");
@@ -1032,7 +1070,7 @@ export function hybridManifestDispatchOptions({
       workProvider: HYBRID_WEB_FLOW_PROVIDER,
       dispatchPolicy: HYBRID_WEB_FLOW_ASSIGNMENT_POLICY,
       allowedBrowserProviders: [GOOGLE_GEMINI_BROWSER_PROVIDER],
-      browserProviderConcurrency: { [GOOGLE_GEMINI_BROWSER_PROVIDER]: GOOGLE_GEMINI_IMAGE_CONCURRENCY },
+      browserProviderConcurrency: { [GOOGLE_GEMINI_BROWSER_PROVIDER]: geminiConcurrency },
       browserProviderMaxOrderedReferences: { [GOOGLE_GEMINI_BROWSER_PROVIDER]: 4 },
       browserProviderWorkerSessionPolicy: {
         [GOOGLE_GEMINI_BROWSER_PROVIDER]: persistentWorkerPool
@@ -1040,8 +1078,8 @@ export function hybridManifestDispatchOptions({
           : FRESH_BROWSER_SESSION_PER_JOB_POLICY,
       },
       browserProviderReceiptRequired: true,
-      recommendedConcurrency: GOOGLE_GEMINI_IMAGE_CONCURRENCY,
-      maxConcurrency: GOOGLE_GEMINI_IMAGE_CONCURRENCY,
+      recommendedConcurrency: geminiConcurrency,
+      maxConcurrency: geminiConcurrency,
     };
   }
   if (chatgptOnly) {
@@ -1063,7 +1101,7 @@ export function hybridManifestDispatchOptions({
         workProvider: FEDERATED_WEB_IMAGE_PROVIDER,
         dispatchPolicy: HYBRID_WEB_FLOW_ASSIGNMENT_POLICY,
         allowedBrowserProviders: [GOOGLE_GEMINI_BROWSER_PROVIDER],
-        browserProviderConcurrency: { [GOOGLE_GEMINI_BROWSER_PROVIDER]: GOOGLE_GEMINI_IMAGE_CONCURRENCY },
+        browserProviderConcurrency: { [GOOGLE_GEMINI_BROWSER_PROVIDER]: geminiConcurrency },
         browserProviderMaxOrderedReferences: { [GOOGLE_GEMINI_BROWSER_PROVIDER]: 4 },
         browserProviderWorkerSessionPolicy: {
           [GOOGLE_GEMINI_BROWSER_PROVIDER]: persistentWorkerPool
@@ -1071,8 +1109,8 @@ export function hybridManifestDispatchOptions({
             : FRESH_BROWSER_SESSION_PER_JOB_POLICY,
         },
         browserProviderReceiptRequired: true,
-        recommendedConcurrency: GOOGLE_GEMINI_IMAGE_CONCURRENCY,
-        maxConcurrency: GOOGLE_GEMINI_IMAGE_CONCURRENCY,
+        recommendedConcurrency: geminiConcurrency,
+        maxConcurrency: geminiConcurrency,
       };
     }
     return {
@@ -1085,7 +1123,7 @@ export function hybridManifestDispatchOptions({
       ],
       browserProviderConcurrency: {
         [GOOGLE_FLOW_BROWSER_PROVIDER]: effectiveFlowConcurrency,
-        [GOOGLE_GEMINI_BROWSER_PROVIDER]: GOOGLE_GEMINI_IMAGE_CONCURRENCY,
+        [GOOGLE_GEMINI_BROWSER_PROVIDER]: geminiConcurrency,
         ...(federatedChatGptEnabled ? { chatgpt: HYBRID_CHATGPT_IMAGE_CONCURRENCY } : {}),
       },
       browserProviderMaxOrderedReferences: {
@@ -1161,8 +1199,15 @@ async function waitForManifest({ manifestPath, timeoutMs, providerRuntimes }) {
   let lastProgress = "";
   let lastRuntimeCheck = 0;
   const runtimeRecoveryStartedAt = new Map();
+  let providerCircuitError = null;
   while (true) {
-    const status = await getCodexWorkStatus({ manifestPath });
+    let status = await getCodexWorkStatus({ manifestPath });
+    providerCircuitError ??= status.dispatch_drain?.reason ?? null;
+    if (providerCircuitError && status.counts.leased === 0) {
+      // Completion can land between a row's completion and lease reads. Once
+      // admission is closed and leases have drained, take the stable import set.
+      status = await getCodexWorkStatus({ manifestPath, reconcile: false });
+    }
     const progress = JSON.stringify(status.counts);
     if (progress !== lastProgress) {
       process.stderr.write(`[browser-pool] ${path.basename(path.dirname(manifestPath))} ${progress}\n`);
@@ -1170,19 +1215,19 @@ async function waitForManifest({ manifestPath, timeoutMs, providerRuntimes }) {
     }
     if (manifestQueueStopReason(status)) return status;
     if (Date.now() - started > timeoutMs) throw new Error(`Timed out waiting for hybrid browser manifest ${manifestPath}.`);
+    if (providerCircuitError) {
+      if (status.counts.leased === 0) return { ...status, status: "blocked_provider_circuit", provider_runtime_error: providerCircuitError };
+      await delay(2_000);
+      continue;
+    }
     if (Date.now() - lastRuntimeCheck > 15_000) {
       try {
         await assertMonitoredProviderRuntimes(providerRuntimes, runtimeRecoveryStartedAt);
       } catch (error) {
         if (!/provider circuit is open/i.test(String(error?.message ?? ""))) throw error;
-        if (status.counts.leased === 0) {
-          return {
-            ...status,
-            status: "blocked_provider_circuit",
-            provider_runtime_error: String(error.message),
-          };
-        }
-        process.stderr.write(`[browser-pool] Provider circuit opened; draining ${status.counts.leased} in-flight asset(s) before stopping.\n`);
+        await beginCodexWorkManifestDrain({ manifestPath, reason: String(error.message) });
+        providerCircuitError = String(error.message);
+        process.stderr.write("[browser-pool] Provider circuit opened; new leases stopped. Waiting for a fresh drained snapshot before import.\n");
       }
       lastRuntimeCheck = Date.now();
     }
@@ -1197,8 +1242,13 @@ async function waitForManifestAssetIds({ manifestPath, assetIds, timeoutMs, prov
   let lastProgress = "";
   let lastRuntimeCheck = 0;
   const runtimeRecoveryStartedAt = new Map();
+  let providerCircuitError = null;
   while (true) {
-    const status = await getCodexWorkStatus({ manifestPath });
+    let status = await getCodexWorkStatus({ manifestPath });
+    providerCircuitError ??= status.dispatch_drain?.reason ?? null;
+    if (providerCircuitError && status.counts.leased === 0) {
+      status = await getCodexWorkStatus({ manifestPath, reconcile: false });
+    }
     const rows = status.items.filter((row) => wanted.has(row.asset_id));
     const unknown = [...wanted].filter((assetId) => !rows.some((row) => row.asset_id === assetId));
     if (unknown.length) throw new Error(`Streaming manifest does not contain: ${unknown.join(", ")}.`);
@@ -1221,22 +1271,22 @@ async function waitForManifestAssetIds({ manifestPath, assetIds, timeoutMs, prov
       };
     }
     if (Date.now() - started > timeoutMs) throw new Error(`Timed out waiting for streaming browser assets in ${manifestPath}.`);
+    if (providerCircuitError) {
+      if (status.counts.leased === 0) return {
+        ...status, status: "blocked_provider_circuit", item_count: rows.length, counts, items: rows,
+        provider_runtime_error: providerCircuitError,
+      };
+      await delay(2_000);
+      continue;
+    }
     if (Date.now() - lastRuntimeCheck > 15_000) {
       try {
         await assertMonitoredProviderRuntimes(providerRuntimes, runtimeRecoveryStartedAt);
       } catch (error) {
         if (!/provider circuit is open/i.test(String(error?.message ?? ""))) throw error;
-        if (counts.leased === 0) {
-          return {
-            ...status,
-            status: "blocked_provider_circuit",
-            item_count: rows.length,
-            counts,
-            items: rows,
-            provider_runtime_error: String(error.message),
-          };
-        }
-        process.stderr.write(`[browser-pool-stream] Provider circuit opened; draining ${counts.leased} in-flight asset(s) before stopping.\n`);
+        await beginCodexWorkManifestDrain({ manifestPath, reason: String(error.message) });
+        providerCircuitError = String(error.message);
+        process.stderr.write("[browser-pool-stream] Provider circuit opened; new leases stopped. Waiting for all existing manifest leases to drain.\n");
       }
       lastRuntimeCheck = Date.now();
     }
@@ -1314,6 +1364,20 @@ async function providerStreamingScopeSummary(manifestPath, status) {
     validation_status: validation?.status ?? "not_applicable_no_completions",
     streaming_queue: status.streaming_queue ?? null,
   };
+}
+
+export function streamingBatchCompletionStatus(phase, exactAssetIds) {
+  const requested = new Set(exactAssetIds);
+  const completed = new Set([...(phase.completed_asset_ids ?? []), ...(phase.reconciled_asset_ids ?? [])]);
+  const passed = requested.size > 0
+    && phase.status === "completed"
+    && !(phase.failed_asset_ids ?? []).length
+    && !(phase.pending_asset_ids ?? []).length
+    && Number(phase.counts?.pending ?? 0) === 0
+    && Number(phase.counts?.leased ?? 0) === 0
+    && completed.size === requested.size
+    && [...requested].every((id) => completed.has(id));
+  return { status: passed ? "passed" : "blocked", code: passed ? 0 : 1 };
 }
 
 async function importManifest({
@@ -1457,6 +1521,8 @@ async function createAndRunPhase({
   if (!assetIds.length) return null;
   if ([flowOnly, chatgptOnly, geminiOnly].filter(Boolean).length > 1) throw new Error("A phase can select only one browser provider.");
   const federatedChatGptEnabled = federatedWebImageAutomaticChatGptEnabled(identity);
+  const googleScheduling = googleImageSchedulingForIdentity(identity);
+  if (googleScheduling && !checkHostRuntimes) throw new Error("Identity-locked Google image scheduling requires live host checks.");
   const activeRuntimes = flowOnly
     ? [runtimes.flow]
     : geminiOnly ? [runtimes.gemini]
@@ -1472,6 +1538,7 @@ async function createAndRunPhase({
     styleOnly,
     geminiOnly,
     chatgptOnly,
+    schedulingRequired: Boolean(googleScheduling),
   });
   if (checkHostRuntimes) {
     await Promise.all(checkedRuntimes
@@ -1480,6 +1547,7 @@ async function createAndRunPhase({
         expectedModelLabel: runtime.modelLabel,
         requirePreparedWorkerPool: true,
         expectedConcurrency: runtime.expectedConcurrency,
+        googleScheduling: runtime.googleScheduling,
       })));
   }
   const dispatch = hybridManifestDispatchOptions({
@@ -1491,6 +1559,7 @@ async function createAndRunPhase({
     federatedChatGptEnabled,
     mode,
     flowConcurrency: flowRuntimeConcurrency,
+    googleScheduling,
     persistentWorkerPool: federated
       && identity.image_provider_options?.routing_policy === FEDERATED_WEB_IMAGE_ROUTING_POLICY,
   });
@@ -1772,8 +1841,8 @@ export async function openWavefrontBrowserImageStream({
   dataRoot = defaultDataRoot,
   stateRoot = process.env.GOLDFLOW_STUDIO_STATE_DIR ?? path.join(os.homedir(), ".goldflow-studio"),
   downloadsRoot = path.join(os.homedir(), "Downloads", "GoldflowStudio"),
-  flowRuntimeConcurrency = HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY,
-  timeoutMs = 6 * 60 * 60_000,
+  flowRuntimeConcurrency = null,
+  timeoutMs = null,
   checkHostRuntimes = true,
 } = {}) {
   const resolvedEpisodeDir = path.resolve(episodeDir);
@@ -1785,12 +1854,17 @@ export async function openWavefrontBrowserImageStream({
   }
   const identityStatus = await federatedWebImageIdentityStatus(identity);
   if (!identityStatus.done) throw new Error(identityStatus.evidence);
+  const googleScheduling = googleImageSchedulingForIdentity(identity);
+  if (googleScheduling && !checkHostRuntimes) throw new Error("Identity-locked Google image scheduling requires live host checks.");
+  flowRuntimeConcurrency = validateFlowRuntimeConcurrency(flowRuntimeConcurrency ?? googleScheduling?.google_flow_concurrency ?? HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY);
+  timeoutMs ??= (googleScheduling ? 24 : 6) * 60 * 60_000;
   const federatedChatGptEnabled = federatedWebImageAutomaticChatGptEnabled(identity);
   const dispatch = hybridManifestDispatchOptions({
     mode: "scene",
     federated: true,
     federatedChatGptEnabled,
     flowConcurrency: flowRuntimeConcurrency,
+    googleScheduling,
     persistentWorkerPool: true,
   });
   const runtimes = {
@@ -1800,12 +1874,16 @@ export async function openWavefrontBrowserImageStream({
       path: path.join(resolvedStateRoot, "providers", GOOGLE_FLOW_BROWSER_PROVIDER, "studio-runtime.json"),
       planLabel: identity.image_provider_options.google_flow.plan_label,
       modelLabel: identity.image_provider_options.google_flow.model_label,
+      expectedConcurrency: flowRuntimeConcurrency,
+      googleScheduling,
     },
     gemini: {
       provider: GOOGLE_GEMINI_BROWSER_PROVIDER,
       path: path.join(resolvedStateRoot, "providers", GOOGLE_GEMINI_BROWSER_PROVIDER, "studio-runtime.json"),
       planLabel: identity.image_provider_options.google_gemini?.plan_label ?? "Ultra",
       modelLabel: identity.image_provider_options.google_gemini?.model_label ?? "Nano Banana 2",
+      expectedConcurrency: googleScheduling?.google_gemini_concurrency ?? GOOGLE_GEMINI_IMAGE_CONCURRENCY,
+      googleScheduling,
     },
   };
   const runtimeByProvider = new Map([
@@ -1819,6 +1897,8 @@ export async function openWavefrontBrowserImageStream({
       expectedPlanLabel: runtime.planLabel,
       expectedModelLabel: runtime.modelLabel,
       requirePreparedWorkerPool: true,
+      expectedConcurrency: runtime.expectedConcurrency,
+      googleScheduling: runtime.googleScheduling,
     })));
   }
   const bridgeByProvider = new Map([
@@ -1983,9 +2063,10 @@ export async function openWavefrontBrowserImageStream({
           wavefrontPrefetch: true,
         });
       }
+      const completionStatus = streamingBatchCompletionStatus(phase, exactAssetIds);
       const batchReport = {
         schema: "goldflow_wavefront_stream_batch_v1",
-        status: phase.failed_asset_ids.length ? "blocked" : "passed",
+        status: completionStatus.status,
         stream_id: streamId,
         manifest_id: phase.manifest_id,
         manifest_path: phase.manifest_path,
@@ -1996,7 +2077,7 @@ export async function openWavefrontBrowserImageStream({
         updated_at: new Date().toISOString(),
       };
       if (input.poolReportPath) await writeJson(input.poolReportPath, batchReport);
-      return { code: phase.failed_asset_ids.length ? 1 : 0, phase, batch_report: batchReport };
+      return { code: completionStatus.code, phase, batch_report: batchReport };
     });
   };
 
@@ -2068,7 +2149,10 @@ export async function runHybridBrowserImagePool(flags) {
     HYBRID_CHATGPT_IMAGE_CONCURRENCY,
     Number(flags["chatgpt-electron-concurrency"] ?? HYBRID_CHATGPT_IMAGE_CONCURRENCY),
   ));
-  const flowRuntimeConcurrency = validateFlowRuntimeConcurrency(flags["flow-runtime-concurrency"]);
+  const googleScheduling = googleImageSchedulingForIdentity(identity);
+  const geminiRuntimeConcurrency = googleScheduling?.google_gemini_concurrency ?? GOOGLE_GEMINI_IMAGE_CONCURRENCY;
+  const flowRuntimeConcurrency = validateFlowRuntimeConcurrency(flags["flow-runtime-concurrency"] ?? googleScheduling?.google_flow_concurrency ?? HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY);
+  if (googleScheduling && flowRuntimeConcurrency > googleScheduling.google_flow_concurrency) throw new Error("Flow runtime concurrency exceeds the identity-locked Google image scheduling limit.");
   if ([flowOnly, chatgptOnly, geminiOnly].filter(Boolean).length > 1) throw new Error("--flow-only, --chatgpt-only, and --gemini-only are mutually exclusive.");
   const repairReason = String(flags["repair-reason"] ?? "").trim();
   const repairSharedReferenceIds = validateRepairSharedReferenceScope({
@@ -2121,15 +2205,19 @@ export async function runHybridBrowserImagePool(flags) {
       planLabel: identity.image_provider_options.google_flow.plan_label,
       modelLabel: flowModelOverride || identity.image_provider_options.google_flow.model_label,
       expectedConcurrency: flowRuntimeConcurrency,
+      googleScheduling,
     },
     gemini: {
       provider: GOOGLE_GEMINI_BROWSER_PROVIDER,
       path: path.join(stateRoot, "providers", GOOGLE_GEMINI_BROWSER_PROVIDER, "studio-runtime.json"),
       planLabel: identity.image_provider_options.google_gemini?.plan_label ?? "Ultra",
       modelLabel: identity.image_provider_options.google_gemini?.model_label ?? "Nano Banana 2",
+      expectedConcurrency: geminiRuntimeConcurrency,
+      googleScheduling,
     },
   };
   const checkHostRuntimes = !boolFlag(flags["skip-host-health-check"]);
+  if (googleScheduling && !checkHostRuntimes) throw new Error("Identity-locked Google image scheduling requires live host checks.");
   const bridges = {
     chatgpt: await new GoldflowBridge({
       repoRoot,
@@ -2145,7 +2233,7 @@ export async function runHybridBrowserImagePool(flags) {
     path: identity.image_provider_options.google_flow.health_proof_path,
     sha256: identity.image_provider_options.google_flow.health_proof_sha256,
   };
-  const timeoutMs = Math.max(60_000, Number(flags["timeout-ms"] ?? 6 * 60 * 60_000));
+  const timeoutMs = Math.max(60_000, Number(flags["timeout-ms"] ?? (googleScheduling ? 24 : 6) * 60 * 60_000));
   const promptsPath = path.resolve(flags.prompts ?? path.join(episodeDir, "section_image_prompts_hardened.json"));
   const referencePlanPath = path.resolve(flags["reference-plan"] ?? path.join(episodeDir, "visual_reference_plan.json"));
   const characterStateRefsPath = path.resolve(flags["character-state-refs"] ?? path.join(episodeDir, "character_state_refs.json"));
@@ -2187,15 +2275,15 @@ export async function runHybridBrowserImagePool(flags) {
           : chatgptElectron ? chatgptElectronConcurrency : HYBRID_CHATGPT_IMAGE_CONCURRENCY,
         google_flow_concurrency: chatgptOnly || geminiOnly ? 0 : flowRuntimeConcurrency,
         google_flow_profile_max_concurrency: HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY,
-        google_gemini_concurrency: federated || geminiOnly ? GOOGLE_GEMINI_IMAGE_CONCURRENCY : 0,
+        google_gemini_concurrency: federated || geminiOnly ? geminiRuntimeConcurrency : 0,
         total_concurrency: flowOnly
           ? flowRuntimeConcurrency
           : chatgptOnly
             ? (chatgptElectron ? chatgptElectronConcurrency : HYBRID_CHATGPT_IMAGE_CONCURRENCY)
             : geminiOnly
-              ? GOOGLE_GEMINI_IMAGE_CONCURRENCY
+              ? geminiRuntimeConcurrency
               : federated
-                ? flowRuntimeConcurrency + GOOGLE_GEMINI_IMAGE_CONCURRENCY
+                ? flowRuntimeConcurrency + geminiRuntimeConcurrency
                   + (federatedWebImageAutomaticChatGptEnabled(identity)
                     ? (chatgptElectron ? chatgptElectronConcurrency : HYBRID_CHATGPT_IMAGE_CONCURRENCY)
                     : 0)

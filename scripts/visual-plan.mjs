@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { visualPromptPartialFailure } from "./lib/visual-prompt-recovery.mjs";
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
@@ -7,6 +8,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { getLLMModel, isLocalLLMRoute, localLLMAuthHeaders, localLLMChatCompletionURL } from "./lib/llm-router.mjs";
 import { configuredCodexModel, isCodexCacheCompatible, readCodexCallMetadata, runCodexCli } from "./lib/codex-cli-runner.mjs";
 import { plannerChunkIdentityFindings, recordPlannerChunkCheckpoint } from "./lib/planner-chunk-ledger.mjs";
+import { isSourceSceneLocationBeat } from "./lib/editorial-beat-director.mjs";
 import {
   appendPlannerChunkTelemetry,
   derivePlannerChunkTuning,
@@ -255,7 +257,33 @@ function uniqueStrings(values) {
   return [...new Set((values ?? []).map((value) => String(value ?? "").trim()).filter(Boolean))];
 }
 
-function sceneCharacterStateRefs(scene, stateRefIndex = new Map()) {
+function referencePlanForHistoricalBeat(scene, visualReferencePlan) {
+  if (!localPromptPackets || scene?.depiction_mode !== "memory_or_flashback" || !scene?.visual_beat_id) return visualReferencePlan;
+  const beatId = String(scene.visual_beat_id);
+  return {
+    ...visualReferencePlan,
+    reference_targets: (visualReferencePlan?.reference_targets ?? []).filter((target) => {
+      if (String(target?.kind ?? "").toLowerCase() !== "character_state") return true;
+      return target.identity_usage === "face_only"
+        || (target.planned_beat_ids ?? []).includes(beatId);
+    }),
+  };
+}
+
+function sceneCharacterStateRefs(scene, stateRefIndex = new Map(), visualReferencePlan = null) {
+  if (localPromptPackets && scene?.depiction_mode === "memory_or_flashback" && scene?.visual_beat_id) {
+    const scopedPlan = referencePlanForHistoricalBeat(scene, visualReferencePlan);
+    const visible = new Set(uniqueStrings([
+      ...(scene.visible_characters ?? []),
+      ...(scene.screen_visible_characters ?? []),
+      ...(scene.preview_visible_characters ?? []),
+    ]).map(normalizeLabel));
+    return referenceTargetsForScene(scene, scopedPlan)
+      .filter((target) => String(target?.kind ?? "").toLowerCase() === "character_state")
+      .filter((target) => visible.has(normalizeLabel(target.character ?? target.canonical_subject_id ?? target.subject)))
+      .map((target) => characterStateRefForTarget(target, scene, stateRefIndex))
+      .filter(Boolean);
+  }
   if (Array.isArray(scene.character_state_refs)) return scene.character_state_refs;
   const refs = [];
   const sceneId = String(scene.scene_id ?? "");
@@ -435,7 +463,7 @@ export function expireElapsedPhysicalState(rows = []) {
   });
 }
 
-function compactSceneForPrompt(scene, stateRefIndex = new Map()) {
+function compactSceneForPrompt(scene, stateRefIndex = new Map(), visualReferencePlan = null) {
   const absoluteIndex = Number.isFinite(Number(scene.__visual_plan_absolute_index))
     ? Number(scene.__visual_plan_absolute_index)
     : null;
@@ -489,7 +517,7 @@ function compactSceneForPrompt(scene, stateRefIndex = new Map()) {
     // Full state anchors live once in the packet reference dictionary. Beat
     // rows carry only stable ids so the same 300-900 character anchor is not
     // repeated for every nearby cut.
-    character_state_ref_ids: sceneCharacterStateRefs(scene, stateRefIndex)
+    character_state_ref_ids: sceneCharacterStateRefs(scene, stateRefIndex, visualReferencePlan)
       .map((ref) => ref.state_ref_id ?? ref.ref_id ?? null)
       .filter(Boolean),
     ui_text_on_screen: scene.local_ui_elements ?? scene.ui_text_on_screen ?? [],
@@ -538,7 +566,7 @@ function characterStateRefForTarget(target, scene, stateRefIndex = new Map()) {
 }
 
 function relevantReferenceTargets(scene, visualReferencePlan, stateRefIndex = new Map()) {
-  let targets = referenceTargetsForScene(scene, visualReferencePlan)
+  let targets = referenceTargetsForScene(scene, referencePlanForHistoricalBeat(scene, visualReferencePlan))
     .filter((target) => locationTargetMatchesSourceRow(target, scene));
   if (localPromptPackets) {
     const visibleLabels = uniqueStrings([
@@ -753,11 +781,13 @@ Core contract:
 - When a physically visible, screen-visible, or preview-visible identity-bearing actor has a matching attachable character_state target in the current unit packet, attach that identity/anatomy ref when the actor is decisive or individually readable. Under the four-slot cap, omit peripheral participants before omitting the boss, creature, construct, or contact target that defines the shot.
 - Location contracts and image refs are separate. For a physical setting, select the exact in-scope textual location contract in shot_manifest.location_contract_id and use its prompt_anchor to describe the environment. Set shot_manifest.location_ref_id only when the current unit packet contains a matching approved attachable location image ref. A text-only location contract never belongs in reference_requirements and never consumes an image slot.
 - For every attached character state, reaffirm the supplied scene_prompt_anchor in that actor's own clause, then add current screen position and action. If the anchor already begins with the actor's name, do not repeat the name a second time.
+- Keep each visible person's facial identity bound to that person's own reference and prose clause. Unrelated people must retain distinct face shape, hair, complexion, age presentation, and silhouette; do not spread the protagonist's likeness across nearby men. An explicit twin, clone, or same-person state may share the protagonist's face when the locked story establishes it.
 - For an attached creature/construct identity, repeat its scene_prompt_anchor anatomy contract materially unchanged in every cut. State one coherent silhouette and the exact location of any integrated object-like body feature; distinguish integrated anatomy from something worn, held, or separate in the environment.
 - When a visible actor has an amputation, prosthetic rule, nonstandard limb count, signature integrated anatomy, physical contact, or hands that manipulate an object, add one shot_manifest.anatomy_contracts row. State the identity ref when available, immutable body fact, exact expected visible hand count, missing limb when any, whether a prosthetic is allowed when relevant, and whether this frame must visibly prove the invariant. Make the provider prose obey that row.
 - For every visible weapon or handled/operated object—including phones, bags, pens, documents, cards, coins, cups, keys, books, microphones, cameras, tools, and handoffs—add one shot_manifest.equipment_contracts row. State the named owner, item, exact visible count, hand assignment, sheath/holder state, contact target when relevant, and whether any extra instance is allowed. A weapon worn at the hip or on the back still needs the contract. Make the provider prose obey that row.
 - Put ordered reference-role metadata once in shot_manifest.reference_slots. Do not duplicate it in top-level compatibility fields and do not repeat provider wrapper sentences such as "Use Image 1" inside scene prose.
 - active_state_constraints is binding. Preserve its current wardrobe, injury, possession, status, visible state, and location facts for every visible entity; never reset a character to a base/default state merely because an older ref exists.
+- In each character_staging row, name one wardrobe state and its owner at this exact beat. Keep that state across adjacent cuts until exact story evidence changes it, even when the change happens inside one semantic scene. A base face reference must not import old clothing, and a real garment handed between people must appear only on its current wearer.
 - Treat status as narrative/social context, not physical appearance. Wardrobe and injury may come only from the current active wardrobe/injury fields or the exact selected character-state anchor. When those physical fields are absent, use the selected base identity anchor's attire and intact physical condition; never infer old clothing or wounds from a status such as winner, boxer, victim, or defeated rival.
 - Author one motion_intent that serves the beat instead of adding decorative drift. Name the focal subject, normalized start/end anchors, restrained start/end scale, easing, and the editorial reason for the move. For an impact, reveal, focus shift, or UI entrance that benefits from hand-edited timing, add 2-5 motion_keyframes. Default to hold, one acceleration-smooth ease_in_out move, then a readable hold. Let the visual transition and SFX provide impact instead of bouncing the camera scale.
 - Match motion to the visual job: reveal environment with a useful zoom-out; follow an actor toward visible action or impact; shift between separately staged subjects in an interaction; hold or gently push on readable reactions; settle on a UI panel or critical object without losing context; reveal the surrounding aftermath after a consequence. Use a static hold when the composition already carries strong action or the cut is too short for a meaningful move.
@@ -977,7 +1007,7 @@ function buildPrompt(timedPlan, semanticPlan, visualReferencePlan = null, stateR
         ? (referenceTargetsByUnit[unitId] ?? [])
         : (referenceTargetsByScene[scene.parent_scene_id ?? scene.scene_id] ?? []);
       return {
-        ...compactSceneForPrompt(scene, stateRefIndex),
+        ...compactSceneForPrompt(scene, stateRefIndex, visualReferencePlan),
         target_provider_route: routedProviderForPrompt(scene, activeProvider, activeProviderOptions),
         previous_beat_context: scene.__previous_visual_context ?? compactNeighborContext(rows[index - 1]),
         next_beat_context: scene.__next_visual_context ?? compactNeighborContext(rows[index + 1]),
@@ -1620,13 +1650,18 @@ function normalizePrompt(row, index, episodeId, sourceUnit = null, scope = {}) {
     image_generation_required: true,
   };
   const scene = sourceUnit ?? row;
-  const scopedCharacterRefs = sceneCharacterStateRefs(scene, scope.stateRefIndex ?? new Map());
+  const scopedReferencePlan = referencePlanForHistoricalBeat(scene, scope.visualReferencePlan);
+  const scopedCharacterRefs = sceneCharacterStateRefs(scene, scope.stateRefIndex ?? new Map(), scope.visualReferencePlan);
   const allowedRefIds = allowedRefIdsForScene({
     scene,
-    visualReferencePlan: scope.visualReferencePlan,
+    visualReferencePlan: scopedReferencePlan,
     characterStateRefs: scopedCharacterRefs,
   });
-  return dropOutOfScopePromptRefs(basePrompt, allowedRefIds);
+  const scopedPrompt = dropOutOfScopePromptRefs(basePrompt, allowedRefIds);
+  if (scene?.depiction_mode === "memory_or_flashback" && scene?.visual_beat_id) {
+    scopedPrompt.character_state_refs_used = scopedPrompt.character_state_refs_used.filter((id) => allowedRefIds.has(id));
+  }
+  return scopedPrompt;
 }
 
 function plannerRecoveryPlaceholder(sourceUnit, episodeId, scope = {}) {
@@ -1659,13 +1694,14 @@ export function plannerRecoveryPlaceholderForTests(sourceUnit, options = {}) {
 }
 
 function revalidateExistingPrompt(prompt, sourceUnit, scope = {}) {
-  const scopedCharacterRefs = sceneCharacterStateRefs(sourceUnit, scope.stateRefIndex ?? new Map());
+  const scopedReferencePlan = referencePlanForHistoricalBeat(sourceUnit, scope.visualReferencePlan);
+  const scopedCharacterRefs = sceneCharacterStateRefs(sourceUnit, scope.stateRefIndex ?? new Map(), scope.visualReferencePlan);
   const allowedRefIds = allowedRefIdsForScene({
     scene: sourceUnit,
-    visualReferencePlan: scope.visualReferencePlan,
+    visualReferencePlan: scopedReferencePlan,
     characterStateRefs: scopedCharacterRefs,
   });
-  return dropOutOfScopePromptRefs({
+  const scopedPrompt = dropOutOfScopePromptRefs({
     ...prompt,
     depiction_mode: sourceUnit?.depiction_mode ?? prompt.depiction_mode ?? "current_reality",
     physically_visible_entity_ids: sourceUnit?.physically_visible_entity_ids ?? prompt.physically_visible_entity_ids ?? [],
@@ -1673,6 +1709,10 @@ function revalidateExistingPrompt(prompt, sourceUnit, scope = {}) {
     preview_visible_entity_ids: sourceUnit?.preview_visible_entity_ids ?? prompt.preview_visible_entity_ids ?? [],
     mentioned_only_entity_ids: sourceUnit?.mentioned_only_entity_ids ?? prompt.mentioned_only_entity_ids ?? [],
   }, allowedRefIds);
+  if (sourceUnit?.depiction_mode === "memory_or_flashback" && sourceUnit?.visual_beat_id) {
+    scopedPrompt.character_state_refs_used = (scopedPrompt.character_state_refs_used ?? []).filter((id) => allowedRefIds.has(id));
+  }
+  return scopedPrompt;
 }
 
 export function normalizePromptPacketForTests(row, sourceUnit, options = {}) {
@@ -2508,6 +2548,15 @@ function locationTargetsForSourceRow(row, visualReferencePlan) {
 function locationTargetMatchesSourceRow(target, row) {
   if (String(target?.kind ?? "").toLowerCase() !== "location") return true;
   const contractIds = (target.location_contract_ids ?? []).map((id) => String(id ?? "").trim()).filter(Boolean);
+  if (isSourceSceneLocationBeat(row)) {
+    const localRefIds = new Set((row.ref_needs ?? row.beat_ref_requirements ?? [])
+      .filter((need) => String(need?.kind ?? "").toLowerCase() === "location"
+        && need.subject === row.local_location)
+      .map((need) => String(need.ref_id ?? "").trim()).filter(Boolean));
+    return contractIds.length
+      ? contractIds.some((id) => localRefIds.has(id))
+      : localRefIds.has(String(target.ref_id ?? "").trim());
+  }
   const rowLocationId = String(row?.location_id ?? row?.location_contract_id ?? "").trim();
   if (!contractIds.length || !rowLocationId) return true;
   return contractIds.includes(rowLocationId);
@@ -2735,6 +2784,17 @@ export function indexCharacterStateRefs(artifact) {
 
 export function relevantReferenceTargetsForTests(scene, visualReferencePlan, characterStateRefs) {
   return relevantReferenceTargets(scene, visualReferencePlan, indexCharacterStateRefs(characterStateRefs));
+}
+
+export function historicalMemoryReferenceScopeForTests(scene, visualReferencePlan, characterStateRefs) {
+  const index = indexCharacterStateRefs(characterStateRefs);
+  const scopedPlan = referencePlanForHistoricalBeat(scene, visualReferencePlan);
+  const states = sceneCharacterStateRefs(scene, index, visualReferencePlan);
+  return {
+    target_ids: relevantReferenceTargets(scene, visualReferencePlan, index).map((target) => target.ref_id),
+    state_ids: states.map((state) => state.state_ref_id),
+    allowed_ids: [...allowedRefIdsForScene({ scene, visualReferencePlan: scopedPlan, characterStateRefs: states })],
+  };
 }
 
 async function main() {
@@ -3483,13 +3543,9 @@ async function main() {
           adaptive_chunk_telemetry_warnings: adaptiveTelemetryWarnings,
           wavefront_output_dir: wavefrontOutputDir,
           wavefront_chunk_count: wavefrontChunkFiles.length,
-          partial_failure: {
+          partial_failure: visualPromptPartialFailure(partialPrompts, {
             failed_chunk_count: failedChunkResults.length,
-            failed_cut_ids: [...new Set(failedCutIds)],
-            failed_beat_ids: [...new Set(failedBeatIds)],
-            preserved_passed_cut_ids: successfulScopedPrompts.map((prompt) => prompt.image_id),
-            recovery_policy: "exact_failed_cut_scope",
-          },
+          }),
         },
         visual_plan_scope: {
           mode: scopedRepair ? "exact_cut_recovery" : "full_episode_partial",
@@ -3526,7 +3582,7 @@ async function main() {
         });
       }
       throw new Error(
-        `${failedChunkResults.length} visual prompt chunk(s) failed; preserved ${successfulScopedPrompts.length} passed cuts and recorded exact recovery scope for ${failedCutIds.length} cuts.`,
+        `${failedChunkResults.length} visual prompt chunk(s) failed; preserved ${partialReport.planner.partial_failure.preserved_passed_cut_ids.length} passed cuts and recorded exact recovery scope for ${partialReport.planner.partial_failure.failed_cut_ids.length} cuts.`,
       );
     }
     const styleSummaries = [];
@@ -3694,6 +3750,7 @@ async function main() {
       wavefront_output_dir: wavefrontOutputDir,
       wavefront_chunk_count: wavefrontChunkFiles.length,
       manual_recovery_output_files: manualRecoveryOutputFiles,
+      ...(unresolvedRecoveryPrompts.length ? { partial_failure: visualPromptPartialFailure(prompts) } : {}),
     },
     editorial_reuse_policy: editorialReuse.policy,
     narrative_overlay_policy: {

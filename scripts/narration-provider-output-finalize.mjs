@@ -7,7 +7,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import {
+  NARRATION_DELIVERY_CONSENSUS_VERSION,
   adjudicateNarrationDeliveryConsensus,
+  blockAutomatedNarrationEdgeRisks,
   exactNarrationListenReviewPacket,
   exactNarrationRepairPacket,
   narrationDeliveryNeedsConfirmation,
@@ -17,6 +19,7 @@ import {
 import {
   buildNarrationQualityContract,
   narrationQualityContractForIdentity,
+  narrationUsesAutomatedAsrAcceptance,
 } from "./lib/narration-quality-contract.mjs";
 import {
   narrationProviderUnitQaSha256,
@@ -30,7 +33,6 @@ import {
   validateNarrationSubjectiveReviewManifest,
 } from "./lib/narration-subjective-review.mjs";
 import {
-  narrationTtsRetryReportPolicy,
   narrationTtsPolicyForIdentity,
   validateNarrationTtsPolicy,
 } from "./lib/narration-tts-policy.mjs";
@@ -48,9 +50,15 @@ import {
   planNarrationConfirmationWindows,
 } from "./lib/narration-confirmation-windows.mjs";
 import {
+  NARRATION_CROSS_LEVEL_ASR_POLICY_VERSION,
+  crossLevelArticleFusionCandidate,
+  corroborateCrossLevelArticleFusion,
+} from "./lib/narration-cross-level-asr.mjs";
+import {
   emptyNarrationFinalizationCheckpoint,
   narrationFinalizationStageKey,
   narrationFinalizationUnitKey,
+  narrationStitchImplementationIdentity,
   reusableNarrationFinalizationStage,
   reusableNarrationFinalizationUnit,
 } from "./lib/narration-finalization-checkpoint.mjs";
@@ -62,6 +70,27 @@ import { equivalentPhrasesForTests } from "./narration-tts-episode.mjs";
 import { runFasterWhisperForDiagnostics } from "./local-whisper-word-timing.mjs";
 import { prepareOpeningNarrationFinalization, validateOpeningFinalizationFlags } from "./lib/narration-opening-finalization.mjs";
 import { prepareFullPilotNarrationFinalization } from "./lib/narration-full-pilot-finalization.mjs";
+import { loadNarrationSourceStructure } from "./lib/narration-source-structure.mjs";
+import { applyLowMarginDisposition, assertLowMarginActiveBindings, loadLowMarginDisposition } from "./lib/narration-low-margin-disposition.mjs";
+import { applyFullStreamManualReview, loadFullStreamManualReview } from "./lib/narration-full-stream-manual-review.mjs";
+import { applyContextualAsrReconciliation, loadContextualAsrReconciliation } from "./lib/narration-full-stream-contextual-asr.mjs";
+import { applyFullStreamSpacingBridge, loadFullStreamSpacingBridge } from "./lib/narration-full-stream-spacing-bridge.mjs";
+import { applyAsrOrthographyReviewForTests, loadAsrOrthographyReview } from "./lib/narration-asr-orthography-review.mjs";
+import { providerNeutralRetryReportFieldsForTests, verifiedStructuralRecoveryFromManifest } from "./lib/narration-structural-finalizer-provenance.mjs";
+import { loadPronunciationRecoveryState } from "./lib/narration-pronunciation-episode.mjs";
+import { loadAutomatedPronunciationState } from "./lib/narration-automated-pronunciation-episode.mjs";
+import { CONTRACTION_ALIAS, CONTRACTION_MODE, CONTRACTION_SOURCE_UNIT,
+  contractionCandidateAsrDecisionForTests,
+  contractionSegmentReportFieldsForTests,
+  loadContractionRecoveryState,
+  loadContractionDescendantManifest,
+  validateConsumedContractionForBlockedFullStream,
+} from "./lib/narration-contraction-repair.mjs";
+import {
+  applyPronunciationCandidateReviewForTests,
+  applyAutomatedPronunciationCandidateForTests,
+  PRONUNCIATION_MODE, AUTOMATED_PRONUNCIATION_MODE,
+} from "./lib/narration-pronunciation-repair.mjs";
 
 const execFile = promisify(execFileCb);
 const CANONICAL_SAMPLE_RATE_HZ = 24000;
@@ -69,6 +98,8 @@ const NARRATION_DELIVERY_MANUAL_REVIEW_SCHEMA =
   "goldflow_narration_delivery_manual_review_v1";
 const NARRATION_DELIVERY_MANUAL_REVIEW_ATTESTATION =
   "all_hash_bound_blocked_narration_units_listened_end_to_end";
+const NARRATION_DELIVERY_MIXED_REVIEW_ATTESTATION =
+  "all_hash_bound_blocked_narration_units_listened_and_individually_decided";
 
 function parseFlags(parts) {
   const flags = {};
@@ -341,10 +372,19 @@ export async function validateNarrationDeliveryManualReviewEvidenceForTests({
       `Narration delivery manual review requires ${NARRATION_DELIVERY_MANUAL_REVIEW_SCHEMA} with approved status.`,
     );
   }
+  const acceptedUnits = Array.isArray(evidence.accepted_units)
+    ? evidence.accepted_units
+    : [];
+  const rejectedUnits = Array.isArray(evidence.rejected_units)
+    ? evidence.rejected_units
+    : [];
+  const expectedAttestation = rejectedUnits.length
+    ? NARRATION_DELIVERY_MIXED_REVIEW_ATTESTATION
+    : NARRATION_DELIVERY_MANUAL_REVIEW_ATTESTATION;
   if (!String(evidence.reviewer ?? "").trim()
     || !String(evidence.reviewed_at ?? "").trim()
     || !String(evidence.note ?? "").trim()
-    || evidence.attestation !== NARRATION_DELIVERY_MANUAL_REVIEW_ATTESTATION) {
+    || evidence.attestation !== expectedAttestation) {
     throw new Error(
       "Narration delivery manual review requires reviewer, reviewed_at, note, and the exact listening attestation.",
     );
@@ -387,12 +427,16 @@ export async function validateNarrationDeliveryManualReviewEvidenceForTests({
   if (!blockedIds.length) {
     throw new Error("Narration delivery manual review has no current blocker scope.");
   }
-  const acceptedUnits = Array.isArray(evidence.accepted_units)
-    ? evidence.accepted_units
-    : [];
   const acceptedIds = acceptedUnits.map((row) => String(row?.unit_id ?? ""));
+  const rejectedIds = rejectedUnits.map((row) => String(row?.unit_id ?? ""));
+  const decidedIds = [...acceptedIds, ...rejectedIds];
   if (Number(evidence.accepted_unit_count) !== acceptedUnits.length
-    || !exactStringSet(acceptedIds, blockedIds)) {
+    || (evidence.rejected_units != null && !Array.isArray(evidence.rejected_units))
+    || (rejectedUnits.length
+      ? Number(evidence.rejected_unit_count) !== rejectedUnits.length
+      : Number(evidence.rejected_unit_count ?? 0) !== 0)
+    || new Set(decidedIds).size !== decidedIds.length
+    || !exactStringSet(decidedIds, blockedIds)) {
     throw new Error(
       "Narration delivery manual review must cover every currently blocked unit exactly once.",
     );
@@ -441,6 +485,32 @@ export async function validateNarrationDeliveryManualReviewEvidenceForTests({
       throw new Error(`Narration delivery manual review audio is stale for ${unitId}.`);
     }
   }
+  for (const rejected of rejectedUnits) {
+    const unitId = String(rejected?.unit_id ?? "");
+    const source = sourceById.get(unitId);
+    const delivery = deliveryById.get(unitId);
+    if (!source || !delivery
+      || rejected.decision !== "repair_required"
+      || rejected.provider !== source.provider
+      || Number(rejected.attempt) !== Number(source.attempt ?? 1)
+      || rejected.audio_path !== source.wav
+      || rejected.audio_sha256 !== source.audio_sha256
+      || rejected.synthesis_identity_sha256 !== source.synthesis_identity_sha256
+      || !String(rejected.listen_note ?? "").trim()
+      || !String(rejected.operator_quote ?? "").trim()) {
+      throw new Error(`Narration delivery manual rejection is stale or incomplete for ${unitId}.`);
+    }
+    const actualCodes = normalizedFindingCodes(delivery.decision?.blockers);
+    if (!actualCodes.length
+      || !exactStringSet(actualCodes, rejected.reviewed_blocker_codes ?? [])) {
+      throw new Error(
+        `Narration delivery manual rejection for ${unitId} does not enumerate the exact blocker codes.`,
+      );
+    }
+    if (!await fileMatchesSha256(source.wav, source.audio_sha256)) {
+      throw new Error(`Narration delivery manual rejection audio is stale for ${unitId}.`);
+    }
+  }
   return {
     status: "approved",
     reviewer: String(evidence.reviewer).trim(),
@@ -448,6 +518,8 @@ export async function validateNarrationDeliveryManualReviewEvidenceForTests({
     note: String(evidence.note).trim(),
     accepted_unit_ids: acceptedIds,
     accepted_unit_count: acceptedIds.length,
+    rejected_unit_ids: rejectedIds,
+    rejected_unit_count: rejectedIds.length,
     accepted_blocker_codes_by_unit: Object.fromEntries(
       acceptedUnits.map((row) => [
         String(row.unit_id),
@@ -458,7 +530,7 @@ export async function validateNarrationDeliveryManualReviewEvidenceForTests({
   };
 }
 
-function applyNarrationDeliveryManualReview({
+export function applyNarrationDeliveryManualReviewForTests({
   deliveryRows,
   blockers,
   review,
@@ -766,6 +838,66 @@ async function extractConfirmationWindow({
   };
 }
 
+async function pcm16Mono(audioPath, startSample = null, endSampleExclusive = null) {
+  const args = ["-nostdin", "-v", "error", "-i", audioPath];
+  if (startSample != null && endSampleExclusive != null) {
+    args.push("-af", `atrim=start_sample=${startSample}:end_sample=${endSampleExclusive},asetpts=N/SR/TB`);
+  }
+  args.push("-ac", "1", "-ar", String(CANONICAL_SAMPLE_RATE_HZ),
+    "-f", "s16le", "pipe:1");
+  const { stdout } = await execFile("ffmpeg", args, {
+    encoding: "buffer", maxBuffer: 8 * 1024 * 1024,
+  });
+  return stdout;
+}
+
+function pcmCorrelation(left, right, startSample, endSampleExclusive) {
+  let dot = 0;
+  let leftPower = 0;
+  let rightPower = 0;
+  for (let sample = startSample; sample < endSampleExclusive; sample += 1) {
+    const a = left.readInt16LE(sample * 2);
+    const b = right.readInt16LE(sample * 2);
+    dot += a * b;
+    leftPower += a * a;
+    rightPower += b * b;
+  }
+  return leftPower > 0 && rightPower > 0
+    ? dot / Math.sqrt(leftPower * rightPower) : 0;
+}
+
+async function crossLevelPcmIntegrity({ preparedPath, rawStitchPath,
+  masterPath, startSample, endSampleExclusive, articleStartSec, articleEndSec }) {
+  const [prepared, raw, master] = await Promise.all([
+    pcm16Mono(preparedPath),
+    pcm16Mono(rawStitchPath, startSample, endSampleExclusive),
+    pcm16Mono(masterPath, startSample, endSampleExclusive),
+  ]);
+  const expectedBytes = (endSampleExclusive - startSample) * 2;
+  const articleStart = Math.floor(articleStartSec * CANONICAL_SAMPLE_RATE_HZ);
+  const articleEnd = Math.ceil(articleEndSec * CANONICAL_SAMPLE_RATE_HZ);
+  const articleCorrelation = prepared.length === expectedBytes
+    && raw.length === expectedBytes && master.length === expectedBytes
+    && articleStart >= 0 && articleEnd <= expectedBytes / 2
+    && articleEnd - articleStart >= 1200
+      ? pcmCorrelation(raw, master, articleStart, articleEnd) : 0;
+  return {
+    status: prepared.length === expectedBytes
+      && raw.length === expectedBytes && master.length === expectedBytes
+      && prepared.equals(raw) && articleCorrelation >= 0.99
+      ? "passed" : "blocked",
+    prepared_pcm_sha256: createHash("sha256").update(prepared).digest("hex"),
+    raw_stitch_span_pcm_sha256: createHash("sha256").update(raw).digest("hex"),
+    master_span_pcm_sha256: createHash("sha256").update(master).digest("hex"),
+    article_master_raw_correlation: Number(articleCorrelation.toFixed(6)),
+    article_start_sample: articleStart,
+    article_end_sample_exclusive: articleEnd,
+    span_start_sample: startSample,
+    span_end_sample_exclusive: endSampleExclusive,
+  };
+}
+export const crossLevelPcmIntegrityForTests = crossLevelPcmIntegrity;
+
 function localizedConsensusDecision({
   windowRows,
   orderQa,
@@ -808,6 +940,12 @@ function localizedConsensusDecision({
   };
 }
 
+export function narrationFullStreamDerivedDecisionsCurrent(fullStream, comparisonVersion) {
+  return fullStream?.transcript_comparison_version === comparisonVersion
+    && fullStream?.delivery_consensus_version === NARRATION_DELIVERY_CONSENSUS_VERSION
+    && fullStream?.cross_level_asr_policy_version === NARRATION_CROSS_LEVEL_ASR_POLICY_VERSION;
+}
+
 export async function runFullStreamDeliveryQa({
   helpers,
   audioPath,
@@ -817,8 +955,13 @@ export async function runFullStreamDeliveryQa({
   orderQa,
   joinQa,
   stitch,
+  stitchAudioPath,
+  stitchAudioSha256,
+  unitDeliveryRows = [],
+  unitPrimaryRecognitions = new Map(),
   workDir,
   localWhisperContract,
+  retainedEvidence = null,
 }) {
   const intendedText = units.map((unit) => (
     String(unit.spoken_text ?? unit.tts_spoken_text ?? "").trim()
@@ -827,16 +970,21 @@ export async function runFullStreamDeliveryQa({
     ?? "small.en";
   const confirmationModel = qualityContract.delivery_qa.full_stream_confirmation_model
     ?? "medium";
+  const priorConfirmationEvidence = [
+    ...(retainedEvidence?.retained_confirmation_evidence ?? []),
+    ...(retainedEvidence?.confirmation_windows ?? []),
+  ];
   if (primaryModel !== localWhisperContract.model) {
     throw new Error(
       `Full-stream screening model ${primaryModel} does not match the locked `
       + `official timing model ${localWhisperContract.model}.`,
     );
   }
-  const primary = await runFasterWhisperForDiagnostics(
-    audioPath,
-    localWhisperContract,
-  );
+  // The caller admits retained evidence only for the same full-stream input
+  // key and verified window audio hashes. A comparator revision invalidates
+  // derived decisions, not the unchanged recognizer output.
+  const primary = retainedEvidence?.primary_transcription
+    ?? await runFasterWhisperForDiagnostics(audioPath, localWhisperContract);
   const equivalentPhrases = units.flatMap((unit) => equivalentPhrasesForTests(unit));
   const primaryTranscriptQa = primary
     ? helpers.transcriptQaForTests(intendedText, primary.text, {
@@ -905,6 +1053,9 @@ export async function runFullStreamDeliveryQa({
     } else {
       const windowDir = path.join(workDir, "full-stream-confirmation-windows");
       const materialized = [];
+      const retainedWindows = new Map(priorConfirmationEvidence
+        .map((window) => [window.binding_sha256, window]));
+      const cachedConfirmations = new Map();
       for (const window of windowPlan.windows) {
         const bindingSha256 = sha256(JSON.stringify({
           source_audio_sha256: audioSha256,
@@ -918,28 +1069,41 @@ export async function runFullStreamDeliveryQa({
           windowDir,
           `${window.window_id}-${bindingSha256.slice(0, 12)}.wav`,
         );
-        const audio = await extractConfirmationWindow({
+        const retained = retainedWindows.get(bindingSha256);
+        const audio = retained ?? await extractConfirmationWindow({
           audioPath,
           outputPath,
           startSample: window.start_sample,
           endSampleExclusive: window.end_sample_exclusive,
           sampleRateHz: CANONICAL_SAMPLE_RATE_HZ,
         });
+        if (retained?.confirmation_recognized_text != null
+          && (retained.confirmation_model ?? retainedEvidence.confirmation_model) === confirmationModel) {
+          cachedConfirmations.set(window.window_id, {
+            text: retained.confirmation_recognized_text,
+            words: retained.confirmation_recognized_words ?? [],
+          });
+        }
         materialized.push({
-          ...window,
           ...audio,
+          ...window,
           source_audio_path: audioPath,
           source_audio_sha256: audioSha256,
           binding_sha256: bindingSha256,
         });
       }
-      const confirmationMap = await helpers.runFasterWhisperUnitBatchForDiagnostics(
-        materialized.map((window) => ({
-          unit_id: window.window_id,
-          wav: window.audio_path,
-        })),
-        { model: confirmationModel, device: "cpu", computeType: "int8_float32" },
-      );
+      const needsConfirmation = materialized.filter((window) => (
+        !cachedConfirmations.has(window.window_id)
+      ));
+      const freshConfirmations = needsConfirmation.length
+        ? await helpers.runFasterWhisperUnitBatchForDiagnostics(
+            needsConfirmation.map((window) => ({
+              unit_id: window.window_id,
+              wav: window.audio_path,
+            })),
+            { model: confirmationModel, device: "cpu", computeType: "int8_float32" },
+          ) : new Map();
+      const confirmationMap = new Map([...cachedConfirmations, ...freshConfirmations]);
       confirmationWindows = materialized.map((window) => {
         const startSec = window.start_sample / CANONICAL_SAMPLE_RATE_HZ;
         const endSec = window.end_sample_exclusive / CANONICAL_SAMPLE_RATE_HZ;
@@ -989,10 +1153,116 @@ export async function runFullStreamDeliveryQa({
           primary_transcript_qa: primaryQa,
           confirmation_recognized_text: confirmation?.text ?? null,
           confirmation_recognized_words: confirmation?.words ?? [],
+          confirmation_model: confirmationModel,
           confirmation_transcript_qa: confirmationQa,
           decision: windowDecision,
         };
       });
+      const deliveryById = new Map(unitDeliveryRows.map((row) => [String(row.unit_id), row]));
+      const unitById = new Map(units.map((row) => [String(row.unit_id), row]));
+      const preparedById = new Map((stitch?.prepared_inputs ?? [])
+        .map((row) => [String(row.unit_id), row]));
+      const candidateIndexes = confirmationWindows.flatMap((window, index) => (
+        crossLevelArticleFusionCandidate(window) ? [index] : []
+      ));
+      for (const index of candidateIndexes) {
+        const window = confirmationWindows[index];
+        const candidate = crossLevelArticleFusionCandidate(window);
+        const unit = unitById.get(candidate.unit_id);
+        const delivery = deliveryById.get(candidate.unit_id);
+        const prepared = preparedById.get(candidate.unit_id);
+        const smallRecognition = unitPrimaryRecognitions.get(candidate.unit_id)?.recognized;
+        if (qualityContract?.delivery_qa?.acceptance_mode !== "automated_asr_v1"
+          || unit?.provider !== "qwen_local"
+          || !unit || !delivery || !prepared || !smallRecognition
+          || delivery.audio_path !== unit.wav
+          || delivery.audio_sha256 !== unit.audio_sha256
+          || prepared.source_wav !== unit.wav
+          || !prepared.prepared_wav || !prepared.prepared_audio_sha256
+          || !(await fileMatchesSha256(unit.wav, unit.audio_sha256))
+          || !(await fileMatchesSha256(prepared.prepared_wav, prepared.prepared_audio_sha256))) continue;
+        const corroborationIds = [
+          `${window.window_id}__unit_raw_medium`,
+          `${window.window_id}__unit_prepared_medium`,
+        ];
+        const localMedium = await helpers.runFasterWhisperUnitBatchForDiagnostics([
+          { unit_id: corroborationIds[0], wav: unit.wav },
+          { unit_id: corroborationIds[1], wav: prepared.prepared_wav },
+        ], { model: confirmationModel, device: "cpu", computeType: "int8_float32" });
+        const rawRecognition = localMedium.get(corroborationIds[0]);
+        const preparedRecognition = localMedium.get(corroborationIds[1]);
+        if (!rawRecognition || !preparedRecognition) continue;
+        const localQa = (text) => helpers.transcriptQaForTests(unit.spoken_text, text, {
+          maxWer: qualityContract.delivery_qa.maximum_word_error_rate,
+          equivalentPhrases: equivalentPhrasesForTests(unit),
+          blockAnySubstitution: false,
+        });
+        const rawQa = localQa(rawRecognition.text);
+        const preparedQa = localQa(preparedRecognition.text);
+        const articleWord = preparedRecognition.words?.[candidate.intended_index];
+        const pcmIntegrity = await crossLevelPcmIntegrity({
+          preparedPath: prepared.prepared_wav,
+          rawStitchPath: stitchAudioPath,
+          masterPath: audioPath,
+          startSample: window.start_sample,
+          endSampleExclusive: window.end_sample_exclusive,
+          articleStartSec: Number(articleWord?.start_sec),
+          articleEndSec: Number(articleWord?.end_sec),
+        });
+        const preparedSpeechPreserved = prepared.edge_edit_plan?.status === "passed"
+          && Number(prepared.edge_edit_plan?.fade_in_samples ?? 0) === 0
+          && Number(prepared.edge_edit_plan?.fade_out_samples ?? 0) === 0
+          && Number(prepared.trim_start_sample) <= Number(delivery.edge_alignment?.first_speech_sample)
+          && Number(prepared.trim_end_sample) >= Number(delivery.edge_alignment?.last_speech_sample_exclusive)
+          && Number(prepared.prepared_sample_count) === Number(window.sample_count);
+        const evidence = {
+          schema: "goldflow_narration_cross_level_article_fusion_v1",
+          policy_version: NARRATION_CROSS_LEVEL_ASR_POLICY_VERSION,
+          window_id: window.window_id,
+          unit_id: candidate.unit_id,
+          source_audio_sha256: unit.audio_sha256,
+          prepared_audio_sha256: prepared.prepared_audio_sha256,
+          stitch_audio_sha256: stitchAudioSha256,
+          master_audio_sha256: audioSha256,
+          window_audio_sha256: window.audio_sha256,
+          quality_contract_sha256: qualityContract.contract_sha256,
+          sample_accounting_exact: stitch?.sample_accounting?.exact_sample_accounting === true
+            && stitch.sample_accounting.status === "passed",
+          join_qa_passed: joinQa?.status === "passed" && !(joinQa.blockers ?? []).length,
+          prepared_speech_preserved: preparedSpeechPreserved,
+          pcm_integrity: pcmIntegrity,
+          prepared_trim_start_sample: prepared.trim_start_sample,
+          prepared_trim_end_sample: prepared.trim_end_sample,
+          unit_small_recognition: smallRecognition,
+          unit_small_qa: delivery.transcript_qa,
+          unit_medium_raw_qa: rawQa,
+          unit_medium_prepared_qa: preparedQa,
+          unit_medium_raw: { ...rawRecognition,
+            canonical_token_count: rawQa.intended_canonical_token_count },
+          unit_medium_prepared: { ...preparedRecognition,
+            canonical_token_count: preparedQa.intended_canonical_token_count },
+        };
+        const resolution = corroborateCrossLevelArticleFusion(window, evidence);
+        if (!resolution.corroborated) continue;
+        const receiptDir = path.join(workDir, "full-stream-cross-level-corroboration");
+        await fs.mkdir(receiptDir, { recursive: true });
+        const receiptPath = path.join(receiptDir,
+          `${window.window_id}-${sha256(JSON.stringify(evidence)).slice(0, 16)}.json`);
+        const receiptText = `${JSON.stringify(evidence, null, 2)}\n`;
+        try {
+          await fs.writeFile(receiptPath, receiptText, { flag: "wx" });
+        } catch (error) {
+          if (error?.code !== "EEXIST" || await fs.readFile(receiptPath, "utf8") !== receiptText) throw error;
+        }
+        confirmationWindows[index] = {
+          ...resolution.window,
+          cross_level_article_fusion: {
+            ...evidence,
+            receipt_path: receiptPath,
+            receipt_file_sha256: await sha256File(receiptPath),
+          },
+        };
+      }
       decision = localizedConsensusDecision({
         windowRows: confirmationWindows,
         orderQa,
@@ -1013,6 +1283,9 @@ export async function runFullStreamDeliveryQa({
     });
   }
   return {
+    transcript_comparison_version: helpers.TRANSCRIPT_QA_COMPARISON_VERSION,
+    delivery_consensus_version: NARRATION_DELIVERY_CONSENSUS_VERSION,
+    cross_level_asr_policy_version: NARRATION_CROSS_LEVEL_ASR_POLICY_VERSION,
     intended_text: intendedText,
     intended_text_sha256: sha256(intendedText),
     primary_model: primaryModel,
@@ -1036,6 +1309,18 @@ export async function runFullStreamDeliveryQa({
     confirmation_transcript_qa: null,
     confirmation_window_plan: windowPlan,
     confirmation_windows: confirmationWindows,
+    // Retire obsolete comparison scopes without deleting the raw ASR evidence
+    // or letting their old decisions influence current QA.
+    retained_confirmation_evidence: [...new Map(priorConfirmationEvidence
+      .filter((window) => !confirmationWindows.some((current) => (
+        current.binding_sha256 === window.binding_sha256
+      )))
+      .map((window) => {
+        const { primary_transcript_qa: _primaryQa, confirmation_transcript_qa: _confirmationQa,
+          decision: _decision, ...raw } = window;
+        return [window.binding_sha256, { ...raw,
+          confirmation_model: window.confirmation_model ?? retainedEvidence.confirmation_model }];
+      })).values()],
     decision,
   };
 }
@@ -1050,6 +1335,12 @@ async function encodeM4a(inputPath, outputPath) {
   return sha256File(outputPath);
 }
 
+export function assertPartialRepairUnitBlockerHoldForTests({ requireUnitBlockers, blockers }) {
+  if (requireUnitBlockers && (!Array.isArray(blockers) || blockers.length === 0)) {
+    throw new Error("Partial exact-boundary repair unexpectedly cleared all unit blockers; full-stream QA held.");
+  }
+}
+
 export async function finalizeNarrationProviderOutput(
   argv = process.argv.slice(2),
   { phaseContext = null } = {},
@@ -1058,11 +1349,29 @@ export async function finalizeNarrationProviderOutput(
   if (!flags["episode-dir"]) throw new Error("--episode-dir is required.");
   if (phaseContext) validateOpeningFinalizationFlags(flags);
   const workflowBypass = boolFlag(flags["workflow-bypass"]);
+  const requireUnitBlockers = boolFlag(flags["require-unit-blockers"]);
   const acceptAsrDeliveryBlockers = boolFlag(
     flags["accept-asr-delivery-blockers"],
   );
+  const fullStreamReviewEvidencePath = String(flags["full-stream-review-evidence"] ?? "").trim()
+    ? path.resolve(flags["full-stream-review-evidence"]) : null;
+  const contextualAsrEvidencePath = String(flags["contextual-asr-evidence"] ?? "").trim()
+    ? path.resolve(flags["contextual-asr-evidence"]) : null;
+  const spacingBridgeEvidencePath = String(flags["full-stream-spacing-bridge-evidence"] ?? "").trim()
+    ? path.resolve(flags["full-stream-spacing-bridge-evidence"]) : null;
   const acceptReviewWarnings = boolFlag(flags["accept-review-warnings"]);
   const skipSubjectiveReview = boolFlag(flags["skip-subjective-review"]);
+  if (fullStreamReviewEvidencePath && acceptAsrDeliveryBlockers) {
+    throw new Error("Exact full-stream review cannot be combined with --accept-asr-delivery-blockers.");
+  }
+  if (contextualAsrEvidencePath && (spacingBridgeEvidencePath || fullStreamReviewEvidencePath
+    || acceptAsrDeliveryBlockers || acceptReviewWarnings || skipSubjectiveReview)) {
+    throw new Error("Exact contextual ASR evidence cannot be combined with a review or waiver.");
+  }
+  if (spacingBridgeEvidencePath && (fullStreamReviewEvidencePath
+    || acceptAsrDeliveryBlockers || acceptReviewWarnings || skipSubjectiveReview)) {
+    throw new Error("Exact full-stream spacing evidence cannot be combined with a review or waiver.");
+  }
   const deliveryWaiverReason = String(
     flags["delivery-waiver-reason"] ?? "",
   ).trim();
@@ -1136,12 +1445,58 @@ export async function finalizeNarrationProviderOutput(
   if (sourceScriptHash(plan) && actualSourceScriptSha256 !== sourceScriptHash(plan)) {
     throw new Error("Narration plan source hash differs from the actual approved script.");
   }
+  const sourceStructure = !phaseContext ? await loadNarrationSourceStructure({
+    episodeDir, episode, plan,
+    sourceScriptSha256: actualSourceScriptSha256,
+    generationPlanSha256: canonicalPlanSha256,
+    generationPlanFileSha256: planFileSha256,
+  }) : null;
   const preparePilotPhase = phaseContext?.phase === "full_pilot" ? prepareFullPilotNarrationFinalization : prepareOpeningNarrationFinalization;
   const pilotFinalization = phaseContext ? await preparePilotPhase({
     phaseContext, episodeDir, identityPath, identity, scriptPath, planPath, plan, manifestPath, manifest, policy, flags,
   }) : null;
   if (pilotFinalization) units = pilotFinalization.units;
   const artifactDir = pilotFinalization?.outputNamespace ?? episodeDir;
+  const fullStreamPath = path.join(artifactDir, `narration_full_stream_qa_${episode}.json`);
+  // Validate before checkpoint/report writes. This mode consumes a reviewed
+  // snapshot and retained media; it cannot rebuild media or refresh ASR.
+  const fullStreamManualReview = fullStreamReviewEvidencePath
+    ? await loadFullStreamManualReview({
+      evidencePath: fullStreamReviewEvidencePath, currentReportPath: fullStreamPath,
+      expectedBindings: {
+        source_script_hash: actualSourceScriptSha256,
+        narration_generation_plan_sha256: canonicalPlanSha256,
+        narration_generation_plan_file_sha256: planFileSha256,
+        narration_quality_contract_sha256: qualityContract.contract_sha256,
+      },
+      providerManifestSha256: manifestFileSha256,
+      unitReviewEvidencePath: flags["manual-review-evidence"]
+        ? path.resolve(flags["manual-review-evidence"]) : null,
+    }) : null;
+  const contextualAsrReconciliation = contextualAsrEvidencePath
+    ? await loadContextualAsrReconciliation({
+      evidencePath: contextualAsrEvidencePath, currentReportPath: fullStreamPath,
+      currentStitchReportPath: path.join(episodeDir,
+        `audio_stitch_report_${episode}-narration.json`),
+      currentUnitDeliveryPath: path.join(episodeDir,
+        `narration_unit_delivery_qa_${episode}.json`),
+    }) : null;
+  const spacingBridge = spacingBridgeEvidencePath
+    ? await loadFullStreamSpacingBridge({
+      evidencePath: spacingBridgeEvidencePath, currentReportPath: fullStreamPath,
+      currentStitchReportPath: path.join(episodeDir,
+        `audio_stitch_report_${episode}-narration.json`),
+      currentUnitDeliveryPath: path.join(episodeDir,
+        `narration_unit_delivery_qa_${episode}.json`),
+    }) : null;
+  if (contextualAsrReconciliation
+    && contextualAsrReconciliation.prior.provider_output_manifest_file_sha256 !== manifestFileSha256) {
+    throw new Error("Contextual ASR evidence does not bind the selected provider manifest.");
+  }
+  if (spacingBridge
+    && spacingBridge.prior.provider_output_manifest_file_sha256 !== manifestFileSha256) {
+    throw new Error("Full-stream spacing evidence does not bind the selected provider manifest.");
+  }
   const scopeFields = pilotFinalization ? { finalization_scope: pilotFinalization.scope } : {};
   const operatorNarrationWaiver = {
     schema: "goldflow_operator_narration_qa_waiver_v1",
@@ -1190,6 +1545,264 @@ export async function finalizeNarrationProviderOutput(
       !== policy.primary.voice_continuity_contract) {
     throw new Error("Provider manifest model or voice identity differs from run identity.");
   }
+  const structuralRecovery = !phaseContext && manifest.provider === "qwen_local"
+    ? await verifiedStructuralRecoveryFromManifest({ episodeDir, manifest,
+        manifestPath, plan, planFileSha256,
+        sourceScriptSha256: actualSourceScriptSha256 })
+    : null;
+
+  const pronunciationReviewEvidencePath = String(
+    flags["pronunciation-review-evidence"] ?? "",
+  ).trim() ? path.resolve(flags["pronunciation-review-evidence"]) : null;
+  const hasPronunciationCandidate = manifest.units.some(
+    (row) => row.synthesis_mode === PRONUNCIATION_MODE,
+  );
+  const hasAutomatedPronunciationCandidate = manifest.units.some(
+    (row) => row.synthesis_mode === AUTOMATED_PRONUNCIATION_MODE,
+  );
+  const automatedPronunciationEvidencePath = String(
+    flags["automated-pronunciation-evidence"] ?? "",
+  ).trim() ? path.resolve(flags["automated-pronunciation-evidence"]) : null;
+  const contractionEvidencePath = String(
+    flags["contraction-expansion-evidence"] ?? "",
+  ).trim() ? path.resolve(flags["contraction-expansion-evidence"]) : null;
+  const hasContractionCandidate = manifest.units.some(
+    (row) => row.synthesis_mode === CONTRACTION_MODE,
+  );
+  let inheritedContractionReview = null;
+  if (hasContractionCandidate && !contractionEvidencePath) {
+    if (phaseContext || policy.primary.provider !== "qwen_local"
+      || !narrationUsesAutomatedAsrAcceptance(qualityContract)
+      || acceptAsrDeliveryBlockers || acceptReviewWarnings
+      || pronunciationReviewEvidencePath || automatedPronunciationEvidencePath
+      || fullStreamReviewEvidencePath || flags["manual-review-evidence"]
+      || flags["contextual-asr-evidence"]
+      || flags["full-stream-spacing-bridge-evidence"]
+      || flags["asr-orthography-evidence"]) {
+      throw new Error("A retained contraction requires ordinary Qwen QA without another review or waiver route.");
+    }
+    const activeReport = await readJson(path.join(episodeDir,
+      `narration_tts_report_${episode}.json`));
+    const activeDelivery = await readJson(path.join(episodeDir,
+      `narration_unit_delivery_qa_${episode}.json`));
+    const activeFullQa = await readJson(path.join(episodeDir,
+      `narration_full_stream_qa_${episode}.json`));
+    const activeManifestPath = activeReport?.provider_output_manifest_path;
+    if (!activeManifestPath || !path.isAbsolute(activeManifestPath)
+      || !path.resolve(activeManifestPath).startsWith(`${episodeDir}${path.sep}`)) {
+      throw new Error("Retained contraction root manifest escaped the episode.");
+    }
+    const activeManifest = await readJson(activeManifestPath);
+    const consumed = await validateConsumedContractionForBlockedFullStream({
+      episodeDir, episode, sourceScriptSha256: actualSourceScriptSha256,
+      ttsReport: activeReport, unitDelivery: activeDelivery,
+      blockedFullStreamQa: activeFullQa, providerOutput: activeManifest,
+      providerOutputPath: activeManifestPath,
+    });
+    if (!consumed) {
+      throw new Error("Retained contraction root candidate or current full-stream blocker is stale.");
+    }
+    const proof = activeReport.automated_contraction_expansion;
+    const descendant = await loadContractionDescendantManifest({
+      episodeDir, episode, sourceScriptSha256: actualSourceScriptSha256,
+      proof, derivedManifest: manifest, derivedManifestPath: manifestPath,
+    });
+    inheritedContractionReview = {
+      kind: "descendant_ready", unit_id: proof.unit_id,
+      evidence_path: proof.evidence_path,
+      evidence_file_sha256: proof.evidence_sha256,
+      prior_proof: proof, descendant,
+    };
+  }
+  if (hasContractionCandidate
+    !== Boolean(contractionEvidencePath || inheritedContractionReview)) {
+    throw new Error("Exact contraction candidate and its hash-bound evidence must be selected together.");
+  }
+  if (hasPronunciationCandidate && !pronunciationReviewEvidencePath) {
+    throw new Error("A phonetic-word candidate cannot be selected without exact user listening approval.");
+  }
+  if (hasAutomatedPronunciationCandidate && !automatedPronunciationEvidencePath) {
+    throw new Error("Automated phonetic candidate requires its exact reviewed ASR evidence.");
+  }
+  if (pronunciationReviewEvidencePath && automatedPronunciationEvidencePath) {
+    throw new Error("User listening and automated pronunciation reviews cannot be combined.");
+  }
+  if (contractionEvidencePath && (pronunciationReviewEvidencePath
+    || automatedPronunciationEvidencePath || fullStreamReviewEvidencePath
+    || flags["manual-review-evidence"]
+    || flags["contextual-asr-evidence"] || flags["full-stream-spacing-bridge-evidence"]
+    || flags["asr-orthography-evidence"])) {
+    throw new Error("Exact contraction expansion cannot combine with another explicit review route.");
+  }
+  let pronunciationReview = null;
+  if (pronunciationReviewEvidencePath) {
+    if (phaseContext || policy.primary.provider !== "qwen_local"
+      || acceptAsrDeliveryBlockers || acceptReviewWarnings) {
+      throw new Error("Exact pronunciation listening cannot combine with another review or waiver route.");
+    }
+    pronunciationReview = await loadPronunciationRecoveryState({
+      episodeDir, episode, sourceScriptSha256: actualSourceScriptSha256,
+    });
+    if (!pronunciationReview
+      || !["selected_approved", "candidate_approved"].includes(pronunciationReview.kind)
+      || pronunciationReview.review_path !== pronunciationReviewEvidencePath
+      || pronunciationReview.manifest_path !== manifestPath
+      || pronunciationReview.manifest_file_sha256 !== manifestFileSha256
+      || hasPronunciationCandidate !== (pronunciationReview.kind === "candidate_approved")) {
+      throw new Error("Pronunciation listening approval does not bind this exact provider manifest.");
+    }
+  }
+  let automatedPronunciationReview = null;
+  if (automatedPronunciationEvidencePath) {
+    if (phaseContext || policy.primary.provider !== "qwen_local"
+      || !narrationUsesAutomatedAsrAcceptance(qualityContract)
+      || acceptAsrDeliveryBlockers || acceptReviewWarnings || pronunciationReview) {
+      throw new Error("Exact automated pronunciation review cannot combine with another route.");
+    }
+    automatedPronunciationReview = await loadAutomatedPronunciationState({
+      episodeDir, episode, sourceScriptSha256: actualSourceScriptSha256,
+    });
+    if (automatedPronunciationReview?.kind !== "candidate_ready"
+      || automatedPronunciationReview.evidence_path !== automatedPronunciationEvidencePath
+      || automatedPronunciationReview.manifest_path !== manifestPath
+      || automatedPronunciationReview.manifest_file_sha256 !== manifestFileSha256
+      || !hasAutomatedPronunciationCandidate) {
+      throw new Error("Automated pronunciation evidence does not bind this exact candidate manifest.");
+    }
+  }
+  let contractionReview = inheritedContractionReview;
+  if (contractionEvidencePath) {
+    if (phaseContext || policy.primary.provider !== "qwen_local"
+      || !narrationUsesAutomatedAsrAcceptance(qualityContract)
+      || acceptAsrDeliveryBlockers || acceptReviewWarnings
+      || pronunciationReview || automatedPronunciationReview) {
+      throw new Error("Exact contraction expansion requires ordinary automated Qwen QA without waivers.");
+    }
+    contractionReview = await loadContractionRecoveryState({
+      episodeDir, episode, sourceScriptSha256: actualSourceScriptSha256,
+    });
+    if (contractionReview?.kind !== "candidate_ready"
+      || contractionReview.evidence_path !== contractionEvidencePath
+      || contractionReview.candidate_manifest_path !== manifestPath
+      || contractionReview.candidate_manifest_file_sha256 !== manifestFileSha256
+      || manifest.units.filter((row) => row.synthesis_mode === CONTRACTION_MODE).length !== 1) {
+      throw new Error("Contraction evidence does not bind this exact one-unit candidate manifest.");
+    }
+  }
+  let pronunciationSnapshots = null;
+  if (contractionReview?.kind === "descendant_ready") {
+    pronunciationSnapshots = {
+      prior_report: {
+        path: contractionReview.prior_proof.prior_report_snapshot_path,
+        sha256: contractionReview.prior_proof.prior_report_snapshot_sha256,
+      },
+      prior_delivery: {
+        path: contractionReview.prior_proof.prior_delivery_snapshot_path,
+        sha256: contractionReview.prior_proof.prior_delivery_snapshot_sha256,
+      },
+    };
+  } else if (pronunciationReview || automatedPronunciationReview || contractionReview) {
+    for (const row of manifest.units) {
+      if (await sha256File(row.audio_path) !== row.audio_sha256) {
+        throw new Error(`Provider audio hash is stale for ${row.unit_id}.`);
+      }
+    }
+    const snapshotDir = path.join(episodeDir,
+      "assets/audio/narration_tts/pronunciation_reviews",
+      pronunciationReview?.review_file_sha256
+        ?? automatedPronunciationReview?.evidence_file_sha256
+        ?? contractionReview.evidence_file_sha256);
+    const copyImmutable = async (sourcePath, basename) => {
+      const targetPath = path.join(snapshotDir, basename);
+      const bytes = await fs.readFile(sourcePath);
+      await fs.mkdir(snapshotDir, { recursive: true });
+      try { await fs.writeFile(targetPath, bytes, { flag: "wx" }); }
+      catch (error) {
+        if (error?.code !== "EEXIST"
+          || !bytes.equals(await fs.readFile(targetPath))) throw error;
+      }
+      return { path: targetPath, sha256: await sha256File(targetPath) };
+    };
+    pronunciationSnapshots = {
+      prior_report: await copyImmutable(path.join(episodeDir,
+        `narration_tts_report_${episode}.json`), "prior_report.json"),
+      prior_delivery: await copyImmutable(path.join(episodeDir,
+        `narration_unit_delivery_qa_${episode}.json`), "prior_delivery.json"),
+    };
+  }
+  const pronunciationProvenance = pronunciationReview ? {
+    user_pronunciation_review: {
+      schema: "goldflow_tts_exact_user_pronunciation_review_v1",
+      unit_id: pronunciationReview.unit_id,
+      kind: pronunciationReview.kind,
+      evidence_path: pronunciationReview.review_path,
+      evidence_sha256: pronunciationReview.review_file_sha256,
+      manifest_path: manifestPath,
+      manifest_file_sha256: manifestFileSha256,
+      prior_report_snapshot_path: pronunciationSnapshots.prior_report.path,
+      prior_report_snapshot_sha256: pronunciationSnapshots.prior_report.sha256,
+      prior_delivery_snapshot_path: pronunciationSnapshots.prior_delivery.path,
+      prior_delivery_snapshot_sha256: pronunciationSnapshots.prior_delivery.sha256,
+      human_listening_performed: true,
+    },
+  } : {};
+  const automatedPronunciationProvenance = automatedPronunciationReview ? {
+    automated_pronunciation_review: {
+      schema: "goldflow_tts_exact_automated_pronunciation_review_v1",
+      unit_id: automatedPronunciationReview.unit_id,
+      evidence_path: automatedPronunciationReview.evidence_path,
+      evidence_sha256: automatedPronunciationReview.evidence_file_sha256,
+      manifest_path: manifestPath,
+      manifest_file_sha256: manifestFileSha256,
+      prior_report_snapshot_path: pronunciationSnapshots.prior_report.path,
+      prior_report_snapshot_sha256: pronunciationSnapshots.prior_report.sha256,
+      prior_delivery_snapshot_path: pronunciationSnapshots.prior_delivery.path,
+      prior_delivery_snapshot_sha256: pronunciationSnapshots.prior_delivery.sha256,
+      expected_word: automatedPronunciationReview.expected_word,
+      phonetic_word: automatedPronunciationReview.phonetic_word,
+      human_listening_performed: false,
+      acceptance_basis: "fresh_independent_dual_asr_and_normal_audio_qa",
+    },
+  } : {};
+  const contractionProvenance = contractionReview?.kind === "descendant_ready"
+    ? { automated_contraction_expansion: contractionReview.prior_proof }
+    : contractionReview ? {
+    automated_contraction_expansion: {
+      schema: "goldflow_tts_reviewed_contraction_expansion_v1",
+      unit_id: contractionReview.unit_id,
+      evidence_path: contractionReview.evidence_path,
+      evidence_sha256: contractionReview.evidence_file_sha256,
+      manifest_path: manifestPath,
+      manifest_file_sha256: manifestFileSha256,
+      candidate_request_path: contractionReview.candidate_request_path,
+      candidate_request_sha256: contractionReview.candidate_request_file_sha256,
+      candidate_result_path: contractionReview.candidate_result_path,
+      candidate_result_sha256: contractionReview.candidate_result_file_sha256,
+      prior_report_snapshot_path: pronunciationSnapshots.prior_report.path,
+      prior_report_snapshot_sha256: pronunciationSnapshots.prior_report.sha256,
+      prior_delivery_snapshot_path: pronunciationSnapshots.prior_delivery.path,
+      prior_delivery_snapshot_sha256: pronunciationSnapshots.prior_delivery.sha256,
+      source_phrase: CONTRACTION_ALIAS.from,
+      tts_only_spoken_phrase: CONTRACTION_ALIAS.to,
+      human_listening_performed: false,
+      acceptance_basis: "fresh_independent_dual_asr_and_normal_audio_qa",
+    },
+  } : {};
+
+  const orthographyReview = !phaseContext && policy.primary.provider === "qwen_local"
+    && narrationUsesAutomatedAsrAcceptance(qualityContract)
+    ? await loadAsrOrthographyReview({ episodeDir, episode, plan,
+        identityFileSha256, sourceScriptSha256: actualSourceScriptSha256,
+        planFileSha256, qualityContractSha256: qualityContract.contract_sha256,
+        currentManifest: manifest })
+    : null;
+  const explicitOrthographyPath = String(flags["asr-orthography-evidence"] ?? "").trim();
+  if (explicitOrthographyPath && (!orthographyReview
+    || path.resolve(explicitOrthographyPath) !== orthographyReview.evidence_path)) {
+    throw new Error("Explicit ASR orthography receipt is absent, stale, or not applicable.");
+  }
+  const orthographyProvenance = orthographyReview
+    ? { asr_orthography_review: orthographyReview.provenance } : {};
 
   const manifestById = new Map(
     manifest.units.map((row) => [String(row.unit_id), row]),
@@ -1235,6 +1848,9 @@ export async function finalizeNarrationProviderOutput(
   };
   checkpoint.units ??= {};
   checkpoint.stages ??= {};
+  if (contractionReview?.kind === "descendant_ready") {
+    delete checkpoint.stages.full_stream_delivery_qa;
+  }
   if (reviewContinuation) {
     // The operator reviewed the old raw stream, not a new master. Only exact
     // unit QA and the semantic stitch are reusable across this boundary.
@@ -1246,6 +1862,12 @@ export async function finalizeNarrationProviderOutput(
   const rows = units.map((unit, orderIndex) => {
     const output = manifestById.get(String(unit.unit_id));
     const spokenText = String(unit.spoken_text ?? unit.tts_spoken_text ?? "");
+    if (String(unit.unit_id) === contractionReview?.unit_id
+      && (unit.source_text !== CONTRACTION_SOURCE_UNIT
+        || unit.caption_text !== CONTRACTION_SOURCE_UNIT
+        || unit.caption_text_sha256 !== sha256(CONTRACTION_SOURCE_UNIT))) {
+      throw new Error("Exact contraction candidate lost the locked source caption.");
+    }
     return {
       ...unit,
       order_index: orderIndex,
@@ -1278,6 +1900,17 @@ export async function finalizeNarrationProviderOutput(
       provider_receipt: output.provider_receipt,
       provider_unit_qa: output.provider_unit_qa ?? null,
       provider_unit_qa_sha256: output.provider_unit_qa_sha256 ?? null,
+      ...(String(unit.unit_id) === contractionReview?.unit_id ? {
+        caption_text: unit.caption_text,
+        caption_text_sha256: unit.caption_text_sha256,
+        asr_equivalent_phrases: [CONTRACTION_ALIAS],
+        tts_only_contraction_expansion: {
+          source_token: "She’d", spoken_words: ["She", "had"],
+          source_phrase: CONTRACTION_ALIAS.from,
+          spoken_phrase: CONTRACTION_ALIAS.to,
+          evidence_sha256: contractionReview.evidence_file_sha256,
+        },
+      } : {}),
       unit_qa: output.provider_unit_qa
         ? waveformQaWithoutVoiceAggregate(output.provider_unit_qa)
         : null,
@@ -1295,7 +1928,8 @@ export async function finalizeNarrationProviderOutput(
       voiceSha256: manifest.voice_sha256,
       voiceContinuityContract: manifest.voice_continuity_contract,
     });
-    const cached = reusableNarrationFinalizationUnit(
+    const cached = String(row.unit_id) === contractionReview?.unit_id ? null
+      : reusableNarrationFinalizationUnit(
       checkpoint,
       row.unit_id,
       row.finalization_unit_key,
@@ -1324,7 +1958,8 @@ export async function finalizeNarrationProviderOutput(
     computeType: "int8_float32",
   });
   for (const row of rows) {
-    const cached = reusableNarrationFinalizationUnit(
+    const cached = String(row.unit_id) === contractionReview?.unit_id ? null
+      : reusableNarrationFinalizationUnit(
       checkpoint,
       row.unit_id,
       row.finalization_unit_key,
@@ -1398,6 +2033,15 @@ export async function finalizeNarrationProviderOutput(
     ?? (embeddedContinuityComplete ? [...embeddedContinuityPaths][0] : null);
   const reuseContinuitySha256 = cachedContinuityStage?.payload?.report_sha256
     ?? (embeddedContinuityComplete ? [...embeddedContinuityHashes][0] : null);
+  if (fullStreamManualReview && primaryNeeds.length) {
+    throw new Error("Exact full-stream review requires retained unit ASR; refresh QA separately.");
+  }
+  if (contextualAsrReconciliation && primaryNeeds.length) {
+    throw new Error("Contextual ASR reconciliation requires retained unit ASR; refresh QA separately.");
+  }
+  if (spacingBridge && primaryNeeds.length) {
+    throw new Error("Full-stream spacing bridge requires retained unit ASR; refresh QA separately.");
+  }
   const [acousticQa, freshPrimaryMap, voiceContinuity] = await Promise.all([
     helpers.runUnitOutputQaForDiagnostics(rows, {
       reuseHashValidQa: true,
@@ -1437,6 +2081,23 @@ export async function finalizeNarrationProviderOutput(
     },
   };
   await atomicWriteJson(continuityPath, voiceContinuity);
+  // Read after exact continuity evidence is available. No sidecar preserves the
+  // existing review policy; an explicit receipt changes only named low margins.
+  const lowMarginDisposition = await loadLowMarginDisposition({ episodeDir, episode });
+  if (lowMarginDisposition && phaseContext) {
+    throw new Error("Low-margin policy disposition is not supported for proof-phase finalization.");
+  }
+  assertLowMarginActiveBindings(lowMarginDisposition, {
+    source_script_sha256: actualSourceScriptSha256,
+    run_identity_sha256: identityFileSha256,
+    narration_generation_plan_file_sha256: planFileSha256,
+    provider_output_manifest_file_sha256: manifestFileSha256,
+    speaker_similarity_file_sha256: voiceContinuity.report_sha256,
+    narration_generation_plan_sha256: canonicalPlanSha256,
+    narration_quality_contract_sha256: qualityContract.contract_sha256,
+  });
+  const lowMarginProvenance = lowMarginDisposition
+    ? { voice_low_margin_disposition: lowMarginDisposition } : {};
   const continuityArtifactSha256 = await sha256File(continuityPath);
   const primaryById = new Map();
   const confirmationCandidates = [];
@@ -1457,26 +2118,39 @@ export async function finalizeNarrationProviderOutput(
       contract: qualityContract,
     });
     primaryById.set(String(row.unit_id), { recognized, transcriptQa, decision });
-    if (narrationDeliveryNeedsConfirmation(transcriptQa, decision)) {
+    const cached = String(row.unit_id) === contractionReview?.unit_id ? null
+      : reusableNarrationFinalizationUnit(
+      checkpoint,
+      row.unit_id,
+      row.finalization_unit_key,
+    );
+    // Keep the raw confirmation even when a comparison repair removes the
+    // need for it. It remains evidence; only the decision is recomputed.
+    if (cached?.confirmation_recognition) {
+      cachedConfirmationMap.set(String(row.unit_id), cached.confirmation_recognition);
+    }
+    if (narrationDeliveryNeedsConfirmation(transcriptQa, decision)
+      || String(row.unit_id) === automatedPronunciationReview?.unit_id
+      || String(row.unit_id) === contractionReview?.unit_id) {
       confirmationRequiredIds.add(String(row.unit_id));
-      const cached = reusableNarrationFinalizationUnit(
-        checkpoint,
-        row.unit_id,
-        row.finalization_unit_key,
-      );
-      if (cached?.confirmation_recognition) {
-        cachedConfirmationMap.set(
-          String(row.unit_id),
-          cached.confirmation_recognition,
-        );
-      } else {
+      if (!cached?.confirmation_recognition) {
         confirmationCandidates.push({ unit_id: row.unit_id, wav: row.wav });
       }
     }
   }
+  if (fullStreamManualReview && confirmationCandidates.length) {
+    throw new Error("Exact full-stream review requires retained unit confirmation ASR; refresh QA separately.");
+  }
+  if (contextualAsrReconciliation && confirmationCandidates.length) {
+    throw new Error("Contextual ASR reconciliation requires retained unit confirmation ASR.");
+  }
+  if (spacingBridge && confirmationCandidates.length) {
+    throw new Error("Full-stream spacing bridge requires retained unit confirmation ASR.");
+  }
   for (const row of rows) {
     const primary = primaryById.get(String(row.unit_id));
-    const cached = reusableNarrationFinalizationUnit(
+    const cached = String(row.unit_id) === contractionReview?.unit_id ? null
+      : reusableNarrationFinalizationUnit(
       checkpoint,
       row.unit_id,
       row.finalization_unit_key,
@@ -1551,6 +2225,63 @@ export async function finalizeNarrationProviderOutput(
       ...acousticReviewWarnings,
       ...(continuity?.warnings ?? []),
     ]);
+    decision = blockAutomatedNarrationEdgeRisks(
+      decision,
+      row.unit_qa?.findings ?? [],
+      qualityContract,
+    );
+    if (pronunciationReview) {
+      decision = applyPronunciationCandidateReviewForTests({
+        decision, unitId: String(row.unit_id),
+        reviewedUnitId: pronunciationReview.unit_id,
+        reviewFileSha256: pronunciationReview.review_file_sha256,
+        primaryTranscriptQa: primary.transcriptQa,
+        // The candidate reuses the immutable remainder whose prior Small and
+        // Medium passes both matched every later word. A clean current Small
+        // pass need not trigger a new Medium diagnostic.
+        confirmationTranscriptQa: confirmationQa
+          ?? (pronunciationReview.kind === "candidate_approved"
+            ? primary.transcriptQa : null),
+      });
+    }
+    if (automatedPronunciationReview) {
+      decision = applyAutomatedPronunciationCandidateForTests({
+        decision, unitId: String(row.unit_id),
+        reviewedUnitId: automatedPronunciationReview.unit_id,
+        evidenceSha256: automatedPronunciationReview.evidence_file_sha256,
+        expectedWord: automatedPronunciationReview.expected_word,
+        phoneticWord: automatedPronunciationReview.phonetic_word,
+        primaryTranscriptQa: primary.transcriptQa,
+        confirmationTranscriptQa: confirmationQa,
+      });
+    }
+    if (contractionReview) {
+      if (String(row.unit_id) === contractionReview.unit_id
+        && (primaryRecognitionSourceById.get(String(row.unit_id))
+          !== "fresh_finalizer_small_asr"
+          || !freshConfirmationMap.has(String(row.unit_id)))) {
+        throw new Error("Contraction candidate requires fresh independent Small and Medium ASR.");
+      }
+      decision = contractionCandidateAsrDecisionForTests({
+        decision, unitId: String(row.unit_id),
+        reviewedUnitId: contractionReview.unit_id,
+        expectedText: row.text,
+        primaryText: primary.recognized?.text,
+        confirmationText: confirmation?.text,
+        evidenceSha256: contractionReview.evidence_file_sha256,
+      });
+    }
+    const reviewedSpelling = orthographyReview?.rows_by_id.get(String(row.unit_id));
+    if (reviewedSpelling) {
+      if (primary.recognized?.text !== reviewedSpelling.primary_recognized_text
+        || confirmation?.text !== reviewedSpelling.confirmation_recognized_text) {
+        throw new Error(`Retained dual-ASR evidence changed for reviewed spelling ${row.unit_id}.`);
+      }
+      decision = applyAsrOrthographyReviewForTests(
+        decision, reviewedSpelling, orthographyReview.evidence_sha256,
+      );
+    }
+    decision = applyLowMarginDisposition(decision, row.unit_id, lowMarginDisposition);
     if (acceptAsrDeliveryBlockers) {
       decision = operatorWaiveAsrDecision(
         decision,
@@ -1595,6 +2326,10 @@ export async function finalizeNarrationProviderOutput(
       acoustic_qa: row.unit_qa,
       voice_continuity: continuity,
       decision,
+      ...(row.tts_only_contraction_expansion ? {
+        asr_equivalent_phrases: row.asr_equivalent_phrases,
+        tts_only_contraction_expansion: row.tts_only_contraction_expansion,
+      } : {}),
     };
     deliveryRows.push(deliveryRow);
     blockers.push(...(decision.blockers ?? []).map((finding) => ({
@@ -1675,7 +2410,7 @@ export async function finalizeNarrationProviderOutput(
       deliveryRows,
       blockers,
     });
-    blockers = applyNarrationDeliveryManualReview({
+    blockers = applyNarrationDeliveryManualReviewForTests({
       deliveryRows,
       blockers,
       review: manualReview,
@@ -1687,6 +2422,7 @@ export async function finalizeNarrationProviderOutput(
         {
           evidence_sha256: manualReviewEvidenceSha256,
           accepted_unit_ids: manualReview.accepted_unit_ids,
+          rejected_unit_ids: manualReview.rejected_unit_ids,
           provider_output_manifest_sha256: manifestFileSha256,
         },
       ),
@@ -1697,6 +2433,7 @@ export async function finalizeNarrationProviderOutput(
         reviewer: manualReview.reviewer,
         reviewed_at: manualReview.reviewed_at,
         accepted_unit_ids: manualReview.accepted_unit_ids,
+        rejected_unit_ids: manualReview.rejected_unit_ids,
       },
     };
   }
@@ -1712,7 +2449,13 @@ export async function finalizeNarrationProviderOutput(
     throw new Error("Reviewed continuation no longer matches the exact approved listen packet.");
   }
   const unitDeliveryArtifact = {
+    ...lowMarginProvenance,
+    ...orthographyProvenance,
+    ...pronunciationProvenance,
+    ...automatedPronunciationProvenance,
+    ...contractionProvenance,
     schema: "goldflow_narration_unit_delivery_qa_v2",
+    transcript_comparison_version: helpers.TRANSCRIPT_QA_COMPARISON_VERSION,
     status: blockers.length
       ? "blocked"
       : listenPacket.item_count ? "passed_with_warnings" : "passed",
@@ -1735,6 +2478,7 @@ export async function finalizeNarrationProviderOutput(
     manual_review_evidence_path: manualReviewEvidencePath,
     manual_review_evidence_sha256: manualReviewEvidenceSha256,
     manual_review_accepted_unit_ids: manualReview?.accepted_unit_ids ?? [],
+    manual_review_rejected_unit_ids: manualReview?.rejected_unit_ids ?? [],
     operator_narration_qa_waiver:
       acceptAsrDeliveryBlockers || acceptReviewWarnings
         ? operatorNarrationWaiver
@@ -1783,6 +2527,10 @@ export async function finalizeNarrationProviderOutput(
   });
   const selectedBlockers = blockers.filter((finding) => finding.unit_id);
   const unitQaArtifact = {
+    ...lowMarginProvenance,
+    ...orthographyProvenance,
+    ...pronunciationProvenance,
+    ...automatedPronunciationProvenance,
     schema: "goldflow_narration_tts_unit_qa_v2",
     status: blockers.length
       ? "blocked"
@@ -1807,6 +2555,7 @@ export async function finalizeNarrationProviderOutput(
     manual_review_evidence_path: manualReviewEvidencePath,
     manual_review_evidence_sha256: manualReviewEvidenceSha256,
     manual_review_accepted_unit_ids: manualReview?.accepted_unit_ids ?? [],
+    manual_review_rejected_unit_ids: manualReview?.rejected_unit_ids ?? [],
     operator_narration_qa_waiver:
       acceptAsrDeliveryBlockers || acceptReviewWarnings
         ? operatorNarrationWaiver
@@ -1818,6 +2567,7 @@ export async function finalizeNarrationProviderOutput(
     selected_blockers: selectedBlockers,
     selected_units: selectedUnits,
   };
+  assertPartialRepairUnitBlockerHoldForTests({ requireUnitBlockers, blockers });
   await Promise.all([
     atomicWriteJson(unitDeliveryPath, unitDeliveryArtifact),
     atomicWriteJson(unitQaPath, unitQaArtifact),
@@ -1836,6 +2586,11 @@ export async function finalizeNarrationProviderOutput(
       `narration_tts_report_${episode}.json`,
     );
     await atomicWriteJson(blockedTtsReportPath, {
+      ...lowMarginProvenance,
+      ...orthographyProvenance,
+      ...pronunciationProvenance,
+      ...automatedPronunciationProvenance,
+      ...contractionProvenance,
       ...scopeFields,
       schema: "goldflow_narration_tts_report_v1",
       status: "blocked",
@@ -1859,8 +2614,15 @@ export async function finalizeNarrationProviderOutput(
       unit_qa_path: unitQaPath,
       unit_qa_status: unitQaArtifact.status,
       full_stream_qa_status: "not_run_due_to_unit_blockers",
+      manual_review_evidence_path: manualReviewEvidencePath,
+      manual_review_evidence_sha256: manualReviewEvidenceSha256,
+      manual_review_accepted_unit_ids: manualReview?.accepted_unit_ids ?? [],
+      manual_review_rejected_unit_ids: manualReview?.rejected_unit_ids ?? [],
       expected_unit_count: rows.length,
       selected_unit_count: rows.length,
+      ...providerNeutralRetryReportFieldsForTests({
+        structuralRecovery, provider: manifest.provider, qualityContract, rows,
+      }),
       retry_scope_policy:
         "no_automatic_retry; later_hash_bound_exact_unit_repair_only",
       results: rows.map((row, index) => ({
@@ -1878,6 +2640,7 @@ export async function finalizeNarrationProviderOutput(
         audio_sha256: row.audio_sha256,
         synthesis_identity: row.synthesis_identity,
         synthesis_identity_sha256: row.synthesis_identity_sha256,
+        recovery_provenance: row.recovery_provenance,
         selected_qa: selectedUnits[index].qa,
         qa_status: selectedUnits[index].qa_status,
       })),
@@ -1907,16 +2670,21 @@ export async function finalizeNarrationProviderOutput(
       listenDecision,
     );
   }
-  const deliveryAccepted = listenPacket.item_count === 0
+  const automatedAsrAcceptance = narrationUsesAutomatedAsrAcceptance(qualityContract);
+  const deliveryAccepted = automatedAsrAcceptance
+    || listenPacket.item_count === 0
     || listenDecisionValidation?.status === "approved";
 
   const rawWav = reviewContinuation?.rawAudio.path
     ?? path.join(workDir, `${episode}-narration-provider-neutral-raw.wav`);
+  const stitchImplementation = await narrationStitchImplementationIdentity();
   const stitchInputKey = narrationFinalizationStageKey("semantic_stitch", {
     ordered_unit_keys: rows.map((row) => row.finalization_unit_key),
+    narration_generation_plan_sha256: plan.plan_sha256,
     quality_contract_sha256: qualityContract.contract_sha256,
     stitch_sample_rate_hz: CANONICAL_SAMPLE_RATE_HZ,
     alignment_policy: "narration_alignment_safe_semantic_stitch_v2",
+    stitch_implementation: stitchImplementation,
   });
   const cachedStitchStage = reusableNarrationFinalizationStage(
     checkpoint,
@@ -1943,6 +2711,9 @@ export async function finalizeNarrationProviderOutput(
     }
   }
   if (!stitch) {
+    if (fullStreamManualReview || contextualAsrReconciliation || spacingBridge) {
+      throw new Error("Exact full-stream evidence requires the retained stitch; media rebuilding is forbidden.");
+    }
     if (reviewContinuation) {
       throw new Error("Reviewed continuation lost its exact cached raw stitch; restitching is forbidden.");
     }
@@ -1963,6 +2734,7 @@ export async function finalizeNarrationProviderOutput(
       raw_wav_path: rawWav,
       raw_wav_sha256: rawWavSha256,
       stitch,
+      stitch_implementation: stitchImplementation,
     },
   };
   await atomicWriteJson(checkpointPath, checkpoint);
@@ -1972,7 +2744,7 @@ export async function finalizeNarrationProviderOutput(
       ? "deferred_until_delivery_acceptance"
       : "diagnostic_disabled",
     reason: masteringRequested
-      ? "Exact listen items must be approved before mastering."
+      ? "Narration delivery QA must pass before mastering."
       : "Mastering was explicitly disabled for a diagnostic run.",
   };
   let canonicalWav = rawWav;
@@ -2000,6 +2772,9 @@ export async function finalizeNarrationProviderOutput(
       )) {
       mastering = cachedMastering;
     } else {
+      if (fullStreamManualReview || contextualAsrReconciliation || spacingBridge) {
+        throw new Error("Exact full-stream evidence requires the retained master; media rebuilding is forbidden.");
+      }
       mastering = await masterNarrationTwoPass({
         inputPath: rawWav,
         outputPath: masteredPath,
@@ -2049,6 +2824,7 @@ export async function finalizeNarrationProviderOutput(
       generationPlanFileSha256: planFileSha256,
       qualityContractSha256: qualityContract.contract_sha256,
       sampleRateHz: CANONICAL_SAMPLE_RATE_HZ,
+      sourceStructure,
     });
     if (pilotFinalization) {
       subjectiveManifest.finalization_scope = pilotFinalization.scope;
@@ -2110,14 +2886,33 @@ export async function finalizeNarrationProviderOutput(
   let cachedFullStream = cachedFullStreamStage?.payload?.full_stream ?? null;
   if (cachedFullStream) {
     const confirmationEvidenceValid = (await Promise.all(
-      (cachedFullStream.confirmation_windows ?? []).map((window) => (
+      [...(cachedFullStream.confirmation_windows ?? []),
+        ...(cachedFullStream.retained_confirmation_evidence ?? [])].map((window) => (
         fileMatchesSha256(window.audio_path, window.audio_sha256)
       )),
     )).every(Boolean);
     if (!confirmationEvidenceValid) cachedFullStream = null;
   }
-  const rawFullStream = cachedFullStream
-    ?? await runFullStreamDeliveryQa({
+  if (fullStreamManualReview && !narrationFullStreamDerivedDecisionsCurrent(
+    cachedFullStream, helpers.TRANSCRIPT_QA_COMPARISON_VERSION,
+  )) {
+    throw new Error("Exact full-stream review requires current retained ASR; refresh QA separately before listening review.");
+  }
+  if (contextualAsrReconciliation && !narrationFullStreamDerivedDecisionsCurrent(
+    cachedFullStream, helpers.TRANSCRIPT_QA_COMPARISON_VERSION,
+  )) {
+    throw new Error("Contextual ASR reconciliation requires current retained full-stream ASR.");
+  }
+  if (spacingBridge && !narrationFullStreamDerivedDecisionsCurrent(
+    cachedFullStream, helpers.TRANSCRIPT_QA_COMPARISON_VERSION,
+  )) {
+    throw new Error("Full-stream spacing bridge requires current retained full-stream ASR.");
+  }
+  const rawFullStream = narrationFullStreamDerivedDecisionsCurrent(
+    cachedFullStream, helpers.TRANSCRIPT_QA_COMPARISON_VERSION,
+  )
+    ? cachedFullStream
+    : await runFullStreamDeliveryQa({
       helpers,
       audioPath: canonicalWav,
       audioSha256: canonicalWavSha256,
@@ -2126,8 +2921,13 @@ export async function finalizeNarrationProviderOutput(
       orderQa,
       joinQa,
       stitch,
+      stitchAudioPath: rawWav,
+      stitchAudioSha256: rawWavSha256,
+      unitDeliveryRows: deliveryRows,
+      unitPrimaryRecognitions: primaryById,
       workDir,
       localWhisperContract: officialLocalWhisperContract,
+      retainedEvidence: cachedFullStream,
     });
   checkpoint.stages.full_stream_delivery_qa = {
     input_key: fullStreamInputKey,
@@ -2142,6 +2942,42 @@ export async function finalizeNarrationProviderOutput(
         evidenceSha256: manualReviewEvidenceSha256,
       })
     : rawFullStream;
+  if (fullStreamManualReview) {
+    fullStream = applyFullStreamManualReview({ fullStream, review: fullStreamManualReview,
+      bindings: {
+        source_script_hash: actualSourceScriptSha256,
+        narration_generation_plan_sha256: canonicalPlanSha256,
+        narration_generation_plan_file_sha256: planFileSha256,
+        narration_quality_contract_sha256: qualityContract.contract_sha256,
+        audio_path: canonicalWav, audio_sha256: canonicalWavSha256,
+      },
+    });
+    checkpoint.stages.full_stream_manual_review = {
+      input_key: narrationFinalizationStageKey("full_stream_manual_review", fullStream.full_stream_manual_review),
+      status: fullStream.decision.status === "blocked" ? "blocked" : "passed",
+      payload: fullStream.full_stream_manual_review,
+    };
+  }
+  if (contextualAsrReconciliation) {
+    fullStream = applyContextualAsrReconciliation({
+      fullStream, reconciliation: contextualAsrReconciliation,
+    });
+    checkpoint.stages.full_stream_contextual_asr = {
+      input_key: narrationFinalizationStageKey("full_stream_contextual_asr",
+        fullStream.full_stream_contextual_asr),
+      status: fullStream.decision.status === "blocked" ? "blocked" : "passed",
+      payload: fullStream.full_stream_contextual_asr,
+    };
+  }
+  if (spacingBridge) {
+    fullStream = applyFullStreamSpacingBridge({ fullStream, bridge: spacingBridge });
+    checkpoint.stages.full_stream_spacing_bridge = {
+      input_key: narrationFinalizationStageKey("full_stream_spacing_bridge",
+        fullStream.full_stream_spacing_bridge),
+      status: fullStream.decision.status === "blocked" ? "blocked" : "passed",
+      payload: fullStream.full_stream_spacing_bridge,
+    };
+  }
   const originalFullStreamBlockers = [
     ...(fullStream.decision?.blockers ?? []),
   ];
@@ -2172,19 +3008,20 @@ export async function finalizeNarrationProviderOutput(
     status: fullStream.decision.status === "blocked" ? "blocked" : "passed",
     payload: { full_stream: rawFullStream },
   };
-  const fullStreamPath = path.join(
-    artifactDir,
-    `narration_full_stream_qa_${episode}.json`,
-  );
   const fullStreamArtifact = {
     ...scopeFields,
+    ...orthographyProvenance,
     schema: "goldflow_narration_full_stream_qa_v2",
+    transcript_comparison_version: fullStream.transcript_comparison_version,
+    delivery_consensus_version: fullStream.delivery_consensus_version,
+    cross_level_asr_policy_version: fullStream.cross_level_asr_policy_version,
     status: fullStream.decision.status,
     source_script_hash: sourceScriptHash(plan),
     narration_generation_plan_path: planPath,
     narration_generation_plan_sha256: canonicalPlanSha256,
     narration_generation_plan_file_sha256: planFileSha256,
     narration_quality_contract_sha256: qualityContract.contract_sha256,
+    provider_output_manifest_file_sha256: manifestFileSha256,
     audio_path: canonicalWav,
     audio_sha256: canonicalWavSha256,
     intended_text_sha256: fullStream.intended_text_sha256,
@@ -2202,10 +3039,15 @@ export async function finalizeNarrationProviderOutput(
     confirmation_transcript_qa: fullStream.confirmation_transcript_qa,
     confirmation_window_plan: fullStream.confirmation_window_plan,
     confirmation_windows: fullStream.confirmation_windows,
+    retained_confirmation_evidence: fullStream.retained_confirmation_evidence ?? [],
     primary_alignment_contract: fullStream.primary_alignment_contract,
     manual_review_evidence_path: manualReviewEvidencePath,
     manual_review_evidence_sha256: manualReviewEvidenceSha256,
     manual_review_accepted_unit_ids: manualReview?.accepted_unit_ids ?? [],
+    manual_review_rejected_unit_ids: manualReview?.rejected_unit_ids ?? [],
+    full_stream_manual_review: fullStream.full_stream_manual_review ?? null,
+    full_stream_contextual_asr: fullStream.full_stream_contextual_asr ?? null,
+    full_stream_spacing_bridge: fullStream.full_stream_spacing_bridge ?? null,
     operator_narration_qa_waiver:
       acceptAsrDeliveryBlockers || acceptReviewWarnings
         ? operatorNarrationWaiver
@@ -2238,6 +3080,9 @@ export async function finalizeNarrationProviderOutput(
   );
   let finalM4aSha256 = cachedEncodeStage?.payload?.final_m4a_sha256 ?? null;
   if (!(await fileMatchesSha256(finalM4a, finalM4aSha256))) {
+    if (fullStreamManualReview || contextualAsrReconciliation || spacingBridge) {
+      throw new Error("Exact full-stream evidence requires the retained encode; media rebuilding is forbidden.");
+    }
     finalM4aSha256 = await encodeM4a(canonicalWav, finalM4a);
   }
   checkpoint.stages.encode_m4a = {
@@ -2249,6 +3094,18 @@ export async function finalizeNarrationProviderOutput(
     },
   };
   const sourceHash = sourceScriptHash(plan);
+  const contractionTimeline = contractionReview
+    ? narrationUnitTimeline({ plan, stitch, sampleRateHz: CANONICAL_SAMPLE_RATE_HZ })
+    : null;
+  const contractionTiming = contractionTimeline?.rows.find(
+    (row) => row.unit_id === contractionReview?.unit_id) ?? null;
+  if (contractionReview && (!contractionTiming
+    || contractionTimeline.rows.length !== rows.length
+    || contractionTimeline.total_sample_count
+      !== Number(stitch.sample_accounting?.actual_sample_count
+        ?? stitch.final_qa?.metrics?.sample_count))) {
+    throw new Error("Contraction caption timing does not match exact stitched sample accounting.");
+  }
   const primary = {
     ...policy.primary,
     provider: manifest.provider,
@@ -2268,6 +3125,9 @@ export async function finalizeNarrationProviderOutput(
     voice_sha256: row.voice_sha256,
     voice_continuity_contract: row.voice_continuity_contract,
     text: row.text,
+    ...(row.tts_only_contraction_expansion
+      ? contractionSegmentReportFieldsForTests({ row, timing: contractionTiming,
+        evidenceSha256: contractionReview.evidence_file_sha256 }) : {}),
     spoken_text_sha256: row.spoken_text_sha256,
     synthesis_identity_sha256: row.synthesis_identity_sha256,
     synthesis_identity: row.synthesis_identity,
@@ -2328,6 +3188,9 @@ export async function finalizeNarrationProviderOutput(
     stitch_qa_status: stitch.status,
     full_stream_qa_status: fullStreamArtifact.status,
     full_stream_qa_path: fullStreamPath,
+    full_stream_manual_review: fullStream.full_stream_manual_review ?? null,
+    full_stream_contextual_asr: fullStream.full_stream_contextual_asr ?? null,
+    full_stream_spacing_bridge: fullStream.full_stream_spacing_bridge ?? null,
     boundary_qa: stitch.boundary_qa,
     boundaries: stitch.boundaries,
     join_qa: joinQa,
@@ -2354,9 +3217,17 @@ export async function finalizeNarrationProviderOutput(
     subjective_review_waiver: subjectiveReviewWaiver,
   };
   const ttsReport = {
+    ...lowMarginProvenance,
+    ...orthographyProvenance,
+    ...pronunciationProvenance,
+    ...automatedPronunciationProvenance,
+    ...contractionProvenance,
     ...scopeFields,
     ...(pilotFinalization?.phaseBatchPlans ? { phase_batch_plans: pilotFinalization.phaseBatchPlans } : {}),
     schema: "goldflow_provider_neutral_narration_tts_report_v2",
+    full_stream_manual_review: fullStream.full_stream_manual_review ?? null,
+    full_stream_contextual_asr: fullStream.full_stream_contextual_asr ?? null,
+    full_stream_spacing_bridge: fullStream.full_stream_spacing_bridge ?? null,
     status: ttsStatus,
     source_script_hash: sourceHash,
     narration_generation_plan_path: planPath,
@@ -2386,12 +3257,11 @@ export async function finalizeNarrationProviderOutput(
     full_stream_qa_path: fullStreamPath,
     expected_unit_count: rows.length,
     selected_unit_count: rows.length,
+    ...providerNeutralRetryReportFieldsForTests({
+      structuralRecovery, provider: manifest.provider, qualityContract, rows,
+    }),
     fallback_unit_ids: [],
     fallback_usage: null,
-    retry_policy: narrationTtsRetryReportPolicy({
-      provider: manifest.provider,
-      qualityContract,
-    }),
     provider_output_manifest_path: manifestPath,
     provider_output_manifest_sha256: await sha256File(manifestPath),
     voice_continuity_report_path: continuityPath,
@@ -2401,13 +3271,16 @@ export async function finalizeNarrationProviderOutput(
     manual_review_evidence_path: manualReviewEvidencePath,
     manual_review_evidence_sha256: manualReviewEvidenceSha256,
     manual_review_accepted_unit_ids: manualReview?.accepted_unit_ids ?? [],
+    manual_review_rejected_unit_ids: manualReview?.rejected_unit_ids ?? [],
     operator_narration_qa_waiver:
       acceptAsrDeliveryBlockers || acceptReviewWarnings || skipSubjectiveReview
         ? operatorNarrationWaiver
         : null,
     listen_review_packet_path: listenPacketPath,
     listen_review_packet_sha256: listenPacket.packet_sha256,
-    listen_review_status: listenPacket.item_count === 0
+    listen_review_status: automatedAsrAcceptance
+      ? "automated_asr_qa"
+      : listenPacket.item_count === 0
       ? "not_required"
       : listenDecisionValidation?.status ?? "pending",
     ...(reviewContinuation ? {

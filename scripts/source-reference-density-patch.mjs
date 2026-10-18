@@ -216,7 +216,7 @@ const report = {
   patches: applied,
   ...(densityTrim ? { density_trim: densityTrim } : {}),
   provider: providerReceipt?.provider ?? "reused_response",
-  model: providerReceipt?.model ?? "gpt-5.6-sol",
+  model: providerReceipt?.model ?? "gpt-6-sol",
   reasoning_effort: providerReceipt?.reasoning_effort ?? "max",
   receipt_path: providerReceipt?.bridge_receipt_path ?? null,
   completed_at: new Date().toISOString(),

@@ -42,6 +42,9 @@ const manualLocationRefRepairsPath = flags["manual-location-ref-repairs"]
 const manualSemanticRepairsPath = flags["manual-semantic-repairs"]
   ? path.resolve(flags["manual-semantic-repairs"])
   : null;
+const manualReconciliationRepairPath = flags["manual-reconciliation-evidence"]
+  ? path.resolve(flags["manual-reconciliation-evidence"])
+  : null;
 const scopeStartSec = flags["scope-start-sec"] == null ? null : Number(flags["scope-start-sec"]);
 const scopeEndSec = flags["scope-end-sec"] == null ? null : Number(flags["scope-end-sec"]);
 let activeContentProfile = contentProfileForIdentity({});
@@ -396,6 +399,84 @@ export function applyManualLocationRefRepairsForTests(
 
 function exactJsonEqual(left, right) {
   return JSON.stringify(left) === JSON.stringify(right);
+}
+
+export function applyManualReconciliationRepairForTests(parsed, artifact, script, { sourceScriptHash, failedCheckpointSha256, inputSha256 } = {}) {
+  if (artifact?.schema !== "goldflow_semantic_reconciliation_repair_v1" || artifact.status !== "approved") {
+    throw new Error("Approved exact-scope semantic reconciliation repair is required");
+  }
+  if (artifact.source_script_hash !== sourceScriptHash || artifact.failed_checkpoint_sha256 !== failedCheckpointSha256 || artifact.input_sha256 !== inputSha256) {
+    throw new Error("Semantic reconciliation repair is stale for this script, prompt, or failed checkpoint");
+  }
+  const patched = structuredClone(parsed);
+  const operations = artifact.operations ?? [];
+  if (!Array.isArray(operations) || !operations.length) throw new Error("Semantic reconciliation repair has no operations");
+  const allowedCollections = new Set(["canonical_entities", "canonical_locations", "canonical_props", "canonical_ui_motifs", "state_transitions", "scenes"]);
+  const seen = new Set();
+  for (const op of operations) {
+    if (!allowedCollections.has(op.collection) || !Number.isInteger(op.row_index) || op.row_index < 0) throw new Error("Semantic reconciliation repair has an invalid exact row scope");
+    const row = patched[op.collection]?.[op.row_index];
+    if (!row) throw new Error(`Semantic reconciliation repair row missing: ${op.collection}/${op.row_index}`);
+    const rowId = row.entity_id ?? row.location_id ?? row.prop_id ?? row.ui_id ?? row.scene_id;
+    if (rowId !== op.row_id) throw new Error(`Semantic reconciliation repair row identity changed: ${op.collection}/${op.row_index}`);
+    const key = [op.collection, op.row_index, op.field, op.evidence_index ?? ""].join("/");
+    if (seen.has(key)) throw new Error(`Duplicate semantic reconciliation repair operation: ${key}`);
+    seen.add(key);
+    let parent = row;
+    if (op.field === "exact_excerpt") {
+      if (op.collection === "scenes" || !Number.isInteger(op.evidence_index) || op.evidence_index < 0) throw new Error(`Invalid evidence repair scope: ${key}`);
+      parent = row.evidence?.[op.evidence_index];
+    } else if (op.field === "transition_evidence_excerpt") {
+      if (op.collection !== "state_transitions") throw new Error(`Invalid transition repair scope: ${key}`);
+    } else if (["script_excerpt_start", "script_excerpt_end"].includes(op.field)) {
+      if (op.collection !== "scenes") throw new Error(`Invalid scene anchor repair scope: ${key}`);
+    } else throw new Error(`Unsupported semantic reconciliation repair field: ${op.field}`);
+    if (!parent || parent[op.field] !== op.expected_excerpt) throw new Error(`Semantic reconciliation repair expected evidence changed: ${key}`);
+    if (typeof op.replacement_excerpt !== "string" || !op.replacement_excerpt.trim() || !script.includes(op.replacement_excerpt)) {
+      throw new Error(`Semantic reconciliation repair replacement is not exact script text: ${key}`);
+    }
+    parent[op.field] = op.replacement_excerpt;
+  }
+  const entityAppends = artifact.canonical_entity_appends ?? [];
+  if (!Array.isArray(entityAppends)) throw new Error("Semantic reconciliation entity appends must be an array");
+  const knownEntityIds = new Set((patched.canonical_entities ?? []).map(row => row.entity_id));
+  const missingVisibleSubjects = new Set(canonicalVisibleEntityCoverageFindingsForTests(patched, patched.scenes)
+    .filter((finding) => finding.code === "canonical_visible_actor_missing")
+    .map((finding) => identityLabel(finding.subject)));
+  for (const row of entityAppends) {
+    if (!/^[a-z][a-z0-9_]+$/.test(row?.entity_id ?? "") || knownEntityIds.has(row.entity_id)
+      || !["group", "person"].includes(row.kind) || !row.display_name?.trim() || !Array.isArray(row.aliases) || !row.aliases.length
+      || !Array.isArray(row.evidence) || !row.evidence.length
+      || row.evidence.some(item => !item?.exact_excerpt?.trim() || !script.includes(item.exact_excerpt) || !(Number(item.confidence) >= 0 && Number(item.confidence) <= 1))) {
+      throw new Error(`Invalid evidence-backed canonical entity append: ${row?.entity_id ?? "unknown"}`);
+    }
+    if (row.kind === "person") {
+      const displayLabel = identityLabel(row.display_name);
+      const existingLabels = (patched.canonical_entities ?? []).flatMap((entity) => [entity.display_name, ...(entity.aliases ?? [])]).filter(Boolean);
+      const cited = (label) => {
+        const phrase = identityLabel(label);
+        return phrase && row.evidence.some((item) => (` ${identityLabel(item.exact_excerpt)} `).includes(` ${phrase} `));
+      };
+      if (!missingVisibleSubjects.has(displayLabel)
+        || row.entity_id !== sanitizeCanonicalIdForTests(row.display_name)
+        || (patched.canonical_entities ?? []).some((entity) => sanitizeCanonicalIdForTests(entity.entity_id) === row.entity_id)
+        || ![row.display_name, ...row.aliases].every((label) => typeof label === "string" && label.trim() && cited(label))
+        || [row.display_name, ...row.aliases].some((label) => existingLabels.some((existing) => labelsDescribeSameEntity(label, existing)))) {
+        throw new Error(`Person append must name one missing visible actor with distinct, cited identity: ${row.entity_id}`);
+      }
+      missingVisibleSubjects.delete(displayLabel);
+    }
+    knownEntityIds.add(row.entity_id);
+    patched.canonical_entities.push(structuredClone(row));
+  }
+  // A transition's effective excerpt must also appear among its cited evidence.
+  for (const transition of patched.state_transitions ?? []) {
+    const excerpt = transition.transition_evidence_excerpt;
+    if (script.includes(excerpt) && !(transition.evidence ?? []).some(item => item.exact_excerpt === excerpt)) {
+      transition.evidence = [...(transition.evidence ?? []), { exact_excerpt: excerpt, confidence: 1 }];
+    }
+  }
+  return patched;
 }
 
 export function applyManualSemanticRepairsForTests(
@@ -1442,6 +1523,34 @@ async function reconcileSemanticPlan(script, bibles, parsedChunks, targets, stag
     reused_output: true,
   } : null;
   try {
+    if (!llm && manualReconciliationRepairPath) {
+      const artifact = await readJson(manualReconciliationRepairPath, null);
+      const failedPath = path.resolve(String(artifact?.failed_checkpoint_path ?? ""));
+      const checkpointDir = path.join(episodeDir, "planner_checkpoints", "semantic_scene_plan");
+      if (!failedPath.startsWith(`${checkpointDir}${path.sep}`) || !path.basename(failedPath).includes(".failed_")) {
+        throw new Error("Manual semantic reconciliation repair must bind one failed checkpoint in this episode");
+      }
+      const failedBytes = await fs.readFile(failedPath);
+      const failed = JSON.parse(failedBytes.toString("utf8"));
+      if (failed.status !== "failed" || failed.chunk_id !== chunkId || failed.input_sha256 !== inputHash || !failed.parsed) {
+        throw new Error("Manual semantic reconciliation repair checkpoint does not match current prompt");
+      }
+      const repairedParsed = applyManualReconciliationRepairForTests(failed.parsed, artifact, script, {
+        sourceScriptHash: sha256(script),
+        failedCheckpointSha256: sha256(failedBytes),
+        inputSha256: inputHash,
+      });
+      llm = {
+        provider: failed.provider,
+        model: failed.model,
+        reasoning_effort: failed.reasoning_effort,
+        output_path: failed.provider_output_path,
+        parsed: repairedParsed,
+        manual_reconciliation_repair_path: manualReconciliationRepairPath,
+        manual_reconciliation_repair_sha256: sha256(await fs.readFile(manualReconciliationRepairPath)),
+        repaired_failed_checkpoint_path: failedPath,
+      };
+    }
     if (!llm) {
       const callStage = exactRepair ? `${reconciliationStage}_exact_repair` : reconciliationStage;
       llm = isLocalLLMRoute(callStage)
@@ -1477,6 +1586,11 @@ async function reconcileSemanticPlan(script, bibles, parsedChunks, targets, stag
         reasoning_effort: llm.reasoning_effort ?? null,
         output_path: llm.output_path ?? null,
         attempt: 1,
+        ...(llm.manual_reconciliation_repair_path ? {
+          manual_reconciliation_repair_path: llm.manual_reconciliation_repair_path,
+          manual_reconciliation_repair_sha256: llm.manual_reconciliation_repair_sha256,
+          repaired_failed_checkpoint_path: llm.repaired_failed_checkpoint_path,
+        } : {}),
       },
       updated_at: new Date().toISOString(),
     };

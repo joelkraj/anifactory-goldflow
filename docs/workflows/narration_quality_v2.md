@@ -32,6 +32,8 @@ The voice stage writes:
 
 Sentence-complete units prefer 20-42 spoken words. Forty-eight words is the soft maximum and 60 is the hard maximum. Short dialogue, system/UI, emphasis, and hard-boundary units stay atomic.
 
+Fresh local-Qwen plans follow [coherent narration submission](qwen_submission_v1.md): the author may join connected dialogue and narration across planning segments, while preserving genuine source/voice barriers and intentional short lines. Each group and semantic boundary has an explicit reason. Historical plans and other providers retain their original grouping contract and caches.
+
 Each unit carries:
 
 - immutable source, caption, and spoken tracks
@@ -156,7 +158,13 @@ Every unit receives waveform inspection, transcript comparison, and calibrated s
 
 The locked delivery ceiling is 0.05 WER. `small.en` screens units and the full stream. Exact `medium` confirmation is used when the contract requires it. Confirmed opening/final loss, missing or duplicated spans, insertion/deletion runs, wrong order/count, or excessive WER block finalization. Ambiguous substitution-only differences produce a hash-bound exact-listen item rather than an automatic regeneration.
 
+Protected-value confirmation requires the same operation type, intended value, recognized value, and shared intended source position in both recognizers. Pair-aware numeric notation may restore an implicit article or a dollar-symbol unit differently in the two intended sequences; those known additions cannot shift a later source position. Other intended-sequence disagreement is not silently aligned. A shared finding category alone is insufficient: one recognizer misreading 2.2 million while the other misreads a later 18 is disagreement, not confirmation of either amount. Repeated identical amounts at different positions remain distinct; protected insertions bind a shared source gap. Unconfirmed operations remain explicit warnings under the locked review policy. Exact shared wrong values, signs, initialisms, omissions and insertions still block. This does not change numeric tokenization, recognition text, audio, or the treatment of other delivery defects.
+
+`delivery_consensus_version` records this derived adjudication independently of `transcript_comparison_version`. A changed consensus version makes provider finalization rebuild decisions from the retained hash-bound primary transcription and matching Medium windows. It does not require new recognition for unchanged scopes or authorize synthesis. Preserve the blocked artifacts before running the guarded finalizer; do not hand-edit an existing decision to clear it.
+
 Voice continuity is calibrated against at least three owned reference clips with leave-one-out thresholds. Universal cosine thresholds and automatic voice switching are forbidden.
+
+An explicit [exact passing low-margin disposition](narration_low_margin_disposition.md) may make only named, above-minimum low-margin measurements advisory when aggregate identity passes. This documented policy refinement preserves all raw scores, below-floor and other exact-unit reviews, subjective sampling, and the locked contract; the default review requirements remain unchanged.
 
 ## Mandatory Subjective Sampling
 
@@ -177,6 +185,8 @@ A confirmed defect names only the affected sample and unit IDs. Passed units rem
 ## Editing And Stitching
 
 Amplitude-only trim is forbidden. A unit may be trimmed only from speech alignment while retaining at least 80 ms before its first aligned word and 140 ms after its last aligned word. If either ASR reports a leading or trailing deletion, edge alignment is considered uncertain and the whole unit is preserved. Otherwise dual-ASR alignment uses the widest speech envelope. Missing alignment preserves the entire unit. A four-millisecond fade may occur only inside verified retained silence, never over aligned speech.
+
+Waveform activity more than 20 ms beyond a proposed aligned trim vetoes the trim and preserves the entire unit without fades. Activity never chooses a new cut. Semantic-stitch cache keys bind the current plan and editor/helper implementation hashes, so cached stitching cannot bypass an editing or authored-boundary change; accepted raw synthesis and ASR remain reusable.
 
 Semantic boundary targets are:
 
@@ -210,6 +220,8 @@ The narrator-only longform stage does not master this canonical WAV again when i
 ## Repair Policy
 
 There is no automatic second creative submission. A confirmed problem produces an exact unit or boundary scope. Human review uses `goldflow tts approve-listen` and binds the prior report, unit audio, synthesis identity, finding codes, and decision. A pronunciation repair changes only the spoken track and preserves captions.
+
+Provider finalization also accepts a mixed `goldflow_narration_delivery_manual_review_v1` through `tts finalize-provider --manual-review-evidence <json>`. Keep the legacy listening attestation for an all-accepted review. When any listened unit is rejected, use `all_hash_bound_blocked_narration_units_listened_and_individually_decided`, with explicit `accepted_unit_count`/`accepted_units` and `rejected_unit_count`/`rejected_units`. Their disjoint union must cover every current blocked unit exactly once. Each rejected row requires `decision: "repair_required"`, the exact unit/provider/attempt/audio path/audio hash/synthesis identity, exact `reviewed_blocker_codes`, and a nonempty `listen_note` and `operator_quote`; it does not claim audible acceptance. The same plan, provider manifest, prior QA, review reel (when present), and audio hashes remain mandatory. Finalization retains the accepted decisions and unchanged rejected blockers in its canonical reports, then stops before stitching. This records the correction without authorizing synthesis; a later hash-bound exact-unit repair must separately authorize only the rejected unit.
 
 ## Measured Proof
 

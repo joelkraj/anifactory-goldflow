@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { googleImageSchedulingForIdentity, googleImageSchedulingPolicy } from "./google-image-scheduling.mjs";
 
 export const HYBRID_WEB_FLOW_PROVIDER = "hybrid_chatgpt_web_style_google_flow_pool";
 export const FEDERATED_WEB_IMAGE_PROVIDER = "federated_google_web_image_pool";
@@ -107,11 +108,14 @@ export function federatedWebImageIdentityOptions({
   geminiPlan = DEFAULT_GOOGLE_GEMINI_PLAN,
   geminiModel = DEFAULT_GOOGLE_GEMINI_MODEL,
   healthProof,
+  schedulingPolicy = null,
 } = {}) {
   if (!healthProof?.path || !SHA256_PATTERN.test(String(healthProof?.sha256 ?? ""))) {
     throw new Error("Federated image identity options require a hash-bound Google Flow health proof.");
   }
+  const scheduling = googleImageSchedulingPolicy(schedulingPolicy);
   return {
+    ...(scheduling ? { scheduling } : {}),
     routing_policy: FEDERATED_WEB_IMAGE_ROUTING_POLICY,
     style_reference_provider: GOOGLE_GEMINI_IMAGE_PROVIDER,
     reference_provider_pool: [GOOGLE_FLOW_IMAGE_PROVIDER, GOOGLE_GEMINI_IMAGE_PROVIDER],
@@ -125,7 +129,7 @@ export function federatedWebImageIdentityOptions({
     },
     chatgpt_project_url: chatGptProjectUrl,
     google_flow: {
-      concurrency: HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY,
+      concurrency: scheduling?.google_flow_concurrency ?? HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY,
       plan_label: flowPlan,
       model_label: flowModel,
       project_policy: PERSISTENT_GOOGLE_FLOW_PROJECT_PER_SLOT_POLICY,
@@ -136,7 +140,7 @@ export function federatedWebImageIdentityOptions({
       health_proof_sha256: healthProof.sha256,
     },
     google_gemini: {
-      concurrency: GOOGLE_GEMINI_IMAGE_CONCURRENCY,
+      concurrency: scheduling?.google_gemini_concurrency ?? GOOGLE_GEMINI_IMAGE_CONCURRENCY,
       plan_label: geminiPlan,
       model_label: geminiModel,
       worker_session_policy: PERSISTENT_BROWSER_TAB_PER_SLOT_POLICY,
@@ -150,7 +154,11 @@ export function federatedWebImageProviderLocks(options, {
   flowModel = DEFAULT_GOOGLE_FLOW_MODEL,
   geminiModel = DEFAULT_GOOGLE_GEMINI_MODEL,
 } = {}) {
+  const scheduling = options?.scheduling;
+  const flowConcurrency = scheduling?.google_flow_concurrency ?? HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY;
+  const geminiConcurrency = scheduling?.google_gemini_concurrency ?? GOOGLE_GEMINI_IMAGE_CONCURRENCY;
   return {
+    ...(scheduling ? { image_scheduling: { ...scheduling } } : {}),
     image_provider: FEDERATED_WEB_IMAGE_PROVIDER,
     image_routing_policy: options?.routing_policy ?? FEDERATED_WEB_IMAGE_ROUTING_POLICY,
     image_assignment_policy: HYBRID_WEB_FLOW_ASSIGNMENT_POLICY,
@@ -159,12 +167,12 @@ export function federatedWebImageProviderLocks(options, {
     scene_provider_pool: options?.scene_provider_pool ?? [GOOGLE_FLOW_IMAGE_PROVIDER, GOOGLE_GEMINI_IMAGE_PROVIDER],
     explicit_image_fallback_provider: CHATGPT_WEB_IMAGE_PROVIDER,
     explicit_image_fallback_policy: GOOGLE_FLOW_EXACT_ID_FALLBACK_POLICY,
-    google_flow_image_concurrency: HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY,
-    google_gemini_image_concurrency: GOOGLE_GEMINI_IMAGE_CONCURRENCY,
+    google_flow_image_concurrency: flowConcurrency,
+    google_gemini_image_concurrency: geminiConcurrency,
     chatgpt_web_image_concurrency: Number(options?.chatgpt_web?.concurrency ?? 0),
     chatgpt_web_fallback_concurrency: HYBRID_CHATGPT_IMAGE_CONCURRENCY,
-    federated_google_primary_concurrency: FEDERATED_GOOGLE_PRIMARY_CONCURRENCY,
-    federated_web_image_concurrency: FEDERATED_TOTAL_IMAGE_CONCURRENCY,
+    federated_google_primary_concurrency: flowConcurrency + geminiConcurrency,
+    federated_web_image_concurrency: scheduling?.total_concurrency ?? FEDERATED_TOTAL_IMAGE_CONCURRENCY,
     chatgpt_image_activation_policy: options?.chatgpt_activation_policy ?? "operator_approved_exact_id_only_v1",
     creative_submission_attempts: 1,
     image_automatic_retry_policy: "none",
@@ -300,6 +308,11 @@ export async function federatedWebImageIdentityStatus(identity = {}) {
   const locks = identity.provider_locks ?? {};
   const flow = options.google_flow ?? {};
   const gemini = options.google_gemini ?? {};
+  let scheduling;
+  try { scheduling = googleImageSchedulingForIdentity(identity); }
+  catch (error) { return { done: false, evidence: error.message, findings: [error.message] }; }
+  const flowConcurrency = scheduling?.google_flow_concurrency ?? HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY;
+  const geminiConcurrency = scheduling?.google_gemini_concurrency ?? GOOGLE_GEMINI_IMAGE_CONCURRENCY;
   const legacyV1 = options.routing_policy === FEDERATED_WEB_IMAGE_ROUTING_POLICY_V1;
   const legacyV2 = options.routing_policy === FEDERATED_WEB_IMAGE_ROUTING_POLICY_V2;
   const currentV3 = options.routing_policy === FEDERATED_WEB_IMAGE_ROUTING_POLICY;
@@ -310,10 +323,11 @@ export async function federatedWebImageIdentityStatus(identity = {}) {
   const expectedChatGptConcurrency = legacyV1 ? HYBRID_CHATGPT_IMAGE_CONCURRENCY : 0;
   const expectedTotalConcurrency = legacyV1
     ? FEDERATED_LEGACY_TOTAL_IMAGE_CONCURRENCY
-    : FEDERATED_TOTAL_IMAGE_CONCURRENCY;
+    : scheduling?.total_concurrency ?? FEDERATED_TOTAL_IMAGE_CONCURRENCY;
   const findings = [];
   const compare = (condition, field) => { if (!condition) findings.push(field); };
   compare(legacyFederated || currentV3, "image_provider_options.routing_policy");
+  compare(!scheduling || currentV3, "image_provider_options.scheduling.routing_policy");
   compare(options.style_reference_provider === GOOGLE_GEMINI_IMAGE_PROVIDER, "image_provider_options.style_reference_provider");
   compare(exactArray(options.reference_provider_pool, expectedPool), "image_provider_options.reference_provider_pool");
   compare(exactArray(options.scene_provider_pool, expectedPool), "image_provider_options.scene_provider_pool");
@@ -325,8 +339,8 @@ export async function federatedWebImageIdentityStatus(identity = {}) {
     compare(options.explicit_fallback?.policy === GOOGLE_FLOW_EXACT_ID_FALLBACK_POLICY, "image_provider_options.explicit_fallback.policy");
     compare(options.explicit_fallback?.automatic_failover === false, "image_provider_options.explicit_fallback.automatic_failover");
   }
-  compare(Number(flow.concurrency) === HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY, "image_provider_options.google_flow.concurrency");
-  compare(Number(gemini.concurrency) === GOOGLE_GEMINI_IMAGE_CONCURRENCY, "image_provider_options.google_gemini.concurrency");
+  compare(Number(flow.concurrency) === flowConcurrency, "image_provider_options.google_flow.concurrency");
+  compare(Number(gemini.concurrency) === geminiConcurrency, "image_provider_options.google_gemini.concurrency");
   const expectedFlowProjectPolicy = currentV3
     ? PERSISTENT_GOOGLE_FLOW_PROJECT_PER_SLOT_POLICY
     : FRESH_GOOGLE_FLOW_PROJECT_PER_JOB_POLICY;
@@ -342,7 +356,11 @@ export async function federatedWebImageIdentityStatus(identity = {}) {
   compare(locks.image_routing_policy === options.routing_policy, "provider_locks.image_routing_policy");
   compare(exactArray(locks.reference_provider_pool, expectedPool), "provider_locks.reference_provider_pool");
   compare(exactArray(locks.scene_provider_pool, expectedPool), "provider_locks.scene_provider_pool");
-  compare(Number(locks.federated_google_primary_concurrency) === FEDERATED_GOOGLE_PRIMARY_CONCURRENCY, "provider_locks.federated_google_primary_concurrency");
+  compare(Number(locks.federated_google_primary_concurrency) === flowConcurrency + geminiConcurrency, "provider_locks.federated_google_primary_concurrency");
+  if (scheduling) {
+    compare(Number(locks.google_flow_image_concurrency) === flowConcurrency, "provider_locks.google_flow_image_concurrency");
+    compare(Number(locks.google_gemini_image_concurrency) === geminiConcurrency, "provider_locks.google_gemini_image_concurrency");
+  }
   compare(Number(locks.chatgpt_web_image_concurrency) === expectedChatGptConcurrency, "provider_locks.chatgpt_web_image_concurrency");
   compare(Number(locks.federated_web_image_concurrency) === expectedTotalConcurrency, "provider_locks.federated_web_image_concurrency");
   if (legacyV2 || currentV3) {
@@ -378,7 +396,7 @@ export async function federatedWebImageIdentityStatus(identity = {}) {
           ? `legacy federated image pool locked: Flow ${HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY} + Gemini ${GOOGLE_GEMINI_IMAGE_CONCURRENCY} + GPT Image ${HYBRID_CHATGPT_IMAGE_CONCURRENCY}`
           : legacyV2
             ? `legacy federated image pool locked: Flow ${HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY} + Gemini ${GOOGLE_GEMINI_IMAGE_CONCURRENCY}; fresh browser workspaces; GPT Image exact-ID fallback only`
-            : `federated persistent-worker image pool locked: Flow ${HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY} projects + Gemini ${GOOGLE_GEMINI_IMAGE_CONCURRENCY} tabs; GPT Image exact-ID fallback only`,
+            : `federated persistent-worker image pool locked: Flow ${flowConcurrency} projects + Gemini ${geminiConcurrency} tabs; GPT Image exact-ID fallback only`,
       };
 }
 
@@ -390,11 +408,15 @@ export function federatedWebImageAutomaticChatGptEnabled(identity = {}) {
 }
 
 export function federatedWebImageConcurrencyForIdentity(identity = {}, {
-  flowConcurrency = HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY,
+  flowConcurrency,
 } = {}) {
   if (!isFederatedWebImageProvider(identity.image_provider)) return null;
-  return Number(flowConcurrency) + GOOGLE_GEMINI_IMAGE_CONCURRENCY
-    + (federatedWebImageAutomaticChatGptEnabled(identity) ? HYBRID_CHATGPT_IMAGE_CONCURRENCY : 0);
+  const scheduling = googleImageSchedulingForIdentity(identity);
+  return Math.min(scheduling?.total_concurrency ?? Infinity,
+    Number(flowConcurrency ?? scheduling?.google_flow_concurrency ?? HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY)
+      + (scheduling?.google_gemini_concurrency ?? GOOGLE_GEMINI_IMAGE_CONCURRENCY)
+    + (federatedWebImageAutomaticChatGptEnabled(identity) ? HYBRID_CHATGPT_IMAGE_CONCURRENCY : 0)
+  );
 }
 
 export async function loadGoogleFlowHealthProof(filePath = DEFAULT_GOOGLE_FLOW_HEALTH_PROOF_PATH, {

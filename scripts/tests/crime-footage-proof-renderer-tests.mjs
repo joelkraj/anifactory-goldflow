@@ -1,0 +1,32 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import sharp from 'sharp';
+import {validateCrimeFootageManifest,measuredCrimeText,exerciseCrimeFootageRendererWithSyntheticInputs,renderCrimeFootageProof} from '../lib/crime-footage-proof-renderer.mjs';
+
+const source={path:'/synthetic/source.wav',sha256:'1'.repeat(64),in_sec:0,out_sec:30,origin:'original_court_audio'};
+const scene=id=>({id,plan_scene_id:id,kind:'graphic',duration_frames:900,audio:{...source},source_id:'test',window_id:'window',source_label:'SYNTHETIC FIXTURE',title:'THE RECORD',captions:[{start_sec:0,end_sec:1,text:'A complete phrase.'}],transcript_text:'A complete phrase.'});
+const manifest={schema:'crime_footage_proof_render_manifest_v1',width:1920,height:1080,fps:30,min_duration_sec:90,max_duration_sec:150,production_eligible:false,publish_allowed:false,segments:['a','b','c'].map(scene)};
+assert.equal(validateCrimeFootageManifest(manifest).duration_frames,2700);
+const mutation=fn=>{const m=structuredClone(manifest);fn(m);assert.throws(()=>validateCrimeFootageManifest(m));};
+mutation(m=>m.publish_allowed=true);
+mutation(m=>m.segments[0].audio.out_sec=29);
+mutation(m=>m.segments[0].audio.in_sec=1);
+mutation(m=>m.segments[0].captions[0].text='Different words');
+mutation(m=>m.segments[0].captions.push({start_sec:.5,end_sec:2,text:'Overlap'}));
+mutation(m=>m.segments[0].kind='footage');
+mutation(m=>{m.segments[0].kind='audio_transcript';m.segments[0].audio.origin='qwen_narration';m.segments[0].narration_unit_id='voice';});
+mutation(m=>m.segments[0].text_cues=[{start_sec:31,title:'Late'}]);
+mutation(m=>m.underscore={enabled:true,amplitude:.5});
+const measured=await measuredCrimeText({text:'A short complete phrase.',width:1500,height:160,fontSize:54,minFontSize:48});
+assert(measured.measurement.actual_width<=1500&&measured.measurement.actual_height<=160);
+await assert.rejects(()=>measuredCrimeText({text:'This is too much text for a tiny box.',width:20,height:20,fontSize:54,minFontSize:48}));
+const root=await fs.mkdtemp(path.join(os.tmpdir(),'crime-footage-renderer-fixtures-'));
+await assert.rejects(()=>renderCrimeFootageProof({manifestPath:'/not-selected',outputDir:path.join(root,'no-guard')}),/guarded explicit/);
+assert.deepEqual(await fs.readdir(root),[]);
+const outputDir=path.join(root,'synthetic');const fixture=await exerciseCrimeFootageRendererWithSyntheticInputs({outputDir});
+assert.equal(fixture.synthetic_fixture,true);assert.equal(fixture.results.length,5);
+for(const row of fixture.results){const v=row.probe.streams.find(s=>s.codec_type==='video');assert.equal(v.width,1920);assert.equal(v.height,1080);assert.equal(Number(v.nb_frames),60);assert.equal(Number(v.duration),2);assert.equal(row.audio_samples_per_channel,96000);assert.equal(row.graphics.captions.length,2);for(const c of row.graphics.captions){const m=await sharp(c.path).metadata();assert.equal(m.width,1920);assert.equal(m.height,1080);}}
+await assert.rejects(()=>exerciseCrimeFootageRendererWithSyntheticInputs({outputDir}),/EEXIST/);
+console.log(JSON.stringify({passed:true,provider_free:true,fixture_root:root,checks:['private scope and exact windows','caption text/order','no-write missing guard refusal','actual measured text fit','real FFmpeg four-layout encoding with timed captions, reveal variants and waveform cursor','portrait containment over blurred/dimmed same-source backdrop','exact fixture frame/audio counts','existing output refusal']}));

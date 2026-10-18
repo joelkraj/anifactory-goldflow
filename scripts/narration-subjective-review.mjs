@@ -3,6 +3,7 @@
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { loadNarrationSourceStructure } from "./lib/narration-source-structure.mjs";
 import {
   NARRATION_SUBJECTIVE_REVIEW_ATTESTATION,
   buildNarrationSubjectiveReviewDecision,
@@ -49,6 +50,15 @@ async function main() {
   ));
   const manifest = JSON.parse(await fs.readFile(manifestPath, "utf8"));
   if (manifest.manifest_sha256 !== narrationSubjectiveReviewManifestSha256(manifest)) throw new Error("Subjective narration manifest is stale or hash-invalid.");
+  const planBytes = await fs.readFile(path.join(episodeDir, "narration_generation_plan.json"));
+  const plan = JSON.parse(planBytes.toString("utf8"));
+  await loadNarrationSourceStructure({
+    episodeDir, episode, plan,
+    sourceScriptSha256: sha256(await fs.readFile(path.join(episodeDir, "script_clean.md"))),
+    generationPlanSha256: plan.plan_sha256 ?? sha256(planBytes),
+    generationPlanFileSha256: sha256(planBytes),
+    expectedBinding: manifest.source_structure ?? null,
+  });
   const audioBytes = await fs.readFile(manifest.audio_path);
   if (sha256(audioBytes) !== manifest.audio_sha256) throw new Error("Canonical narration audio is missing or hash-stale.");
   const reviewer = String(flags.reviewer ?? "").trim();

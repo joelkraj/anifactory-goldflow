@@ -1,0 +1,52 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import {createHash} from 'node:crypto';
+import {fileURLToPath} from 'node:url';
+import {execFile} from 'node:child_process';
+import {promisify} from 'node:util';
+import {QWEN_JOEL_PRIMARY_LOCK as PIN} from '../lib/narration-tts-policy.mjs';
+import * as workflow from '../lib/crime-footage-proof-workflow.mjs';
+import {validateCrimeQuestionCarryForwardIdentity,carryForwardCrimeQuestionSources,carryForwardCrimeQuestionNarration} from '../lib/crime-question-proof-carry-forward.mjs';
+
+const exec=promisify(execFile),root=await fs.mkdtemp(path.join(os.tmpdir(),'crime-question-carry-fixture-')),ref=workflow.crimeFootageFileRef;
+const hash=x=>createHash('sha256').update(x).digest('hex');
+const write=async(p,x)=>{await fs.writeFile(p,typeof x==='string'?x:JSON.stringify(x,null,2)+'\n');return ref(p);};
+try{
+  const repo=path.join(root,'repo');await fs.mkdir(repo);await exec('git',['init','--quiet'],{cwd:repo});await exec('git',['config','user.name','Fixture'],{cwd:repo});await exec('git',['config','user.email','fixture@example.invalid'],{cwd:repo});await fs.writeFile(path.join(repo,'README'),'Synthetic carry-forward fixture.\n');await exec('git',['add','README'],{cwd:repo});await exec('git',['commit','--quiet','-m','fixture'],{cwd:repo});
+  const oldDir=path.join(root,'revisions/proof-v5/episodes/ep_01'),newDir=path.join(root,'revisions/proof-v6/episodes/ep_01');
+  const text='Synthetic retained narration.',plan={schema:'goldflow_crime_footage_proof_plan_v1',title:'Synthetic exact carry',case_name:'Lindsay Clancy',target_duration_sec:90,narration_units:[{id:'N01',text,source_ids:['V01']}],claims:[{id:'C01',text:'Synthetic structural fixture only.',source_ids:['V01']}],scenes:[{id:'S01',type:'video',source_ids:['V01'],source_window_refs:[{source_id:'V01',window_id:'W01'}],narration_unit_ids:[],picture_origin:'original',audio_origin:'original'},{id:'S02',type:'narration_bridge',source_ids:['V01'],source_window_refs:[],narration_unit_ids:['N01'],picture_origin:'authored',audio_origin:'narration'}]};
+  const identity={schema:'goldflow_crime_footage_proof_identity_v1',content_profile:'true_crime_proof_v1',media_workflow:'crime_footage_private_proof_v1',channel:'crimedungeon',channel_name:'CrimeDungeon',series_slug:'case-files',run_slug:'synthetic-carry',episode:'ep_01',title:plan.title,run_intent:'proof',production_eligible:false,publish_allowed:false,plan:await write(path.join(root,'plan.json'),plan),script:await write(path.join(root,'script.txt'),text+'\n'),sources:[{id:'V01',url:'https://example.org/synthetic',kind:'video',locator:'Synthetic source.',use_basis:'Locally generated fixture.',windows:[{id:'W01',start_sec:10,end_sec:12}]}],narration:{provider:PIN.provider,model:PIN.model_id,model_revision:PIN.model_revision,voice_id:PIN.voice_id,voice_sha256:PIN.voice_sha256,reference_audio:{path:PIN.reference_audio_path,sha256:PIN.reference_audio_sha256},reference_text:await write(path.join(root,'reference.txt'),PIN.reference_text)},proof_scope:{min_duration_sec:90,max_duration_sec:150,fps:30,width:1920,height:1080},execution_authorization:{operator:'Synthetic fixture',authorized_at:'2026-09-10T00:00:00Z',instruction:'Exercise exact retained bytes in a synthetic proof.',note:'No real media, model calls or approval.'}};
+  await workflow.preflightCrimeFootageProof({proofDir:oldDir,repoDir:repo,identity});
+  const sa=await workflow.beginCrimeFootageProofStage({proofDir:oldDir,stage:'source_assets'}),video=path.join(sa.outputDir,'source.mp4');
+  await exec('ffmpeg',['-nostdin','-v','error','-n','-f','lavfi','-i','color=c=navy:s=320x180:r=30:d=2','-f','lavfi','-i','sine=frequency=440:sample_rate=48000:duration=2','-c:v','libx264','-preset','ultrafast','-c:a','aac','-shortest',video]);
+  const sourceArtifact={id:'source-V01-W01',...await ref(video),kind:'source_video',source_ids:['V01']};
+  await workflow.finishCrimeFootageProofStage({proofDir:oldDir,stage:'source_assets',attemptToken:sa.attempt_token,result:{artifacts:[sourceArtifact],metadata:{source_windows:[{source_id:'V01',window_id:'W01',artifact_id:sourceArtifact.id,public_url:identity.sources[0].url,acquisition_method:'Synthetic local lavfi fixture.',source_start_sec:10,source_end_sec:12,audio_origin:'original',actual_duration_sec:2}]},cost_usd:0}});
+  const na=await workflow.beginCrimeFootageProofStage({proofDir:oldDir,stage:'narration'}),wav=path.join(na.outputDir,'unit.wav');
+  await exec('ffmpeg',['-nostdin','-v','error','-n','-f','lavfi','-i','sine=frequency=330:sample_rate=24000:duration=2','-ac','1','-c:a','pcm_s16le',wav]);
+  const voice=Object.fromEntries(['provider','model','model_revision','voice_id','voice_sha256'].map(k=>[k,identity.narration[k]]));
+  const narratorArtifact={id:'raw-N01',...await ref(wav),kind:'narration_unit',source_ids:['V01']};
+  await workflow.finishCrimeFootageProofStage({proofDir:oldDir,stage:'narration',attemptToken:na.attempt_token,result:{artifacts:[narratorArtifact,{id:'provider-fixture',...await write(path.join(na.outputDir,'provider.json'),{synthetic_fixture:true,no_model_call:true}),kind:'provider_receipt',source_ids:[]}],metadata:{source_text_sha256:identity.script.sha256,voice,tempo:1,technical_qa:'needs_review',units:[{id:'N01',artifact_id:'raw-N01',text,text_sha256:hash(text),measured_duration_sec:2}]},cost_usd:0}});
+  await workflow.beginCrimeFootageProofStage({proofDir:oldDir,stage:'program_review'});
+  const oldStart=await ref(path.join(oldDir,'attempts/program_review/start.json'));
+  const next=structuredClone(identity);next.execution_authorization.note='New synthetic exact carry, no repeated generation.';
+  const recipe={schema:'crime_question_proof_exact_carry_forward_v1',scope:'same_identity_editorial_media_no_new_acquisition_or_generation',from_proof_dir:oldDir,to_proof_dir:newDir,from_identity:await ref(path.join(oldDir,'run_identity.json')),from_source_stage:await ref(path.join(oldDir,'source_assets.json')),from_narration_stage:await ref(path.join(oldDir,'narration.json')),reason:'Retain exact completed synthetic sources and narration while preserving the earlier open attempt.'};
+  assert.equal(validateCrimeQuestionCarryForwardIdentity(identity,next,recipe),true);
+  for(const mutate of [x=>x.title='Changed title',x=>x.script.sha256='a'.repeat(64),x=>x.sources[0].windows[0].end_sec=13,x=>x.narration.voice_id='different',x=>x.proof_scope.max_duration_sec=151,x=>x.publish_allowed=true]){const wrong=structuredClone(next);mutate(wrong);assert.throws(()=>validateCrimeQuestionCarryForwardIdentity(identity,wrong,recipe),/differs/);}
+  assert.throws(()=>validateCrimeQuestionCarryForwardIdentity(identity,next,{...recipe,to_proof_dir:path.join(root,'unscoped')}),/sibling V6/);
+  await workflow.preflightCrimeFootageProof({proofDir:newDir,repoDir:repo,identity:next});
+  const recipeRef=await write(path.join(root,'recipe.json'),recipe),helper=await ref(fileURLToPath(new URL('../lib/crime-question-proof-carry-forward.mjs',import.meta.url)));
+  const inputs=[recipeRef,helper,recipe.from_identity,recipe.from_source_stage,recipe.from_narration_stage];
+  const sourceAttempt=await workflow.beginCrimeFootageProofStage({proofDir:newDir,stage:'source_assets',inputs});
+  const args={proofDir:newDir,attemptToken:sourceAttempt.attempt_token,recipePath:recipeRef.path};
+  await assert.rejects(()=>carryForwardCrimeQuestionSources({...args,attemptToken:'wrong'}),/exact guarded attempt/);assert.deepEqual(await fs.readdir(sourceAttempt.outputDir),[]);
+  const bytes=await fs.readFile(video);await fs.appendFile(video,'changed');await assert.rejects(()=>carryForwardCrimeQuestionSources(args),/Changed bound file|retained binding changed/);await fs.writeFile(video,bytes);assert.deepEqual(await fs.readdir(sourceAttempt.outputDir),[]);
+  const copiedSource=await carryForwardCrimeQuestionSources(args);assert.equal(copiedSource.artifacts.find(a=>a.id===sourceArtifact.id).sha256,sourceArtifact.sha256);assert.equal(copiedSource.metadata.source_windows[0].artifact_id,sourceArtifact.id);assert.equal(copiedSource.cost_usd,0);await assert.rejects(()=>carryForwardCrimeQuestionSources(args),/no overwrite or retry/);
+  await workflow.finishCrimeFootageProofStage({proofDir:newDir,stage:'source_assets',attemptToken:args.attemptToken,result:copiedSource});
+  const narrativeAttempt=await workflow.beginCrimeFootageProofStage({proofDir:newDir,stage:'narration',inputs});
+  const copiedNarration=await carryForwardCrimeQuestionNarration({...args,attemptToken:narrativeAttempt.attempt_token});assert.equal(copiedNarration.artifacts.find(a=>a.id==='raw-N01').sha256,narratorArtifact.sha256);assert.equal(copiedNarration.metadata.technical_qa,'needs_review');assert.equal(copiedNarration.metadata.provider_calls,0);assert.equal(copiedNarration.metadata.approved,false);
+  await workflow.finishCrimeFootageProofStage({proofDir:newDir,stage:'narration',attemptToken:narrativeAttempt.attempt_token,result:copiedNarration});
+  assert.equal((await workflow.crimeFootageProofStatus({proofDir:newDir})).next_stage,'program_review');assert.equal((await workflow.crimeFootageProofStatus({proofDir:oldDir})).state,'running');assert.equal((await ref(oldStart.path)).sha256,oldStart.sha256);assert.equal((await ref(video)).sha256,sourceArtifact.sha256);assert.equal((await ref(wav)).sha256,narratorArtifact.sha256);
+  console.log('PASS: guarded exact source/narration byte copies, preserved artifact IDs/QA, no provider calls, identity drift/token/tamper/overwrite refusals, old running program unchanged. Synthetic fixture only.');
+}finally{await fs.rm(root,{recursive:true,force:true});}

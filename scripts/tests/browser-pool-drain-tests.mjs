@@ -1,5 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { promises as fs } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import sharp from "sharp";
+import {
+  beginCodexWorkManifestDrain,
+  completeWorkItem,
+  getCodexWorkStatus,
+  heartbeatWorkItem,
+  leaseNextWorkItem,
+  openCodexWorkManifestStream,
+  sha256File,
+} from "../lib/codex-image-work-contract.mjs";
 import {
   googleManifestActivationConflict,
   manifestHasRunnableWork,
@@ -77,4 +90,62 @@ test("worker lease scans ignore drained manifest registrations", () => {
     counts: { pending: 0, leased: 0, completed: 44, deadlettered: 0 },
     streaming_queue: { sealed: false },
   }), true, "an open wavefront stream retains Google-manifest exclusivity between appended chunks");
+});
+
+test("a lease arriving after the idle snapshot drains before import, with later admission closed", async () => {
+  const episodeDir = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-pool-drain-race-"));
+  try {
+    const promptsPath = path.join(episodeDir, "prompts.json");
+    await fs.writeFile(promptsPath, JSON.stringify({
+      status: "passed", image_provider: "codex_imagegen",
+      prompts: ["first", "late", "pending"].map((image_id) => ({
+        image_id, image_generation_required: true,
+        codex_image_prompt: `Distinct ${image_id} landscape.`, reference_slots: [],
+      })),
+    }));
+    const { manifest } = await openCodexWorkManifestStream({
+      streamId: "drain-race", mode: "scene", episodeDir, promptsPath,
+      imageIds: ["first", "late", "pending"], maxAttempts: 1, leaseSeconds: 60,
+    });
+    const manifestPath = manifest.manifest_path;
+    const originalManifestHash = await sha256File(manifestPath);
+    async function complete(lease, workerId, color) {
+      const assignment = lease.assignment;
+      await sharp({ create: { width: 640, height: 360, channels: 3, background: color } })
+        .png().toFile(assignment.expected_output_path);
+      await completeWorkItem({ manifestPath, assetId: assignment.asset_id,
+        leaseToken: assignment.lease_token, workerId,
+        sourcePath: assignment.expected_output_path,
+        reportedSha256: await sha256File(assignment.expected_output_path) });
+    }
+    const first = await leaseNextWorkItem({ manifestPath, workerId: "worker-first", leaseSeconds: 60 });
+    await complete(first, "worker-first", "#102030");
+    const firstHash = await sha256File(first.assignment.expected_output_path);
+    const staleSnapshot = await getCodexWorkStatus({ manifestPath });
+    assert.equal(staleSnapshot.counts.leased, 0);
+
+    // The host wins a lease while the controller awaits its provider check.
+    const late = await leaseNextWorkItem({ manifestPath, workerId: "worker-late", leaseSeconds: 60 });
+    assert.equal(late.status, "leased");
+    const reason = "Gemini provider circuit is open.";
+    const drain = await beginCodexWorkManifestDrain({ manifestPath, reason });
+    assert.equal(drain.policy, "no_new_leases_existing_completions_retained");
+    assert.deepEqual(await beginCodexWorkManifestDrain({ manifestPath, reason }), drain, "the receipt is immutable");
+    const blocked = await leaseNextWorkItem({ manifestPath, workerId: "worker-next", leaseSeconds: 60 });
+    assert.equal(blocked.no_work_reason, "manifest_draining");
+    const fresh = await getCodexWorkStatus({ manifestPath });
+    assert.equal(fresh.counts.leased, 1, "the stale zero snapshot cannot authorize final import");
+    assert.equal(fresh.dispatch_drain.reason, reason, "other streamed waiters see the same drain");
+    await heartbeatWorkItem({ manifestPath, assetId: late.assignment.asset_id,
+      leaseToken: late.assignment.lease_token, workerId: "worker-late", leaseSeconds: 60 });
+    await complete(late, "worker-late", "#807060");
+    const settled = await getCodexWorkStatus({ manifestPath, reconcile: false });
+    assert.deepEqual(settled.counts, { pending: 1, leased: 0, completed: 2, deadlettered: 0 });
+    assert.equal(await sha256File(first.assignment.expected_output_path), firstHash);
+    assert.equal(await sha256File(manifestPath), originalManifestHash, "drain does not rewrite creative work");
+    assert.equal((await leaseNextWorkItem({ manifestPath, workerId: "worker-next", leaseSeconds: 60 })).no_work_reason,
+      "manifest_draining", "cooldown expiry cannot reopen this stopped queue");
+  } finally {
+    await fs.rm(episodeDir, { recursive: true, force: true });
+  }
 });

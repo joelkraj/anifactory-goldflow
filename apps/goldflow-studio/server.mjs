@@ -64,6 +64,7 @@ export function providerFailurePausesDispatch(code) {
     "account_mismatch",
     "ui_contract_mismatch",
     "auth_required",
+    "usage_limited",
   ]
     .includes(String(code ?? ""));
 }
@@ -197,7 +198,7 @@ export async function createStudioServer(options = {}) {
       : {
         provider: "chatgpt",
         account_plan: String(process.env.GOLDFLOW_STUDIO_CHATGPT_PLAN ?? "Pro"),
-        model_label: String(process.env.GOLDFLOW_STUDIO_CHATGPT_MODEL_LABEL ?? "GPT-5.6 Sol"),
+        model_label: String(process.env.GOLDFLOW_STUDIO_CHATGPT_MODEL_LABEL ?? "GPT-6 Sol"),
         effort_label: String(process.env.GOLDFLOW_STUDIO_CHATGPT_EFFORT ?? "Medium"),
       };
   const llmJobs = await new LlmJobStore({ stateDir }).init();
@@ -235,7 +236,7 @@ export async function createStudioServer(options = {}) {
       ANIFACTORY_LLM_ROUTE: "chatgpt-web",
       ANIFACTORY_CHATGPT_WEB_URL: `http://${host}:${actualPort}/v1`,
       ANIFACTORY_CHATGPT_WEB_TOKEN: adminToken,
-      ANIFACTORY_CHATGPT_WEB_MODEL: "gpt-5.6-sol",
+      ANIFACTORY_CHATGPT_WEB_MODEL: "gpt-6-sol",
       ANIFACTORY_CHATGPT_WEB_REASONING_EFFORT: expectedUiContract.effort_label.toLowerCase(),
     };
   }

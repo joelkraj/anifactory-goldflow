@@ -45,7 +45,7 @@ export async function assertPanelProductionPictureCurrent(picture) {
 }
 
 /** Picture only. Official render owns captions, canonical continuous audio and final QA. */
-export async function buildPanelProductionPicture({ episodeDir, loadedPlan, workDir, width, height, fps, onProgress, chunkDurationSec = 10 } = {}) {
+export async function buildPanelProductionPicture({ episodeDir, loadedPlan, workDir, width, height, fps, onProgress, chunkDurationSec = 10, concurrency = 4 } = {}) {
   if (!episodeDir || !loadedPlan || !workDir) fail('explicit episode, loaded production plan and work directory required');
   const root = await fs.realpath(path.resolve(episodeDir));
   const identityPath = path.join(root, 'run_identity.json');
@@ -56,6 +56,7 @@ export async function buildPanelProductionPicture({ episodeDir, loadedPlan, work
   if (timeline.width !== width || timeline.height !== height || timeline.fps !== fps) fail('timeline canvas differs from official render settings');
   const expectedCanvas = contract.canvas;
   if (width !== expectedCanvas.width || height !== expectedCanvas.height || fps !== expectedCanvas.fps) fail('timeline canvas differs from locked panel contract');
+  if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 4) fail('picture concurrency must be an integer within 1..4');
   const sources = { ...loadedPlan.inputHashes };
   const identityHash = await sha256File(identityPath);
   if (sources[identityPath] !== identityHash) fail('loaded plan does not bind the current run identity');
@@ -71,14 +72,18 @@ export async function buildPanelProductionPicture({ episodeDir, loadedPlan, work
   if (!work.startsWith(`${root}${path.sep}`)) fail('production picture work must remain in its episode');
   const codes = await codeHashes(), chunks = planPanelExperimentChunks(timeline, { chunkDurationSec });
   const cache = path.join(work, 'panel-picture-cache'), output = path.join(work, 'panel-picture-attempts', randomUUID());
-  const report = { schema: 'goldflow_panel_production_picture_report_v1', status: 'started', episode: identity.episode, render_profile: identity.render_profile, source_hashes: sources, code_hashes: codes, plan_path: loadedPlan.planPath ?? null, timeline_duration_sec: timeline.duration_sec, width, height, fps, chunks: [], cache_stats: { reused_chunk_count: 0, rendered_chunk_count: 0, captured_frame_count: 0, unchanged_frame_reuse_count: 0 }, started_at: new Date().toISOString() };
+  const report = { schema: 'goldflow_panel_production_picture_report_v1', status: 'started', episode: identity.episode, render_profile: identity.render_profile, source_hashes: sources, code_hashes: codes, plan_path: loadedPlan.planPath ?? null, timeline_duration_sec: timeline.duration_sec, width, height, fps, picture_concurrency: concurrency, chunks: [], cache_stats: { reused_chunk_count: 0, rendered_chunk_count: 0, captured_frame_count: 0, unchanged_frame_reuse_count: 0 }, started_at: new Date().toISOString() };
   const reportPath = path.join(output, 'picture_report.json');
   await fs.mkdir(output, { recursive: true });
   let browser;
   try {
     browser = await chromium.launch({ executablePath: process.env.ANIFACTORY_CHROMIUM_BIN || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', headless: true, args: ['--disable-background-networking', '--disable-component-update', '--disable-sync', '--no-first-run'] });
     report.environment = { browser: browser.version(), ffmpeg: (await command(ffmpeg(), ['-version'])).stdout.split('\n')[0], node: process.version, platform: process.platform, architecture: process.arch };
-    for (const chunk of chunks) {
+    let nextChunk = 0, chunkFailure = null;
+    const worker = async () => {
+      while (!chunkFailure && nextChunk < chunks.length) {
+        const chunk = chunks[nextChunk++];
+        try {
       const cacheKey = panelExperimentChunkKey({ timeline, chunk, assets: loadedPlan.assets, code_hashes: codes, environment: report.environment, identitySha256: identityHash, cacheSchema: 'goldflow_panel_production_picture_cache_v1' });
       const keyDir = path.join(cache, cacheKey);
       const previous = await cachedPanelPictureChunk(keyDir, cacheKey, timeline, chunk);
@@ -87,7 +92,12 @@ export async function buildPanelProductionPicture({ episodeDir, loadedPlan, work
       report.chunks.push(row); report.cache_stats[result.reused ? 'reused_chunk_count' : 'rendered_chunk_count']++;
       if (!result.reused) { report.cache_stats.captured_frame_count += result.capture_count; report.cache_stats.unchanged_frame_reuse_count += result.unchanged_frame_reuse_count; }
       onProgress?.({ phase: 'panel_chunk_completed', chunk: chunk.index, chunks: chunks.length, reused: result.reused });
-    }
+        } catch (error) { chunkFailure ??= error; }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(concurrency, chunks.length) }, worker));
+    report.chunks.sort((a, b) => a.index - b.index);
+    if (chunkFailure) throw chunkFailure;
     await browser.close(); browser = null;
     await assertPanelProductionPictureCurrent(report);
     const listPath = path.join(output, 'picture-concat.txt');

@@ -77,7 +77,9 @@ export function assertEpisodeWorkflowFlags(identity = {}, flags = {}) {
     throw new Error(`Media workflow is identity-locked to ${workflow.id}; --media-workflow cannot switch an existing run.`);
   }
   if (Object.hasOwn(flags, "content-profile")) {
-    const requested = contentProfileDefinition(flags["content-profile"]);
+    const requested = workflow.id === "true_crime_hybrid_proof_v1" && flags["content-profile"] === "true_crime_proof_v1"
+      ? { config: { id: "true_crime_proof_v1" } }
+      : contentProfileDefinition(flags["content-profile"]);
     const locked = identity.content_profile_config?.id ?? identity.content_profile ?? DEFAULT_CONTENT_PROFILE;
     if (requested.config.id !== locked) {
       throw new Error(`Content profile is identity-locked to ${locked}; --content-profile cannot switch an existing run.`);
@@ -111,6 +113,7 @@ export function assertCommandWorkflowRoute({ command, subcommand, script, flags 
       mediaWorkflow: flags["media-workflow"],
     });
     if (binding.media_workflow === "avatar_footage_pilot_v1") throw new Error("Use pilot preflight for the bounded avatar proof; run preflight is generated-visuals only.");
+    if (binding.media_workflow === "true_crime_hybrid_proof_v1") throw new Error("Use crime-proof preflight for the private true-crime proof; run preflight is generated-visuals only.");
     // Validate custom profile paths too, before beginStageExecution can write.
     const profile = contentProfileDefinition(flags["content-profile"]);
     assertAvailableMediaWorkflow({ ...binding, content_profile: profile.config.id, content_profile_config: profile.config });
@@ -129,6 +132,15 @@ export function assertCommandWorkflowRoute({ command, subcommand, script, flags 
     if (panelComposition && ((command === "visual" && ["transitions", "engagement", "motion-plan", "animation-plan", "generated-motion", "ltx-video", "approve-generated-motion", "approve-ltx-video", "parallax-assets", "approve-parallax"].includes(subcommand))
       || (command === "run" && subcommand === "visual-wavefront"))) {
       throw new Error("Panel composition uses its authored asset allocation and panel plan; ordinary transitions, generated motion, parallax and visual-wavefront are unavailable for this render profile.");
+    }
+    if (workflow.id === "true_crime_hybrid_proof_v1" && command !== "crime-proof" && !(command === "run" && subcommand === "status")) {
+      throw new Error("True-crime proof permits only crime-proof commands and run status. Generated production, auto-advance and publishing are unavailable, including with workflow bypass.");
+    }
+    if (identity.image_provider === "openart_cli") {
+      const imageMutation = command === "imagegen" && !["openart", "analyze", "qa"].includes(subcommand);
+      const visualMutation = command === "visual" && ["refs", "approve-ref-plan", "approve-refs", "plan", "harden", "review"].includes(subcommand);
+      if (imageMutation || visualMutation) throw new Error("OpenArt identities require the guarded OpenArt bank/generation adapter; other provider or reference dispatch paths cannot satisfy this identity.");
+      if ((flags["image-provider"] ?? flags.provider) && !["openart", "openart_cli"].includes(flags["image-provider"] ?? flags.provider)) throw new Error("The OpenArt image provider is identity-locked.");
     }
     if (workflow.id === "avatar_footage_pilot_v1" && command !== "pilot" && !(command === "run" && subcommand === "status")) {
       throw new Error("Avatar pilot permits only pilot commands and run status. Generated production, source manufacture, auto-advance and publishing are unavailable, including with workflow bypass.");

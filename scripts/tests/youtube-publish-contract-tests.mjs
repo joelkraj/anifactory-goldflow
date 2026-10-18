@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 import sharp from "sharp";
 import { sha256File } from "../lib/file-hash.mjs";
 import {
+  channelUploadExperimentUsage,
   validateChannelUploadExperimentSpec,
   verifyChannelUploadExperimentIdentity,
 } from "../lib/channel-upload-experiment.mjs";
@@ -17,11 +18,13 @@ import {
   YOUTUBE_PACKAGING_SPEC_SCHEMA,
   YOUTUBE_PINNED_COMMENT_RECEIPT_SCHEMA,
   YOUTUBE_PUBLISH_MANIFEST_SCHEMA,
+  YOUTUBE_SCHEDULE_RECEIPT_SCHEMA,
   YOUTUBE_THUMBNAIL_UPDATE_RECEIPT_SCHEMA,
   YOUTUBE_UPLOAD_RECEIPT_SCHEMA,
   extractMarkdownSection,
   validateYoutubePackagingSpec,
   validateYoutubePinnedCommentReceipt,
+  validateYoutubeScheduleReceipt,
   validateYoutubeThumbnailUpdateReceipt,
   validateYoutubeUploadReceipt,
   youtubeEffectiveThumbnailState,
@@ -37,6 +40,31 @@ import {
 
 const execFileAsync = promisify(execFile);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+
+{
+  const uploadReceipt = { video_id: "abc123xyz89", visibility: "private", manifest_sha256: "manifest-hash" };
+  const scheduleReceipt = {
+    schema: YOUTUBE_SCHEDULE_RECEIPT_SCHEMA,
+    status: "passed",
+    upload_receipt_sha256: "upload-hash",
+    manifest_sha256: "manifest-hash",
+    video_id: "abc123xyz89",
+    visibility: "scheduled",
+    schedule_at: "2026-09-26T12:00:00.000Z",
+    time_zone: "America/New_York",
+    publish_approval: { approved: true, approved_by: "operator" },
+    field_verification: { active_channel: true, schedule: true, existing_fields: true, checks_complete: true },
+    recorded_by: "codex",
+    recorded_at: "2026-09-23T04:00:00.000Z",
+  };
+  const options = { manifest: {}, uploadReceipt, uploadReceiptSha256: "upload-hash" };
+  assert.equal(validateYoutubeScheduleReceipt(scheduleReceipt, options).status, "passed");
+  assert.equal(validateYoutubeScheduleReceipt({ ...scheduleReceipt, upload_receipt_sha256: "wrong" }, options).status, "blocked");
+  assert.equal(validateYoutubeScheduleReceipt({ ...scheduleReceipt, publish_approval: { approved: false } }, options).status, "blocked");
+  const revision = { ...scheduleReceipt, sequence: 2, supersedes_receipt_sha256: "first-schedule-hash", schedule_at: "2026-09-23T12:00:00.000Z" };
+  assert.equal(validateYoutubeScheduleReceipt(revision, { ...options, previousScheduleReceiptSha256: "first-schedule-hash", expectedSequence: 2 }).status, "passed");
+  assert.equal(validateYoutubeScheduleReceipt(revision, { ...options, previousScheduleReceiptSha256: "wrong", expectedSequence: 2 }).status, "blocked");
+}
 
 assert.equal(youtubeFinalQaDurationSeconds({ media_probe: { format: { duration: "4168.41" } } }), 4168.41);
 assert.equal(youtubeFinalQaDurationSeconds({ media_probe: { duration_sec: 4500 } }), 4500);
@@ -240,6 +268,55 @@ export async function runYoutubePublishContractTests() {
     path.join(repoRoot, "docs/channel_experiments/manhwa_joey_75min_manual_midroll_test_v1.json"),
     "utf8",
   ));
+  const usageDataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-channel-experiment-usage-"));
+  try {
+    const writeReceipt = async (episode, name, receipt) => {
+      const episodeDir = path.join(usageDataRoot, "channels", "53rebirth", "weekly_runs", episode, "episodes", "ep_01");
+      await fs.mkdir(episodeDir, { recursive: true });
+      await fs.writeFile(path.join(episodeDir, name), `${JSON.stringify(receipt)}\n`, "utf8");
+    };
+    const uploadReceipt = (videoId, recordedAt, overrides = {}) => ({
+      schema: YOUTUBE_UPLOAD_RECEIPT_SCHEMA,
+      status: "passed",
+      video_id: videoId,
+      watch_url: `https://www.youtube.com/watch?v=${videoId}`,
+      recorded_at: recordedAt,
+      channel_experiment: { experiment_id: uploadExperiment.experiment_id, ordinal: 1 },
+      field_verification: {
+        active_channel: true, initial_private: true, title: true, description: true,
+        thumbnail: true, audience: true, monetization: true, mid_rolls: true,
+        comments: true, checks_complete: true,
+      },
+      ...overrides,
+    });
+    await writeReceipt("first", "youtube_upload_receipt_ep_01_private_before_release.json",
+      uploadReceipt("6R1ebPojk0Y", "2026-09-06T15:18:34Z"));
+    await writeReceipt("first", "youtube_upload_receipt_ep_01.json",
+      uploadReceipt("6R1ebPojk0Y", "2026-09-06T15:57:44Z", {
+        channel_experiment: { experiment_id: uploadExperiment.experiment_id, ordinal: 3 },
+      }));
+    await writeReceipt("second", "youtube_upload_receipt_ep_01.json",
+      uploadReceipt("a3KRti9Oaa0", "2026-09-08T09:46:16Z"));
+    await writeReceipt("unverified", "youtube_upload_receipt_ep_01.json",
+      uploadReceipt("invalid0000", "2026-09-09T09:46:16Z", {
+        field_verification: { active_channel: false },
+      }));
+    await writeReceipt("other-experiment", "youtube_upload_receipt_ep_01.json",
+      uploadReceipt("other000000", "2026-09-10T09:46:16Z", {
+        channel_experiment: { experiment_id: "other-experiment", ordinal: 1 },
+      }));
+    const usage = await channelUploadExperimentUsage({
+      dataRoot: usageDataRoot, channel: "53rebirth", experimentId: uploadExperiment.experiment_id,
+    });
+    assert.equal(usage.receipts.length, 3, "retain the duplicate receipts for audit");
+    assert.equal(usage.count, 2, "one video counts once across private and release receipts");
+    assert.deepEqual([...new Set(usage.receipts.map((row) => row.video_id))], ["6R1ebPojk0Y", "a3KRti9Oaa0"]);
+    assert.equal(validateChannelUploadExperimentSpec({
+      experiment: uploadExperiment, spec: {}, durationSec: 4500, usedCount: usage.count,
+    }).ordinal, 3);
+  } finally {
+    await fs.rm(usageDataRoot, { recursive: true, force: true });
+  }
   const identityDataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-channel-experiment-identity-"));
   try {
     const identityChannelRoot = path.join(identityDataRoot, "channels", "53rebirth");
@@ -350,6 +427,29 @@ export async function runYoutubePublishContractTests() {
   }).status, "passed");
   approvedCodexThumbnail.thumbnail_candidates[0].reference_count = 1;
   assert.equal(validateYoutubePackagingSpec(approvedCodexThumbnail, { now }).blockers.includes("selected_thumbnail_reference_count_must_be_zero"), true);
+
+  const scopedEdit = structuredClone(spec);
+  Object.assign(scopedEdit.thumbnail_candidates[0], {
+    provider: "codex_imagegen",
+    generation_mode: "scoped_edit_from_local_raster",
+    reference_count: 1,
+    edit_source_path: "thumbnail_previous_v5.png",
+    edit_source_sha256: "a".repeat(64),
+    final_sha256: "b".repeat(64),
+    edit_scope: "Blue veins on the brother and a blue glow on Joey's hand; preserve composition.",
+    edit_user_request: "Make an edit to the previous version, not a new image.",
+  });
+  assert.equal(validateYoutubePackagingSpec(scopedEdit, {
+    now, thumbnailFinalSha256: "b".repeat(64), thumbnailEditSourceSha256: "a".repeat(64),
+  }).status, "passed");
+  assert.equal(validateYoutubePackagingSpec(scopedEdit, {
+    now, thumbnailFinalSha256: "c".repeat(64), thumbnailEditSourceSha256: null,
+  }).blockers.includes("selected_thumbnail_scoped_edit_source_hash_stale"), true);
+  assert.equal(validateYoutubePackagingSpec(scopedEdit, {
+    now, thumbnailFinalSha256: "c".repeat(64), thumbnailEditSourceSha256: null,
+  }).blockers.includes("selected_thumbnail_scoped_edit_final_hash_stale"), true);
+  scopedEdit.thumbnail_candidates[0].reference_count = 2;
+  assert.equal(validateYoutubePackagingSpec(scopedEdit, { now }).blockers.includes("selected_thumbnail_scoped_edit_requires_one_reference"), true);
 
   const invalidThumbnailGenerationContract = structuredClone(spec);
   Object.assign(invalidThumbnailGenerationContract.thumbnail_candidates[0], {

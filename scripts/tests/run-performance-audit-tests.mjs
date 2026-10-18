@@ -15,6 +15,8 @@ import {
   stageLatencyPercentiles,
 } from "../lib/production-forecast.mjs";
 import { buildReferenceRoiAudit } from "../lib/reference-roi-audit.mjs";
+import { CONSERVATIVE_GOOGLE_IMAGE_SCHEDULING } from "../lib/google-image-scheduling.mjs";
+import { runPerformanceAudit } from "../run-performance-audit.mjs";
 
 const event = (executionId, stage, status, startMinute, endMinute) => ({
   event_type: "stage_completed",
@@ -122,6 +124,53 @@ assert.ok(largeForecast.forecast.total_p50_minutes > smallForecast.forecast.tota
 assert.ok(degradedForecast.forecast.total_p50_minutes > largeForecast.forecast.total_p50_minutes);
 assert.ok(largeForecast.forecast.total_p90_minutes >= largeForecast.forecast.total_p50_minutes);
 assert.ok(largeForecast.forecast.total_p50_minutes < serializedForecast.forecast.total_p50_minutes);
+assert.equal(largeForecast.inputs.image_concurrency, 8);
+assert.equal(largeForecast.forecast.total_p50_minutes, 425.613, "historical forecast remains unchanged");
+assert.equal(largeForecast.forecast.total_p90_minutes, 748.081);
+assert.equal(largeForecast.image_submission_capacity, undefined);
+
+const conservativeIdentity = {
+  episode: "ep_01",
+  image_provider_options: { scheduling: { ...CONSERVATIVE_GOOGLE_IMAGE_SCHEDULING } },
+  provider_locks: { image_scheduling: { ...CONSERVATIVE_GOOGLE_IMAGE_SCHEDULING } },
+  production_profile_config: {
+    target_wall_clock_minutes: 360,
+    target_wall_clock_policy: "approved_script_to_private_ready_slo_v2",
+    media: { federated_web_image_concurrency: 8 },
+    orchestration: { wall_clock_contract: { hard_ceiling_minutes: 420 } },
+  },
+};
+const conservativeForecast = buildEpisodeProductionForecast({
+  identity: conservativeIdentity,
+  requiredStillCount: 700,
+  referenceCount: 0,
+  imageConcurrency: 8,
+  imageFailureRate: 0,
+});
+assert.equal(conservativeForecast.inputs.image_concurrency, 3, "identity cap overrides stock profile capacity");
+assert.equal(conservativeForecast.image_submission_capacity.maximum_submissions_per_hour, 80);
+assert.equal(conservativeForecast.image_submission_capacity.submissions_per_hour_at_maximum_jitter, 72);
+assert.equal(conservativeForecast.image_submission_capacity.submissions_per_hour_at_mean_jitter, 75.789);
+assert.equal(conservativeForecast.image_submission_capacity.minimum_submission_window_minutes, 524.25);
+assert.equal(conservativeForecast.image_submission_capacity.maximum_jitter_submission_window_minutes, 582.5);
+assert.ok(conservativeForecast.forecast.total_p50_minutes > 420, "accepted scheduling bottleneck is not hidden by stock SLO");
+assert.ok(conservativeForecast.forecast.automated_p50_minutes
+  >= conservativeForecast.image_submission_capacity.mean_jitter_submission_window_minutes);
+assert.ok(conservativeForecast.forecast.automated_p90_minutes
+  >= conservativeForecast.image_submission_capacity.maximum_jitter_submission_window_minutes);
+assert.equal(buildEpisodeProductionForecast({ identity: conservativeIdentity, imageConcurrency: 1 }).inputs.image_concurrency, 1,
+  "forecast never raises an explicitly reduced runtime capacity");
+for (const count of [0, 1]) {
+  const capacity = buildEpisodeProductionForecast({ identity: conservativeIdentity, requiredStillCount: count }).image_submission_capacity;
+  assert.equal(capacity.minimum_submission_window_minutes, 0, "no fictitious wait precedes the first submission");
+}
+assert.equal(conservativeIdentity.production_profile_config.orchestration.wall_clock_contract.hard_ceiling_minutes, 420);
+const invalidSchedulingIdentity = structuredClone(conservativeIdentity);
+invalidSchedulingIdentity.provider_locks.image_scheduling.total_concurrency = 8;
+assert.throws(() => buildEpisodeProductionForecast({ identity: invalidSchedulingIdentity }), /scheduling identity mismatch/);
+const conservativeMarkdown = renderRunPerformanceAuditMarkdown({ ...report, production_forecast: conservativeForecast });
+assert.match(conservativeMarkdown, /Shared Google submission capacity: at most 80\/hour; 72\/hour/);
+assert.match(conservativeMarkdown, /Stock production SLO is unchanged/);
 
 const roiEpisodeDir = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-reference-roi-"));
 const refId = "ref_joey";
@@ -185,6 +234,15 @@ assert.equal(roi.assets[0].generation_minutes, 3);
 assert.equal(roi.assets[0].attachment_count, 1);
 assert.equal(roi.assets[0].accepted_cut_count, 1);
 assert.equal(roi.assets[0].prevention_measurement.status, "not_causally_measured");
+await fs.writeFile(path.join(roiEpisodeDir, "run_identity.json"), JSON.stringify(conservativeIdentity));
+await fs.writeFile(path.join(roiEpisodeDir, "execution_events.jsonl"), events.map((row) => JSON.stringify(row)).join("\n"));
+await fs.writeFile(path.join(roiEpisodeDir, "script_clean.md"), "A bounded local forecast fixture.");
+const conservativeAudit = await runPerformanceAudit({ "episode-dir": roiEpisodeDir });
+assert.equal(conservativeAudit.report.production_forecast.inputs.image_concurrency, 3,
+  "performance audit passes locked identity into forecast despite stock profile concurrency eight");
+assert.equal(conservativeAudit.report.production_forecast.image_submission_capacity.required_image_submission_count, 2,
+  "both selected references and scenes consume shared submission capacity");
+assert.equal(conservativeAudit.report.observation.target_wall_clock_minutes, 360, "stock performance target remains unchanged");
 await fs.rm(roiEpisodeDir, { recursive: true, force: true });
 
 console.log("run performance audit tests passed");

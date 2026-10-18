@@ -2,7 +2,7 @@
 
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { promises as fs } from "node:fs";
+import { constants as fsConstants, promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -41,6 +41,7 @@ import {
   validateQwenLiamBatchPlan,
 } from "./lib/qwen-liam-batch-contract.mjs";
 import { hasTtsTerminalPunctuation } from "./lib/tts-text-boundaries.mjs";
+import { validateStructuralNoAudioRetryEvidence } from "./lib/tts-structural-no-audio-retry.mjs";
 import {
   validateNarrationPerformanceBakeoffApproval,
 } from "./lib/narration-performance-contract.mjs";
@@ -66,6 +67,11 @@ import {
   buildNarrationPreSynthesisGate,
   narrationPreSynthesisGateSha256,
 } from "./lib/narration-pre-synthesis-gate.mjs";
+import {
+  verifyCompletedInterruptedQwenRunner,
+  verifyInterruptedQwenAdoptionReceipt,
+  verifyInterruptedQwenInventory,
+} from "./lib/qwen-interrupted-adoption.mjs";
 
 const DATA_ROOT = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const DEFAULT_PYTHON = "/Users/joel/AniFactoryData/voice_bank/bakeoff/.venv-kokoro-mlx-audio-0.4.6/bin/python";
@@ -108,6 +114,19 @@ function parseFlags(parts) {
 
 function boolFlag(value) {
   return /^(?:1|true|yes|on)$/i.test(String(value ?? ""));
+}
+
+async function preserveStructuralPredecessor(buffer, archivePath, expectedSha256) {
+  await fs.mkdir(path.dirname(archivePath), { recursive: true });
+  try {
+    await fs.writeFile(archivePath, buffer, { flag: "wx" });
+  } catch (error) {
+    if (error?.code !== "EEXIST") throw error;
+  }
+  if (await sha256File(archivePath) !== expectedSha256) {
+    throw new Error(`Structural retry predecessor archive is stale: ${archivePath}`);
+  }
+  return archivePath;
 }
 
 export function recoveryScopeForTests(rawUnitIds, units) {
@@ -153,9 +172,11 @@ export function preservedTtsSelectionsForTests({
   planFileSha256 = null,
   requestedUnitIds = [],
   requireAllUnrequested = false,
+  allowedBlockedUnrequestedIds = [],
 } = {}) {
   const findings = [];
   const requested = new Set(requestedUnitIds.map(String));
+  const allowedBlockedUnrequested = new Set(allowedBlockedUnrequestedIds.map(String));
   const resultRows = priorReport?.results ?? [];
   const selectedRows = priorUnitQa?.selected_units ?? [];
   const reportResults = new Map(
@@ -197,7 +218,7 @@ export function preservedTtsSelectionsForTests({
     const result = reportResults.get(unitId);
     const selectedQa = selectedQaRows.get(unitId);
     if (!result && !selectedQa) {
-      if (requireAllUnrequested) {
+      if (requireAllUnrequested && !requestedRetryOrigin) {
         findings.push({
           code: "preserved_tts_selection_missing_or_stale",
           unit_id: unitId,
@@ -213,9 +234,15 @@ export function preservedTtsSelectionsForTests({
       ?? selectedQa?.qa?.acoustic?.audio_sha256
       ?? null;
     const accepted = candidateDisposition(qa, PRIMARY_TTS_PROVIDER).accepted;
+    const exactUnresolvedBlocker = !requestedRetryOrigin
+      && allowedBlockedUnrequested.has(unitId)
+      && priorReport?.status === "blocked"
+      && qa?.status === "blocked"
+      && (priorReport.blockers ?? []).some((finding) =>
+        String(finding.unit_id ?? "") === unitId);
     if (!result
       || !selectedQa
-      || (!requestedRetryOrigin && !accepted)
+      || (!requestedRetryOrigin && !accepted && !exactUnresolvedBlocker)
       || !result.audio_path
       || !resultAudioSha256
       || result.audio_path !== selectedQa.audio_path
@@ -445,6 +472,7 @@ export function exactUnitRecoveryProvenanceForTests({
   cohortBinding,
   batchPlanSha256,
   confirmedDefect = null,
+  confirmedEvidenceBasis = null,
   confirmedEvidencePath = null,
   confirmedEvidenceSha256 = null,
 } = {}) {
@@ -466,8 +494,11 @@ export function exactUnitRecoveryProvenanceForTests({
         .map((finding) => finding.code)
       ?? [],
   )].map(String).sort();
-  const triggerCodes = confirmedDefect
-    ? [`operator_confirmed_${String(confirmedDefect).toLowerCase()}`]
+  const structuralNoAudio = confirmedEvidenceBasis === "reviewed_structural_no_audio";
+  const triggerCodes = confirmedDefect && !structuralNoAudio
+    ? [`${confirmedEvidenceBasis === "operator_authorized_asr_consensus"
+      ? "operator_authorized_asr_consensus" : confirmedEvidenceBasis === "reviewed_automated_delivery_qa"
+        ? "reviewed_automated_delivery_qa" : "operator_confirmed"}_${String(confirmedDefect).toLowerCase()}`]
     : automaticCodes;
   if (!triggerCodes.length) {
     throw new Error(
@@ -484,6 +515,9 @@ export function exactUnitRecoveryProvenanceForTests({
     trigger_codes: triggerCodes,
     candidate_qa: candidate.qa ?? null,
     confirmed_evidence_sha256: confirmedEvidenceSha256,
+    ...(["operator_authorized_asr_consensus", "operator_confirmed_pronunciation", "reviewed_automated_delivery_qa", "reviewed_structural_no_audio"].includes(confirmedEvidenceBasis)
+      ? { evidence_basis: confirmedEvidenceBasis,
+        human_listening_performed: confirmedEvidenceBasis === "operator_confirmed_pronunciation" } : {}),
   };
   return {
     schema: "goldflow_qwen_exact_unit_recovery_provenance_v1",
@@ -502,6 +536,9 @@ export function exactUnitRecoveryProvenanceForTests({
     trigger_evidence_sha256: canonicalQwenBatchSha256(triggerEvidence),
     confirmed_evidence_path: confirmedEvidencePath,
     confirmed_evidence_sha256: confirmedEvidenceSha256,
+    ...(["operator_authorized_asr_consensus", "operator_confirmed_pronunciation", "reviewed_automated_delivery_qa", "reviewed_structural_no_audio"].includes(confirmedEvidenceBasis)
+      ? { evidence_basis: confirmedEvidenceBasis,
+        human_listening_performed: confirmedEvidenceBasis === "operator_confirmed_pronunciation" } : {}),
   };
 }
 
@@ -512,6 +549,10 @@ export function validateConfirmedRetryEvidenceForTests({
   priorReport,
   priorReportSha256,
   currentCandidates,
+  sourceScriptSha256 = null,
+  planFileSha256 = null,
+  currentUnits = [],
+  priorCandidates = [],
 } = {}) {
   if (!evidence || typeof evidence !== "object") {
     throw new Error("Confirmed retry evidence must be a JSON object.");
@@ -531,11 +572,63 @@ export function validateConfirmedRetryEvidenceForTests({
       "Confirmed retry evidence is not bound to the exact pre-retry narration report hash.",
     );
   }
-  const allowedDefects = new Set(["skip", "truncation", "stutter"]);
+  const operatorAsrBasis = evidence.evidence_basis === "operator_authorized_asr_consensus";
+  const pronunciationBasis = evidence.evidence_basis === "operator_confirmed_pronunciation";
+  const automatedBasis = evidence.evidence_basis === "reviewed_automated_delivery_qa";
+  const explicitException = operatorAsrBasis || pronunciationBasis || automatedBasis;
+  if (evidence.evidence_basis != null && !explicitException
+    && evidence.evidence_basis !== "human_listening") {
+    throw new Error("Unsupported confirmed retry evidence basis.");
+  }
+  if (explicitException && (evidence.schema !== "goldflow_confirmed_tts_retry_evidence_v2"
+    || evidence.human_listening_performed !== pronunciationBasis
+    || (pronunciationBasis
+      ? evidence.attestation !== "operator_heard_pronunciation_in_exact_selected_audio"
+      : evidence.attestation != null)
+    || (!automatedBasis && !String(evidence.operator_quote ?? "").trim())
+    || String(evidence.operator_reason ?? "").trim().length < 40
+    || !String(evidence.authorized_by ?? "").trim()
+    || !Number.isFinite(Date.parse(evidence.authorized_at))
+    || evidence.maximum_attempts_per_unit !== 1
+    || !/^[a-f0-9]{64}$/u.test(String(sourceScriptSha256 ?? ""))
+    || !/^[a-f0-9]{64}$/u.test(String(planFileSha256 ?? ""))
+    || evidence.source_script_sha256 !== sourceScriptSha256
+    || evidence.narration_generation_plan_file_sha256 !== planFileSha256
+    || priorReport.schema !== "goldflow_narration_tts_report_v1"
+    || priorReport.status !== "blocked"
+    || priorReport.source_script_hash !== sourceScriptSha256
+    || priorReport.narration_generation_plan_sha256 !== planSha256
+    || priorReport.narration_generation_plan_file_sha256 !== planFileSha256)) {
+    throw new Error("Explicit retry exception requires current source/plan/report bindings, authorization and its exact listening evidence basis.");
+  }
+  if (automatedBasis && (evidence.attestation != null
+    || evidence.authorization_origin !== "user_authorized_autonomous_asr_qa"
+    || (priorReport.blockers ?? []).length === 0)) {
+    throw new Error("Reviewed automated delivery retry requires user-authorized ASR QA and an exact blocked report.");
+  }
+  const allowedDefects = new Set(pronunciationBasis ? ["pronunciation"] : operatorAsrBasis
+    ? ["truncation", "unexpected_words"] : automatedBasis
+      ? ["delivery"] : ["skip", "truncation", "stutter"]);
   const evidenceRows = Array.isArray(evidence.confirmed_units)
     ? evidence.confirmed_units
     : [];
   const requested = [...new Set((requestedUnitIds ?? []).map(String))];
+  if (explicitException && (!requested.length
+    || requested.length !== requestedUnitIds.length
+    || evidenceRows.length !== requested.length
+    || new Set(evidenceRows.map((row) => row?.unit_id)).size !== requested.length
+    || evidenceRows.some((row) => !requested.includes(String(row?.unit_id ?? ""))))) {
+    throw new Error("Explicit retry exception must name only the exact requested units once.");
+  }
+  if (pronunciationBasis && requested.length !== 1) {
+    throw new Error("Heard pronunciation repair permits exactly one unit per explicit invocation.");
+  }
+  if (pronunciationBasis && (!/^[a-f0-9]{64}$/u.test(String(planSha256))
+    || !/^[a-f0-9]{64}$/u.test(String(priorReportSha256))
+    || !path.isAbsolute(String(evidence.pre_retry_narration_report_path ?? ""))
+    || !/^\d{4}-\d{2}-\d{2}T.*Z$/u.test(String(evidence.authorized_at)))) {
+    throw new Error("Heard pronunciation repair requires an archived report path, exact SHA-256 bindings and an ISO authorization timestamp.");
+  }
   const evidenceById = new Map(
     evidenceRows.map((row) => [String(row?.unit_id ?? ""), row]),
   );
@@ -549,10 +642,14 @@ export function validateConfirmedRetryEvidenceForTests({
       throw new Error(`Confirmed retry evidence does not cover requested unit: ${unitId}`);
     }
     if (!allowedDefects.has(String(row.defect_type ?? "").toLowerCase())
-      || !String(row.listen_note ?? "").trim()) {
+      || !String(operatorAsrBasis || automatedBasis ? row.evidence_note ?? "" : row.listen_note ?? "").trim()) {
       throw new Error(
         `Confirmed retry evidence for ${unitId} must record defect_type `
-        + "(skip, truncation, or stutter) and a non-empty listen_note.",
+        + (operatorAsrBasis
+          ? "(truncation or unexpected_words) and a non-empty evidence_note."
+          : pronunciationBasis
+            ? "(pronunciation) and a non-empty listen_note."
+            : "(skip, truncation, or stutter) and a non-empty listen_note."),
       );
     }
     const prior = priorById.get(unitId);
@@ -560,6 +657,59 @@ export function validateConfirmedRetryEvidenceForTests({
       throw new Error(
         `Pre-retry narration report lacks an exact selected audio/synthesis identity for ${unitId}.`,
       );
+    }
+    if (pronunciationBasis) {
+      const unit = currentUnits.find((item) => String(item.unit_id) === unitId);
+      const word = String(row.expected_spoken_word ?? "").trim();
+      const heard = String(row.heard_pronunciation ?? "").trim();
+      const spokenHash = createHash("sha256").update(String(unit?.spoken_text ?? "")).digest("hex");
+      if (!unit || row.defect_type !== "pronunciation" || row.selected_attempt !== 1
+        || row.expected_spoken_word !== word || !/^[\p{L}]+(?:['’][\p{L}]+)*$/u.test(word)
+        || !(String(unit.spoken_text).match(/[\p{L}]+(?:['’][\p{L}]+)*/gu) ?? []).includes(word)
+        || !heard || heard.toLocaleLowerCase() === word.toLocaleLowerCase()
+        || unit.spoken_text_sha256 !== spokenHash
+        || row.spoken_text_sha256 !== spokenHash || prior.spoken_text_sha256 !== spokenHash
+        || !/^[a-f0-9]{64}$/u.test(String(prior.audio_sha256))
+        || !/^[a-f0-9]{64}$/u.test(String(prior.synthesis_identity_sha256))
+        || [...(currentCandidates ?? []), ...priorCandidates].some((candidate) => (
+          String(candidate?.unit_id) === unitId && Number(candidate.attempt) !== 1
+        ))) {
+        throw new Error(`Heard pronunciation repair requires an unchanged exact spoken word, a distinct heard pronunciation, and no prior retake for ${unitId}.`);
+      }
+    }
+    if (operatorAsrBasis) {
+      const delivery = prior.selected_qa?.delivery;
+      const blockers = delivery?.blockers ?? [];
+      const codes = blockers.map((finding) => finding.code).sort();
+      const reviewed = [...(row.reviewed_blocker_codes ?? [])].sort();
+      const requiredCode = row.defect_type === "unexpected_words"
+        ? "narration_confirmed_unexpected_word" : "narration_confirmed_final_word_missing";
+      const permittedCodes = new Set(row.defect_type === "unexpected_words"
+        ? ["narration_confirmed_unexpected_word"]
+        : ["narration_confirmed_final_word_missing", "narration_confirmed_word_omission"]);
+      const reportBlockers = (priorReport.blockers ?? []).filter((finding) => finding.unit_id === unitId);
+      if (delivery?.schema !== "goldflow_narration_delivery_consensus_v2"
+        || delivery.status !== "blocked" || delivery.confirmation_required !== true
+        || delivery.primary_model !== "small.en" || delivery.confirmation_model !== "medium"
+        || !codes.includes(requiredCode)
+        || blockers.some((finding) => finding.severity !== "blocker" || !permittedCodes.has(finding.code))
+        || JSON.stringify(codes) !== JSON.stringify(reviewed)
+        || row.selected_delivery_qa_sha256 !== canonicalQwenBatchSha256(delivery)
+        || canonicalQwenBatchSha256(blockers.map((finding) => ({ ...finding, unit_id: unitId })))
+          !== canonicalQwenBatchSha256(reportBlockers)) {
+        throw new Error(`Operator-authorized ASR retry lacks exact independently confirmed current blocker evidence for ${unitId}.`);
+      }
+    }
+    if (automatedBasis) {
+      const reportCodes = (priorReport.blockers ?? [])
+        .filter((finding) => finding.unit_id === unitId)
+        .map((finding) => finding.code).sort();
+      const reviewedCodes = [...(row.reviewed_blocker_codes ?? [])].sort();
+      if (!reportCodes.length || JSON.stringify(reportCodes) !== JSON.stringify(reviewedCodes)
+        || row.selected_qa_sha256 !== canonicalQwenBatchSha256(prior.selected_qa)
+        || (priorReport.results ?? []).some((result) => result.unit_id === unitId && result.qa_status === "passed")) {
+        throw new Error(`Reviewed automated delivery retry lacks exact blocked QA evidence for ${unitId}.`);
+      }
     }
     const current = (currentCandidates ?? []).find((candidate) => {
       const candidateIdentitySha256 = candidate
@@ -574,6 +724,9 @@ export function validateConfirmedRetryEvidenceForTests({
       ?.selected_report_synthesis_identity_sha256
       ?? current?.synthesis_identity_sha256;
     const expectedAttempt = Number(prior.attempt);
+    if (explicitException && expectedAttempt !== 1) {
+      throw new Error("Explicit retry exception permits only one retake of a first take.");
+    }
     if (!Number.isInteger(expectedAttempt)
       || Number(row.selected_attempt) !== expectedAttempt
       || row.audio_sha256 !== prior.audio_sha256
@@ -595,6 +748,25 @@ export function validateConfirmedRetryEvidenceForTests({
       selected_attempt: expectedAttempt,
       audio_sha256: prior.audio_sha256,
       synthesis_identity_sha256: prior.synthesis_identity_sha256,
+      ...(operatorAsrBasis ? {
+        evidence_basis: "operator_authorized_asr_consensus",
+        human_listening_performed: false,
+        reviewed_blocker_codes: row.reviewed_blocker_codes,
+        selected_delivery_qa_sha256: row.selected_delivery_qa_sha256,
+      } : {}),
+      ...(automatedBasis ? {
+        evidence_basis: "reviewed_automated_delivery_qa",
+        human_listening_performed: false,
+        reviewed_blocker_codes: row.reviewed_blocker_codes,
+        selected_qa_sha256: row.selected_qa_sha256,
+      } : {}),
+      ...(pronunciationBasis ? {
+        evidence_basis: "operator_confirmed_pronunciation",
+        human_listening_performed: true,
+        spoken_text_sha256: row.spoken_text_sha256,
+        expected_spoken_word: row.expected_spoken_word,
+        heard_pronunciation: row.heard_pronunciation,
+      } : {}),
     });
   }
   return validated;
@@ -959,6 +1131,17 @@ async function atomicWriteJson(filePath, value) {
   );
   await fs.writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, "utf8");
   await fs.rename(temporary, filePath);
+}
+
+async function atomicWriteJsonExclusive(filePath, value) {
+  const temporary = path.join(path.dirname(filePath),
+    `.${path.basename(filePath)}.adoption-${process.pid}-${Date.now()}`);
+  await fs.writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { flag: "wx" });
+  try {
+    await fs.link(temporary, filePath);
+  } finally {
+    await fs.unlink(temporary).catch(() => {});
+  }
 }
 
 async function hydratePreservedTtsSelections({
@@ -1755,6 +1938,7 @@ function ttsStatusContract({
     retry_policy: narrationTtsRetryReportPolicy({
       provider: policy.primary.provider,
       qualityContract: policy.narration_quality_contract,
+      recoveryProvenances: selectedRows.map((row) => row.recovery_provenance),
     }),
     results,
   };
@@ -2239,6 +2423,7 @@ export async function runSynthesis({
   scriptPath,
   scriptSha256,
   onCohortComplete = null,
+  completedRunner = null,
 }) {
   if (route !== "qwen") {
     throw new Error(`Qwen Liam production forbids alternate synthesis route ${route}`);
@@ -2300,38 +2485,49 @@ export async function runSynthesis({
         recoveryProvenanceByUnit.get(String(unit.unit_id)) ?? null,
     })),
   };
-  const jobsPath = path.join(outputDir, "jobs", `${invocationId}-${route}-attempt-${attempt}.json`);
-  const reportPath = path.join(outputDir, "runs", `${invocationId}-${route}-attempt-${attempt}.json`);
-  const cohortEventsPath = path.join(
+  const jobsPath = completedRunner?.jobs_path ?? path.join(outputDir, "jobs", `${invocationId}-${route}-attempt-${attempt}.json`);
+  const reportPath = completedRunner?.runner_path ?? path.join(outputDir, "runs", `${invocationId}-${route}-attempt-${attempt}.json`);
+  const cohortEventsPath = completedRunner?.cohort_events_path ?? path.join(
     outputDir,
     "runs",
     `${invocationId}-${route}-attempt-${attempt}-cohorts.jsonl`,
   );
-  await atomicWriteJson(jobsPath, jobs);
-  const args = [
-    runnerPath,
-    "--route", route,
-    "--jobs", jobsPath,
-    "--output-dir", path.join(outputDir, "units", provider),
-    "--report", reportPath,
-    "--events", cohortEventsPath,
-  ];
-  args.push(
-    "--qwen-reference-audio", policy.primary.reference_audio_path,
-    "--qwen-reference-text", policy.primary.reference_text,
-  );
-  const runnerExecution = await run(python, args, {
-    progressJsonlPath: cohortEventsPath,
-    onProgressEvent: async (event) => {
-      if (event?.schema !== "goldflow_local_tts_cohort_event_v1"
-        || event?.event !== "cohort_complete") return;
-      if (event.jobs_sha256 !== await sha256File(jobsPath)
-        || event.batch_plan_sha256 !== batchPlan.batch_plan_sha256) {
-        throw new Error(`Stale Qwen cohort event for ${event.cohort_id ?? "unknown"}`);
-      }
-      if (typeof onCohortComplete === "function") await onCohortComplete(event);
-    },
-  });
+  let runnerExecution = { progressErrors: [] };
+  if (completedRunner) {
+    const [storedJobs, storedReportHash, storedJobsHash] = await Promise.all([
+      readJson(jobsPath, null), sha256File(reportPath), sha256File(jobsPath),
+    ]);
+    if (synthesisMode !== QWEN_LIAM_INCOMPLETE_UNIT_RESUME_MODE
+      || storedReportHash !== completedRunner.runner_sha256
+      || storedJobsHash !== completedRunner.jobs_sha256
+      || JSON.stringify(storedJobs) !== JSON.stringify(jobs)) {
+      throw new Error("Completed interrupted Qwen runner differs from this exact no-synthesis job");
+    }
+  } else {
+    await atomicWriteJson(jobsPath, jobs);
+    const args = [
+      runnerPath,
+      "--route", route,
+      "--jobs", jobsPath,
+      "--output-dir", path.join(outputDir, "units", provider),
+      "--report", reportPath,
+      "--events", cohortEventsPath,
+      "--qwen-reference-audio", policy.primary.reference_audio_path,
+      "--qwen-reference-text", policy.primary.reference_text,
+    ];
+    runnerExecution = await run(python, args, {
+      progressJsonlPath: cohortEventsPath,
+      onProgressEvent: async (event) => {
+        if (event?.schema !== "goldflow_local_tts_cohort_event_v1"
+          || event?.event !== "cohort_complete") return;
+        if (event.jobs_sha256 !== await sha256File(jobsPath)
+          || event.batch_plan_sha256 !== batchPlan.batch_plan_sha256) {
+          throw new Error(`Stale Qwen cohort event for ${event.cohort_id ?? "unknown"}`);
+        }
+        if (typeof onCohortComplete === "function") await onCohortComplete(event);
+      },
+    });
+  }
   const report = await readJson(reportPath, null);
   if (!["passed", "completed_with_job_failures"].includes(report?.status)
     || report.job_count !== units.length
@@ -2344,12 +2540,17 @@ export async function runSynthesis({
       !== JSON.stringify(policy.synthesis_contract)) {
     throw new Error(`Invalid ${route} production runner report: ${reportPath}`);
   }
-  if (synthesisMode === QWEN_LIAM_EXACT_UNIT_RECOVERY_MODE
+  if ((synthesisMode === QWEN_LIAM_EXACT_UNIT_RECOVERY_MODE
+      || synthesisMode === QWEN_LIAM_INCOMPLETE_UNIT_RESUME_MODE)
     && Number(report.cohort_event_count) === 0) {
     // The runner removes a stale event file at startup and exact-unit recovery
     // intentionally emits no batch cohort events. Materialize that empty ledger
     // so the run receipt can still bind its hash.
-    await fs.writeFile(cohortEventsPath, "", "utf8");
+    const priorEvents = await fs.stat(cohortEventsPath).catch(() => null);
+    if (priorEvents && (!priorEvents.isFile() || priorEvents.size !== 0)) {
+      throw new Error("Serial recovery cohort event ledger is not empty");
+    }
+    if (!priorEvents) await fs.writeFile(cohortEventsPath, "", { flag: "wx" });
   }
   const expectedModel = policy.primary;
   if (report.provider !== provider
@@ -2691,8 +2892,298 @@ async function applyQwenVoiceContinuityQa({
   };
 }
 
+export async function adoptInterruptedQwenFirstTakes(flags = {}) {
+  if (!flags["episode-dir"] || !flags.inventory
+    || flags["workflow-bypass"] || flags["allow-full-stage-rerun"]
+    || flags["confirmed-retry-unit-ids"] || flags["regenerate-unit-ids"]
+    || flags["manual-review-evidence"] || flags["output-dir"]
+    || flags.script || flags.plan || flags.identity) {
+    throw new Error("Interrupted Qwen adoption requires --episode-dir and --inventory only; no bypass, alternate sources, or creative retry flags.");
+  }
+  const episodeDir = path.resolve(flags["episode-dir"]);
+  const episode = path.basename(episodeDir);
+  const identityPath = path.join(episodeDir, "run_identity.json");
+  const planPath = path.join(episodeDir, "narration_generation_plan.json");
+  const scriptPath = path.join(episodeDir, "script_clean.md");
+  const gatePath = path.join(episodeDir, `narration_tts_pre_synthesis_gate_${episode}.json`);
+  const outputDir = path.join(episodeDir, "assets/audio/narration_tts");
+  const reportPath = path.join(episodeDir, `narration_tts_report_${episode}.json`);
+  const unitQaPath = path.join(episodeDir, `narration_tts_unit_qa_${episode}.json`);
+  const receiptPath = path.join(episodeDir, `narration_interrupted_qwen_adoption_${episode}.json`);
+  for (const target of [reportPath, unitQaPath, receiptPath]) {
+    if (await fs.stat(target).catch(() => null)) {
+      throw new Error(`Interrupted Qwen adoption cannot overwrite an existing checkpoint: ${target}`);
+    }
+  }
+  const [identity, plan] = await Promise.all([
+    readJson(identityPath, null), readJson(planPath, null),
+  ]);
+  if (!identity || !plan) throw new Error("Interrupted Qwen adoption requires locked identity and narration plan.");
+  const policy = validateNarrationTtsPolicyForTests(identity);
+  if (policy.status !== "passed") throw new Error(`Locked narration policy failed: ${JSON.stringify(policy.findings)}`);
+  const planPolicy = validateNarrationPlanPolicyForTests(plan, policy);
+  if (planPolicy.status !== "passed") throw new Error(`Locked narration plan failed: ${JSON.stringify(planPolicy.findings)}`);
+  const units = normalizeNarrationUnitsForTests(plan, {
+    voiceId: policy.primary.voice_id,
+    referenceVariantId: policy.primary.reference_variant_id ?? null,
+  });
+  const batchValidation = validateQwenLiamBatchPlan(
+    plan.qwen_liam_batch_plan, units, policy.synthesis_contract,
+  );
+  if (batchValidation.status !== "passed") {
+    throw new Error(`Interrupted Qwen adoption needs the valid pinned batch plan: ${JSON.stringify(batchValidation.findings)}`);
+  }
+  const planSha256 = String(plan.plan_sha256 ?? await sha256File(planPath));
+  const original = await verifyInterruptedQwenInventory({
+    inventoryPath: flags.inventory,
+    episodeDir, outputDir, identityPath, planPath, scriptPath, gatePath,
+    units, policy, batchPlan: batchValidation.expected, planSha256,
+  });
+  const originalGateArchivePath = path.join(episodeDir,
+    `narration_tts_original_pre_synthesis_gate_${episode}.json`);
+  await fs.copyFile(gatePath, originalGateArchivePath, fsConstants.COPYFILE_EXCL);
+  if (await sha256File(originalGateArchivePath)
+    !== original.inventory.pre_synthesis_gate_file_sha256) {
+    throw new Error("Archived original pre-synthesis gate hash differs; adoption refused.");
+  }
+  // The helper reads its unit-QA switches from argv when imported. Adoption
+  // runs the same waveform/continuity checks as normal Qwen selection and
+  // defers transcript fidelity to the required full-stream Whisper stage.
+  if (!process.argv.includes("--unit-transcript-qa")) {
+    process.argv.push("--unit-transcript-qa", "false");
+  }
+  if (!process.argv.includes("--unit-qa-whisper-model")) {
+    process.argv.push("--unit-qa-whisper-model", "small");
+  }
+  const helpers = await import("./modelslab-qwen-episode-audio.mjs");
+  const byId = new Map(original.verified_units.map((row) => [row.unit_id, row]));
+  const rows = units.flatMap((unit) => {
+    const verified = byId.get(String(unit.unit_id));
+    if (!verified) return [];
+    return [{
+      ...unit,
+      text: unit.spoken_text,
+      segment_id: unit.segment_id ?? unit.source_segment_ids?.[0]
+        ?? unit.inherited_segment_id ?? unit.unit_id,
+      speaker: unit.speaker ?? "NARRATOR",
+      provider: policy.primary.provider,
+      model_id: verified.result.model_id,
+      voice_id: policy.primary.voice_id,
+      attempt: Number(verified.result.attempt),
+      wav: verified.wav_path,
+      audio_sha256: verified.wav_sha256,
+      duration_sec: Number(verified.result.duration_sec),
+      synthesis_mode: verified.result.synthesis_mode,
+      batch_plan_sha256: verified.result.batch_plan_sha256,
+      cohort_id: verified.result.cohort_id,
+      cohort_sha256: verified.result.cohort_sha256,
+      generated_token_count: verified.result.generated_token_count,
+      effective_token_limit: verified.result.effective_token_limit,
+      token_limit_reached: verified.result.token_limit_reached,
+      synthesis_identity: verified.result.synthesis_identity,
+      synthesis_identity_sha256: verified.result.synthesis_identity_sha256,
+    }];
+  });
+  await helpers.runUnitOutputQaForDiagnostics(rows);
+  applyProtectedTermQa(rows);
+  const narrationQualityContract = narrationQualityContractForIdentity(identity);
+  const similarityPython = path.resolve(process.env.ANIFACTORY_TTS_SIMILARITY_PYTHON
+    ?? DEFAULT_SIMILARITY_PYTHON);
+  const similarityRunnerPath = path.join(path.dirname(fileURLToPath(import.meta.url)),
+    "tts-speaker-similarity.py");
+  const invocationId = `interrupted-adoption-${Date.now()}-${process.pid}`;
+  const continuity = await applyQwenVoiceContinuityQa({
+    rows, policy, outputDir, invocationId, attempt: 1,
+    similarityPython, similarityRunnerPath, narrationQualityContract,
+  });
+  for (const row of rows) row.unit_qa = softenPrimaryQa(row.unit_qa);
+  const rejected = rows.filter((row) => !candidateDisposition(
+    row.unit_qa, policy.primary.provider,
+  ).accepted);
+  const qaEvidencePath = path.join(episodeDir,
+    `narration_interrupted_qwen_adoption_qa_${episode}.json`);
+  const qaEvidence = {
+    schema: "goldflow_interrupted_qwen_adoption_qa_v1",
+    status: rejected.length ? "blocked" : "passed_partial",
+    inventory_path: original.inventory_path,
+    inventory_sha256: original.inventory_sha256,
+    original_job_path: original.original_job_path,
+    original_job_sha256: original.original_job_sha256,
+    cohort_events_path: original.cohort_events_path,
+    cohort_events_sha256: original.cohort_events_sha256,
+    voice_continuity_report_path: continuity?.reportPath ?? null,
+    voice_continuity_report_sha256: continuity?.reportPath
+      ? await sha256File(continuity.reportPath).catch(() => null) : null,
+    unit_count: rows.length,
+    rejected_unit_ids: rejected.map((row) => row.unit_id),
+    units: rows.map((row) => ({ unit_id: row.unit_id,
+      audio_path: row.wav, audio_sha256: row.unit_qa?.audio_sha256,
+      synthesis_identity_sha256: row.synthesis_identity_sha256,
+      qa: row.unit_qa,
+      disposition: candidateDisposition(row.unit_qa, policy.primary.provider) })),
+    full_stream_qa_still_required: true,
+  };
+  await atomicWriteJsonExclusive(qaEvidencePath, qaEvidence);
+  if (rejected.length) {
+    throw new Error(`Interrupted Qwen adoption QA blocked ${rejected.length} raw first takes; no remaining units were submitted. Inspect ${qaEvidencePath}`);
+  }
+  const candidates = rows.map((row) => {
+    const verified = byId.get(String(row.unit_id));
+    return {
+      unit_id: row.unit_id, provider: policy.primary.provider,
+      model_id: policy.primary.model_id, voice_id: policy.primary.voice_id,
+      voice_sha256: policy.primary.voice_sha256,
+      voice_continuity_contract: policy.primary.voice_continuity_contract,
+      attempt: row.attempt, seed: verified.sidecar.per_unit_serial_seed,
+      spoken_text_sha256: row.spoken_text_sha256,
+      synthesis_identity: row.synthesis_identity,
+      synthesis_identity_sha256: row.synthesis_identity_sha256,
+      synthesis_mode: row.synthesis_mode,
+      batch_plan_sha256: row.batch_plan_sha256,
+      cohort_id: row.cohort_id, cohort_sha256: row.cohort_sha256,
+      generated_token_count: row.generated_token_count,
+      effective_token_limit: row.effective_token_limit,
+      token_limit_reached: row.token_limit_reached,
+      runner_report_path: verified.sidecar_path,
+      runner_report_sha256: verified.sidecar_sha256,
+      audio_path: verified.wav_path, audio_sha256: verified.wav_sha256,
+      duration_sec: row.duration_sec, voice_continuity: row.unit_qa?.voice_continuity,
+      qa: row.unit_qa,
+      disposition: candidateDisposition(row.unit_qa, policy.primary.provider),
+      preservation_provenance: {
+        schema: "goldflow_preserved_tts_unit_v1",
+        selected_report_synthesis_identity_sha256: row.synthesis_identity_sha256,
+        synthesis_sidecar_path: verified.sidecar_path,
+        synthesis_sidecar_sha256: verified.sidecar_sha256,
+        audio_sha256: verified.wav_sha256,
+      },
+    };
+  });
+  const selectedRows = rows.map((row) => preservedSelectionRow(
+    row, candidates.find((candidate) => candidate.unit_id === row.unit_id),
+    row.unit_qa, policy,
+  ));
+  const recoveryScope = {
+    schema: "goldflow_interrupted_qwen_adoption_scope_v1",
+    mode: "interrupted_qwen_first_take_adoption",
+    adoption_receipt_path: receiptPath,
+    inventory_path: original.inventory_path,
+    inventory_sha256: original.inventory_sha256,
+    accepted_unit_ids: rows.map((row) => row.unit_id),
+    never_submitted_unit_ids: original.never_submitted_unit_ids,
+    model_loaded: false,
+    synthesis_invoked: false,
+  };
+  const unitQaReport = rebuildQaAggregate(
+    candidates.map((candidate) => ({ unit_id: candidate.unit_id,
+      provider: candidate.provider, attempt: candidate.attempt, unit_qa: candidate.qa })),
+    candidates,
+  );
+  unitQaReport.status = "interrupted_adoption_partial";
+  unitQaReport.source_script_hash = original.inventory.source_script_sha256;
+  unitQaReport.narration_generation_plan_path = planPath;
+  unitQaReport.narration_generation_plan_sha256 = planSha256;
+  unitQaReport.narration_generation_plan_file_sha256 = original.inventory.narration_generation_plan_file_sha256;
+  unitQaReport.selection_policy_version = NARRATION_TTS_SELECTION_POLICY_VERSION;
+  unitQaReport.recovery_scope = recoveryScope;
+  unitQaReport.selected_units = selectedRows.map((row) => ({
+    unit_id: row.unit_id, provider: row.provider, model_id: row.model_id,
+    voice_id: row.voice_id, voice_sha256: policy.primary.voice_sha256,
+    voice_continuity_contract: policy.primary.voice_continuity_contract,
+    attempt: row.attempt, spoken_text_sha256: row.spoken_text_sha256,
+    synthesis_identity_sha256: row.synthesis_identity_sha256,
+    audio_path: row.wav, audio_sha256: row.unit_qa.audio_sha256,
+    qa: row.unit_qa,
+  }));
+  const report = {
+    schema: "goldflow_narration_tts_report_v1",
+    status: "interrupted_adoption_partial",
+    source_script_hash: original.inventory.source_script_sha256,
+    narration_generation_plan_path: planPath,
+    narration_generation_plan_sha256: planSha256,
+    narration_generation_plan_file_sha256: original.inventory.narration_generation_plan_file_sha256,
+    recovery_scope: recoveryScope,
+    policy,
+    ...ttsStatusContract({
+      policy, units, selectedRows, candidates,
+      unitQaStatus: unitQaReport.status,
+      fullStreamQaStatus: "not_run_pending_interrupted_resume",
+      recoveryScope, batchPlan: batchValidation.expected,
+      synthesisRuns: [{ attempt: 1, synthesis_mode: policy.synthesis_contract.mode,
+        status: "interrupted_after_completed_cohorts",
+        jobs_path: original.original_job_path,
+        jobs_sha256: original.original_job_sha256,
+        cohort_events_path: original.cohort_events_path,
+        cohort_events_sha256: original.cohort_events_sha256,
+        runner_report_path: null }],
+    }),
+    unit_qa_path: unitQaPath,
+    full_stream_qa_path: path.join(episodeDir, `narration_full_stream_qa_${episode}.json`),
+    stitch_report_path: path.join(episodeDir, `audio_stitch_report_${episode}-narration.json`),
+    blockers: [{ code: "interrupted_qwen_remaining_units_never_submitted",
+      unit_count: original.never_submitted_unit_ids.length }],
+  };
+  await atomicWriteJsonExclusive(unitQaPath, unitQaReport);
+  await atomicWriteJsonExclusive(reportPath, report);
+  const partialReportArchivePath = path.join(episodeDir,
+    `narration_interrupted_qwen_partial_report_${episode}.json`);
+  const partialUnitQaArchivePath = path.join(episodeDir,
+    `narration_interrupted_qwen_partial_unit_qa_${episode}.json`);
+  await fs.copyFile(reportPath, partialReportArchivePath, fsConstants.COPYFILE_EXCL);
+  await fs.copyFile(unitQaPath, partialUnitQaArchivePath, fsConstants.COPYFILE_EXCL);
+  const receipt = {
+    schema: "goldflow_interrupted_qwen_adoption_v1",
+    status: "passed_partial",
+    episode_dir: episodeDir,
+    run_identity_path: identityPath,
+    run_identity_file_sha256: original.inventory.run_identity_file_sha256,
+    narration_generation_plan_path: planPath,
+    narration_generation_plan_file_sha256: original.inventory.narration_generation_plan_file_sha256,
+    narration_generation_plan_canonical_sha256: planSha256,
+    source_script_path: scriptPath,
+    source_script_sha256: original.inventory.source_script_sha256,
+    inventory_path: original.inventory_path,
+    inventory_file_sha256: original.inventory_sha256,
+    original_job_path: original.original_job_path,
+    original_job_file_sha256: original.original_job_sha256,
+    cohort_events_path: original.cohort_events_path,
+    cohort_events_file_sha256: original.cohort_events_sha256,
+    original_pre_synthesis_gate_path: originalGateArchivePath,
+    original_pre_synthesis_gate_file_sha256:
+      original.inventory.pre_synthesis_gate_file_sha256,
+    original_pre_synthesis_gate_sha256:
+      original.inventory.pre_synthesis_gate_sha256,
+    adoption_qa_path: qaEvidencePath,
+    adoption_qa_file_sha256: await sha256File(qaEvidencePath),
+    partial_report_path: partialReportArchivePath,
+    partial_report_file_sha256: await sha256File(partialReportArchivePath),
+    partial_unit_qa_path: partialUnitQaArchivePath,
+    partial_unit_qa_file_sha256: await sha256File(partialUnitQaArchivePath),
+    canonical_report_path: reportPath,
+    canonical_unit_qa_path: unitQaPath,
+    accepted_unit_ids: rows.map((row) => row.unit_id),
+    accepted_artifacts: rows.map((row) => {
+      const verified = byId.get(String(row.unit_id));
+      return { unit_id: row.unit_id, audio_path: verified.wav_path,
+        audio_sha256: verified.wav_sha256,
+        synthesis_sidecar_path: verified.sidecar_path,
+        synthesis_sidecar_sha256: verified.sidecar_sha256 };
+    }),
+    never_submitted_unit_ids: original.never_submitted_unit_ids,
+    model_loaded: false,
+    synthesis_invoked: false,
+    full_stream_qa_still_required: true,
+  };
+  await atomicWriteJsonExclusive(receiptPath, receipt);
+  return { status: "passed_partial", receipt_path: receiptPath,
+    receipt_sha256: await sha256File(receiptPath),
+    accepted_unit_count: rows.length,
+    never_submitted_unit_count: original.never_submitted_unit_ids.length };
+}
+
 async function main() {
   const flags = parseFlags(process.argv.slice(2));
+  const finalizeInterrupted = boolFlag(flags["finalize-interrupted"]);
   const channel = flags.channel ?? "53rebirth";
   const week = flags.week ?? "current";
   const episode = flags.episode ?? "ep_01";
@@ -2726,7 +3217,10 @@ async function main() {
     identityPath,
     priorGate: priorPreSynthesisGate,
   });
-  await atomicWriteJson(preSynthesisGatePath, bootstrapGate);
+  if (finalizeInterrupted && !priorPreSynthesisGate) {
+    throw new Error("No-model interrupted finalization requires the retained authorization gate.");
+  }
+  if (!finalizeInterrupted) await atomicWriteJson(preSynthesisGatePath, bootstrapGate);
   const historicalSynthesisAuthorized =
     bootstrapGate.historical_synthesis_authorized;
   const scriptPath = path.resolve(
@@ -2965,7 +3459,7 @@ async function main() {
     ...gateInputs,
     synthesisScope: preliminarySynthesisScope,
   });
-  await atomicWriteJson(preSynthesisGatePath, preSynthesisGate);
+  if (!finalizeInterrupted) await atomicWriteJson(preSynthesisGatePath, preSynthesisGate);
   if (preSynthesisGate.gate_sha256
       !== narrationPreSynthesisGateSha256(preSynthesisGate)
     || preSynthesisGate.status !== "passed") {
@@ -3045,6 +3539,16 @@ async function main() {
   ).trim()
     ? path.resolve(flags["manual-review-evidence"])
     : null;
+  const interruptedAdoptionReceiptPath = String(
+    flags["interrupted-adoption-receipt"] ?? "",
+  ).trim()
+    ? path.resolve(flags["interrupted-adoption-receipt"])
+    : null;
+  const completedRunnerReportPath = String(
+    flags["completed-runner-report"] ?? "",
+  ).trim()
+    ? path.resolve(flags["completed-runner-report"])
+    : null;
   const stitchRepairTailUnitIds = String(
     flags["stitch-repair-tail-unit-ids"] ?? "",
   ).split(",").map((value) => value.trim()).filter(Boolean);
@@ -3064,6 +3568,19 @@ async function main() {
       "--manual-review-evidence and --confirmed-retry-unit-ids are mutually exclusive. "
       + "Accept reviewed first takes or retry confirmed defects in separate guarded calls.",
     );
+  }
+  if (interruptedAdoptionReceiptPath
+    && (manualReviewEvidencePath || requestedRecoveryScope
+      || flags["stitch-repair-tail-unit-ids"] || workflowBypass
+      || flags["allow-full-stage-rerun"])) {
+    throw new Error("Interrupted-Qwen adoption resume cannot be combined with retakes, manual acceptance, stitch repair, or workflow bypass.");
+  }
+  if (finalizeInterrupted && (!interruptedAdoptionReceiptPath
+    || !completedRunnerReportPath || dryRun || planOnly)) {
+    throw new Error("No-model interrupted finalization requires its adoption receipt and completed runner report, without dry-run or plan-only.");
+  }
+  if (!finalizeInterrupted && completedRunnerReportPath) {
+    throw new Error("A completed runner report is accepted only by the no-model interrupted finalizer.");
   }
   if (requestedRecoveryScope && !String(
     flags["confirmed-retry-evidence"] ?? "",
@@ -3087,6 +3604,31 @@ async function main() {
   const priorUnitQaSha256 = priorUnitQaBuffer
     ? createHash("sha256").update(priorUnitQaBuffer).digest("hex")
     : null;
+  let interruptedAdoption = null;
+  let completedInterruptedRunner = null;
+  if (priorNarrationReport?.status === "interrupted_adoption_partial"
+    && !interruptedAdoptionReceiptPath) {
+    throw new Error("Interrupted-Qwen partial checkpoint requires --interrupted-adoption-receipt; unscoped synthesis is forbidden.");
+  }
+  if (interruptedAdoptionReceiptPath) {
+    if (!priorNarrationReport || !priorUnitQa) {
+      throw new Error("Interrupted-Qwen resume requires its exact partial report and unit-QA checkpoint.");
+    }
+    interruptedAdoption = await verifyInterruptedQwenAdoptionReceipt({
+      receiptPath: interruptedAdoptionReceiptPath,
+      episodeDir, outputDir, identityPath, planPath, scriptPath,
+      reportPath, unitQaPath, units, planSha256,
+      requireExactOutputSet: !finalizeInterrupted,
+    });
+  }
+  if (finalizeInterrupted) {
+    completedInterruptedRunner = await verifyCompletedInterruptedQwenRunner({
+      runnerReportPath: completedRunnerReportPath,
+      receiptPath: interruptedAdoptionReceiptPath,
+      episodeDir, outputDir, identityPath, planPath, scriptPath,
+      reportPath, unitQaPath, units, planSha256, batchPlan, policy,
+    });
+  }
   if (!priorNarrationReport || !priorUnitQa) {
     const orphanedUnitFiles = (await filesBelow(
       path.join(outputDir, "units"),
@@ -3102,6 +3644,30 @@ async function main() {
   let preservationValidation = null;
   let preservedCandidates = [];
   if (priorNarrationReport && priorUnitQa) {
+    const requestedIds = requestedRecoveryScope?.requested_unit_ids ?? [];
+    const blockedIds = new Set((priorNarrationReport.blockers ?? [])
+      .map((row) => String(row.unit_id ?? "")).filter(Boolean));
+    let allowedBlockedUnrequestedIds = [];
+    if (priorNarrationReport.status === "blocked"
+      && requestedIds.length > 0 && requestedIds.length < blockedIds.size
+      && requestedIds.every((id) => blockedIds.has(String(id)))) {
+      const evidence = await readJson(path.resolve(
+        String(flags["confirmed-retry-evidence"] ?? ""),
+      ), null);
+      if (evidence?.evidence_basis !== "reviewed_automated_delivery_qa") {
+        throw new Error("Partial narration retake requires reviewed automated delivery evidence.");
+      }
+      validateConfirmedRetryEvidenceForTests({
+        evidence, requestedUnitIds: requestedIds,
+        planSha256, priorReport: priorNarrationReport,
+        priorReportSha256: priorNarrationReportSha256,
+        currentCandidates: priorNarrationReport.results ?? [],
+        sourceScriptSha256: scriptHash, planFileSha256,
+      });
+      const requestedSet = new Set(requestedIds.map(String));
+      allowedBlockedUnrequestedIds = [...blockedIds]
+        .filter((id) => !requestedSet.has(id));
+    }
     preservationValidation = preservedTtsSelectionsForTests({
       units,
       priorReport: priorNarrationReport,
@@ -3112,6 +3678,7 @@ async function main() {
       requestedUnitIds:
         requestedRecoveryScope?.requested_unit_ids ?? [],
       requireAllUnrequested: false,
+      allowedBlockedUnrequestedIds,
     });
     if (preservationValidation.status !== "passed") {
       throw new Error(
@@ -3141,17 +3708,84 @@ async function main() {
     confirmedRetryEvidencePath = path.resolve(flags["confirmed-retry-evidence"]);
     const evidenceBuffer = await fs.readFile(confirmedRetryEvidencePath);
     const evidence = JSON.parse(evidenceBuffer.toString("utf8"));
+    if (evidence.evidence_basis === "operator_confirmed_pronunciation"
+      && (!path.isAbsolute(String(evidence.pre_retry_narration_report_path ?? ""))
+        || path.resolve(evidence.pre_retry_narration_report_path) === path.resolve(reportPath)
+        || await sha256File(evidence.pre_retry_narration_report_path).catch(() => null)
+          !== priorNarrationReportSha256)) {
+      throw new Error("Heard pronunciation retry requires an immutable copy of the exact current pre-retry report.");
+    }
     confirmedRetryEvidenceSha256 = createHash("sha256")
       .update(evidenceBuffer)
       .digest("hex");
-    validatedConfirmedRetryEvidence = validateConfirmedRetryEvidenceForTests({
-      evidence,
-      requestedUnitIds: requestedRecoveryScope.requested_unit_ids,
-      planSha256,
-      priorReport: priorNarrationReport,
-      priorReportSha256: priorNarrationReportSha256,
-      currentCandidates: preservedCandidates,
-    });
+    if (evidence.evidence_basis === "reviewed_structural_no_audio") {
+      const structuralId = requestedRecoveryScope.requested_unit_ids[0];
+      const priorCandidate = (priorUnitQa?.candidates ?? []).find((row) => (
+        String(row?.unit_id) === structuralId
+      ));
+      const runnerPath = priorCandidate?.runner_report_path;
+      if (!runnerPath || !path.isAbsolute(runnerPath)
+        || !path.resolve(runnerPath).startsWith(`${path.resolve(outputDir)}${path.sep}`)) {
+        throw new Error("Structural no-audio retry lacks an episode-local original runner report.");
+      }
+      const runnerBuffer = await fs.readFile(runnerPath);
+      const runnerReportSha256 = createHash("sha256")
+        .update(runnerBuffer).digest("hex");
+      const structural = validateStructuralNoAudioRetryEvidence({
+        evidence,
+        requestedUnitIds: requestedRecoveryScope.requested_unit_ids,
+        sourceScriptSha256: scriptHash,
+        planSha256,
+        planFileSha256,
+        priorReport: priorNarrationReport,
+        priorReportSha256: priorNarrationReportSha256,
+        priorUnitQa,
+        priorUnitQaSha256,
+        runnerReport: JSON.parse(runnerBuffer.toString("utf8")),
+        runnerReportSha256,
+        units,
+        batchPlan,
+      });
+      if (policy.primary.provider !== "qwen_local"
+        || policy.synthesis_contract.mode !== QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT.mode
+        || preservationValidation.preserved_unit_ids.length !== units.length - 1) {
+        throw new Error("Structural no-audio retry requires one Qwen cohort failure and all other units hash-preserved.");
+      }
+      const archiveDir = path.join(outputDir, "structural-retry-predecessors");
+      const preRetryReportArchivePath = await preserveStructuralPredecessor(
+        priorNarrationReportBuffer,
+        path.join(archiveDir, `narration-report-${priorNarrationReportSha256}.json`),
+        priorNarrationReportSha256,
+      );
+      const preRetryUnitQaArchivePath = await preserveStructuralPredecessor(
+        priorUnitQaBuffer,
+        path.join(archiveDir, `unit-qa-${priorUnitQaSha256}.json`),
+        priorUnitQaSha256,
+      );
+      validatedConfirmedRetryEvidence = [{
+        ...structural,
+        pre_retry_report_archive_path: preRetryReportArchivePath,
+        pre_retry_unit_qa_archive_path: preRetryUnitQaArchivePath,
+      }];
+    } else {
+      validatedConfirmedRetryEvidence = validateConfirmedRetryEvidenceForTests({
+        evidence,
+        requestedUnitIds: requestedRecoveryScope.requested_unit_ids,
+        planSha256,
+        priorReport: priorNarrationReport,
+        priorReportSha256: priorNarrationReportSha256,
+        currentCandidates: preservedCandidates,
+        sourceScriptSha256: scriptHash,
+        planFileSha256,
+        currentUnits: units,
+        priorCandidates: priorUnitQa?.candidates ?? [],
+      });
+    }
+    if (validatedConfirmedRetryEvidence.some((row) => row.evidence_basis === "operator_confirmed_pronunciation")
+      && (policy.primary.provider !== "qwen_local"
+        || policy.synthesis_contract.mode !== QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT.mode)) {
+      throw new Error("Heard pronunciation repair requires the Qwen batch-cohort exact-unit provenance route.");
+    }
   }
   const finalSynthesisScope = narrationSynthesisScopeForTests({
     units,
@@ -3167,6 +3801,22 @@ async function main() {
         ? await sha256File(manualReviewEvidencePath).catch(() => null)
         : null,
   });
+  if (interruptedAdoption) {
+    finalSynthesisScope.evidence_path = interruptedAdoption.receipt_path;
+    finalSynthesisScope.evidence_sha256 = interruptedAdoption.receipt_sha256;
+    finalSynthesisScope.interrupted_adoption_receipt_path =
+      interruptedAdoption.receipt_path;
+    finalSynthesisScope.interrupted_adoption_receipt_sha256 =
+      interruptedAdoption.receipt_sha256;
+  }
+  if (interruptedAdoption && (finalSynthesisScope.mode
+      !== "interrupted_full_synthesis_resume_preserving_accepted_units"
+      || JSON.stringify(finalSynthesisScope.preserved_unit_ids)
+        !== JSON.stringify(interruptedAdoption.receipt.accepted_unit_ids)
+      || JSON.stringify(finalSynthesisScope.authorized_synthesis_unit_ids)
+        !== JSON.stringify(interruptedAdoption.receipt.never_submitted_unit_ids))) {
+    throw new Error("Interrupted-Qwen resume scope differs from the QA-accepted and never-submitted receipt partition.");
+  }
   const preservedForInvocation = preservedCandidates.filter((candidate) => (
     finalSynthesisScope.preserved_unit_ids.includes(String(candidate.unit_id))
   ));
@@ -3190,17 +3840,26 @@ async function main() {
       );
     }
   }
-  preSynthesisGate = buildNarrationPreSynthesisGate({
+  const expectedPreSynthesisGate = buildNarrationPreSynthesisGate({
     ...gateInputs,
     synthesisScope: finalSynthesisScope,
   });
-  await atomicWriteJson(preSynthesisGatePath, preSynthesisGate);
+  preSynthesisGate = finalizeInterrupted
+    ? await readJson(preSynthesisGatePath, null)
+    : expectedPreSynthesisGate;
+  if (!finalizeInterrupted) await atomicWriteJson(preSynthesisGatePath, preSynthesisGate);
   let preSynthesisGateFileSha256 = await sha256File(preSynthesisGatePath);
-  if (preSynthesisGate.gate_sha256
+  if (!preSynthesisGate
+    || preSynthesisGate.gate_sha256
       !== narrationPreSynthesisGateSha256(preSynthesisGate)
-    || preSynthesisGate.status !== "passed") {
+    || preSynthesisGate.status !== "passed"
+    || (finalizeInterrupted && (
+      preSynthesisGate.authorization?.validation_gate_sha256
+        !== expectedPreSynthesisGate.gate_sha256
+      || preSynthesisGateFileSha256
+        !== completedInterruptedRunner.runner.pre_synthesis_gate_file_sha256))) {
     throw new Error(
-      `Narration pre-synthesis gate blocked before helper import/model load: ${JSON.stringify(preSynthesisGate.findings)}`,
+      `Narration pre-synthesis gate blocked before helper import/model load: ${JSON.stringify(preSynthesisGate?.findings ?? [])}`,
     );
   }
   if (alreadyComplete && !allowAlreadyCompleteFinalization) {
@@ -3316,10 +3975,19 @@ async function main() {
     throw new Error("--unit-qa-whisper-model is production-locked to small");
   }
   ensureArg("--unit-qa-whisper-model", "small");
-  if (!manualReviewEvidencePath) {
+  if (!manualReviewEvidencePath && !finalizeInterrupted) {
     preSynthesisGate = authorizeNarrationPreSynthesisGate(preSynthesisGate);
     await atomicWriteJson(preSynthesisGatePath, preSynthesisGate);
     preSynthesisGateFileSha256 = await sha256File(preSynthesisGatePath);
+    if (interruptedAdoption) {
+      const resumeGateArchivePath = path.join(episodeDir,
+        `narration_tts_interrupted_resume_gate_${episode}.json`);
+      await fs.copyFile(preSynthesisGatePath, resumeGateArchivePath,
+        fsConstants.COPYFILE_EXCL);
+      if (await sha256File(resumeGateArchivePath) !== preSynthesisGateFileSha256) {
+        throw new Error("Interrupted-Qwen resume gate archive differs before synthesis.");
+      }
+    }
   }
   const helpers = await import("./modelslab-qwen-episode-audio.mjs");
 
@@ -3347,6 +4015,9 @@ async function main() {
       policy,
     });
     candidates.push(...preservedFinalInputs.candidates);
+    candidates.push(...validatedConfirmedRetryEvidence
+      .filter((row) => row.evidence_basis === "reviewed_structural_no_audio")
+      .map((row) => row.candidate));
     synthesisRuns.push(...preservedFinalInputs.synthesisRuns);
     for (const row of preservedFinalInputs.selectedRows) {
       selected.set(String(row.unit_id), row);
@@ -3462,6 +4133,7 @@ async function main() {
         scriptPath,
         scriptSha256: scriptHash,
         onCohortComplete: prefetchCohortQa,
+        completedRunner: completedInterruptedRunner,
       });
     } catch (error) {
       for (const unit of targetUnits) {
@@ -3708,6 +4380,27 @@ async function main() {
     pre_synthesis_gate_path: preSynthesisGatePath,
     pre_synthesis_gate_sha256: preSynthesisGate.gate_sha256,
     pre_synthesis_gate_file_sha256: preSynthesisGateFileSha256,
+    ...(completedInterruptedRunner ? {
+      completed_runner_finalization: {
+        schema: "goldflow_completed_interrupted_qwen_finalization_v1",
+        status: "exact_completed_runner_verified_no_synthesis",
+        adoption_receipt_path: completedInterruptedRunner.adoption_receipt_path,
+        adoption_receipt_sha256: completedInterruptedRunner.adoption_receipt_sha256,
+        runner_report_path: completedInterruptedRunner.runner_path,
+        runner_report_sha256: completedInterruptedRunner.runner_sha256,
+        jobs_path: completedInterruptedRunner.jobs_path,
+        jobs_sha256: completedInterruptedRunner.jobs_sha256,
+        pre_synthesis_gate_path: preSynthesisGatePath,
+        pre_synthesis_gate_file_sha256: preSynthesisGateFileSha256,
+        empty_cohort_events_path: completedInterruptedRunner.cohort_events_path,
+        empty_cohort_events_sha256:
+          completedInterruptedRunner.empty_cohort_events_sha256,
+        adopted_unit_ids: completedInterruptedRunner.accepted_unit_ids,
+        completed_runner_unit_ids: completedInterruptedRunner.resumed_unit_ids,
+        model_loaded_by_finalizer: false,
+        synthesis_invoked_by_finalizer: false,
+      },
+    } : {}),
   };
   if (manualReviewEvidencePath) {
     const evidenceBuffer = await fs.readFile(manualReviewEvidencePath);
@@ -3866,10 +4559,28 @@ async function main() {
     );
     recoveryScope = {
       ...recoveryScope,
-      status: "validated_against_confirmed_listen_evidence",
+      status: validatedConfirmedRetryEvidence.every((row) => (
+        row.evidence_basis === "reviewed_structural_no_audio"
+      )) ? "validated_against_reviewed_structural_no_audio"
+        : validatedConfirmedRetryEvidence.every((row) => (
+        row.evidence_basis === "operator_authorized_asr_consensus"
+      )) ? "validated_against_operator_authorized_asr_consensus"
+        : validatedConfirmedRetryEvidence.every((row) => row.evidence_basis === "reviewed_automated_delivery_qa")
+          ? "validated_against_reviewed_automated_delivery_qa"
+        : validatedConfirmedRetryEvidence.every((row) => row.evidence_basis === "operator_confirmed_pronunciation")
+          ? "validated_against_operator_confirmed_pronunciation"
+        : "validated_against_confirmed_listen_evidence",
       evidence_path: confirmedRetryEvidencePath,
       evidence_sha256: confirmedRetryEvidenceSha256,
       pre_retry_narration_report_sha256: priorNarrationReportSha256,
+      ...(validatedConfirmedRetryEvidence[0]?.evidence_basis === "reviewed_structural_no_audio"
+        ? {
+          pre_retry_narration_report_archive_path:
+            validatedConfirmedRetryEvidence[0].pre_retry_report_archive_path,
+          pre_retry_unit_qa_sha256: priorUnitQaSha256,
+          pre_retry_unit_qa_archive_path:
+            validatedConfirmedRetryEvidence[0].pre_retry_unit_qa_archive_path,
+        } : {}),
       confirmed_artifacts: validatedConfirmedRetryEvidence,
     };
     if (scopedRecoveryUnits.length) {
@@ -3901,6 +4612,7 @@ async function main() {
               cohortBinding: bindingByUnit.get(unitId),
               batchPlanSha256: batchPlan.batch_plan_sha256,
               confirmedDefect: confirmed?.defect_type ?? null,
+              confirmedEvidenceBasis: confirmed?.evidence_basis ?? null,
               confirmedEvidencePath: confirmed
                 ? confirmedRetryEvidencePath
                 : null,
@@ -4773,7 +5485,13 @@ async function main() {
 }
 
 if (path.resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {
-  main().catch((error) => {
+  const entryFlags = parseFlags(process.argv.slice(2));
+  const entry = boolFlag(entryFlags["adopt-interrupted"])
+    ? adoptInterruptedQwenFirstTakes(entryFlags).then((result) => {
+        console.log(JSON.stringify(result, null, 2));
+      })
+    : main();
+  entry.catch((error) => {
     console.error(error instanceof Error ? error.stack || error.message : String(error));
     process.exitCode = 1;
   });

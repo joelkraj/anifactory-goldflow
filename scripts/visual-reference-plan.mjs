@@ -7,6 +7,8 @@ import { fileURLToPath } from "node:url";
 import { getLLMModel, isLocalLLMRoute, localLLMAuthHeaders, localLLMChatCompletionURL } from "./lib/llm-router.mjs";
 import { configuredCodexModel, isCodexCacheCompatible, readCodexCallMetadata, runCodexCli } from "./lib/codex-cli-runner.mjs";
 import { recordPlannerChunkCheckpoint } from "./lib/planner-chunk-ledger.mjs";
+import { isSourceSceneLocationBeat } from "./lib/editorial-beat-director.mjs";
+import { compactReferencePromptValue, REFERENCE_PROMPT_TABLE_INSTRUCTION } from "./lib/reference-prompt-format.mjs";
 import {
   buildReferenceDirectorSelectionReceipt,
   referenceDirectorSelectionFidelityFindings,
@@ -513,8 +515,9 @@ function buildReferenceEvidenceLedger(scopedSemantic, visualBeatPlan, {
       : rawSubject;
     if (!cleanSubject) return;
     const assetKind = normalizedKind;
+    const sourceSceneLocation = assetKind === "location" && isSourceSceneLocationBeat(beat);
     const canonicalIndex = canonicalAliases.get(assetKind) ?? { exact: new Map(), evidence_phrases: [] };
-    const canonical = [canonicalId, refId, cleanSubject]
+    const canonical = sourceSceneLocation ? null : [canonicalId, refId, cleanSubject]
       .map((value) => slug(value, ""))
       .filter(Boolean)
       .map((key) => canonicalIndex.exact.get(key))
@@ -536,7 +539,7 @@ function buildReferenceEvidenceLedger(scopedSemantic, visualBeatPlan, {
         ? `char_${canonical.canonical_id.replace(/^char_/, "")}_identity`
         : inventoryRefIdFor(assetKind, canonical.canonical_id, canonical.canonical_id);
     }
-    if (!refId && assetKind === "location" && sceneId) {
+    if (!sourceSceneLocation && !refId && assetKind === "location" && sceneId) {
       let bestLocation = null;
       for (const existing of assets.values()) {
         if (existing.kind !== "location" || !existing.scene_ids.has(sceneId)) continue;
@@ -783,7 +786,7 @@ function buildLocationContractLedger(scopedSemantic, { outputPath: ledgerPath = 
       const description = String(req.subject ?? req.description ?? scene.location ?? req.ref_id ?? contractId).trim();
       const matchingBeats = beats.filter((beat) => (beat.ref_needs ?? beat.beat_ref_requirements ?? [])
         .some((need) => normalizeKind(need?.kind) === "location" && slug(need?.ref_id ?? "") === contractId));
-      const scopedBeats = matchingBeats.length ? matchingBeats : beats;
+      const scopedBeats = matchingBeats.length ? matchingBeats : beats.filter((beat) => !isSourceSceneLocationBeat(beat));
       const localLocationLabels = [...new Set(scopedBeats
         .map((beat) => String(beat.local_location ?? beat.location ?? "").trim())
         .filter(Boolean))];
@@ -828,6 +831,23 @@ function buildLocationContractLedger(scopedSemantic, { outputPath: ledgerPath = 
           .map((need) => slug(need?.ref_id ?? "")),
       ].filter(Boolean));
       for (const contractId of contractIds) {
+        if (isSourceSceneLocationBeat(beat) && !contracts.has(contractId)
+          && (beat.ref_needs ?? beat.beat_ref_requirements ?? []).some((need) => (
+            normalizeKind(need?.kind) === "location" && slug(need?.ref_id ?? "") === contractId
+            && need.subject === beat.local_location
+          ))) {
+          contracts.set(contractId, {
+            location_contract_id: contractId,
+            semantic_ref_id: null,
+            description: beat.local_location,
+            prompt_anchor: beat.local_location,
+            scene_ids: [],
+            beat_ids: [],
+            local_location_labels: [],
+            reasons: ["Exact source scene location; no canonical location ID or inherited venue reference."],
+            location_provenance: beat.location_provenance,
+          });
+        }
         const contract = contracts.get(contractId);
         if (!contract) continue;
         const locationLabel = String(beat.local_location ?? beat.location ?? "").trim();
@@ -1207,7 +1227,7 @@ export function compactLocationContractLedgerForDirectorCardsForTests(locationCo
   };
 }
 
-function buildPrompt(semanticPlan, { chunkLabel = null, guidance = {}, inventoryLedger = null, locationContractLedger = null } = {}) {
+function buildPrompt(semanticPlan, { chunkLabel = null, guidance = {}, inventoryLedger = null, locationContractLedger = null, compactOversized = true } = {}) {
   const contentProfile = guidance.contentProfile ?? activeContentProfile;
   const plannerDirective = contentProfilePlannerDirective(contentProfile);
   const compact = {
@@ -1217,7 +1237,19 @@ function buildPrompt(semanticPlan, { chunkLabel = null, guidance = {}, inventory
     scene_count: semanticPlan.scenes?.length ?? 0,
     scenes: (semanticPlan.scenes ?? []).map(compactScene),
   };
-  return `Propose canonical visual-reference candidates from this evidence-backed story chunk.
+  const guidancePayload = visualGuidanceBlock(guidance, compact);
+  const evidencePayload = compactPromptJsonForTests(compactSceneReferenceEvidenceForTests(
+    inventoryLedger,
+    (semanticPlan.scenes ?? []).map((scene) => scene.scene_id),
+    { maxAssets: 36, sceneIdLimit: 4 },
+  ));
+  const locationPayload = compactPromptJsonForTests({
+    contracts: (locationContractLedger?.contracts ?? []).filter((contract) =>
+      (contract.scene_ids ?? []).some((sceneId) => (semanticPlan.scenes ?? []).some((scene) => scene.scene_id === sceneId))
+    ),
+  });
+  const semanticPayload = compactPromptJsonForTests(compact);
+  let prompt = `Propose canonical visual-reference candidates from this evidence-backed story chunk.
 ${chunkLabel ? `\nThis is ${chunkLabel}. Propose only assets with plausible episode-level continuity value. A later global director call makes every final generation decision.\n` : ""}
 
 CONTENT PROFILE: ${contentProfile.id}
@@ -1234,6 +1266,8 @@ Rules:
 - A nonhuman actor that moves, attacks, reacts, is fought, or is physically contacted is not a prop. Propose it as kind character_state. Use conditioning_asset_role creature_identity for one distinct creature/construct identity and faction_language only for a true recurring creature group or shared species/faction design.
 - A distinct nonhuman actor should receive a clean standalone identity reference when it recurs across two or more beats, is the decisive threat/contact target in an action sequence, or has signature anatomy that text-only scene prompting is likely to reinterpret. Its scene_prompt_anchor must repeat one concise positive anatomy contract across every covered beat, including exact silhouette, material, head/face construction, limb/body construction, and whether a signature object-like feature is integrated into the body, worn, held, or separate in the environment.
 - Resolve role/title aliases to canonical named characters when the script or semantic scenes establish that relationship. If a named person is also the dean, boss, chairman, judge, professor, host, rival, spouse, parent, or another title, do not create a separate generic character ref for later role-only mentions. Expand the existing named character's state/scope instead.
+- Give recurring people who are not the same person distinct positive identity anchors: facial geometry, hairstyle, complexion, age presentation, and body silhouette. Do not let an unrelated character inherit the protagonist's face or hair merely because they share an age or gender. Share facial identity only when the locked story establishes twins, clones, or the same person in another state.
+- Treat each material wardrobe change as a named state of one identity with exact beat scope, including before/after beats inside one semantic scene. A face-only base anchor supplies likeness, never an obsolete outfit; borrowed or handed-off real clothing stays with its actual owner at that moment.
 - For real named public figures whose likeness matters, request a face-only source identity anchor before the episode character-state ref is generated. Do not rely on text-only "inspired by" likeness prompts for production. The source anchor supplies facial likeness only; the character-state ref supplies wardrobe, pose, body state, and ${contentProfile.content_family} styling.
 - Use each scene's visual_beats when present. A named character that appears in a beat excerpt through replay footage, livestream panels, phone screens, broadcast feeds, camera files, dossiers, avatars, or video walls still needs current-scene reference coverage if their likeness may be visible in that cut.
 - Treat each beat's active_state_constraints and depiction_mode as binding evidence. Select refs for materially recurring visible states; do not collapse incompatible wardrobe/injury states and do not create refs for transient text-only state changes.
@@ -1284,24 +1318,16 @@ Rules:
 - Return only valid JSON.
 
 VISUAL BIBLES AND OPERATOR DIRECTION:
-${visualGuidanceBlock(guidance, compact)}
+${guidancePayload}
 
 REFERENCE EVIDENCE LEDGER (scene-local; the global director receives the episode catalog later):
-${compactPromptJsonForTests(compactSceneReferenceEvidenceForTests(
-  inventoryLedger,
-  (semanticPlan.scenes ?? []).map((scene) => scene.scene_id),
-  { maxAssets: 36, sceneIdLimit: 4 },
-))}
+${evidencePayload}
 
 LOCATION CONTRACT LEDGER:
-${compactPromptJsonForTests({
-  contracts: (locationContractLedger?.contracts ?? []).filter((contract) =>
-    (contract.scene_ids ?? []).some((sceneId) => (semanticPlan.scenes ?? []).some((scene) => scene.scene_id === sceneId))
-  ),
-})}
+${locationPayload}
 
 SEMANTIC PLAN:
-${compactPromptJsonForTests(compact)}
+${semanticPayload}
 
 Return:
 {
@@ -1368,6 +1394,23 @@ Return:
   ],
   "warnings": []
 	}`;
+  if (compactOversized && Buffer.byteLength(prompt, "utf8") > VISUAL_REFERENCE_CHUNK_SAFE_MAX_BYTES) {
+    // Leave compatible historical packets byte-identical. Oversized packets get
+    // reversible formatting only; splitting and the hard byte guard still apply.
+    for (const [heading, payload] of [
+      ["VISUAL BIBLES AND OPERATOR DIRECTION:", guidancePayload],
+      ["REFERENCE EVIDENCE LEDGER (scene-local; the global director receives the episode catalog later):", evidencePayload],
+      ["LOCATION CONTRACT LEDGER:", locationPayload],
+      ["SEMANTIC PLAN:", semanticPayload],
+    ]) {
+      prompt = prompt.replace(`${heading}\n${payload}`, `${heading}\n${JSON.stringify(compactReferencePromptValue(JSON.parse(payload)))}`);
+    }
+    const returnMarker = "\nReturn:\n";
+    const returnStart = prompt.lastIndexOf(returnMarker) + returnMarker.length;
+    prompt = prompt.slice(0, returnStart) + JSON.stringify(JSON.parse(prompt.slice(returnStart)));
+    prompt = prompt.replace("VISUAL BIBLES AND OPERATOR DIRECTION:", `${REFERENCE_PROMPT_TABLE_INSTRUCTION}\n\nVISUAL BIBLES AND OPERATOR DIRECTION:`);
+  }
+  return prompt;
 }
 
 export function buildReferenceChunkPromptForTests(semanticPlan, options = {}) {
@@ -1655,6 +1698,336 @@ export function buildReferenceDirectorCandidateCardsForTests(normalizedChunkPlan
   };
 }
 
+function readablePromptLineTable(lines, firstField, fieldOrder) {
+  const rows = lines.map((line) => {
+    const parts = String(line).split(" | ");
+    const row = { [firstField]: parts.shift() };
+    for (const part of parts) {
+      const separator = part.indexOf("=");
+      const field = part.slice(0, separator);
+      if (separator < 1 || !fieldOrder.includes(field) || Object.hasOwn(row, field)) {
+        throw new Error(`Cannot losslessly table reference-director line field ${field}`);
+      }
+      row[field] = part.slice(separator + 1);
+    }
+    const reconstructed = fieldOrder.filter((field) => Object.hasOwn(row, field))
+      .map((field) => field === firstField ? row[field] : `${field}=${row[field]}`).join(" | ");
+    if (reconstructed !== line) throw new Error("Cannot losslessly table reference-director line order");
+    return row;
+  });
+  const allFields = fieldOrder.filter((field) => rows.some((row) => Object.hasOwn(row, field)));
+  return { all_fields: allFields, ...compactPromptTableForTests(rows, allFields) };
+}
+
+// A size-only fallback: values remain readable strings, never numeric dictionary
+// codes. Full local candidate catalogs and the director's selection are untouched.
+export function compactReferenceDirectorMergePayloadsForTests(candidateCards, evidenceLedger) {
+  const targetLines = candidateCards.cards.flatMap((card) => card.target_candidate_lines);
+  const stateLines = [
+    ...candidateCards.cards.flatMap((card) => card.character_state_candidate_lines),
+    ...candidateCards.unlinked_character_state_candidates,
+  ];
+  const targetTable = readablePromptLineTable(targetLines, "candidate_ids", [
+    "candidate_ids", "ref", "scenes", "beats", "uses", "priority", "mode", "required", "states", "bases", "construction",
+  ]);
+  const stateTable = readablePromptLineTable(stateLines, "candidate_ids", [
+    "candidate_ids", "state_ref", "source_targets", "bases", "usage", "scene_overrides", "scenes",
+  ]);
+  const { rows: targetRows, ...targetFormat } = targetTable;
+  const { rows: stateRows, ...stateFormat } = stateTable;
+  let targetOffset = 0;
+  let stateOffset = 0;
+  const cards = candidateCards.cards.map((card) => {
+    const targetCount = card.target_candidate_lines.length;
+    const stateCount = card.character_state_candidate_lines.length;
+    const row = {
+      ...card,
+      target_candidate_lines: targetRows.slice(targetOffset, targetOffset + targetCount),
+      character_state_candidate_lines: stateRows.slice(stateOffset, stateOffset + stateCount),
+    };
+    targetOffset += targetCount;
+    stateOffset += stateCount;
+    return row;
+  });
+  return {
+    candidateCards: {
+      ...candidateCards,
+      schema: "goldflow_reference_director_candidate_card_tables_v2",
+      source_schema: candidateCards.schema,
+      target_candidate_line_format: targetFormat,
+      character_state_candidate_line_format: stateFormat,
+      cards: compactPromptTableForTests(cards, cards.length ? Object.keys(cards[0]) : []),
+      unlinked_character_state_candidates: stateRows.slice(stateOffset),
+    },
+    evidenceLedger: {
+      ...evidenceLedger,
+      schema: "goldflow_reference_director_evidence_rows_v1",
+      source_schema: evidenceLedger.schema,
+      asset_lines: readablePromptLineTable(evidenceLedger.asset_lines, "asset_id", [
+        "asset_id", "kind", "subject", "entity", "scenes", "beats", "span_sec", "canonical",
+      ]),
+    },
+  };
+}
+
+export function compactReferenceDirectorCardDefaultsForTests(candidateCards) {
+  if (candidateCards?.schema !== "goldflow_reference_director_candidate_card_tables_v2") return candidateCards;
+  if (Object.hasOwn(candidateCards, "card_table_source_schema")) throw new Error("Reference director card schema field collision");
+  const size = (value) => Buffer.byteLength(JSON.stringify(value), "utf8");
+  const targetColumn = candidateCards.cards.fields.indexOf("target_candidate_lines");
+  const targetRows = targetColumn >= 0
+    ? candidateCards.cards.rows.flatMap((row) => row[targetColumn])
+    : candidateCards.cards.constants.target_candidate_lines ?? [];
+  const targetRefByCandidateId = new Map();
+  for (const row of targetRows) {
+    const format = candidateCards.target_candidate_line_format;
+    const values = { ...format.constants, ...Object.fromEntries(format.fields.map((field, index) => [field, row[index]])) };
+    for (const id of String(values.candidate_ids ?? "").split(",")) targetRefByCandidateId.set(id, values.ref);
+  }
+  let packed = candidateCards;
+  for (const kind of ["target", "character_state"]) {
+    const formatKey = `${kind}_candidate_line_format`;
+    const lineKey = `${kind}_candidate_lines`;
+    const format = candidateCards[formatKey];
+    const fields = format?.fields;
+    if (!Array.isArray(fields) || !fields.length) continue;
+    const column = candidateCards.cards.fields.indexOf(lineKey);
+    const constantLines = column < 0 && Object.hasOwn(candidateCards.cards.constants, lineKey);
+    const groups = column >= 0
+      ? candidateCards.cards.rows.map((row) => row[column])
+      : constantLines ? [candidateCards.cards.constants[lineKey]] : [];
+    const unlinked = kind === "character_state" ? candidateCards.unlinked_character_state_candidates : null;
+    const rows = [...groups.flat(), ...(unlinked ?? [])];
+    if (!rows.length) continue;
+    if (rows.some((row) => !Array.isArray(row) || row.length !== fields.length)) {
+      throw new Error("Reference director literal-default row width changed");
+    }
+    const overrideField = "literal_field_overrides_or_null";
+    if (fields.includes(overrideField) || Object.hasOwn(format, "defaults") || Object.hasOwn(format, "source_fields") || Object.hasOwn(format, "field_aliases")) {
+      throw new Error("Reference director literal-default format field collision");
+    }
+    const encode = (defaults, aliases = {}) => {
+      const derivedFields = [...Object.keys(defaults), ...Object.keys(aliases)];
+      const valueFields = fields.filter((field) => !derivedFields.includes(field));
+      const encodeRow = (row) => {
+        const values = { ...format.constants, ...Object.fromEntries(fields.map((field, index) => [field, row[index]])) };
+        const firstSource = String(values.source_targets ?? "").split(",")[0];
+        const overrides = Object.fromEntries(derivedFields
+          .filter((field) => aliases[field]
+            ? !targetRefByCandidateId.has(firstSource) || JSON.stringify(values[field]) !== JSON.stringify(targetRefByCandidateId.get(firstSource))
+            : JSON.stringify(values[field]) !== JSON.stringify(defaults[field]))
+          .map((field) => [field, values[field]]));
+        return [...valueFields.map((field) => values[field]), Object.keys(overrides).length ? overrides : null];
+      };
+      const result = structuredClone(packed);
+      result.schema = "goldflow_reference_director_candidate_card_defaults_v3";
+      result.card_table_source_schema = candidateCards.schema;
+      result[formatKey] = { ...format, source_fields: fields, fields: [...valueFields, overrideField], defaults, ...(Object.keys(aliases).length ? { field_aliases: aliases } : {}), override_field: overrideField };
+      if (column >= 0) result.cards.rows.forEach((row, index) => { row[column] = groups[index].map(encodeRow); });
+      else if (constantLines) result.cards.constants[lineKey] = groups[0].map(encodeRow);
+      if (unlinked) result.unlinked_character_state_candidates = unlinked.map(encodeRow);
+      return result;
+    };
+    let defaults = {};
+    // Choose only format defaults that reduce actual bytes. All exceptions
+    // remain explicit literal values; no candidate or field is discarded.
+    for (const [index, field] of fields.entries()) {
+      const counts = new Map();
+      for (const row of rows) {
+        const key = JSON.stringify(row[index]);
+        counts.set(key, (counts.get(key) ?? 0) + 1);
+      }
+      const mostFrequent = [...counts].sort((a, b) => b[1] - a[1])[0];
+      if (mostFrequent[1] < 2) continue;
+      const proposedDefaults = { ...defaults, [field]: JSON.parse(mostFrequent[0]) };
+      const proposal = encode(proposedDefaults);
+      if (size(proposal) < size(packed)) {
+        defaults = proposedDefaults;
+        packed = proposal;
+      }
+    }
+    if (kind === "character_state" && fields.includes("state_ref")) {
+      const aliasDefaults = { ...defaults };
+      delete aliasDefaults.state_ref;
+      const proposal = encode(aliasDefaults, {
+        state_ref: { source: "target_candidate", via: "source_targets", key: "first_candidate_id", field: "ref" },
+      });
+      if (size(proposal) < size(packed)) packed = proposal;
+    }
+  }
+  return packed;
+}
+
+// Named fragments retain literal IDs and text. Only array-valued cells under
+// an explicitly declared field template are expanded; other cells are exact.
+function expandReferenceLiteralTemplateRows(rows, format) {
+  for (const [field, fragments] of Object.entries(format.literal_templates ?? {})) {
+    const column = format.fields.indexOf(field);
+    if (column < 0 || !Array.isArray(fragments) || fragments.length < 2 || fragments.some((part) => typeof part !== "string")) throw new Error("Invalid reference director literal template");
+    for (const row of rows) {
+      const parts = row[column];
+      if (!Array.isArray(parts)) continue;
+      if (parts.length !== fragments.length - 1 || parts.some((part) => typeof part !== "string")) throw new Error("Invalid reference director literal template parts");
+      row[column] = fragments.map((fragment, index) => fragment + (parts[index] ?? "")).join("");
+    }
+  }
+}
+
+export function compactReferenceDirectorCardTemplatesForTests(candidateCards) {
+  if (candidateCards?.schema !== "goldflow_reference_director_candidate_card_defaults_v3") return candidateCards;
+  if (candidateCards.cards.literal_templates || candidateCards.target_candidate_line_format.literal_templates) return candidateCards;
+  const packed = structuredClone(candidateCards);
+  const size = (value) => Buffer.byteLength(JSON.stringify(value), "utf8");
+  const targetColumn = packed.cards.fields.indexOf("target_candidate_lines");
+  const targetRows = targetColumn >= 0
+    ? packed.cards.rows.flatMap((row) => row[targetColumn])
+    : packed.cards.constants.target_candidate_lines ?? [];
+  const tryTemplate = (rows, format, field, fragments, split) => {
+    const column = format.fields.indexOf(field);
+    if (column < 0 || rows.some((row) => Array.isArray(row[column]))) return;
+    const original = rows.map((row) => row[column]);
+    const replacement = original.map((value) => typeof value === "string" ? split(value) ?? value : value);
+    const declaration = { ...(format.literal_templates ?? {}), [field]: fragments };
+    const overhead = size(declaration) - (format.literal_templates ? size(format.literal_templates) : 0) + (format.literal_templates ? 0 : 21);
+    if (size(original) - size(replacement) <= overhead) return;
+    rows.forEach((row, index) => { row[column] = replacement[index]; });
+    format.literal_templates = declaration;
+  };
+  const targetFormat = packed.target_candidate_line_format;
+  const constructionColumn = targetFormat.fields.indexOf("construction");
+  if (constructionColumn >= 0) {
+    const values = targetRows.map((row) => row[constructionColumn]);
+    // Derive a literal prefix from the actual authored text, not a content-
+    // family default. Keep the best exact byte-saving prefix ending in space.
+    const prefixes = new Set(values.filter((value) => typeof value === "string").flatMap((value) => (
+      [...value.matchAll(/\s+/g)].map((match) => value.slice(0, match.index + match[0].length)).filter((prefix) => prefix.length >= 8)
+    )));
+    let best = null;
+    for (const prefix of prefixes) {
+      const replacement = values.map((value) => typeof value === "string" && value.startsWith(prefix) ? [value.slice(prefix.length)] : value);
+      const saving = size(values) - size(replacement) - size([prefix, ""]);
+      if (!best || saving > best.saving) best = { prefix, saving };
+    }
+    if (best?.saving > 0) tryTemplate(targetRows, targetFormat, "construction", [best.prefix, ""], (value) => value.startsWith(best.prefix) ? [value.slice(best.prefix.length)] : null);
+  }
+  const beatFragments = ["", ":beat_w", "->beat_w", ""];
+  const splitBeatScope = (value) => value.match(/^(\d+):beat_w(\d+_w\d+)->beat_w(\d+_w\d+)$/)?.slice(1) ?? null;
+  tryTemplate(targetRows, targetFormat, "beats", beatFragments, splitBeatScope);
+  tryTemplate(packed.cards.rows, packed.cards, "union_beat_scope", beatFragments, splitBeatScope);
+  return size(packed) < size(candidateCards) ? packed : candidateCards;
+}
+
+export function expandReferenceDirectorCardDefaultsForTests(candidateCards) {
+  if (candidateCards?.schema !== "goldflow_reference_director_candidate_card_defaults_v3") return candidateCards;
+  if (candidateCards.card_table_source_schema !== "goldflow_reference_director_candidate_card_tables_v2") throw new Error("Unknown source card-table schema");
+  const result = structuredClone(candidateCards);
+  expandReferenceLiteralTemplateRows(result.cards.rows, result.cards);
+  delete result.cards.literal_templates;
+  const targetRefByCandidateId = new Map();
+  for (const kind of ["target", "character_state"]) {
+    const key = `${kind}_candidate_line_format`;
+    const format = result[key];
+    const lineKey = `${kind}_candidate_lines`;
+    const column = result.cards.fields.indexOf(lineKey);
+    const rows = column >= 0 ? result.cards.rows.flatMap((row) => row[column]) : result.cards.constants[lineKey] ?? [];
+    expandReferenceLiteralTemplateRows([...rows, ...(kind === "character_state" ? result.unlinked_character_state_candidates : [])], format);
+    delete format.literal_templates;
+    const decodeRow = (row) => {
+      if (!format.override_field) return row;
+      if (row.length !== format.fields.length) throw new Error("Reference director literal-default row width changed");
+      const values = { ...format.constants, ...format.defaults };
+      let overrides = null;
+      format.fields.forEach((field, index) => {
+        if (field === format.override_field) overrides = row[index];
+        else values[field] = row[index];
+      });
+      if (overrides !== null && (!overrides || typeof overrides !== "object" || Array.isArray(overrides))) throw new Error("Invalid literal field overrides");
+      if (Object.keys(overrides ?? {}).some((field) => !format.source_fields.includes(field))) throw new Error("Unknown literal override field");
+      // Alias dependencies must see a row's explicit source-target exception,
+      // not the shared default. Explicit aliased-field overrides still win.
+      Object.assign(values, overrides ?? {});
+      for (const [field, alias] of Object.entries(format.field_aliases ?? {})) {
+        if (Object.hasOwn(overrides ?? {}, field)) continue;
+        if (alias.source !== "target_candidate" || alias.via !== "source_targets" || alias.key !== "first_candidate_id" || alias.field !== "ref") throw new Error("Unknown reference director field alias");
+        const source = String(values.source_targets ?? "").split(",")[0];
+        if (!targetRefByCandidateId.has(source)) throw new Error("Unresolved reference director field alias");
+        values[field] = targetRefByCandidateId.get(source);
+      }
+      return format.source_fields.map((field) => {
+        if (!Object.hasOwn(values, field)) throw new Error("Missing reference director literal value");
+        return values[field];
+      });
+    };
+    if (column >= 0) result.cards.rows.forEach((row) => { row[column] = row[column].map(decodeRow); });
+    else if (Object.hasOwn(result.cards.constants, lineKey)) result.cards.constants[lineKey] = result.cards.constants[lineKey].map(decodeRow);
+    if (kind === "character_state") result.unlinked_character_state_candidates = result.unlinked_character_state_candidates.map(decodeRow);
+    if (format.override_field) {
+      const { source_fields, defaults, override_field, field_aliases, ...original } = format;
+      result[key] = { ...original, fields: source_fields };
+    }
+    if (kind === "target") {
+      const original = result[key];
+      const rows = column >= 0 ? result.cards.rows.flatMap((row) => row[column]) : result.cards.constants[lineKey] ?? [];
+      for (const row of rows) {
+        const values = { ...original.constants, ...Object.fromEntries(original.fields.map((field, index) => [field, row[index]])) };
+        for (const id of String(values.candidate_ids ?? "").split(",")) targetRefByCandidateId.set(id, values.ref);
+      }
+    }
+  }
+  result.schema = result.card_table_source_schema;
+  delete result.card_table_source_schema;
+  return result;
+}
+
+// A final presentation-only fallback after the existing candidate/evidence
+// tables. Preserve every payload value and the director's complete catalog.
+export function compactOversizedReferenceDirectorPromptForTests(prompt) {
+  if (Buffer.byteLength(prompt, "utf8") <= VISUAL_REFERENCE_DIRECTOR_SAFE_MAX_BYTES) return prompt;
+  const headings = [
+    "VISUAL BIBLES AND OPERATOR DIRECTION:",
+    "REFERENCE EVIDENCE LEDGER:",
+    "LOCATION CONTRACT LEDGER:",
+    "EPISODE SUMMARY:",
+    "CANDIDATE CARDS:",
+    "Return:",
+  ];
+  const firstSection = prompt.indexOf(`${headings[0]}\n`);
+  if (firstSection < 0) throw new Error("Reference director prompt is missing its guidance section");
+  let packed = `${prompt.slice(0, firstSection)}${REFERENCE_PROMPT_TABLE_INSTRUCTION}\n\n`;
+  let candidateCards;
+  for (const [index, heading] of headings.entries()) {
+    const sectionStart = prompt.indexOf(`${heading}\n`, index ? firstSection : 0);
+    if (sectionStart < 0) throw new Error(`Reference director prompt is missing ${heading}`);
+    const start = sectionStart + heading.length + 1;
+    const end = index + 1 < headings.length
+      ? prompt.indexOf(`\n\n${headings[index + 1]}\n`, start)
+      : prompt.length;
+    if (end < start) throw new Error(`Reference director prompt has invalid section order after ${heading}`);
+    const value = JSON.parse(prompt.slice(start, end));
+    if (heading === "CANDIDATE CARDS:") candidateCards = value;
+    packed += `${heading}\n${JSON.stringify(compactReferencePromptValue(value))}${index + 1 < headings.length ? "\n\n" : ""}`;
+  }
+  // Preserve already-fitting output bytes from the earlier literal-table
+  // fallback before considering the additional card representation.
+  if (Buffer.byteLength(packed, "utf8") > VISUAL_REFERENCE_DIRECTOR_SAFE_MAX_BYTES) {
+    let compactedCards = compactReferenceDirectorCardDefaultsForTests(candidateCards);
+    if (compactedCards !== candidateCards) {
+      packed = packed.replace(`CANDIDATE CARDS:\n${JSON.stringify(compactReferencePromptValue(candidateCards))}`, () => `CANDIDATE CARDS:\n${JSON.stringify(compactReferencePromptValue(compactedCards))}`);
+      packed = packed.replace(REFERENCE_PROMPT_TABLE_INSTRUCTION, `${REFERENCE_PROMPT_TABLE_INSTRUCTION}\nCandidate-card line formats use named literal defaults: apply constants/defaults and row fields, then the override_field cell (null for none, otherwise exact named replacements including explicit null), then field_aliases only for fields without overrides. A target_candidate alias copies ref from the target row containing the first literal candidate ID in the resolved source_targets; absent/unlinked targets require an explicit override. source_fields preserves original columns; all_fields preserves labeled-line order. card_table_source_schema records the original card schema. These aliases never merge or select candidates.`);
+      if (Buffer.byteLength(packed, "utf8") > VISUAL_REFERENCE_DIRECTOR_SAFE_MAX_BYTES) {
+        const templatedCards = compactReferenceDirectorCardTemplatesForTests(compactedCards);
+        if (templatedCards !== compactedCards) {
+          packed = packed.replace(`CANDIDATE CARDS:\n${JSON.stringify(compactReferencePromptValue(compactedCards))}`, () => `CANDIDATE CARDS:\n${JSON.stringify(compactReferencePromptValue(templatedCards))}`);
+          packed = packed.replace(REFERENCE_PROMPT_TABLE_INSTRUCTION, `${REFERENCE_PROMPT_TABLE_INSTRUCTION}\nFor a field named in literal_templates, an array cell contains exact string parts: interleave the declared literal fragments with those parts to recover the original string before defaults or aliases. Non-array cells remain exact, including null and exceptions. No numeric conversion or delimiter splitting is allowed.`);
+        }
+      }
+    }
+  }
+  // Some valid packets are irreducible. Keep the original rather than enlarge
+  // it; the unchanged caller-side byte guard remains authoritative.
+  return Buffer.byteLength(packed, "utf8") < Buffer.byteLength(prompt, "utf8") ? packed : prompt;
+}
+
 function buildMergePrompt(semanticPlan, chunkPlans, guidance = {}, inventoryLedger = null, locationContractLedger = null) {
   const contentProfile = guidance.contentProfile ?? activeContentProfile;
   const plannerDirective = contentProfilePlannerDirective(contentProfile);
@@ -1766,7 +2139,10 @@ function buildMergePrompt(semanticPlan, chunkPlans, guidance = {}, inventoryLedg
     ...buildReferenceDirectorCandidateCardsForTests(normalizedChunkPlans),
     chunk_warning_summary: [...warningSummaryByCode.values()],
   };
-  const prompt = `Merge chunked visual reference strategy outputs into one coherent episode-level visual reference plan.
+  const evidencePayload = compactReferenceEvidenceLedgerForDirectorCardsForTests(inventoryLedger, {
+    maxAssets: Number(flags["visual-ref-merge-ledger-max-assets"] ?? 320),
+  });
+  let prompt = `Merge chunked visual reference strategy outputs into one coherent episode-level visual reference plan.
 
 CONTENT PROFILE: ${contentProfile.id}
 ${plannerDirective || "- Preserve recurring visual identity and physical continuity from the locked narration."}
@@ -1791,6 +2167,8 @@ Rules:
 - When visual_beats carry ref_needs or beat_ref_requirements, treat those as advisory local transcript-timed evidence, not locked reference targets. Semantic scene ref_requirements remain broad scene coverage. The LLM decides the final episode-level reference strategy and may merge, downgrade, upgrade, rename, or replace beat suggestions when the story context supports it.
 - Do not preserve beat-authored generation_mode mechanically. Make the final decision from recurrence, story criticality, identity risk, and opening-retention value.
 - Distinguish people, distinct nonhuman actors, and true groups/factions. A recurring named person gets a character_state/base identity ref when needed. A named or distinct creature, boss, guardian, construct, or summon that moves, attacks, reacts, is fought, or is physically contacted is an identity-bearing actor, never a prop; keep it as kind character_state with conditioning_asset_role creature_identity. A recurring group or creature system may receive a clean group/faction design plate when its shared silhouette, uniform, armor, or visual system matters; never pretend it is one person's face identity.
+- Give recurring people who are not the same person distinct positive identity anchors: facial geometry, hairstyle, complexion, age presentation, and body silhouette. Do not let an unrelated character inherit the protagonist's face or hair merely because they share an age or gender. Share facial identity only when the locked story establishes twins, clones, or the same person in another state.
+- Treat each material wardrobe change as a named state of one identity with exact beat scope, including before/after beats inside one semantic scene. A face-only base anchor supplies likeness, never an obsolete outfit; borrowed or handed-off real clothing stays with its actual owner at that moment.
 - Preserve a clean standalone identity ref for a distinct nonhuman actor when it recurs across two or more beats, is the decisive threat/contact target in an action sequence, or has signature anatomy that text-only prompts can reinterpret. Its scene_prompt_anchor must carry one concise positive anatomy contract unchanged across its covered beats, including exact silhouette, materials, head/face construction, limb/body construction, and whether any object-like feature is integrated, worn, held, or environmental.
 - If a character state ref is visually reused as replay/screen evidence in a later scene, include that later scene_id in the ref scope and explain the screen-visible or replay-footage usage in risk_notes.
 - Every prompt_anchor must begin with the matching content-profile reference instruction and depict exactly one reusable conditioning concept.
@@ -1836,7 +2214,7 @@ VISUAL BIBLES AND OPERATOR DIRECTION:
 ${visualMergeGuidanceBlock(guidance)}
 
 REFERENCE EVIDENCE LEDGER:
-${compactPromptJsonForTests(compactReferenceEvidenceLedgerForDirectorCardsForTests(inventoryLedger, { maxAssets: Number(flags["visual-ref-merge-ledger-max-assets"] ?? 320) }))}
+${compactPromptJsonForTests(evidencePayload)}
 
 LOCATION CONTRACT LEDGER:
 ${compactPromptJsonForTests(compactLocationContractLedgerForDirectorCardsForTests(locationContractLedger))}
@@ -1862,6 +2240,17 @@ Return:
   "character_state_overrides": {},
   "warnings": []
 }`;
+  if (Buffer.byteLength(prompt, "utf8") > VISUAL_REFERENCE_DIRECTOR_SAFE_MAX_BYTES) {
+    const compacted = compactReferenceDirectorMergePayloadsForTests(candidateCardPayload, evidencePayload);
+    prompt = prompt
+      .replace(`REFERENCE EVIDENCE LEDGER:\n${compactPromptJsonForTests(evidencePayload)}`,
+        `REFERENCE EVIDENCE LEDGER:\n${compactPromptJsonForTests(compacted.evidenceLedger)}`)
+      .replace(`CANDIDATE CARDS:\n${compactPromptJsonForTests(candidateCardPayload)}`,
+        `CANDIDATE CARDS:\n${compactPromptJsonForTests(compacted.candidateCards)}`)
+      .replace("- CANDIDATE CARDS are plain-language evidence, not encoded dictionaries.",
+        "- CANDIDATE CARDS and evidence use lossless plain-value tables: fields names each row column; constants apply to every row; null means that optional field is absent. Nested target/state rows use their named line_format. all_fields records original label order. Values are literal text and IDs, never dictionary indexes.");
+  }
+  prompt = compactOversizedReferenceDirectorPromptForTests(prompt);
   return {
     prompt,
     candidateCatalog: {

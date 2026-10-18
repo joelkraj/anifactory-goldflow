@@ -1,4 +1,7 @@
 import { createHash } from "node:crypto";
+import { COHERENT_THOUGHT_SUBMISSION_POLICY, COHERENT_THOUGHT_DIRECTION_SCHEMA,
+  coherentNarrationGroupFindings, coherentThoughtSubmissionContract,
+} from "./narration-submission-contract.mjs";
 
 export const NARRATION_ACTIONABLE_DIRECTION_VERSION =
   "narration_actionable_direction_v3";
@@ -108,11 +111,17 @@ export function validateActionableNarrationDirection({
     };
   }
   const directionSchema = String(artifact.schema ?? "");
-  const v3 = directionSchema === "goldflow_narration_actionable_direction_v3";
+  const coherent = directionSchema === COHERENT_THOUGHT_DIRECTION_SCHEMA;
+  const v3 = coherent || directionSchema === "goldflow_narration_actionable_direction_v3";
   const v2 = directionSchema === "goldflow_narration_actionable_direction_v2";
   if (!v3 && !v2 && directionSchema !== "goldflow_narration_actionable_direction_v1") {
     findings.push({ code: "actionable_direction_schema_invalid" });
   }
+  if (coherent && (artifact.submission_policy !== COHERENT_THOUGHT_SUBMISSION_POLICY
+    || JSON.stringify(artifact.submission_contract) !== JSON.stringify(coherentThoughtSubmissionContract()))) {
+    findings.push({ code: "actionable_direction_submission_contract_invalid" });
+  }
+  if (!coherent && artifact.submission_policy) findings.push({ code: "actionable_direction_submission_schema_invalid" });
   if (artifact.status !== "approved") {
     findings.push({ code: "actionable_direction_not_approved" });
   }
@@ -150,7 +159,7 @@ export function validateActionableNarrationDirection({
       continue;
     }
     const segmentIds = new Set(rows.flatMap((row) => row.source_segment_ids ?? [row.segment_id]));
-    if (segmentIds.size !== 1) {
+    if (!coherent && segmentIds.size !== 1) {
       findings.push({ code: "actionable_direction_crosses_voice_segment", group_index: groupIndex });
     }
     const crossesAtomicBarrier = rows.length > 1 && rows.some((row) => (
@@ -159,9 +168,10 @@ export function validateActionableNarrationDirection({
       || row.risk_flags?.includes("speaker_or_performance_turn")
       || row.risk_flags?.includes("tts_override_applied")
     ));
-    if (crossesAtomicBarrier) {
+    if (!coherent && crossesAtomicBarrier) {
       findings.push({ code: "actionable_direction_crosses_atomic_barrier", group_index: groupIndex });
     }
+    if (coherent) findings.push(...coherentNarrationGroupFindings(group, rows).map((finding) => ({ ...finding, group_index: groupIndex })));
     const submitted = String(group.spoken_text ?? "").trim();
     const deterministic = rows.map((row) => row.spoken_text).join(" ").trim();
     if (JSON.stringify(punctuationInsensitiveTokens(submitted))
@@ -283,6 +293,7 @@ export function buildNarrationPerformanceContract({
   softWordMax = 48,
   hardWordMax = 60,
   bakeoffRequiredBeforeFullSynthesis = true,
+  submissionPolicy = null,
 } = {}) {
   const contract = {
     schema: NARRATION_PERFORMANCE_CONTRACT_VERSION,
@@ -295,7 +306,9 @@ export function buildNarrationPerformanceContract({
     reference_text_sha256: referenceTextSha256,
     synthesis_contract: synthesisContract,
     actionable_direction: {
-      version: NARRATION_ACTIONABLE_DIRECTION_VERSION,
+      version: submissionPolicy === COHERENT_THOUGHT_SUBMISSION_POLICY
+        ? "narration_actionable_direction_v4" : NARRATION_ACTIONABLE_DIRECTION_VERSION,
+      ...(submissionPolicy === COHERENT_THOUGHT_SUBMISSION_POLICY ? { submission_policy: submissionPolicy, submission_contract_sha256: coherentThoughtSubmissionContract().sha256 } : {}),
       authoring_kind: actionableDirection?.authoring_kind ?? "deterministic_fallback",
       artifact_sha256: actionableDirection?.artifact_sha256 ?? null,
       provider_neutral_controls: [

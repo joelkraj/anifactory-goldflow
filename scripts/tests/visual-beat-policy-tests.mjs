@@ -6,6 +6,8 @@ import {
   normalizeEditorialGrouping,
 } from "../lib/editorial-beat-director.mjs";
 import {
+  groupingLockSourceHashMatchesForTests,
+  closeRetimedSilentGapsForTests,
   mergeEditorialRecoveryBeatsForTests,
   retentionResetEvidenceForTests,
   retentionBeatDensityFindingsForTests,
@@ -200,5 +202,36 @@ invalidAnalyticsReset[0].retention_reset = {
 assert.equal(visualBeatQualityContractFindings(invalidAnalyticsReset, {
   analyticsEvidenceIds: analyticsEvidence.map((row) => row.evidence_id),
 }).some((finding) => finding.code === "visual_retention_reset_evidence_invalid"), true);
+
+const retimingSources = ["/episode/timed_scene_plan.json", "/episode/narration_word_timing_ep_01.json"];
+const lockSource = { sourcePath: retimingSources[0], recordedHash: "old", currentHash: "new", timingSourcePaths: retimingSources };
+assert.equal(groupingLockSourceHashMatchesForTests(lockSource), false, "ordinary reuse rejects changed timing");
+for (const sourcePath of retimingSources) {
+  assert.equal(groupingLockSourceHashMatchesForTests({ ...lockSource, sourcePath, retimeLockedGrouping: true }), true);
+}
+for (const sourcePath of ["/episode/script_clean.md", "/episode/story_fact_ledger.json", "/other/timed_scene_plan.json"]) {
+  assert.equal(groupingLockSourceHashMatchesForTests({ ...lockSource, sourcePath, retimeLockedGrouping: true }), false, "retiming must preserve exact creative-source provenance");
+}
+assert.equal(groupingLockSourceHashMatchesForTests({ ...lockSource, currentHash: null, retimeLockedGrouping: true }), false);
+assert.equal(groupingLockSourceHashMatchesForTests({ ...lockSource, recordedHash: null, retimeLockedGrouping: true }), false);
+assert.equal(groupingLockSourceHashMatchesForTests({ ...lockSource, currentHash: "old" }), true);
+
+const pauseBeats = [
+  { visual_beat_id: "a", start_sec: 1300, source_word_end_index: 0 },
+  { visual_beat_id: "b", start_sec: 1308.5, source_word_start_index: 1 },
+];
+const pauseWords = [{ end_sec: 1307.8 }, { start_sec: 1308.5 }];
+const pauseTiming = { max_beat_sec: 8 };
+const pauseRepaired = closeRetimedSilentGapsForTests(pauseBeats, pauseWords, pauseTiming);
+assert.equal(pauseRepaired[1].start_sec, 1308);
+assert.equal(pauseBeats[1].start_sec, 1308.5, "accepted input remains immutable");
+assert.equal(pauseRepaired[0].source_word_end_index, 0);
+assert.equal(pauseRepaired[1].source_word_start_index, 1);
+assert.equal(pauseRepaired[1].timing_repair.visual_boundary_pause_repair.narration_unchanged, true);
+assert.throws(() => closeRetimedSilentGapsForTests(pauseBeats, [{ end_sec: 1308.2 }, pauseWords[1]], pauseTiming), /measured inter-word pause/);
+assert.throws(() => closeRetimedSilentGapsForTests(pauseBeats, [], pauseTiming), /measured inter-word pause/);
+assert.deepEqual(closeRetimedSilentGapsForTests(pauseBeats, [], { max_beat_sec: 9 }), pauseBeats);
+const toleratedPause = [pauseBeats[0], { ...pauseBeats[1], start_sec: 1308.1 }];
+assert.deepEqual(closeRetimedSilentGapsForTests(toleratedPause, [], pauseTiming), toleratedPause, "honor the existing inclusive 100ms contract tolerance");
 
 console.log("visual beat advisory policy tests passed");

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
+import { visualPromptRecoveryAdmission } from "./lib/visual-prompt-recovery.mjs";
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
@@ -11,6 +12,7 @@ import { motionIntentForPrompt, rebalanceEditorialMotionStreaks } from "./lib/mo
 import { productionProfileForIdentity } from "./lib/production-profiles.mjs";
 import { normalizeImageProvider } from "./lib/image-provider-routing.mjs";
 import {
+  federatedWebImageAutomaticChatGptEnabled,
   federatedWebImageConcurrencyForIdentity,
   HYBRID_TOTAL_IMAGE_CONCURRENCY,
   HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY,
@@ -19,7 +21,8 @@ import {
   isGoogleFlowPrimaryProvider,
 } from "./lib/image-provider-policy.mjs";
 import { effectiveImageIdentityForEpisode } from "./lib/operator-image-route-override.mjs";
-import { openWavefrontBrowserImageStream } from "./hybrid-browser-image-pool.mjs";
+import { googleImageSchedulingForIdentity } from "./lib/google-image-scheduling.mjs";
+import { hybridManifestDispatchOptions, openWavefrontBrowserImageStream } from "./hybrid-browser-image-pool.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const flags = parseFlags(process.argv.slice(2));
@@ -43,6 +46,24 @@ function isTrue(value) {
 
 function safeTimestamp(value = new Date()) {
   return value.toISOString().replace(/[:.]/g, "-");
+}
+
+export function wavefrontProviderHealthBinding(identity, now = new Date()) {
+  return {
+    schema: "goldflow_wavefront_provider_health_binding_v1",
+    status: "passed_by_identity_health_proof",
+    image_provider: identity.image_provider,
+    google_flow_health_proof_path: identity.image_provider_options?.google_flow?.health_proof_path ?? null,
+    google_flow_health_proof_sha256: identity.image_provider_options?.google_flow?.health_proof_sha256 ?? null,
+    provider_concurrency: isFederatedWebImageProvider(identity.image_provider)
+      ? hybridManifestDispatchOptions({
+          federated: true,
+          federatedChatGptEnabled: federatedWebImageAutomaticChatGptEnabled(identity),
+          googleScheduling: googleImageSchedulingForIdentity(identity),
+        }).maxConcurrency
+      : HYBRID_TOTAL_IMAGE_CONCURRENCY,
+    updated_at: now.toISOString(),
+  };
 }
 
 function sleep(ms) {
@@ -122,10 +143,7 @@ export function plannerTokensWithWavefrontOverridesForTests(tokens, inputFlags =
 }
 
 function exactPromptRecoveryAllowed(initial = {}, inputFlags = {}) {
-  return initial.current_stage === "visual_prompt_plan"
-    && initial.current_stage_state === "blocked"
-    && isTrue(inputFlags["workflow-bypass"])
-    && Boolean(String(inputFlags["beat-ids"] ?? inputFlags["cut-ids"] ?? "").trim());
+  return visualPromptRecoveryAdmission(initial, inputFlags).allowed;
 }
 
 export function exactPromptRecoveryAllowedForTests(initial = {}, inputFlags = {}) {
@@ -361,7 +379,7 @@ function selectPendingBatch(pendingRows, maxCuts) {
   return selected;
 }
 
-async function finalizePrefetchBatch({
+export async function finalizePrefetchBatch({
   batchId,
   batchDir,
   rows,
@@ -379,13 +397,27 @@ async function finalizePrefetchBatch({
   imagegen,
 }) {
   const report = await readJson(imagegenReportPath, null);
-  const completionPartition = wavefrontCompletionPartitionForTests(combined.prompts, report);
+  const reportCurrent = ["passed", "partial"].includes(report?.status)
+    && report.prompt_plan_hash === await sha256File(hardenedPlanPath)
+    && (!report.prompt_plan_path || path.resolve(report.prompt_plan_path) === path.resolve(hardenedPlanPath));
+  const requestedIds = new Set(combined.prompts.map((prompt) => String(prompt.image_id)));
+  const currentResults = [];
+  for (const row of reportCurrent ? report.results ?? [] : []) {
+    if (!requestedIds.has(String(row.image_id)) || !row.image_path) continue;
+    const expectedHash = row.image_sha256 ?? row.generated?.output_sha256;
+    if (hybridProvider && !/^[a-f0-9]{64}$/.test(String(expectedHash ?? ""))) continue;
+    const currentHash = await sha256File(row.image_path).catch(() => null);
+    if (currentHash && (!expectedHash || currentHash === expectedHash)) currentResults.push(row);
+  }
+  const completionPartition = wavefrontCompletionPartitionForTests(combined.prompts, { results: currentResults });
   const completedCutIds = completionPartition.completed_cut_ids;
   const completedCutIdSet = new Set(completedCutIds);
   const deferredCutIds = completionPartition.deferred_cut_ids;
+  const scopeComplete = imagegen.code === 0 && reportCurrent && report.status === "passed"
+    && completedCutIds.length === requestedIds.size && deferredCutIds.length === 0;
   let qaPromptPath = hardenedPlanPath;
   let qaImagegenReportPath = imagegenReportPath;
-  if (imagegen.code !== 0 && completedCutIds.length) {
+  if (!scopeComplete && completedCutIds.length) {
     qaPromptPath = path.join(batchDir, `${batchId}.qa-subset.hardened.json`);
     qaImagegenReportPath = path.join(batchDir, `${batchId}.qa-subset.imagegen.json`);
     const hardened = await readJson(hardenedPlanPath, null);
@@ -399,7 +431,7 @@ async function finalizePrefetchBatch({
     };
     await writeJsonAtomic(qaPromptPath, qaPlan);
     const qaPromptSha256 = await sha256File(qaPromptPath);
-    const qaResults = (report?.results ?? []).filter((row) => completedCutIdSet.has(String(row.image_id)));
+    const qaResults = currentResults;
     await writeJsonAtomic(qaImagegenReportPath, {
       ...report,
       status: "passed",
@@ -416,7 +448,7 @@ async function finalizePrefetchBatch({
   }
   return {
     batch_id: batchId,
-    status: imagegen.code === 0 ? "prefetched" : "prefetch_partial_or_failed",
+    status: scopeComplete ? "prefetched" : "prefetch_partial_or_failed",
     cut_ids: combined.prompts.map((prompt) => prompt.image_id),
     source_chunk_files: rows.map((row) => row.filePath),
     hardened_plan_path: hardenedPlanPath,
@@ -431,13 +463,67 @@ async function finalizePrefetchBatch({
       : report?.current_batch_image_count ?? report?.image_count ?? 0),
     completed_cut_ids: completedCutIds,
     deferred_cut_ids: deferredCutIds,
-    incremental_qa_eligible: imagegen.code === 0 || completedCutIds.length > 0,
+    incremental_qa_eligible: completedCutIds.length > 0,
     incremental_qa_enabled: incrementalQaEnabled,
     focal_analysis_path: focalAnalysisPath,
     semantic_audit_path: semanticAuditPath,
     incremental_qa_path: incrementalQaPath,
     incremental_qa_review_dir: incrementalQaReviewDir,
   };
+}
+
+// Attach rejection handling when the batch is scheduled, not after the planner
+// finishes. A failed health read cannot turn a queued batch into an unhandled
+// rejection while other batches and the independent planner are still running.
+export async function settleWavefrontPrefetchBatch(completion, options) {
+  let imagegen;
+  let failure = null;
+  try {
+    imagegen = await completion;
+  } catch (error) {
+    failure = {
+      schema: "goldflow_wavefront_batch_error_v1",
+      status: "blocked",
+      batch_id: options.batchId,
+      cut_ids: options.combined.prompts.map((prompt) => prompt.image_id),
+      error_code: error?.code ?? "wavefront_batch_completion_failed",
+      error: String(error?.message ?? error),
+      automatic_retry: false,
+      recorded_at: new Date().toISOString(),
+    };
+    imagegen = { code: 1 };
+  }
+  let batch;
+  try {
+    batch = await finalizePrefetchBatch({ ...options, imagegen });
+  } catch (error) {
+    failure ??= {
+      schema: "goldflow_wavefront_batch_error_v1", status: "blocked",
+      batch_id: options.batchId,
+      cut_ids: options.combined.prompts.map((prompt) => prompt.image_id),
+      error_code: error?.code ?? "wavefront_batch_finalization_failed",
+      error: String(error?.message ?? error), automatic_retry: false,
+      recorded_at: new Date().toISOString(),
+    };
+    failure.finalization_error = String(error?.message ?? error);
+    batch = {
+      batch_id: options.batchId,
+      cut_ids: failure.cut_ids,
+      completed_cut_ids: [], deferred_cut_ids: failure.cut_ids,
+      hardened_plan_path: options.hardenedPlanPath,
+      imagegen_report_path: options.imagegenReportPath,
+      hybrid_pool_report_path: options.hybridPoolReportPath,
+      incremental_qa_enabled: options.incrementalQaEnabled,
+      incremental_qa_eligible: false,
+    };
+  }
+  if (!failure) return batch;
+  const errorPath = path.join(options.batchDir, `${options.batchId}.stream-error.json`);
+  failure.hardened_plan_path = options.hardenedPlanPath;
+  failure.imagegen_report_path = options.imagegenReportPath;
+  failure.hybrid_pool_report_path = options.hybridPoolReportPath;
+  await writeJsonAtomic(errorPath, failure);
+  return { ...batch, status: "prefetch_blocked", stream_error_path: errorPath };
 }
 
 async function processPrefetchBatch({
@@ -491,23 +577,15 @@ async function processPrefetchBatch({
   const hybridPoolReportPath = path.join(batchDir, `${batchId}.hybrid-pool.json`);
   let imagegen;
   if (hybridProvider) {
-    await writeJsonAtomic(providerHealthPath, {
-      schema: "goldflow_wavefront_provider_health_binding_v1",
-      status: "passed_by_identity_health_proof",
-      image_provider: identity.image_provider,
-      google_flow_health_proof_path: identity.image_provider_options?.google_flow?.health_proof_path ?? null,
-      google_flow_health_proof_sha256: identity.image_provider_options?.google_flow?.health_proof_sha256 ?? null,
-      provider_concurrency: HYBRID_TOTAL_IMAGE_CONCURRENCY,
-      updated_at: new Date().toISOString(),
-    });
+    await writeJsonAtomic(providerHealthPath, wavefrontProviderHealthBinding(identity));
     if (browserImageStream) {
-      const completion = browserImageStream.append({
+      const completion = settleWavefrontPrefetchBatch(browserImageStream.append({
         promptsPath: hardenedPlanPath,
         assetIds: combined.prompts.map((prompt) => prompt.image_id),
         imagegenReportPath,
         poolReportPath: hybridPoolReportPath,
         cutExecutionLedgerPath: cutLedgerPath,
-      }).then((result) => finalizePrefetchBatch({
+      }), {
         batchId,
         batchDir,
         rows,
@@ -522,8 +600,7 @@ async function processPrefetchBatch({
         incrementalQaReviewDir,
         incrementalQaEnabled,
         hybridProvider,
-        imagegen: result,
-      }));
+      });
       return { queued: true, batch_id: batchId, completion };
     }
     imagegen = await runNode([
@@ -905,7 +982,11 @@ async function main() {
   if (imageProvider !== "modelslab" && !isBrowserPoolImageProvider(imageProvider)) {
     throw new Error(`Visual wavefront prefetch supports ModelsLab and verified browser-backed Flow lanes; run identity locks ${identity.image_provider}.`);
   }
-  const exactPromptRecovery = exactPromptRecoveryAllowed(initial, flags);
+  const recoveryAdmission = visualPromptRecoveryAdmission(initial, flags);
+  if (recoveryAdmission.applicable && !recoveryAdmission.allowed) {
+    throw new Error(`Visual prompt recovery is not ready: ${recoveryAdmission.reason}.`);
+  }
+  const exactPromptRecovery = recoveryAdmission.allowed;
   if (!(initial.allowed_command_stages ?? []).includes("visual_prompt_plan") && !exactPromptRecovery) {
     throw new Error(`Visual prompt planning is not ready. Current stage: ${initial.current_stage}; allowed: ${(initial.allowed_command_stages ?? []).join(", ")}.`);
   }
@@ -934,7 +1015,6 @@ async function main() {
         episodeDir: initial.episode_dir,
         identity,
         streamId: `visual-wavefront:${identity.channel}:${identity.series_slug}:${identity.week}:${identity.episode}:${identity.stage_registry_version ?? "registry"}${streamScopeSuffix}`,
-        flowRuntimeConcurrency: HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY,
       })
     : null;
 

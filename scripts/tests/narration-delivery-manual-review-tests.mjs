@@ -6,6 +6,7 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
+  applyNarrationDeliveryManualReviewForTests,
   applyNarrationFullStreamManualReviewForTests,
   validateNarrationDeliveryManualReviewEvidenceForTests,
 } from "../narration-provider-output-finalize.mjs";
@@ -181,6 +182,117 @@ try {
     }),
     /exact blocked QA artifact path/i,
   );
+
+  // A corrected operator decision may retain six accepted takes while rejecting
+  // one. Recording the mixed review must never accept the rejected candidate.
+  const rejectedAudioPath = path.join(tempDir, "rejected.wav");
+  await fs.writeFile(rejectedAudioPath, Buffer.from("heard-pronunciation-defect"));
+  const rejectedAudioSha256 = sha256(await fs.readFile(rejectedAudioPath));
+  const acceptedIds = Array.from({ length: 6 }, (_, index) => `unit_00${index + 1}`);
+  const rejectedId = "unit_007";
+  const mixedBlockers = [...acceptedIds, rejectedId].map((unit_id) => ({
+    ...blocker, unit_id,
+  }));
+  const mixedRows = [...acceptedIds, rejectedId].map((unit_id) => ({
+    ...rows[0], unit_id,
+    ...(unit_id === rejectedId ? {
+      wav: rejectedAudioPath,
+      audio_sha256: rejectedAudioSha256,
+      synthesis_identity_sha256: "e".repeat(64),
+    } : {}),
+  }));
+  const mixedDeliveryRows = mixedBlockers.map((finding) => ({
+    unit_id: finding.unit_id,
+    decision: { status: "blocked", blockers: [finding], warnings: [] },
+  }));
+  const mixedEvidence = {
+    ...evidence,
+    attestation: "all_hash_bound_blocked_narration_units_listened_and_individually_decided",
+    accepted_unit_count: 6,
+    accepted_units: acceptedIds.map((unit_id) => ({
+      ...evidence.accepted_units[0], unit_id,
+    })),
+    rejected_unit_count: 1,
+    rejected_units: [{
+      unit_id: rejectedId,
+      decision: "repair_required",
+      provider: "qwen_local",
+      attempt: 1,
+      audio_path: rejectedAudioPath,
+      audio_sha256: rejectedAudioSha256,
+      synthesis_identity_sha256: "e".repeat(64),
+      reviewed_blocker_codes: [blocker.code],
+      listen_note: "The spoken word was heard as initials and needs exact repair.",
+      operator_quote: "Clip one said A-I and not eye.",
+    }],
+  };
+  const validateMixed = (candidate = mixedEvidence) => (
+    validateNarrationDeliveryManualReviewEvidenceForTests({
+      evidence: candidate,
+      evidencePath: path.join(tempDir, "mixed-evidence.json"),
+      canonicalPlanSha256: "b".repeat(64),
+      manifestFileSha256: "c".repeat(64),
+      priorUnitDeliveryPath: priorQaPath,
+      priorUnitDeliverySha256: priorQaSha256,
+      rows: mixedRows,
+      deliveryRows: mixedDeliveryRows,
+      blockers: mixedBlockers,
+    })
+  );
+  const mixedReview = await validateMixed();
+  assert.deepEqual(mixedReview.accepted_unit_ids, acceptedIds);
+  assert.deepEqual(mixedReview.rejected_unit_ids, [rejectedId]);
+  assert.equal(mixedReview.accepted_unit_count, 6);
+  assert.equal(mixedReview.rejected_unit_count, 1);
+  assert.equal(mixedReview.accepted_blocker_codes_by_unit[rejectedId], undefined);
+  const appliedRows = structuredClone(mixedDeliveryRows);
+  const rejectedBefore = structuredClone(appliedRows.at(-1));
+  const remainingBlockers = applyNarrationDeliveryManualReviewForTests({
+    deliveryRows: appliedRows,
+    blockers: mixedBlockers,
+    review: mixedReview,
+    evidenceSha256: "f".repeat(64),
+  });
+  assert.deepEqual(remainingBlockers, [mixedBlockers.at(-1)]);
+  assert.deepEqual(appliedRows.at(-1), rejectedBefore);
+  assert.equal(appliedRows.filter((row) => row.decision.status === "passed_with_warnings").length, 6);
+  assert.deepEqual(sha256(await fs.readFile(rejectedAudioPath)), rejectedAudioSha256);
+  const rejectedFullStream = applyNarrationFullStreamManualReviewForTests({
+    fullStream: {
+      confirmation_windows: [],
+      decision: { status: "blocked", blockers: [mixedBlockers.at(-1)], warnings: [] },
+    },
+    review: mixedReview,
+    evidenceSha256: "f".repeat(64),
+  });
+  assert.deepEqual(rejectedFullStream.decision.blockers, [mixedBlockers.at(-1)]);
+  for (const [label, mutate] of [
+    ["old all-accepted attestation", (value) => { value.attestation = evidence.attestation; }],
+    ["omitted rejection", (value) => { value.rejected_units = []; value.rejected_unit_count = 0; }],
+    ["wrong accepted count", (value) => { value.accepted_unit_count = 7; }],
+    ["wrong rejected count", (value) => { value.rejected_unit_count = 2; }],
+    ["duplicate acceptance", (value) => { value.accepted_units[1] = value.accepted_units[0]; }],
+    ["duplicate rejection", (value) => { value.rejected_units.push(value.rejected_units[0]); value.rejected_unit_count = 2; }],
+    ["overlapping decisions", (value) => { value.rejected_units[0].unit_id = acceptedIds[0]; }],
+    ["unknown rejection", (value) => { value.rejected_units[0].unit_id = "unknown"; }],
+    ["wrong rejection decision", (value) => { value.rejected_units[0].decision = "accept_first_take"; }],
+    ["stale rejected provider", (value) => { value.rejected_units[0].provider = "other"; }],
+    ["stale rejected attempt", (value) => { value.rejected_units[0].attempt = 2; }],
+    ["stale rejected path", (value) => { value.rejected_units[0].audio_path = audioPath; }],
+    ["stale rejected audio hash", (value) => { value.rejected_units[0].audio_sha256 = "0".repeat(64); }],
+    ["stale rejected synthesis", (value) => { value.rejected_units[0].synthesis_identity_sha256 = "0".repeat(64); }],
+    ["missing rejection note", (value) => { value.rejected_units[0].listen_note = ""; }],
+    ["missing operator quote", (value) => { value.rejected_units[0].operator_quote = ""; }],
+    ["wrong rejected blockers", (value) => { value.rejected_units[0].reviewed_blocker_codes = ["wrong"]; }],
+    ["stale plan", (value) => { value.narration_generation_plan_sha256 = "0".repeat(64); }],
+    ["stale manifest", (value) => { value.provider_output_manifest_sha256 = "0".repeat(64); }],
+  ]) {
+    const candidate = structuredClone(mixedEvidence);
+    mutate(candidate);
+    await assert.rejects(validateMixed(candidate), undefined, label);
+  }
+  await fs.writeFile(rejectedAudioPath, Buffer.from("changed-audio"));
+  await assert.rejects(validateMixed(), /rejection audio is stale/i);
 } finally {
   await fs.rm(tempDir, { recursive: true, force: true });
 }

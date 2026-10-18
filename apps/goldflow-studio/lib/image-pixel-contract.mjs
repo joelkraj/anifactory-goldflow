@@ -1,5 +1,10 @@
 import sharp from "sharp";
 
+export async function imagePixelDimensions(input) {
+  const { width, height } = await sharp(input, { failOn: "error" }).metadata();
+  return { width, height };
+}
+
 export async function normalizedImagePixels(input, { width = 256, height = 144 } = {}) {
   return sharp(input, { failOn: "error" })
     .flatten({ background: "#ffffff" })
@@ -18,7 +23,7 @@ export function meanAbsolutePixelDifference(left, right) {
   return total / left.length;
 }
 
-export async function findReferenceEcho(candidate, references = [], { threshold = 1 } = {}) {
+export async function findReferenceEcho(candidate, references = [], { threshold = 1, onComparison = null } = {}) {
   if (!references.length) return null;
   const candidatePixels = await normalizedImagePixels(candidate);
   let closest = null;
@@ -34,5 +39,6 @@ export async function findReferenceEcho(candidate, references = [], { threshold 
       };
     }
   }
+  if (onComparison) onComparison(closest?.mean_absolute_difference ?? null);
   return closest && closest.mean_absolute_difference <= threshold ? closest : null;
 }

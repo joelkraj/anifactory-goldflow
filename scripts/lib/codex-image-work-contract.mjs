@@ -8,6 +8,7 @@ import { assertPanelPromptAllocation } from "./panel-production-assets.mjs";
 import {
   compileVisualPrompt,
   validateVisualPromptCompilerReceipt,
+  VISUAL_PROMPT_COMPILER_VERSION,
 } from "./visual-prompt-compiler.mjs";
 
 export const CODEX_WORK_SCHEMA = "goldflow_codex_image_work_manifest_v1";
@@ -428,6 +429,34 @@ function resolvedReferenceDependencyAssetIds(target, lookup) {
   return resolved;
 }
 
+// Only queued assets participate. Materialized inputs outside this manifest
+// retain their existing path/hash checks and cannot create a queue cycle.
+export function assertCodexWorkDependenciesAcyclic(items) {
+  const byId = new Map(items.map((item) => [item.asset_id, item]));
+  const visited = new Set();
+  const active = new Map();
+  const trail = [];
+  const visit = (assetId) => {
+    if (active.has(assetId)) {
+      const cycle = [...trail.slice(active.get(assetId)), assetId];
+      const error = new Error(`Image-work dependency cycle: ${cycle.join(" -> ")}. Repair the exact dependency fields before creating the queue.`);
+      error.code = "image_work_dependency_cycle";
+      error.cycle_asset_ids = cycle;
+      throw error;
+    }
+    if (visited.has(assetId)) return;
+    active.set(assetId, trail.length);
+    trail.push(assetId);
+    for (const dependencyId of byId.get(assetId).dependency_asset_ids ?? []) {
+      if (byId.has(dependencyId)) visit(dependencyId);
+    }
+    trail.pop();
+    active.delete(assetId);
+    visited.add(assetId);
+  };
+  for (const assetId of byId.keys()) visit(assetId);
+}
+
 async function bindReferenceTargetInputs(target, lookup, sourceDir, sharedReferenceIds = []) {
   const slots = [];
   const dependencyIds = [...new Set([...referenceDependencyIds(target), ...sharedReferenceIds].map(cleanText).filter(Boolean))];
@@ -642,6 +671,7 @@ export async function createCodexWorkManifest(options) {
         beat_value: row?.beat_value ?? null,
         source_row: row,
         prompt_compiler_policy: "lease_time_provider_compiler_v1",
+        prompt_compiler_version: VISUAL_PROMPT_COMPILER_VERSION,
         source_row_sha256: codexWorkSourceRowSha256(row),
         source_plan_path: promptsPath,
         source_plan_sha256: promptSource.sha256,
@@ -689,11 +719,21 @@ export async function createCodexWorkManifest(options) {
     };
     if (runIdentity) sources.run_identity = await sourceRecord(runIdentityPath);
     const lookup = buildReferenceLookup(referencePlan, characterStateRefs);
-    const stateMetadataByRefId = new Map(
-      (characterStateRefs?.character_state_refs ?? [])
-        .map((state) => [cleanText(state?.state_ref_id ?? state?.ref_id), state])
-        .filter(([id]) => Boolean(id)),
-    );
+    const stateMetadataByRefId = new Map();
+    for (const state of characterStateRefs?.character_state_refs ?? []) {
+      // State IDs and generated target IDs need not match. The source target
+      // must inherit the same explicit identity parent as its state record.
+      for (const id of new Set([state?.state_ref_id, state?.ref_id, state?.source_ref_id].map(cleanText).filter(Boolean))) {
+        const existing = stateMetadataByRefId.get(id);
+        const dependencies = (value) => resolvedReferenceDependencyAssetIds({ ...value, ref_id: id }, lookup).sort();
+        if (existing && JSON.stringify(dependencies(existing)) !== JSON.stringify(dependencies(state))) {
+          const error = new Error(`Reference state alias ${id} has conflicting identity dependencies.`);
+          error.code = "reference_state_dependency_ambiguous";
+          throw error;
+        }
+        if (!existing) stateMetadataByRefId.set(id, state);
+      }
+    }
     for (const sharedReferenceId of sharedReferenceIds) {
       const shared = lookup.get(sharedReferenceId);
       if (!shared) throw new Error(`Shared reference ${sharedReferenceId} is not present in the approved reference artifacts.`);
@@ -722,6 +762,7 @@ export async function createCodexWorkManifest(options) {
         shot_manifest: null,
         quality_budget: row?.quality_budget ?? null,
         prompt_compiler_policy: "lease_time_provider_compiler_v1",
+        prompt_compiler_version: VISUAL_PROMPT_COMPILER_VERSION,
         source_row_sha256: codexWorkSourceRowSha256(row),
         source_plan_path: referencePlanPath,
         source_plan_sha256: referenceSource.sha256,
@@ -738,6 +779,7 @@ export async function createCodexWorkManifest(options) {
     }
   }
 
+  assertCodexWorkDependenciesAcyclic(items);
   applyManifestPriorities(items, mode);
   for (const item of items) delete item.source_row;
   const verificationAssetIds = representativeVerificationAssetIds(items);
@@ -853,6 +895,7 @@ function sameStreamingItemContract(left, right) {
   return left?.asset_id === right?.asset_id
     && left?.source_row_sha256 === right?.source_row_sha256
     && left?.prompt_sha256 === right?.prompt_sha256
+    && (left?.prompt_compiler_version ?? 1) === (right?.prompt_compiler_version ?? 1)
     && stableStringify((left?.ordered_references ?? []).map((row) => ({ ref_id: row.ref_id, sha256: row.sha256 })))
       === stableStringify((right?.ordered_references ?? []).map((row) => ({ ref_id: row.ref_id, sha256: row.sha256 })));
 }
@@ -1001,6 +1044,7 @@ export async function appendCodexWorkManifestStream(options) {
       Number(right.critical_path_priority ?? 0) - Number(left.critical_path_priority ?? 0)
       || left.asset_id.localeCompare(right.asset_id, undefined, { numeric: true })
     ));
+    assertCodexWorkDependenciesAcyclic(items);
     const verificationAssetIds = current.policy?.verification_asset_ids ?? [];
     const appendedAt = nowIso();
     const next = {
@@ -1048,11 +1092,23 @@ export async function appendCodexWorkManifestStream(options) {
   });
 }
 
-export async function sealCodexWorkManifestStream({ manifestPath, streamId = null } = {}) {
+export async function sealCodexWorkManifestStream({ manifestPath, streamId = null, orphanRecovery = null } = {}) {
   const resolvedManifestPath = await resolveManifestPath(manifestPath);
   const manifestDir = path.dirname(resolvedManifestPath);
   return withLeaseDispatchLock(manifestDir, async () => {
     const current = (await loadWorkManifest(resolvedManifestPath)).manifest;
+    if (orphanRecovery) {
+      if (await sha256File(resolvedManifestPath) !== orphanRecovery.manifest_sha256) throw new Error("Orphan seal manifest changed after review.");
+      for (const binding of orphanRecovery.file_bindings ?? []) {
+        if (await sha256File(binding.path) !== binding.sha256) throw new Error(`Orphan seal evidence changed after review: ${binding.path}.`);
+      }
+      assertOrphanStreamProducerEnded(orphanRecovery.producer_pid);
+      // Reject even expired or malformed lease directories. Sealing is not lease
+      // recovery, and must never retire an assignment that a worker may still own.
+      const leases = await fs.readdir(path.join(manifestDir, "leases"));
+      if (leases.length) throw new Error(`Orphan seal requires zero lease entries; found ${leases.length}.`);
+      if (current.streaming_queue?.sealed === true) throw new Error("Orphan seal requires an unsealed stream.");
+    }
     if (!current.streaming_queue) throw new Error(`Manifest ${current.manifest_id} is not appendable.`);
     if (streamId && current.streaming_queue.stream_id !== cleanText(streamId)) throw new Error("Streaming manifest seal identity mismatch.");
     if (current.streaming_queue.sealed === true) return { manifest: current, sealed: false, reused: true };
@@ -1078,10 +1134,29 @@ export async function sealCodexWorkManifestStream({ manifestPath, streamId = nul
       manifest_id: next.manifest_id,
       revision,
       asset_ids: next.items.map((item) => item.asset_id),
+      ...(orphanRecovery ? { orphan_recovery: {
+        ...orphanRecovery,
+        producer_check: "ESRCH",
+        active_lease_count: 0,
+        provider_calls: 0,
+        new_work_items: 0,
+        manifest_after_sha256: await sha256File(resolvedManifestPath),
+      } } : {}),
       created_at: sealedAt,
     });
     return { manifest: next, sealed: true, reused: false, event_path: eventPath };
   });
+}
+
+export function assertOrphanStreamProducerEnded(pid) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error("Orphan seal requires a positive producer PID.");
+  try {
+    process.kill(pid, 0);
+  } catch (error) {
+    if (error?.code === "ESRCH") return;
+    throw new Error(`Cannot verify orphan producer ${pid} ended: ${error?.code ?? error}.`);
+  }
+  throw new Error(`Orphan stream producer ${pid} is still alive.`);
 }
 
 function manifestDirectory(manifestOrPath) {
@@ -1170,6 +1245,27 @@ async function withLeaseDispatchLock(manifestDir, callback) {
     const owner = await readJson(path.join(lockPath, "owner.json")).catch(() => null);
     if (owner?.token === token) await fs.rm(lockPath, { recursive: true, force: true });
   }
+}
+
+export async function beginCodexWorkManifestDrain({ manifestPath, reason }) {
+  const loaded = await loadWorkManifest(manifestPath);
+  if (!cleanText(reason)) throw new Error("Manifest drain requires an explicit reason.");
+  const receiptPath = path.join(loaded.manifestDir, "dispatch-drain.json");
+  return withLeaseDispatchLock(loaded.manifestDir, async () => {
+    if (await pathExists(receiptPath)) return readJson(receiptPath);
+    const receipt = {
+      schema: "goldflow_codex_image_dispatch_drain_v1",
+      status: "draining",
+      manifest_id: loaded.manifest.manifest_id,
+      manifest_path: loaded.manifestPath,
+      manifest_sha256: await sha256File(loaded.manifestPath),
+      reason: cleanText(reason),
+      started_at: nowIso(),
+      policy: "no_new_leases_existing_completions_retained",
+    };
+    await writeJsonExclusive(receiptPath, receipt);
+    return receipt;
+  });
 }
 
 function itemById(manifest, assetId) {
@@ -1374,6 +1470,11 @@ export async function leaseNextWorkItem(options) {
     };
   }
   return withLeaseDispatchLock(manifestDir, async () => {
+    // The controller must stop admission before taking its final drain snapshot.
+    // Keep active registrations and existing leases available for completion.
+    if (await pathExists(path.join(manifestDir, "dispatch-drain.json"))) {
+      return { status: "no_work", no_work_reason: "manifest_draining" };
+    }
     await reconcileExpiredLeases(manifestPath);
     const liveLeaseEntries = await fs.readdir(path.join(manifestDir, "leases"), { withFileTypes: true });
     const liveLeases = [];
@@ -1448,6 +1549,11 @@ export async function leaseNextWorkItem(options) {
         ? Number(providerReferenceLimits[browserProvider])
         : null;
       if (Number.isInteger(providerReferenceLimit) && combinedReferences.length > providerReferenceLimit) continue;
+      if (browserProvider && item.prompt_compiler_policy === "lease_time_provider_compiler_v1"
+        && item.prompt_compiler_version != null
+        && item.prompt_compiler_version !== VISUAL_PROMPT_COMPILER_VERSION) {
+        throw new Error(`Compiler version does not match the manifest contract for ${item.asset_id}.`);
+      }
       const token = randomUUID();
       const attemptNumber = attempts.length + 1;
       const attemptDir = path.join(attemptAssetDir(manifestDir, item.asset_id), `attempt-${String(attemptNumber).padStart(3, "0")}-${token.slice(0, 12)}`);
@@ -1651,6 +1757,7 @@ export async function completeWorkItem(options) {
       neutralPrompt: item.neutral_prompt ?? item.prompt,
       provider: lease.browser_provider ?? browserProvider,
       orderedReferences: assignedItem.ordered_references ?? [],
+      expectedCompilerVersion: item.prompt_compiler_version ?? null,
     });
     if (compilerFindings.length) {
       throw new Error(`Assignment prompt compiler binding is invalid for ${item.asset_id}: ${compilerFindings.join(", ")}.`);
@@ -1933,6 +2040,7 @@ export async function getCodexWorkStatus(options) {
     browser_provider_concurrency: manifest.policy?.browser_provider_concurrency ?? null,
     browser_provider_worker_session_policy: manifest.policy?.browser_provider_worker_session_policy ?? null,
     streaming_queue: manifest.streaming_queue ?? null,
+    dispatch_drain: await readJson(path.join(manifestDir, "dispatch-drain.json")).catch(() => null),
     completed_by_browser_provider: Object.fromEntries(
       (manifest.policy?.allowed_browser_providers ?? []).map((provider) => [
         provider,
@@ -2021,6 +2129,7 @@ export async function validateCodexWorkManifest(options) {
         neutralPrompt: item.neutral_prompt ?? item.prompt,
         provider: assignment.browser_provider,
         orderedReferences: assignment.item.ordered_references ?? [],
+        expectedCompilerVersion: item.prompt_compiler_version ?? null,
       });
       for (const code of compilerFindings) findings.push({ code, asset_id: item.asset_id });
       if (JSON.stringify(completion.prompt_compiler_receipt ?? null) !== JSON.stringify(assignment.item.prompt_compiler_receipt)) {

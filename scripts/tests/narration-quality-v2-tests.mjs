@@ -7,6 +7,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import {
   buildNarrationQualityContract,
+  narrationUsesAutomatedAsrAcceptance,
   validateNarrationQualityContract,
 } from "../lib/narration-quality-contract.mjs";
 import {
@@ -34,6 +35,7 @@ import {
 import {
   NARRATION_EXACT_LISTEN_ATTESTATION,
   adjudicateNarrationDeliveryConsensus,
+  blockAutomatedNarrationEdgeRisks,
   buildNarrationExactListenReviewDecision,
   exactNarrationListenReviewPacket,
   strictNarrationDeliveryDecision,
@@ -54,6 +56,7 @@ import {
   validateNarrationTtsPolicyForTests,
 } from "../narration-tts-episode.mjs";
 import {
+  blockedNarrationComparatorRefreshEligibleForTests,
   narrationPlanUnitsForStatusForTests,
   narrationNativeSpeedLockFindingForTests,
 } from "../run-status.mjs";
@@ -83,6 +86,7 @@ import {
 } from "../lib/local-whisper-policy.mjs";
 import {
   reusableUnitOutputQaForTests,
+  transcriptQaForTests,
 } from "../modelslab-qwen-episode-audio.mjs";
 import {
   compileProviderSafeSpokenText,
@@ -152,6 +156,39 @@ const leanDeliveryContract = buildNarrationQualityContract({
     substitution_only_high_wer_requires_exact_listen: false,
   },
 });
+const automatedContract = buildNarrationQualityContract({
+  provider: "qwen_local",
+  modelId: "Qwen3-TTS-12Hz-1.7B-Base-8bit",
+  deliveryQaPolicy: {
+    acceptance_mode: "automated_asr_v1",
+    substitution_only_asr_disagreement_requires_exact_listen: false,
+    unconfirmed_primary_asr_requires_exact_listen: false,
+    substitution_only_high_wer_requires_exact_listen: false,
+  },
+});
+assert.equal(narrationUsesAutomatedAsrAcceptance(contract), false);
+assert.equal(narrationUsesAutomatedAsrAcceptance(automatedContract), true);
+assert.equal(automatedContract.subjective_review.exact_audio_attestation_required, false);
+assert.equal(validateNarrationQualityContract(automatedContract).status, "passed");
+const unfinishedTail = [{
+  code: "tts_audio_tail_not_settled",
+  severity: "warning",
+  tail_50ms_rms_dbfs: -27.3,
+  trailing_silence_sec: 0,
+}];
+assert.equal(blockAutomatedNarrationEdgeRisks(
+  { status: "passed", blockers: [], warnings: [] },
+  unfinishedTail,
+  automatedContract,
+).blockers[0].code, "narration_unsettled_raw_audio_edge");
+assert.equal(blockAutomatedNarrationEdgeRisks(
+  { status: "passed", blockers: [], warnings: [] },
+  unfinishedTail,
+  contract,
+).status, "passed");
+const weakenedAutomatedContract = structuredClone(automatedContract);
+weakenedAutomatedContract.delivery_qa.full_stream_dual_asr_on_any_difference = false;
+assert.equal(validateNarrationQualityContract(weakenedAutomatedContract).status, "blocked");
 assert.equal(
   compileProviderSafeSpokenText("The IT team fixed it."),
   "The I T team fixed it.",
@@ -1330,6 +1367,43 @@ assert.equal(confirmedFinalTokenCorruption.status, "blocked");
 assert.ok(confirmedFinalTokenCorruption.blockers.some(
   (row) => row.code === "narration_confirmed_final_token_mismatch",
 ));
+const clippedQwenEnding = "I chose take.";
+const clippedEndingPrimary = transcriptQaForTests(clippedQwenEnding, "I choke.", {
+  blockAnySubstitution: false,
+});
+const clippedEndingConfirmation = transcriptQaForTests(clippedQwenEnding, "I cho.", {
+  blockAnySubstitution: false,
+});
+assert.equal(clippedEndingPrimary.last_token_ok, false);
+assert.equal(clippedEndingConfirmation.last_token_ok, false);
+const clippedEndingDecision = adjudicateNarrationDeliveryConsensus({
+  primaryTranscriptQa: clippedEndingPrimary,
+  confirmationTranscriptQa: clippedEndingConfirmation,
+  contract,
+});
+assert.equal(clippedEndingDecision.status, "blocked");
+assert.ok(clippedEndingDecision.blockers.some((row) => (
+  row.code === "narration_confirmed_final_token_mismatch"
+    || row.code === "narration_confirmed_final_word_missing"
+)));
+const completedQwenEnding = transcriptQaForTests(clippedQwenEnding, clippedQwenEnding, {
+  blockAnySubstitution: false,
+});
+assert.equal(completedQwenEnding.first_token_ok, true);
+assert.equal(completedQwenEnding.last_token_ok, true);
+const clippedFinalSyllablePrimary = transcriptQaForTests(clippedQwenEnding, "I chose ta.", {
+  blockAnySubstitution: false,
+});
+const clippedFinalSyllableConfirmation = transcriptQaForTests(clippedQwenEnding, "I chose tack.", {
+  blockAnySubstitution: false,
+});
+assert.equal(clippedFinalSyllablePrimary.trailing_deletion_run, 0);
+assert.equal(clippedFinalSyllableConfirmation.trailing_deletion_run, 0);
+assert.equal(adjudicateNarrationDeliveryConsensus({
+  primaryTranscriptQa: clippedFinalSyllablePrimary,
+  confirmationTranscriptQa: clippedFinalSyllableConfirmation,
+  contract,
+}).blockers.some((row) => row.code === "narration_confirmed_final_token_mismatch"), true);
 const leanConfirmedFinalTokenCorruption = adjudicateNarrationDeliveryConsensus({
   primaryTranscriptQa: {
     deletions: 0,
@@ -1605,5 +1679,67 @@ try {
 } finally {
   await fs.rm(masteringDir, { recursive: true, force: true });
 }
+
+// A comparator update may re-adjudicate retained audio only when the blocked
+// report and every provider WAV still bind to the same approved plan.
+const staleComparisonRefresh = {
+  ttsReport: {
+    status: "blocked", unit_qa_status: "blocked",
+    full_stream_qa_status: "not_run_due_to_unit_blockers",
+    source_script_hash: "script-hash",
+    narration_generation_plan_sha256: "plan-hash",
+    narration_generation_plan_file_sha256: "plan-file-hash",
+    narration_quality_contract_sha256: "quality-hash",
+    provider_output_manifest_path: "/episode/provider-manifest.json",
+    provider_output_manifest_sha256: "provider-file-hash",
+    blockers: [{ unit_id: "unit-1", code: "narration_confirmed_final_token_mismatch" }],
+  },
+  unitDelivery: {
+    status: "blocked", transcript_comparison_version: "older-comparison",
+    source_script_hash: "script-hash",
+    narration_generation_plan_sha256: "plan-hash",
+    narration_generation_plan_file_sha256: "plan-file-hash",
+    quality_contract_sha256: "quality-hash",
+    blockers: [{ unit_id: "unit-1", code: "narration_confirmed_final_token_mismatch" }],
+  },
+  providerOutput: {
+    status: "passed", narration_generation_plan_sha256: "plan-hash",
+    narration_generation_plan_file_sha256: "plan-file-hash",
+    narration_quality_contract_sha256: "quality-hash",
+  },
+  plan: { source_script_hash: "script-hash", plan_sha256: "plan-hash" },
+  planFileSha256: "plan-file-hash", currentScriptHash: "script-hash",
+  qualityContractSha256: "quality-hash",
+  providerValidation: { status: "passed" }, providerAudioHashesValid: true,
+  providerOutputPath: "/episode/provider-manifest.json",
+  providerOutputFileSha256: "provider-file-hash",
+};
+const refreshEligible = (change) => blockedNarrationComparatorRefreshEligibleForTests({
+  ...staleComparisonRefresh, ...change,
+});
+assert.equal(refreshEligible({}), true);
+for (const change of [
+  { unitDelivery: { ...staleComparisonRefresh.unitDelivery,
+    transcript_comparison_version: transcriptQaForTests("same", "same").comparison_version } },
+  { ttsReport: { ...staleComparisonRefresh.ttsReport, status: "passed" } },
+  { ttsReport: { ...staleComparisonRefresh.ttsReport,
+    provider_output_manifest_path: "/episode/repaired-manifest.json" } },
+  { providerOutputFileSha256: "changed-file-hash" },
+  { ttsReport: { ...staleComparisonRefresh.ttsReport,
+    blockers: [{ unit_id: "unit-2", code: "narration_confirmed_final_token_mismatch" }] } },
+  { ttsReport: { ...staleComparisonRefresh.ttsReport,
+    blockers: [{ unit_id: "unit-1", code: "narration_unsettled_raw_audio_edge" }] },
+    unitDelivery: { ...staleComparisonRefresh.unitDelivery,
+      blockers: [{ unit_id: "unit-1", code: "narration_unsettled_raw_audio_edge" }] } },
+  { providerOutput: { ...staleComparisonRefresh.providerOutput, status: "blocked" } },
+  { providerOutput: { ...staleComparisonRefresh.providerOutput,
+    narration_generation_plan_sha256: "other-plan" } },
+  { unitDelivery: { ...staleComparisonRefresh.unitDelivery,
+    narration_generation_plan_file_sha256: "other-file" } },
+  { currentScriptHash: "other-script" },
+  { qualityContractSha256: "other-quality" },
+  { providerValidation: { status: "blocked" } },
+  { providerAudioHashesValid: false },
+]) assert.equal(refreshEligible(change), false);
 
 console.log("narration quality v2 tests passed");

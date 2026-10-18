@@ -45,6 +45,7 @@ import {
   verifyInterruptedQwenFinalRun,
 } from "./lib/qwen-interrupted-adoption.mjs";
 import { loadNarrationSourceStructure } from "./lib/narration-source-structure.mjs";
+import { COHERENT_THOUGHT_SUBMISSION_POLICY, validateCoherentNarrationPlan } from "./lib/narration-submission-contract.mjs";
 import { loadLowMarginDisposition } from "./lib/narration-low-margin-disposition.mjs";
 import { loadAsrOrthographyReview } from "./lib/narration-asr-orthography-review.mjs";
 import {
@@ -5807,6 +5808,16 @@ async function narrationVoicePlanComplete(episodeDir, currentScriptHash, identit
         ?? []
       ));
   if (!units.length) return { done: false, evidence: `${label} contains no narration units` };
+  const coherentSubmissions = plan?.submission_policy === COHERENT_THOUGHT_SUBMISSION_POLICY;
+  if (coherentSubmissions) {
+    const submission = validateCoherentNarrationPlan(plan);
+    if (submission.status !== "passed") {
+      return {
+        done: false,
+        evidence: `${label} coherent submission contract mismatch: ${submission.findings.slice(0, 8).map((finding) => `${finding.code}${finding.unit_id ? ` at ${finding.unit_id}` : ""}`).join(", ")}`,
+      };
+    }
+  }
   if (narrationQualityContract?.unitization?.semantic_boundary_class_required === true) {
     const grouping = plan?.provider_neutral_unit_grouping ?? {};
     const expectedUnitContract = narrationUnitContractForQuality(
@@ -5845,7 +5856,7 @@ async function narrationVoicePlanComplete(episodeDir, currentScriptHash, identit
       return text.split(/\s+/u).filter(Boolean).length
           > Number(expectedUnitContract.hard_words_max)
         || !hasTtsTerminalPunctuation(text)
-        || sourceSegmentIds.length > 1
+        || (!coherentSubmissions && sourceSegmentIds.length > 1)
         || !allowedBoundaryClasses.has(boundary)
         || (index === units.length - 1 && boundary !== "episode_end")
         || (index < units.length - 1 && boundary === "episode_end")
@@ -5893,12 +5904,12 @@ async function narrationVoicePlanComplete(episodeDir, currentScriptHash, identit
       ].map((value) => String(value ?? "").trim()).filter(Boolean))];
       return wordCount > expectedUnitContract.hard_words_max
         || !hasTtsTerminalPunctuation(text)
-        || sourceSegmentIds.length > 1;
+        || (!coherentSubmissions && sourceSegmentIds.length > 1);
     });
     if (groupingMismatches.length || invalidUnit) {
       return {
         done: false,
-        evidence: `${label} Qwen Liam unit contract mismatch${groupingMismatches.length ? `: ${groupingMismatches.join(", ")}` : ""}${invalidUnit ? `; invalid unit=${invalidUnit.unit_id ?? "unknown"} (must stay inside one voice segment, end at a sentence, and stay at or below 60 words)` : ""}`,
+        evidence: `${label} Qwen Liam unit contract mismatch${groupingMismatches.length ? `: ${groupingMismatches.join(", ")}` : ""}${invalidUnit ? `; invalid unit=${invalidUnit.unit_id ?? "unknown"} (must respect the selected submission boundaries, end at a sentence, and stay at or below 60 words)` : ""}`,
       };
     }
     if (policy.synthesis_contract?.mode
@@ -6927,6 +6938,7 @@ if (path.resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {
 }
 
 export {
+  narrationVoicePlanComplete as narrationVoicePlanCompleteForTests,
   qwenExactBoundaryRepairStatus as qwenExactBoundaryRepairStatusForTests,
   blockedNarrationComparatorRefreshEligible as blockedNarrationComparatorRefreshEligibleForTests,
   blockedFullStreamPolicyRefreshEligible as blockedFullStreamPolicyRefreshEligibleForTests,

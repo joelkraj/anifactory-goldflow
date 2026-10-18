@@ -8,6 +8,8 @@ import {
   coherentThoughtSubmissionContract, coherentNarrationGroupFindings, validateCoherentNarrationPlan, narrationSubmissionSourceConstraint,
 } from "../lib/narration-submission-contract.mjs";
 import { qwenGenerationPlanForTests } from "../voice-direction-gate.mjs";
+import { narrationVoicePlanCompleteForTests } from "../run-status.mjs";
+import { defaultNarrationVoiceProviderOptions } from "../lib/narration-tts-policy.mjs";
 import { buildNarrationTextIr, validateNarrationTextIr } from "../lib/narration-text-ir.mjs";
 import { validateActionableNarrationDirection, narrationSourceRefKey } from "../lib/narration-performance-contract.mjs";
 import {
@@ -112,6 +114,31 @@ assert.equal(coherentNarrationGroupFindings(standalone, [{ submission_source_con
 
 const scratch = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-coherent-submission-"));
 try {
+  const statusDir = path.join(scratch, "status-boundaries");
+  await fs.mkdir(statusDir);
+  const statusIdentity = { episode: "ep_01", run_intent: "diagnostic", voice_provider_options: defaultNarrationVoiceProviderOptions() };
+  const statusPlan = { ...plan, schema: "goldflow_test_narration_plan", source_script_hash: sourceHash,
+    text_integrity_coverage: { status: "passed" }, system_ui_speech_coverage: { status: "passed" } };
+  const writeStatusPlan = (value) => fs.writeFile(path.join(statusDir, "narration_generation_plan.json"), JSON.stringify(value));
+  await writeStatusPlan(statusPlan);
+  const currentStatus = await narrationVoicePlanCompleteForTests(statusDir, sourceHash, statusIdentity);
+  assert.equal(currentStatus.done, true, currentStatus.evidence);
+  const legacyStatusPlan = structuredClone(statusPlan);
+  delete legacyStatusPlan.submission_policy;
+  await writeStatusPlan(legacyStatusPlan);
+  const legacyStatus = await narrationVoicePlanCompleteForTests(statusDir, sourceHash, statusIdentity);
+  assert.equal(legacyStatus.done, false);
+  assert.match(legacyStatus.evidence, /unit contract mismatch/);
+  const barrierStatusPlan = structuredClone(statusPlan);
+  barrierStatusPlan.units[0].source_unit_refs[1].submission_source_constraint.atomic = true;
+  await writeStatusPlan(barrierStatusPlan);
+  const barrierStatus = await narrationVoicePlanCompleteForTests(statusDir, sourceHash, statusIdentity);
+  assert.equal(barrierStatus.done, false);
+  assert.match(barrierStatus.evidence, /submission_group_crosses_atomic_source_barrier/);
+  const invalidContractPlan = structuredClone(statusPlan);
+  invalidContractPlan.submission_contract.hard_words_max = 1000;
+  await writeStatusPlan(invalidContractPlan);
+  assert.match((await narrationVoicePlanCompleteForTests(statusDir, sourceHash, statusIdentity)).evidence, /submission_contract_invalid/);
   assert.equal(await resolveNarrationSubmissionPolicy({ episodeDir: scratch }), policy);
   const result = await authorNarrationPerformanceDirection({ atomicUnits: atoms, sourceScriptSha256: sourceHash, episodeDir: scratch, repoRoot: scratch, submissionPolicy: policy,
     plannerExecutor: async ({ prompt }) => {

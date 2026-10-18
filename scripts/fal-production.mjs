@@ -18,6 +18,7 @@ import { reviewedBulkRepairRound } from "./lib/fal-reviewed-bulk-round.mjs";
 import { reviewedBulkSourceReceipt } from "./lib/fal-reviewed-bulk-source-receipt.mjs";
 import { falArtworkOrders, completeFalPanelArtwork } from "./lib/fal-panel-artwork.mjs";
 import { reviewedBulkHoldRecoveryPrompt } from "./lib/fal-reviewed-bulk-hold-recovery.mjs";
+import { inspectReferenceProbeReview, prepareReferenceProbeReview, acceptReferenceProbeReview } from "./lib/fal-reference-probe-review.mjs";
 
 const digest = value => createHash("sha256").update(value).digest("hex");
 const bytes = value => `${JSON.stringify(value, null, 2)}\n`;
@@ -318,6 +319,21 @@ async function preflightPaidRepair(ctx,receiptDir,imageIds,fileStemForId=id=>id)
 async function observeRows(ctx,rows,limit){return mapLimit(rows,limit,async row=>{const receipt=await read(row.submission_receipt_path);try{return await observeFalImage({endpoint:receipt.endpoint,requestId:receipt.request_id,outputPath:row.output_path,receiptPath:row.result_receipt_path});}catch(error){const timedOut=error?.name==="TimeoutError"||/aborted due to timeout/i.test(error?.message??"");const stale=Date.now()-Date.parse(receipt.submitted_at)>15*60_000;if(timedOut&&!stale)return {complete:false,transient_observation_timeout:true,request_id:receipt.request_id};if(timedOut||Number(error?.status)>=500||/Gateway Timeout|Internal Server Error/i.test(error?.message??"")){const resultDir=path.basename(path.dirname(row.result_receipt_path));const holdName=resultDir==="review-repair-result-receipts"?path.basename(row.result_receipt_path):resultDir==="review-repair-transport-recovery-result-receipts"||resultDir==="transport-recovery-result-receipts"?`${path.basename(row.result_receipt_path,".json")}-recovery.json`:`${row.image_id}.json`;const holdPath=path.join(path.dirname(path.dirname(row.result_receipt_path)),"transport-holds",holdName);if(!await fs.access(holdPath).then(()=>true,()=>false))await write(holdPath,{schema:"goldflow_fal_transport_hold_v1",created_at:new Date().toISOString(),image_id:row.image_id,endpoint:receipt.endpoint,request_id:receipt.request_id,assignment_sha256:row.assignment_sha256,provider_queue_status:"unknown_or_completed",reason:timedOut?"stale_observation_timeout":"provider_5xx_during_observation",billable_request_resubmitted:false});return {complete:false,transport_pending:true,request_id:receipt.request_id,hold_path:holdPath};}if(error?.status!==422)throw error;const failurePath=await recordFalFailure(row,receipt,error);return {complete:false,failed:true,failure_path:failurePath};}});}
 async function main(){
  const f=flags(process.argv.slice(2)); const ctx=await context(f); const action=f.action;
+ if (["prepare-reference-probe-repair", "dispatch-reference-probe-repair", "observe-reference-probe-repair", "review-reference-probe-repair"].includes(action)) {
+   const state=await inspectReferenceProbeReview(ctx.episodeDir);
+   need(state,"Exact reference-probe visual rejection is required.");
+   if(action==="prepare-reference-probe-repair") return console.log(JSON.stringify({status:"prepared",image_id:(await prepareReferenceProbeReview(ctx.episodeDir,state)).image_id}));
+   if(action==="dispatch-reference-probe-repair") {
+     need(state.state==="dispatch"&&f["confirm-spend"]==="exact_fal_reference_probe_repair","Only the prepared exact probe repair may be submitted once.");
+     await preflightPaidRepair(ctx,"reference/review-repair-submission-receipts",[state.repair.image_id]);
+     return console.log(JSON.stringify({status:"submitted",count:(await submitRows(ctx,[state.repair],1)).length}));
+   }
+   if(action==="observe-reference-probe-repair") {
+     need(state.state==="observe","Exact probe repair must await observation.");
+     return console.log(JSON.stringify(await observeRows(ctx,[state.repair],1),null,2));
+   }
+   return console.log(JSON.stringify(await acceptReferenceProbeReview(ctx.episodeDir,state,{reviewer:f.reviewer,note:f.note}),null,2));
+ }
  if(action==="apply-postplan-prompt-correction"){
    const bulk=await read(path.join(ctx.root,"bulk-plan.json"));
    return console.log(JSON.stringify(await applyFalPostplanPromptCorrection({

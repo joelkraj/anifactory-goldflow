@@ -6,6 +6,7 @@ import { validateFalValidationCorrection, validateFalValidationRecovery } from "
 import { validateFalPrebulkPromptCorrection } from "./fal-prebulk-prompt-correction.mjs";
 import { inspectFalPostplanPromptCorrection } from "./fal-postplan-prompt-correction.mjs";
 import { validateFalReviewedReferenceSuccessRepair } from "./fal-reviewed-reference-success-repair.mjs";
+import { inspectReferenceProbeReview, referenceProbeReviewStage } from "./fal-reference-probe-review.mjs";
 
 async function exists(file) { return fs.access(file).then(() => true, () => false); }
 async function read(file) { return JSON.parse(await fs.readFile(file, "utf8")); }
@@ -32,6 +33,15 @@ async function reviewedSecondRepair(root, imageId) {
 
 export function falBlockedStageRecoveryAdmission(status, flags = {}) {
   const action = String(flags.action ?? "");
+  if (["prepare-reference-probe-repair", "dispatch-reference-probe-repair", "observe-reference-probe-repair", "review-reference-probe-repair"].includes(action)) {
+    const extra=action==="dispatch-reference-probe-repair"?["confirm-spend"]:action==="review-reference-probe-repair"?["reviewer","note"]:[];
+    return {applicable:true,allowed:status.current_stage==="reference_generation"&&status.current_stage_state==="blocked"
+      &&flags["episode-dir"]===status.episode_dir
+      &&String(status.next_command_shape??"").includes(`--action ${action}`)
+      &&Object.keys(flags).sort().join(',')===["episode-dir","action",...extra].sort().join(',')
+      &&(action!=="dispatch-reference-probe-repair"||flags["confirm-spend"]==="exact_fal_reference_probe_repair"),
+      reason:"Only the exact status-directed reference-probe correction is allowed."};
+  }
   if (status?.current_stage === "reference_image_approval" && status?.current_stage_state === "blocked"
     && action === "repair-failed-reviewed-reference") {
     const id = String(flags["image-id"] ?? "");
@@ -435,13 +445,17 @@ export async function falProductionStageStates({ episodeDir, identity } = {}) {
   else if (postplanCorrection?.state === "pending") bulkState = { state: "missing",
     evidence: `Reviewed post-plan prompt correction for ${postplanCorrection.changed.size} unsubmitted cuts requires an append-only receipt before more paid dispatch`,
     next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action apply-postplan-prompt-correction --request ${postplanCorrection.paths.request}` };
-  if (earlyReferenceFork) return withSpendState({
+  if (earlyReferenceFork) {
+    const probeReview=referenceProbeReviewStage(episodeDir,await inspectReferenceProbeReview(episodeDir));
+    if(probeReview)referenceState=probeReview;
+    return withSpendState({
     reference_generation: referenceState,
     ...(reviewRepairState ? { reference_image_approval: reviewRepairState } : {}),
     image_generation: validationPassed
       ? bulkState ?? { state: "missing", evidence: "Awaiting Fal bulk preparation" }
       : { state: next ? "missing" : "blocked", evidence: next ? "Fal collage validation is incomplete" : validationEvidence, ...(next ? { next_command_shape: next } : {}) },
-  });
+    });
+  }
   return withSpendState({
     reference_image_approval: validationPassed
       ? { done: true, evidence: `Fal eight-shot collage validation passed (${correction ? correction.expected.approved_ids.length + recovery.review.approved_ids.length : review.approved_ids.length}/8 usable)` }

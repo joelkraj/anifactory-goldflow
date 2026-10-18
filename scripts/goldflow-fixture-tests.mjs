@@ -2352,12 +2352,14 @@ function testPinnedCodexRuntimeContracts() {
   assert.equal(DEFAULT_CODEX_MODEL, "gpt-6.1-sol");
   assert.equal(DEFAULT_CODEX_REASONING_EFFORT, "medium");
   const oldCli = parseCodexVersion("codex-cli 0.141.0");
-  const qualifyingBundledCli = parseCodexVersion("codex-cli 0.144.0-alpha.4");
+  const qualifyingBundledCli = parseCodexVersion("codex-cli 0.159.1");
+  const gpt56OnlyCli = parseCodexVersion("codex-cli 0.144.0-alpha.4");
   assert.equal(codexVersionSupportsModel(oldCli, DEFAULT_CODEX_MODEL), false);
+  assert.equal(codexVersionSupportsModel(gpt56OnlyCli, DEFAULT_CODEX_MODEL), false);
   assert.equal(codexVersionSupportsModel(qualifyingBundledCli, DEFAULT_CODEX_MODEL), true);
   // Identities that recorded an earlier model keep that model's own CLI gate.
   assert.equal(codexVersionSupportsModel(oldCli, "gpt-5.6-sol"), false);
-  assert.equal(codexVersionSupportsModel(qualifyingBundledCli, "gpt-5.6-sol"), true);
+  assert.equal(codexVersionSupportsModel(gpt56OnlyCli, "gpt-5.6-sol"), true);
   assert.equal(codexVersionSupportsModel(oldCli, "gpt-5.5"), true);
   assert.equal(compareCodexVersions(qualifyingBundledCli, oldCli) > 0, true);
 

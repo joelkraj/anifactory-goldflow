@@ -2617,7 +2617,7 @@ async function runLimited(jobs, limit) {
 async function main() {
   await configureMediaTools();
   validateDiagnosticProofScope();
-  const [promptPlan, visualBeatPlan, imagegenReport, wordTiming, audioBedReport, audioStitchReport, transitionEditPlan, motionEditPlan, engagementOverlayPlan, runIdentity, imageOutputQa, cutExecutionLedger] = await Promise.all([
+  let [promptPlan, visualBeatPlan, imagegenReport, wordTiming, audioBedReport, audioStitchReport, transitionEditPlan, motionEditPlan, engagementOverlayPlan, runIdentity, imageOutputQa, cutExecutionLedger] = await Promise.all([
     readJson(promptPlanPath, null),
     readJson(visualBeatPlanPath, null),
     readJson(imagegenReportPath, null),
@@ -2647,6 +2647,11 @@ async function main() {
       if (panelPlan.inputHashes[canonicalPath] !== await hashFile(canonicalPath)) throw new Error(`Panel render input is not bound by its current production plan: ${file}`);
     }
     if ((engagementOverlayPlan?.engagement_overlays ?? []).length || (engagementOverlayPlan?.events ?? []).length) throw new Error("Panel composition v1 does not support separate engagement overlays; author visual elements in the production panel recipe.");
+    if (panelPlan.audioRevision) {
+      if (flags.audio || flags.wordTiming || flags['word-timing'] || flags['audio-bed-report']) throw new Error('An exact panel audio revision uses only its compiled, hash-bound audio and word anchors.');
+      wordTiming = panelPlan.wordTiming;
+      audioBedReport = panelPlan.audioBedReport;
+    }
   }
   if (prebuildMotionClipsOnly) {
     if (motionEditPlan?.status !== "passed") throw new Error(`Motion-clip prebuild requires a passed hash-bound partial motion plan: ${motionEditPlanPath}`);
@@ -2952,8 +2957,9 @@ async function main() {
     visual_beat_plan_path: visualBeatPlanPath,
     imagegen_report_path: imagegenReportPath,
     image_output_integrity: imageIntegrity,
-    word_timing_path: wordTimingPath,
-    audio_bed_report_path: audioBedReportPath,
+    word_timing_path: panelPlan?.plan?.revised_word_timing?.path ?? wordTimingPath,
+    ...(panelPlan?.audioRevision ? { panel_audio_revision: panelPlan.audioRevision } : {}),
+    audio_bed_report_path: panelPlan?.plan?.revised_audio_bed?.path ?? audioBedReportPath,
     narration_report_path: audioStitchReportPath,
     audio_stitch_report_path: audioStitchReportPath,
     subtitle_text_source: subtitleRows.source,

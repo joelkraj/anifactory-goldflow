@@ -11,6 +11,7 @@ import { verifyPanelProductionTimingIdentity } from './panel-production-carryfor
 import { loadPanelAssetPlan, assertPanelPromptAllocation } from './panel-production-assets.mjs';
 import { compilePanelComposition } from './panel-composition-authoring.mjs';
 import { validatePanelTimeline } from './panel-layout-validation.mjs';
+import { loadPanelAudioRevision } from './panel-audio-revision.mjs';
 
 const exec = promisify(execFile);
 const fail = message => { throw new Error(`Panel production plan: ${message}`); };
@@ -160,7 +161,7 @@ export async function readPanelProductionInputs({ episodeDir }) {
   const timeline = { schema: 'goldflow_panel_production_timeline_v1', intent: 'production_panel_composition', id: `${identity.channel}-${identity.week ?? identity.run_slug ?? 'run'}-${episode}`, content_profile: 'manhwa_recap_v1', run_identity: run.ref, ...canvas, duration_sec: duration, audio_target: 'narrator_only', audio, narration_preroll_sec: beatRows[0].start_sec, assets, panels, scenes };
   validatePanelTimeline(timeline, timeline.intent);
   await currentHashes(inputHashes);
-  return { episodeDir: dir, identity, paths, timeline, assets, audio, inputHashes, beats: beatRows, words, allocation: allocationPlan, imageReviewDecisions: decisions.value.decisions };
+  return { episodeDir: dir, identity, paths, timeline, assets, audio, inputHashes, beats: beatRows, words, wordTiming: timing.value, audioBedReport: bed.value, allocation: allocationPlan, imageReviewDecisions: decisions.value.decisions };
 }
 
 export async function preparePanelProductionPlan({ episodeDir }) {
@@ -192,23 +193,32 @@ export function validateEditorialBindings(baseline, recipe) {
 }
 
 export async function compilePanelProductionPlan({ episodeDir, recipePath }) {
-  const loaded = await readPanelProductionInputs({ episodeDir });
+  let loaded = await readPanelProductionInputs({ episodeDir });
   const absoluteRecipe = await fs.realpath(recipePath ?? loaded.paths.recipePath), recipeHash = await sha256File(absoluteRecipe), recipe = await read(absoluteRecipe);
   need(recipe.source_packet?.path === loaded.paths.packetPath && recipe.source_packet.sha256 === await sha256File(loaded.paths.packetPath), 'recipe packet binding is missing or stale');
   const packet = await read(loaded.paths.packetPath);
   need(packet.schema === 'goldflow_panel_production_packet_v1' && JSON.stringify(packet.source_hashes) === JSON.stringify(loaded.inputHashes), 'authoring inputs changed; prepare a current packet through scoped recovery');
+  const revisionPath = path.join(loaded.episodeDir, `panel_audio_revision_request_${loaded.identity.episode}.json`);
+  if (await fs.stat(revisionPath).then(() => true, () => false)) loaded = await loadPanelAudioRevision({ loaded, requestPath: revisionPath });
   validateEditorialBindings(loaded.timeline, recipe);
   const timeline = compilePanelComposition(loaded.timeline, recipe, { mode: 'production_panel_composition' });
   timeline.provenance.source_order_review = 'no_future_context_panels';
-  const sources = { ...loaded.inputHashes, [absoluteRecipe]: recipeHash, [loaded.paths.packetPath]: recipe.source_packet.sha256 };
+  const sources = { ...loaded.inputHashes, ...loaded.revisionHashes, [absoluteRecipe]: recipeHash, [loaded.paths.packetPath]: recipe.source_packet.sha256 };
   await currentHashes(sources);
   // Retain every compile receipt and snapshot; official pointers are promoted
   // only after their complete candidate has been validated.
   const attempt = path.join(loaded.episodeDir, 'reports', 'panel-composition', randomUUID());
   await fs.mkdir(attempt, { recursive: true });
   const snapshot = path.join(attempt, 'timeline.json'); await fs.writeFile(snapshot, json(timeline), { flag: 'wx' });
+  const revisionArtifacts = {};
+  if (loaded.audioRevision) {
+    for (const [key, value] of [['revised_word_timing', loaded.wordTiming], ['revised_audio_bed', loaded.audioBedReport]]) {
+      const file = path.join(attempt, `${key}.json`); await fs.writeFile(file, json(value), { flag: 'wx' });
+      const hash = await sha256File(file); sources[file] = hash; revisionArtifacts[key] = { path: file, sha256: hash };
+    }
+  }
   const timelineHash = await sha256File(snapshot);
-  const report = { schema: 'goldflow_panel_production_plan_v1', status: 'passed', episode: loaded.identity.episode, author: recipe.author, run_identity: timeline.run_identity, timeline: { path: loaded.paths.timelinePath, sha256: timelineHash }, retained_timeline: { path: snapshot, sha256: timelineHash }, source_hashes: sources, beat_count: timeline.scenes.length, duration_sec: timeline.duration_sec, layouts: Object.fromEntries([...new Set(recipe.decisions.map(row => row.layout))].map(layout => [layout, recipe.decisions.filter(row => row.layout === layout).length])), provider_calls: 0, cost_usd: 0, created_at: new Date().toISOString() };
+  const report = { schema: 'goldflow_panel_production_plan_v1', status: 'passed', episode: loaded.identity.episode, author: recipe.author, run_identity: timeline.run_identity, timeline: { path: loaded.paths.timelinePath, sha256: timelineHash }, retained_timeline: { path: snapshot, sha256: timelineHash }, source_hashes: sources, recipe: { path: absoluteRecipe, sha256: recipeHash }, ...(loaded.audioRevision ? { audio_revision: loaded.audioRevision, ...revisionArtifacts } : {}), beat_count: timeline.scenes.length, duration_sec: timeline.duration_sec, layouts: Object.fromEntries([...new Set(recipe.decisions.map(row => row.layout))].map(layout => [layout, recipe.decisions.filter(row => row.layout === layout).length])), provider_calls: 0, cost_usd: 0, created_at: new Date().toISOString() };
   await fs.writeFile(path.join(attempt, 'report.json'), json(report), { flag: 'wx' });
   await fs.writeFile(`${loaded.paths.timelinePath}.tmp`, json(timeline)); await fs.rename(`${loaded.paths.timelinePath}.tmp`, loaded.paths.timelinePath);
   await fs.writeFile(`${loaded.paths.planPath}.tmp`, json(report)); await fs.rename(`${loaded.paths.planPath}.tmp`, loaded.paths.planPath);
@@ -216,18 +226,31 @@ export async function compilePanelProductionPlan({ episodeDir, recipePath }) {
 }
 
 export async function loadPanelProductionPlan({ episodeDir }) {
-  const loaded = await readPanelProductionInputs({ episodeDir });
+  let loaded = await readPanelProductionInputs({ episodeDir });
   const plan = await read(loaded.paths.planPath);
   need(plan.schema === 'goldflow_panel_production_plan_v1' && plan.status === 'passed', 'passed production composition report required');
   await currentHashes(plan.source_hashes);
   for (const [file, hash] of Object.entries(loaded.inputHashes)) need(plan.source_hashes[file] === hash, `composition report does not bind ${file}`);
+  const revisionPath = path.join(loaded.episodeDir, `panel_audio_revision_request_${loaded.identity.episode}.json`);
+  const revisionExists = await fs.stat(revisionPath).then(() => true, () => false);
+  need(revisionExists === Boolean(plan.audio_revision), 'registered audio revision differs from compiled plan');
+  if (plan.audio_revision) {
+    need(plan.audio_revision.path === revisionPath && plan.source_hashes[revisionPath] === plan.audio_revision.sha256, 'compiled revision binding differs');
+    loaded = await loadPanelAudioRevision({ loaded, requestPath: revisionPath });
+    for (const [file, hash] of Object.entries(loaded.revisionHashes)) need(plan.source_hashes[file] === hash, `composition report does not bind audio revision source ${file}`);
+    for (const [key, value] of [['revised_word_timing', loaded.wordTiming], ['revised_audio_bed', loaded.audioBedReport]]) {
+      const ref = plan[key];
+      need(ref && plan.source_hashes[ref.path] === ref.sha256 && JSON.stringify(await read(ref.path)) === JSON.stringify(value), `retained ${key} differs from accepted revision`);
+      loaded.revisionHashes[ref.path] = ref.sha256;
+    }
+  }
   need(plan.timeline?.path === loaded.paths.timelinePath && await sha256File(plan.timeline.path) === plan.timeline.sha256, 'composition timeline is stale');
   const timeline = await read(plan.timeline.path);
   validatePanelTimeline(timeline, 'production_panel_composition');
   need(JSON.stringify(timeline.run_identity) === JSON.stringify(loaded.timeline.run_identity) && JSON.stringify(timeline.audio) === JSON.stringify(loaded.audio), 'timeline identity or audio differs from accepted production');
   need(timeline.width === loaded.timeline.width && timeline.height === loaded.timeline.height && timeline.fps === loaded.timeline.fps && timeline.duration_sec === loaded.timeline.duration_sec, 'timeline canvas or duration differs from the production lock');
   need(JSON.stringify(timeline.assets) === JSON.stringify(loaded.assets), 'timeline assets differ from accepted production');
-  const recipeEntries = Object.keys(plan.source_hashes).filter(file => file !== loaded.paths.packetPath && !Object.hasOwn(loaded.inputHashes, file));
+  const recipeEntries = Object.keys(plan.source_hashes).filter(file => file !== loaded.paths.packetPath && !Object.hasOwn(loaded.inputHashes, file) && !Object.hasOwn(loaded.revisionHashes ?? {}, file));
   need(recipeEntries.length === 1, 'exact authored recipe binding required');
   const recipe = await read(recipeEntries[0]);
   validateEditorialBindings(loaded.timeline, recipe);

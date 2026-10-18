@@ -26,7 +26,7 @@ async function assertHashes(hashes) {
 }
 
 async function codeHashes() {
-  const names = ['../render.mjs', 'panel-production-renderer.mjs', 'panel-production-policy.mjs', 'panel-production-plan.mjs', 'panel-production-carryforward.mjs', 'panel-production-assets.mjs', 'panel-composition-authoring.mjs', 'panel-experiment-renderer.mjs', 'panel-layout-review.mjs', 'panel-layout-validation.mjs', 'panel-layout-runtime.mjs'];
+  const names = ['../render.mjs', 'panel-production-renderer.mjs', 'panel-production-policy.mjs', 'panel-production-plan.mjs', 'panel-audio-revision.mjs', 'panel-production-carryforward.mjs', 'panel-production-assets.mjs', 'panel-composition-authoring.mjs', 'panel-experiment-renderer.mjs', 'panel-layout-review.mjs', 'panel-layout-validation.mjs', 'panel-layout-runtime.mjs'];
   return Object.fromEntries(await Promise.all(names.map(async name => { const file = fileURLToPath(new URL(name, import.meta.url)); return [file, await sha256File(file)]; })));
 }
 

@@ -181,7 +181,7 @@ export async function preparePanelProductionPlan({ episodeDir }) {
   return { status: 'needs_authoring', packet_path: paths.packetPath, recipe_path: paths.recipePath, beat_count: timeline.scenes.length, provider_calls: 0 };
 }
 
-function validateEditorialBindings(baseline, recipe) {
+export function validateEditorialBindings(baseline, recipe) {
   const sceneById = new Map(baseline.scenes.map(scene => [scene.id, scene]));
   const firstUse = new Map(baseline.scenes.map(scene => [scene.layers[0].panel_id, scene.start_sec]));
   for (const decision of recipe.decisions ?? []) {

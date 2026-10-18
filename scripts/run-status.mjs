@@ -6693,7 +6693,20 @@ async function main() {
     ? await panelArtifactComplete({ episodeDir, identity, kind: "composition" })
     : await jsonStatusWithSourceHashesComplete(path.join(episodeDir, `motion_edit_plan_${episode}.json`), `motion_edit_plan_${episode}.json`);
   if (panelComposition && !motionPlan.done && await exists(path.join(episodeDir, `panel_composition_packet_${episode}.json`))) {
-    motionPlan.next_command_shape = `node bin/goldflow.mjs visual panel-plan ${commandBase(identity)} --action compile --recipe <authored-panel-composition-recipe.json>`;
+    const authorPointer = await readJson(path.join(episodeDir, `panel_authoring_report_${episode}.json`), null);
+    const packetHash = await fileSha256(path.join(episodeDir, `panel_composition_packet_${episode}.json`));
+    const currentAuthor = authorPointer?.schema === 'goldflow_panel_author_pointer_v1'
+      && authorPointer.source_packet_sha256 === packetHash
+      && path.isAbsolute(authorPointer.report_path ?? '') && await exists(authorPointer.report_path)
+      && await fileSha256(authorPointer.report_path) === authorPointer.report_sha256;
+    const readyRecipe = currentAuthor && authorPointer.status === 'candidate_ready'
+      && path.isAbsolute(authorPointer.recipe_path ?? '') && await exists(authorPointer.recipe_path)
+      && await fileSha256(authorPointer.recipe_path) === authorPointer.recipe_sha256;
+    motionPlan.next_command_shape = readyRecipe
+      ? `node bin/goldflow.mjs visual panel-plan ${commandBase(identity)} --action compile --recipe ${authorPointer.recipe_path}`
+      : currentAuthor && authorPointer.status === 'needs_exact_repair'
+        ? `node bin/goldflow.mjs visual panel-plan ${commandBase(identity)} --action compile --recipe <exact-reviewed-panel-composition-recipe.json>`
+        : `node bin/goldflow.mjs visual panel-plan ${commandBase(identity)} --action author --concurrency 8`;
   }
   const semanticValidation = legacyIdentity
     ? {

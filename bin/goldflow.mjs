@@ -38,6 +38,7 @@ import { falBlockedStageRecoveryAdmission } from "../scripts/lib/fal-production-
 import { interruptedQwenGuardAdmission } from "../scripts/lib/qwen-interrupted-guard.mjs";
 import { exactBlockedNarrationRetakeAdmission } from "../scripts/lib/narration-exact-retake-guard.mjs";
 import { asrOrthographyGuardAdmission } from "../scripts/lib/narration-asr-orthography-review.mjs";
+import { narrationManualReviewAdmission } from "../scripts/lib/narration-manual-review-routing.mjs";
 import { pronunciationGuardAdmission } from "../scripts/lib/narration-pronunciation-repair.mjs";
 import { contractionGuardAdmission } from "../scripts/lib/narration-contraction-repair.mjs";
 import { appendOnlyTailGuardAdmission } from "../scripts/lib/narration-append-only-tail.mjs";
@@ -151,6 +152,11 @@ function enforceWorkflowGuard(commandName, subcommandName, scriptArgs, episodeDi
       if (result.next_command_shape) console.error(`Next valid command shape: ${result.next_command_shape}`);
       process.exit(1);
     }
+    return;
+  }
+  const manualListening = narrationManualReviewAdmission(result, commandName, subcommandName, parsedFlags);
+  if (manualListening.applicable) {
+    if (!manualListening.allowed) { console.error(`Workflow guard blocked manual narration review: ${manualListening.reason}`); process.exit(1); }
     return;
   }
   const orthography = asrOrthographyGuardAdmission(

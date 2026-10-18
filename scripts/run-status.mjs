@@ -4679,6 +4679,13 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
     }
   }
   if (!statusPassed(ttsReport.status)) {
+    try {
+      const { narrationManualReviewStatus } = await import('./lib/narration-manual-review-routing.mjs');
+      const reviewed = await narrationManualReviewStatus({ episodeDir, episode, report: ttsReport, sourceScriptSha256: currentScriptHash });
+      if (reviewed) return reviewed;
+    } catch (error) {
+      return { done: false, state: 'blocked', evidence: `Manual narration listening review is stale or invalid: ${error.message}` };
+    }
     if (ttsReport.status === "blocked" && policy.primary.provider === "qwen_local") {
       const structuralEvidencePath = path.join(episodeDir,
         `narration_structural_no_audio_retry_evidence_${episode}.json`);

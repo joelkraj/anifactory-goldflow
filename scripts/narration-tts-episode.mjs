@@ -41,6 +41,7 @@ import {
   validateQwenLiamBatchPlan,
 } from "./lib/qwen-liam-batch-contract.mjs";
 import { hasTtsTerminalPunctuation } from "./lib/tts-text-boundaries.mjs";
+import { COHERENT_THOUGHT_SUBMISSION_POLICY, validateCoherentNarrationPlan } from "./lib/narration-submission-contract.mjs";
 import { validateStructuralNoAudioRetryEvidence } from "./lib/tts-structural-no-audio-retry.mjs";
 import {
   validateNarrationPerformanceBakeoffApproval,
@@ -1515,6 +1516,13 @@ export function normalizeNarrationUnitsForTests(plan, {
   voiceId = null,
   referenceVariantId = null,
 } = {}) {
+  const coherentSubmissions = plan?.submission_policy === COHERENT_THOUGHT_SUBMISSION_POLICY;
+  if (coherentSubmissions) {
+    const validation = validateCoherentNarrationPlan(plan);
+    if (validation.status !== "passed") {
+      throw new Error(`Invalid coherent narration submission: ${validation.findings.map((finding) => finding.code).join(", ")}`);
+    }
+  }
   const expectedVoiceLock = qwenPinForVoiceId(voiceId, referenceVariantId);
   const topLevel = Array.isArray(plan?.units) ? plan.units : null;
   const raw = topLevel ?? (plan?.segments ?? []).flatMap((segment) => {
@@ -1561,7 +1569,7 @@ export function normalizeNarrationUnitsForTests(plan, {
       ...row.source_unit_refs.map((ref) => ref?.segment_id),
       row.inherited_segment_id,
     ].map((value) => String(value ?? "").trim()).filter(Boolean))];
-    if (sourceSegmentIds.length > 1) {
+    if (!coherentSubmissions && sourceSegmentIds.length > 1) {
       throw new Error(
         `Unit ${unitId} crosses a hard voice-segment boundary: ${sourceSegmentIds.join(", ")}`,
       );

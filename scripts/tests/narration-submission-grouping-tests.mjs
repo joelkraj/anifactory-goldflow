@@ -9,6 +9,7 @@ import {
 } from "../lib/narration-submission-contract.mjs";
 import { qwenGenerationPlanForTests } from "../voice-direction-gate.mjs";
 import { narrationVoicePlanCompleteForTests } from "../run-status.mjs";
+import { normalizeNarrationUnitsForTests } from "../narration-tts-episode.mjs";
 import { defaultNarrationVoiceProviderOptions } from "../lib/narration-tts-policy.mjs";
 import { buildNarrationTextIr, validateNarrationTextIr } from "../lib/narration-text-ir.mjs";
 import { validateActionableNarrationDirection, narrationSourceRefKey } from "../lib/narration-performance-contract.mjs";
@@ -66,6 +67,13 @@ assert.equal(plan.units[0].spoken_text_lineage.components.length, 3);
 assert.equal(plan.sentence_unit_boundary_integrity.within_voice_segment_boundary_count, 2);
 assert.equal(plan.sentence_unit_boundary_integrity.within_submission_boundary_count, 3);
 assert.equal(validateCoherentNarrationPlan(plan).status, "passed");
+assert.equal(normalizeNarrationUnitsForTests(plan).length, 3);
+const historicalSegmentPlan = structuredClone(plan);
+delete historicalSegmentPlan.submission_policy;
+assert.throws(() => normalizeNarrationUnitsForTests(historicalSegmentPlan), /hard voice-segment boundary/);
+const voiceBarrierPlan = structuredClone(plan);
+voiceBarrierPlan.units[0].source_unit_refs[1].submission_synthesis_identity.reference_id = "different-voice";
+assert.throws(() => normalizeNarrationUnitsForTests(voiceBarrierPlan), /submission_group_crosses_synthesis_identity/);
 const ir = buildNarrationTextIr({ sourceScriptSha256: sourceHash, units: plan.units });
 assert.equal(validateNarrationTextIr(ir, plan.units).status, "passed");
 for (const unit of plan.units) {

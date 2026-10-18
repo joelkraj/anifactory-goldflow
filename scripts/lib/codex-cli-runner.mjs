@@ -16,9 +16,10 @@ import {
   plannerStageExecutionPolicy,
 } from "./planner-provider-registry.mjs";
 import { plannerRouteFromRegistry } from "../../apps/goldflow-studio/lib/planning-route-registry.mjs";
+import { CODEX_PLANNING_DEFAULTS, minimumCodexCliForModel } from "./model-defaults.mjs";
 
-export const DEFAULT_CODEX_MODEL = "gpt-6-sol";
-export const DEFAULT_CODEX_REASONING_EFFORT = "medium";
+export const DEFAULT_CODEX_MODEL = CODEX_PLANNING_DEFAULTS.model;
+export const DEFAULT_CODEX_REASONING_EFFORT = CODEX_PLANNING_DEFAULTS.reasoning_effort;
 export const MINIMUM_GPT56_CODEX_CLI = "0.144.0";
 export const ANTIGRAVITY_CLI_MAX_CONCURRENCY = 3;
 
@@ -87,7 +88,7 @@ export function compareCodexVersions(left, right) {
 }
 
 export function minimumCodexVersionForModel(model) {
-  return /^gpt-5\.6(?:-|$)/i.test(String(model ?? "")) ? parseCodexVersion(MINIMUM_GPT56_CODEX_CLI) : parseCodexVersion("0.0.0");
+  return parseCodexVersion(minimumCodexCliForModel(model));
 }
 
 export function codexVersionSupportsModel(version, model) {
@@ -149,7 +150,7 @@ export async function resolveCodexRuntime({ model = null, refresh = false } = {}
     const selected = compatible[0];
     if (!selected) {
       const found = inspected.map((candidate) => `${candidate.executable} (${candidate.version})`).join(", ") || "none";
-      throw new Error(`No Codex CLI new enough for ${resolvedModel}. Need ${MINIMUM_GPT56_CODEX_CLI}+; found ${found}. Upgrade @openai/codex or set ANIFACTORY_CODEX_CLI_PATH.`);
+      throw new Error(`No Codex CLI new enough for ${resolvedModel}. Need ${minimumCodexCliForModel(resolvedModel)}+; found ${found}. Upgrade @openai/codex or set ANIFACTORY_CODEX_CLI_PATH.`);
     }
     return selected;
   })();
@@ -697,6 +698,122 @@ async function runChatGptWebCompletion({
   }
 }
 
+export function claudeNativeArgsForTests({ model, effort }) {
+  const args = [
+    "-p",
+    "--output-format", "json",
+    "--no-session-persistence",
+    "--tools", "",
+    "--effort", normalizedClaudeEffort(effort),
+  ];
+  if (String(model ?? "").trim()) args.push("--model", String(model).trim());
+  return args;
+}
+
+function normalizedClaudeEffort(effort) {
+  const value = String(effort ?? "medium").trim().toLowerCase();
+  return ["low", "medium", "high", "xhigh", "max"].includes(value) ? value : "medium";
+}
+
+export function claudeContentFromStdoutForTests(stdout) {
+  const text = String(stdout ?? "").trim();
+  if (!text) return { content: "", envelope: null };
+  let envelope;
+  try {
+    envelope = JSON.parse(text);
+  } catch {
+    return { content: text, envelope: null };
+  }
+  if (envelope?.is_error === true || (envelope?.subtype && String(envelope.subtype).startsWith("error"))) {
+    throw new Error(`Claude print request failed: ${compactProviderError(envelope?.result ?? envelope?.subtype ?? "unknown error")}`);
+  }
+  return { content: String(envelope?.result ?? ""), envelope };
+}
+
+function claudeCliVersion(executable) {
+  const result = spawnSync(executable, ["--version"], { encoding: "utf8", timeout: 15_000 });
+  if (result.error || result.status !== 0) return null;
+  return String(result.stdout || result.stderr || "").trim() || null;
+}
+
+async function runClaudeCompletion({
+  prompt,
+  stageName,
+  outputPath,
+  resolvedModel,
+  resolvedEffort,
+  verbosity,
+  timeoutMs,
+  promptHash,
+  startedAt,
+  extraArgs,
+  runtime,
+  cwd,
+}) {
+  if (extraArgs.length) throw new Error("Claude planner does not accept Codex CLI extraArgs.");
+  const executable = String(process.env.ANIFACTORY_CLAUDE_CLI_PATH ?? "claude").trim();
+  const args = claudeNativeArgsForTests({ model: resolvedModel, effort: resolvedEffort });
+  const common = {
+    schema: "goldflow_codex_call_metadata_v1",
+    stage_name: stageName,
+    provider: "claude_cli",
+    transport: "claude_code_headless_cli",
+    model: resolvedModel,
+    reasoning_effort: resolvedEffort,
+    planning_effort_policy: runtime.effortPolicy,
+    planning_room_provider_lock: runtime.providerLock ?? null,
+    run_identity_path: runtime.identityPath,
+    verbosity,
+    executable,
+    prompt_sha256: promptHash,
+    output_path: outputPath,
+    started_at: startedAt,
+  };
+  let stdout = "";
+  let stderr = "";
+  try {
+    await new Promise((resolve, reject) => {
+      const child = spawn(executable, args, { cwd, env: { ...process.env, NO_COLOR: "1" }, stdio: ["pipe", "pipe", "pipe"] });
+      const timer = setTimeout(() => {
+        child.kill("SIGTERM");
+        reject(new Error(`Claude ${stageName} timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+      timer.unref();
+      child.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
+      child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+      child.on("error", (error) => { clearTimeout(timer); reject(error); });
+      child.on("exit", (code) => {
+        clearTimeout(timer);
+        code === 0 ? resolve() : reject(new Error(`Claude ${stageName} exited ${code}: ${compactProviderError(stderr || stdout)}`));
+      });
+      child.stdin.end(String(prompt ?? ""));
+    });
+    const parsed = claudeContentFromStdoutForTests(stdout);
+    if (!String(parsed.content).trim()) throw new Error(`Claude ${stageName} returned no output.`);
+    await fs.writeFile(outputPath, parsed.content, "utf8");
+    const metadata = {
+      ...common,
+      status: "passed",
+      claude_cli_version: claudeCliVersion(executable),
+      provider_duration_seconds: Number(parsed.envelope?.duration_ms ?? NaN) / 1000 || null,
+      provider_usage: parsed.envelope?.usage ?? null,
+      provider_conversation_id: parsed.envelope?.session_id ?? null,
+      output_sha256: createHash("sha256").update(parsed.content).digest("hex"),
+      completed_at: new Date().toISOString(),
+    };
+    await writeMetadata(outputPath, metadata);
+    return { content: parsed.content, outputPath, ...metadata };
+  } catch (error) {
+    await writeMetadata(outputPath, {
+      ...common,
+      status: "failed",
+      failed_at: new Date().toISOString(),
+      error: error instanceof Error ? error.message : String(error),
+    }).catch(() => {});
+    throw error;
+  }
+}
+
 async function runCodexCliWithResolvedProvider({
   prompt,
   stageName,
@@ -750,6 +867,12 @@ async function runCodexCliWithResolvedProvider({
   }
   if (planningRuntime.provider === "antigravity_cli") {
     return runAntigravityCompletion({
+      prompt, stageName, outputPath, resolvedModel, resolvedEffort, verbosity,
+      timeoutMs, promptHash, startedAt, extraArgs, runtime: planningRuntime, cwd,
+    });
+  }
+  if (planningRuntime.provider === "claude_cli") {
+    return runClaudeCompletion({
       prompt, stageName, outputPath, resolvedModel, resolvedEffort, verbosity,
       timeoutMs, promptHash, startedAt, extraArgs, runtime: planningRuntime, cwd,
     });
@@ -960,6 +1083,23 @@ export async function codexRuntimeSummary({ model = null, reasoningEffort = null
       codex_cli_path: null,
       codex_cli_version: null,
       minimum_cli_version: null,
+      user_config_model_is_overridden: true,
+    };
+  }
+  if (planningRuntime.provider === "claude_cli") {
+    const executable = String(process.env.ANIFACTORY_CLAUDE_CLI_PATH ?? "claude").trim();
+    const version = claudeCliVersion(executable);
+    if (!version) throw new Error(`Claude CLI is unavailable or unreadable: ${executable}`);
+    return {
+      status: "passed",
+      provider: "claude_cli",
+      transport: "claude_code_headless_cli",
+      model: resolvedModel,
+      reasoning_effort: resolvedEffort,
+      planning_effort_policy: planningRuntime.effortPolicy,
+      run_identity_path: planningRuntime.identityPath,
+      claude_cli_path: executable,
+      claude_cli_version: version,
       user_config_model_is_overridden: true,
     };
   }

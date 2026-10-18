@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { plannerRouteFromRegistry } from "../../apps/goldflow-studio/lib/planning-route-registry.mjs";
+import { CLAUDE_PLANNING_DEFAULTS, CODEX_PLANNING_DEFAULTS, resolveModelAlias } from "./model-defaults.mjs";
 
 export const PLANNING_ROOM_PROVIDER = "planning_room";
 export const FEDERATED_PLANNING_ROOM_SCHEMA = "goldflow_planning_room_v2";
@@ -7,6 +8,7 @@ export const FEDERATED_PLANNING_ROOM_SELECTION_POLICY = "stage_class_capacity_po
 export const PLANNER_PROVIDER_IDS = Object.freeze([
   PLANNING_ROOM_PROVIDER,
   "codex_cli",
+  "claude_cli",
   "antigravity_cli",
   "gemini_web",
   "chatgpt_web",
@@ -54,8 +56,15 @@ export const PLANNER_PROVIDER_REGISTRY = Object.freeze({
     id: "codex_cli",
     role: "local_execution_and_reconciliation",
     transport: "codex_cli",
-    default_model: "gpt-6-sol",
+    default_model: CODEX_PLANNING_DEFAULTS.model,
     environment: Object.freeze(["ANIFACTORY_CODEX_CLI_PATH", "CODEX_CLI_PATH"]),
+  }),
+  claude_cli: Object.freeze({
+    id: "claude_cli",
+    role: "structured_and_reasoning_planning",
+    transport: "claude_code_headless_cli",
+    default_model: CLAUDE_PLANNING_DEFAULTS.model,
+    environment: Object.freeze(["ANIFACTORY_CLAUDE_CLI_PATH", "ANIFACTORY_CLAUDE_MODEL"]),
   }),
   antigravity_cli: Object.freeze({
     id: "antigravity_cli",
@@ -94,6 +103,7 @@ export function normalizePlannerProviderId(value, fallback = PLANNING_ROOM_PROVI
   if (["gemini-web", "gemini", "google-gemini", "gemini-pro"].includes(normalized)) return "gemini_web";
   if (["antigravity", "antigravity-cli", "google-antigravity"].includes(normalized)) return "antigravity_cli";
   if (["codex", "codex-cli", "native-codex"].includes(normalized)) return "codex_cli";
+  if (["claude", "claude-cli", "claude-code"].includes(normalized)) return "claude_cli";
   if (["local", "qwen", "local-qwen"].includes(normalized)) return "local_qwen";
   throw new Error(`Unsupported planning provider: ${value}`);
 }
@@ -125,6 +135,12 @@ export function plannerProviderAvailability(provider, env = process.env) {
     return executableAvailable(explicit, "codex")
       ? { available: true, reason: explicit ? "explicit_executable" : "path_executable" }
       : { available: false, reason: "codex_cli_not_found" };
+  }
+  if (id === "claude_cli") {
+    const explicit = env.ANIFACTORY_CLAUDE_CLI_PATH ?? null;
+    return executableAvailable(explicit, "claude")
+      ? { available: true, reason: explicit ? "explicit_executable" : "path_executable" }
+      : { available: false, reason: "claude_cli_not_found" };
   }
   if (id === "antigravity_cli") {
     const explicit = env.ANIFACTORY_ANTIGRAVITY_CLI_PATH ?? null;
@@ -199,6 +215,8 @@ function structuredPoolContract(identity = {}) {
         ramp_step: configuredInteger("codex_cli_structured_ramp_step", 0) || null,
         ramp_policy: String(planner.codex_cli_structured_ramp_policy ?? "fixed_v1"),
       },
+      // Claude is opt-in; omit it at zero so default identities stay byte-identical.
+      ...(configuredConcurrency("claude_cli", 0) > 0 ? { claude_cli: { concurrency: configuredConcurrency("claude_cli", 0) } } : {}),
       antigravity_cli: { concurrency: configuredConcurrency("antigravity_cli", 0) },
     },
   };
@@ -255,7 +273,8 @@ export function plannerModelForProvider(provider, identity = {}, env = process.e
     ?? identity?.planning_room?.provider_models?.[id]
     ?? null;
   if (locked) return String(locked);
-  if (id === "codex_cli") return String(env.ANIFACTORY_CODEX_MODEL ?? PLANNER_PROVIDER_REGISTRY[id].default_model);
+  if (id === "codex_cli") return resolveModelAlias(id, env.ANIFACTORY_CODEX_MODEL ?? PLANNER_PROVIDER_REGISTRY[id].default_model);
+  if (id === "claude_cli") return resolveModelAlias(id, env.ANIFACTORY_CLAUDE_MODEL ?? PLANNER_PROVIDER_REGISTRY[id].default_model);
   if (id === "antigravity_cli") return String(env.ANIFACTORY_ANTIGRAVITY_MODEL ?? PLANNER_PROVIDER_REGISTRY[id].default_model);
   if (id === "gemini_web") return String(env.ANIFACTORY_GEMINI_WEB_MODEL ?? PLANNER_PROVIDER_REGISTRY[id].default_model);
   if (id === "chatgpt_web") return String(env.ANIFACTORY_CHATGPT_WEB_MODEL ?? PLANNER_PROVIDER_REGISTRY[id].default_model);

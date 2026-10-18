@@ -4680,7 +4680,9 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
   }
   if (!statusPassed(ttsReport.status)) {
     try {
-      const { narrationManualReviewStatus } = await import('./lib/narration-manual-review-routing.mjs');
+      const { narrationManualReviewStatus, narrationFullStreamReviewStatus } = await import('./lib/narration-manual-review-routing.mjs');
+      const fullReviewed = await narrationFullStreamReviewStatus({ episodeDir, episode, report: ttsReport, sourceScriptSha256: currentScriptHash });
+      if (fullReviewed) return fullReviewed;
       const reviewed = await narrationManualReviewStatus({ episodeDir, episode, report: ttsReport, sourceScriptSha256: currentScriptHash });
       if (reviewed) return reviewed;
     } catch (error) {

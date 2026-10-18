@@ -225,6 +225,8 @@ Provider finalization also accepts a mixed `goldflow_narration_delivery_manual_r
 
 For status-directed application of an actual listening decision, save that receipt as `narration_delivery_manual_review_<episode>.json`. Retain episode-local immutable copies of the current blocked report and unit QA, and bind them with `pre_review_narration_report_path`/`pre_review_narration_report_sha256` and `pre_review_unit_delivery_qa_path`/`pre_review_unit_delivery_qa_sha256`. Status validates the complete exact decision scope, current source/plan/provider manifest and selected WAV hashes before naming `tts finalize-provider --episode-dir <dir> --manifest <current-report-bound-manifest> --manual-review-evidence <receipt>`. Only that exact command is admitted, without synthesis, a broad waiver or a workflow bypass. An already applied receipt does not restart finalization or hide later full-stream blockers. Record the actual user's listening response; an agent must never manufacture listening approval.
 
+A later mastered-passage listening decision uses `narration_full_stream_manual_review_<episode>.json`. Status validates its exact full-stream findings, immutable prior QA, mastered audio and reproducible excerpt bindings before offering `tts finalize-provider --full-stream-review-evidence <receipt>`. When an earlier unit review exists, the command retains its `--manual-review-evidence` argument. This reuses the unchanged finalization checkpoints; it authorizes neither new synthesis nor a broad delivery waiver.
+
 ## Measured Proof
 
 Proof root:

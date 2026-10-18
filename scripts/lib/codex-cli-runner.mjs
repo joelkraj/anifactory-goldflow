@@ -20,7 +20,8 @@ import { CODEX_PLANNING_DEFAULTS, minimumCodexCliForModel } from "./model-defaul
 
 export const DEFAULT_CODEX_MODEL = CODEX_PLANNING_DEFAULTS.model;
 export const DEFAULT_CODEX_REASONING_EFFORT = CODEX_PLANNING_DEFAULTS.reasoning_effort;
-export const MINIMUM_GPT56_CODEX_CLI = "0.144.0";
+// Compatibility export for older callers; runtime gates use the model table.
+export const MINIMUM_GPT56_CODEX_CLI = minimumCodexCliForModel("gpt-5.6-sol");
 export const ANTIGRAVITY_CLI_MAX_CONCURRENCY = 3;
 
 const bundledCodexPath = "/Applications/ChatGPT.app/Contents/Resources/codex";
@@ -94,8 +95,7 @@ export function minimumCodexVersionForModel(model) {
 export function codexVersionSupportsModel(version, model) {
   const minimum = minimumCodexVersionForModel(model);
   if (!version || !minimum) return false;
-  // The qualifying ChatGPT desktop build currently bundles a 0.144 prerelease.
-  // Compare the numeric release tuple so that bundled 0.144.0-alpha builds pass.
+  // Preserve the historical numeric-tuple compatibility for bundled prereleases.
   for (const field of ["major", "minor", "patch"]) {
     const delta = Number(version[field] ?? 0) - Number(minimum[field] ?? 0);
     if (delta > 0) return true;
@@ -184,7 +184,7 @@ export function isCodexCacheCompatible(metadata, {
   const pooledProvider = !provider
     && federatedPlanningRoomEnabled(identity)
     && plannerStageClass(resolvedStageName) === "structured_planning"
-    && ["codex_cli", "antigravity_cli"].includes(actualProvider)
+    && ["codex_cli", "claude_cli", "antigravity_cli"].includes(actualProvider)
       ? actualProvider
       : provider;
   const runtime = planningRuntimeFromProcessContext({
@@ -704,6 +704,11 @@ export function claudeNativeArgsForTests({ model, effort }) {
     "--output-format", "json",
     "--no-session-persistence",
     "--tools", "",
+    "--strict-mcp-config",
+    "--mcp-config", '{"mcpServers":{}}',
+    "--disallowedTools", "*",
+    "--disable-slash-commands",
+    "--settings", '{"disableAllHooks":true}',
     "--effort", normalizedClaudeEffort(effort),
   ];
   if (String(model ?? "").trim()) args.push("--model", String(model).trim());
@@ -712,22 +717,25 @@ export function claudeNativeArgsForTests({ model, effort }) {
 
 function normalizedClaudeEffort(effort) {
   const value = String(effort ?? "medium").trim().toLowerCase();
-  return ["low", "medium", "high", "xhigh", "max"].includes(value) ? value : "medium";
+  if (!["low", "medium", "high", "xhigh", "max"].includes(value)) throw new Error(`Unsupported Claude planning effort: ${effort}`);
+  return value;
 }
 
 export function claudeContentFromStdoutForTests(stdout) {
   const text = String(stdout ?? "").trim();
-  if (!text) return { content: "", envelope: null };
   let envelope;
   try {
     envelope = JSON.parse(text);
   } catch {
-    return { content: text, envelope: null };
+    throw new Error("Claude print request returned invalid JSON.");
   }
   if (envelope?.is_error === true || (envelope?.subtype && String(envelope.subtype).startsWith("error"))) {
     throw new Error(`Claude print request failed: ${compactProviderError(envelope?.result ?? envelope?.subtype ?? "unknown error")}`);
   }
-  return { content: String(envelope?.result ?? ""), envelope };
+  if (envelope?.type !== "result" || typeof envelope.result !== "string" || !envelope.result.trim()) {
+    throw new Error("Claude print request returned no valid result text.");
+  }
+  return { content: envelope.result, envelope };
 }
 
 function claudeCliVersion(executable) {
@@ -782,7 +790,8 @@ async function runClaudeCompletion({
       child.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
       child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
       child.on("error", (error) => { clearTimeout(timer); reject(error); });
-      child.on("exit", (code) => {
+      child.stdin.on("error", (error) => { clearTimeout(timer); child.kill("SIGTERM"); reject(error); });
+      child.on("close", (code) => {
         clearTimeout(timer);
         code === 0 ? resolve() : reject(new Error(`Claude ${stageName} exited ${code}: ${compactProviderError(stderr || stdout)}`));
       });
@@ -797,6 +806,8 @@ async function runClaudeCompletion({
       claude_cli_version: claudeCliVersion(executable),
       provider_duration_seconds: Number(parsed.envelope?.duration_ms ?? NaN) / 1000 || null,
       provider_usage: parsed.envelope?.usage ?? null,
+      provider_model_usage: parsed.envelope?.modelUsage ?? null,
+      provider_cost_usd: parsed.envelope?.total_cost_usd ?? null,
       provider_conversation_id: parsed.envelope?.session_id ?? null,
       output_sha256: createHash("sha256").update(parsed.content).digest("hex"),
       completed_at: new Date().toISOString(),

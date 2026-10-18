@@ -7,10 +7,12 @@ import {
   PLANNER_MODELS_PATH,
   minimumCodexCliForModel,
   parsePlannerModelsConfig,
+  plannerDefaultEffort,
   resolveModelAlias,
 } from "../lib/model-defaults.mjs";
 import { plannerModelForProvider } from "../lib/planner-provider-registry.mjs";
 import { DEFAULT_CODEX_MODEL } from "../lib/codex-cli-runner.mjs";
+import { planningRuntimeFromProcessContext } from "../lib/planning-runtime-policy.mjs";
 
 const shipped = JSON.parse(readFileSync(PLANNER_MODELS_PATH, "utf8"));
 
@@ -30,6 +32,13 @@ assert.equal(minimumCodexCliForModel("gpt-sol-6.2", dropped), "0.0.0");
 assert.equal(minimumCodexCliForModel("gpt-6.1-sol", dropped), "0.159.1");
 assert.equal(minimumCodexCliForModel("gpt-5.6-sol", dropped), "0.144.0");
 assert.equal(resolveModelAlias("codex_cli", "latest", dropped), "gpt-sol-6.2");
+const customEffort = parsePlannerModelsConfig({
+  ...shipped,
+  providers: { ...shipped.providers, claude_cli: { ...shipped.providers.claude_cli, reasoning_effort: "high" } },
+});
+assert.equal(plannerDefaultEffort("claude_cli", {}, customEffort), "high");
+assert.equal(plannerDefaultEffort("claude_cli", { ANIFACTORY_CODEX_REASONING_EFFORT: "max" }, customEffort), "high");
+assert.equal(planningRuntimeFromProcessContext({ explicitProvider: "claude_cli", argv: [], env: { ANIFACTORY_CLAUDE_REASONING_EFFORT: "high" } }).defaultEffort, "high");
 
 // Aliases resolve; concrete names pass through untouched.
 assert.equal(resolveModelAlias("codex_cli", "Latest"), CODEX_PLANNING_DEFAULTS.model);
@@ -50,6 +59,7 @@ assert.equal(
 // Bad config fails loudly.
 assert.throws(() => parsePlannerModelsConfig("{nope"), /not valid JSON/);
 assert.throws(() => parsePlannerModelsConfig({ schema: "other" }), /must declare schema/);
+assert.throws(() => parsePlannerModelsConfig({ ...shipped, providers: { ...shipped.providers, codex_cli: { model: "latest", reasoning_effort: "medium" } } }), /must be concrete/);
 assert.throws(() => parsePlannerModelsConfig({ ...shipped, providers: { claude_cli: shipped.providers.claude_cli } }), /codex_cli\.model is required/);
 assert.throws(() => parsePlannerModelsConfig({ ...shipped, providers: { ...shipped.providers, claude_cli: { model: "m", reasoning_effort: "turbo" } } }), /reasoning_effort/);
 assert.throws(() => parsePlannerModelsConfig({
@@ -66,7 +76,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
-async function preflightIdentity(extraArgs) {
+async function preflightIdentity(extraArgs, overrides = {}) {
   const dataRoot = mkdtempSync(path.join(tmpdir(), "planner-model-config-"));
   await execFileAsync(process.execPath, [
     "scripts/run-preflight.mjs",
@@ -74,7 +84,7 @@ async function preflightIdentity(extraArgs) {
     "--channel", "test", "--series", "series", "--week", "run", "--episode", "ep_01", "--title", "Fixture",
     "--run-intent", "diagnostic", "--allow-dirty-worktree", "true", "--dirty-reason", "planner model config test",
     ...extraArgs,
-  ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
+  ], { cwd: process.cwd(), env: { ...process.env, ...overrides, ANIFACTORY_DATA_ROOT: dataRoot } });
   return JSON.parse(readFileSync(path.join(dataRoot, "channels", "test", "weekly_runs", "run", "episodes", "ep_01", "run_identity.json"), "utf8"));
 }
 const codexIdentity = await preflightIdentity(["--planning-provider", "codex_cli", "--planning-model", "latest"]);
@@ -83,4 +93,9 @@ const claudeIdentity = await preflightIdentity(["--planning-provider", "claude_c
 assert.equal(claudeIdentity.model_versions.planning_model, CLAUDE_PLANNING_DEFAULTS.model);
 const claudeDefault = await preflightIdentity(["--planning-provider", "claude_cli"]);
 assert.equal(claudeDefault.model_versions.planning_model, CLAUDE_PLANNING_DEFAULTS.model);
+const envClaude = await preflightIdentity(["--planning-provider", "claude_cli"], {
+  ANIFACTORY_CLAUDE_MODEL: "claude-opus-5-5", ANIFACTORY_CLAUDE_REASONING_EFFORT: "high", ANIFACTORY_CODEX_REASONING_EFFORT: "low",
+});
+assert.equal(envClaude.model_versions.planning_model, "claude-opus-5-5");
+assert.equal(envClaude.provider_locks.planning_default_reasoning_effort, "high");
 console.log("planner model preflight identity checks passed");

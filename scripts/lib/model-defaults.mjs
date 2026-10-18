@@ -21,9 +21,12 @@ export function parsePlannerModelsConfig(raw, source = "planner models config") 
   for (const id of ["codex_cli", "claude_cli"]) {
     const row = doc.providers?.[id];
     if (!row || typeof row.model !== "string" || !row.model.trim()) throw new Error(`${source}: providers.${id}.model is required.`);
+    if (MODEL_ALIASES.has(row.model.trim().toLowerCase())) throw new Error(`${source}: providers.${id}.model must be concrete, not an alias.`);
     if (!EFFORTS.has(row.reasoning_effort)) throw new Error(`${source}: providers.${id}.reasoning_effort must be one of ${[...EFFORTS].join(", ")}.`);
+    if (row.minimum_cli_by_model != null && !Array.isArray(row.minimum_cli_by_model)) throw new Error(`${source}: providers.${id}.minimum_cli_by_model must be an array.`);
     const gates = (row.minimum_cli_by_model ?? []).map((gate, index) => {
       if (!VERSION.test(String(gate?.minimum ?? ""))) throw new Error(`${source}: providers.${id}.minimum_cli_by_model[${index}].minimum must be x.y.z.`);
+      if (typeof gate.pattern !== "string" || !gate.pattern.trim()) throw new Error(`${source}: providers.${id}.minimum_cli_by_model[${index}].pattern is required.`);
       return Object.freeze({ pattern: new RegExp(String(gate.pattern), "i"), minimum: gate.minimum });
     });
     providers[id] = Object.freeze({
@@ -46,6 +49,11 @@ export const CLAUDE_PLANNING_DEFAULTS = Object.freeze({
   model: PLANNER_MODELS.claude_cli.model,
   reasoning_effort: PLANNER_MODELS.claude_cli.reasoning_effort,
 });
+
+export function plannerDefaultEffort(provider, env = process.env, config = PLANNER_MODELS) {
+  const key = provider === "claude_cli" ? "ANIFACTORY_CLAUDE_REASONING_EFFORT" : "ANIFACTORY_CODEX_REASONING_EFFORT";
+  return env[key] ?? config[provider]?.reasoning_effort ?? "medium";
+}
 
 // Minimum Codex CLI release per model; unlisted models have no minimum. A model's
 // own row wins, first match first.

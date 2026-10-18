@@ -40,7 +40,7 @@ import {
   DEFAULT_CODEX_MODEL,
   DEFAULT_CODEX_REASONING_EFFORT,
 } from "./lib/codex-cli-runner.mjs";
-import { CLAUDE_PLANNING_DEFAULTS, resolveModelAlias } from "./lib/model-defaults.mjs";
+import { plannerDefaultEffort, resolveModelAlias } from "./lib/model-defaults.mjs";
 import {
   DEFAULT_PLANNING_PROVIDER,
   DEFAULT_PLANNING_ROOM_EFFORT_POLICY,
@@ -219,6 +219,8 @@ const planningDefaultReasoningEffort = normalizePlanningEffort(
   explicitPlanningReasoningEffort
     ?? (planningProvider === "chatgpt_web"
       ? DEFAULT_WEB_PLANNING_REASONING_EFFORT
+      : ["codex_cli", "claude_cli"].includes(planningProvider)
+        ? plannerDefaultEffort(planningProvider)
       : DEFAULT_CODEX_REASONING_EFFORT),
 );
 // "latest" resolves to the configured default now, so the identity records a concrete model.
@@ -226,7 +228,8 @@ const planningModel = resolveModelAlias(planningProvider, String(flags["planning
   ?? (planningProvider === PLANNING_ROOM_PROVIDER
     ? "stage_routed"
     : planningProvider === "chatgpt_web" ? CHATGPT_WEB_PLANNING_MODEL
-      : planningProvider === "claude_cli" ? CLAUDE_PLANNING_DEFAULTS.model : DEFAULT_CODEX_MODEL)).trim());
+      : ["codex_cli", "claude_cli"].includes(planningProvider)
+        ? plannerModelForProvider(planningProvider) : DEFAULT_CODEX_MODEL)).trim());
 if (planningProvider !== "chatgpt_web" && planningEffortPolicy === DEFAULT_WEB_PLANNING_EFFORT_POLICY) {
   throw new Error(`${DEFAULT_WEB_PLANNING_EFFORT_POLICY} requires --planning-provider chatgpt_web.`);
 }

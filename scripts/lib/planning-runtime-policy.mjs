@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import path from "node:path";
+import { plannerDefaultEffort } from "./model-defaults.mjs";
 import {
   PLANNING_ROOM_PROVIDER,
   normalizePlannerProviderId,
@@ -213,7 +214,9 @@ export function planningRuntimeFromProcessContext({
       ?? context.identity?.model_versions?.planning_reasoning_effort
       ?? (provider === "chatgpt_web"
         ? env.ANIFACTORY_CHATGPT_WEB_REASONING_EFFORT ?? DEFAULT_WEB_PLANNING_REASONING_EFFORT
-        : env.ANIFACTORY_CODEX_REASONING_EFFORT ?? "medium"),
+        : context.identity
+          ? env.ANIFACTORY_CODEX_REASONING_EFFORT ?? "medium"
+          : plannerDefaultEffort(provider, env)),
     provider === "chatgpt_web" ? DEFAULT_WEB_PLANNING_REASONING_EFFORT : "medium",
   );
   return {

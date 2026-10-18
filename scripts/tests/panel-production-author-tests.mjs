@@ -66,6 +66,11 @@ test('native author receives actual raster paths, narration, times and review no
     assert.equal(await fs.stat(f.p('panel_composition_plan_ep_01.json')).then(() => true, () => false), false);
     const resumed = await authorPanelProduction({ ...f, executor }); assert.equal(calls, 1); assert.equal(resumed.cached_chunks, 1);
     assert.equal(resumed.recipe_sha256, result.recipe_sha256); assert.notEqual(resumed.report_path, result.report_path);
+    const chunkDir = path.join(path.dirname(result.report_path), 'chunks');
+    const [chunkName] = await fs.readdir(chunkDir), retained = path.join(chunkDir, chunkName), changed = path.join(chunkDir, 'chunk_001-old-contract.json');
+    await fs.rename(retained, changed);
+    await assert.rejects(authorPanelProduction({ ...f, executor }), /changed author contract requires reviewed reconciliation/);
+    assert.equal(calls, 1); await fs.rename(changed, retained);
     const compiled = await compilePanelProductionPlan({ episodeDir: f.episodeDir, recipePath: result.recipe_path });
     assert.equal(compiled.status, 'passed'); assert.equal(compiled.beat_count, 2);
   } finally { await fs.rm(f.root, { recursive: true, force: true }); }

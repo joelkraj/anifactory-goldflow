@@ -100,6 +100,7 @@ export async function authorPanelProduction({ episodeDir, repoRoot, limit = 1000
   const codeHashes = { author: await sha256File(fileURLToPath(import.meta.url)),
     compiler: await sha256File(fileURLToPath(new URL('./panel-composition-authoring.mjs', import.meta.url))) };
   await fs.mkdir(path.join(job, 'chunks'), { recursive: true }); await fs.mkdir(path.join(job, 'native'), { recursive: true });
+  const retainedChunks = await fs.readdir(path.join(job, 'chunks'));
   const assets = new Map(packet.baseline.assets.map(asset => [asset.id, asset]));
   const panels = new Map(packet.baseline.panels.map(panel => [panel.id, panel]));
   const rows = new Map(); const pending = [];
@@ -120,7 +121,10 @@ export async function authorPanelProduction({ episodeDir, repoRoot, limit = 1000
       need(prior.request_key === key && prior.source_packet_sha256 === packetHash, `stale cached chunk ${chunk.id}`);
       need(prior.status === 'authored', `failed chunk retained for exact manual repair: ${chunk.id}; ${prior.error}`);
       validatePanelAuthorResponse(prior.response, chunk, packet.baseline); rows.set(chunk.id, prior);
-    } else { need(!await exists(raw), `unreconciled native output retained: ${chunk.id}`); pending.push(request); }
+    } else {
+      need(!retainedChunks.some(name => name.startsWith(`${chunk.id}-`)), `changed author contract requires reviewed reconciliation, not redispatch: ${chunk.id}`);
+      need(!await exists(raw), `unreconciled native output retained: ${chunk.id}`); pending.push(request);
+    }
   }
   let next = 0; const selected = pending.slice(0, limit), failures = [];
   await Promise.all(Array.from({ length: Math.min(concurrency, selected.length) }, async () => {
@@ -132,7 +136,7 @@ export async function authorPanelProduction({ episodeDir, repoRoot, limit = 1000
         row = { status: 'authored', response };
       } catch (error) { row = { status: 'failed', error: error.message }; failures.push(request.chunk.id); }
       row = { schema: 'goldflow_panel_author_chunk_v1', ...row, chunk_id: request.chunk.id, request_key: request.key,
-        source_packet_sha256: packetHash, input_images: request.attached, raw_output_path: request.raw,
+        source_packet_sha256: packetHash, code_hashes: codeHashes, input_images: request.attached, raw_output_path: request.raw,
         raw_output_sha256: await exists(request.raw) ? await sha256File(request.raw) : null,
         planner_metadata: await readCodexCallMetadata(request.raw), elapsed_ms: Date.now() - begin, created_at: new Date().toISOString() };
       await fs.writeFile(request.output, json(row), { flag: 'wx' }); rows.set(request.chunk.id, row);

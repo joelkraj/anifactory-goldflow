@@ -122,7 +122,7 @@ export function compilePanelComposition(timeline, recipe, { mode = 'editing_expe
       panel(context.panel_id);
       const entryEnd = entry.start_sec + entry.duration_sec;
       if (!Number.isFinite(entry.start_sec) || !Number.isFinite(entry.duration_sec) || entry.start_sec < start || entry.duration_sec <= 0 || entryEnd >= end) fail(`entry must fit inside ${scene.id}`);
-      if (!Number.isFinite(context.end_sec) || context.end_sec < entryEnd || context.end_sec > end || !context.rect) fail(`context must cover the reveal: ${scene.id}`);
+      if (!Number.isFinite(context.end_sec) || context.end_sec + 1e-9 < entryEnd || context.end_sec > end || !context.rect) fail(`context must cover the reveal: ${scene.id}`);
       const view = row.camera_from ?? camera;
       const from = { ...rect };
       if (entry.direction === 'left') from.x = -rect.width - 0.03;

@@ -110,6 +110,14 @@ try {
     }
     assert.equal(panelFrameState(result, 4).scene.id, 's2'); assert.equal(panelFrameState(result, 6).scene.id, 's3'); assert.equal(panelFrameState(result, 10).scene, null);
   });
+  await test('sub-nanosecond decimal rounding at reveal completion does not reject an equal overlap endpoint', async () => {
+    const f = await fixture('decimal-reveal'), row = f.recipe.decisions[2];
+    row.entry = { direction: 'right', start_sec: 4.4, duration_sec: .4 }; row.context.end_sec = 4.8;
+    assert.ok(row.entry.start_sec + row.entry.duration_sec > row.context.end_sec);
+    assert.equal(compilePanelComposition(f.timeline, f.recipe).scenes.length, 5);
+    row.context.end_sec = 4.799;
+    assert.throws(() => compilePanelComposition(f.timeline, f.recipe), /context must cover the reveal/);
+  });
   await test('page movement honors reading holds and moves through actual tall-source overflow', async () => {
     const f = await fixture('page'), result = compilePanelComposition(f.timeline, f.recipe);
     const state = at => panelFrameState(result, at).layers[0].state;

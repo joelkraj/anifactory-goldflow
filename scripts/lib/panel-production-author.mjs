@@ -6,6 +6,7 @@ import { runCodexCli, readCodexCallMetadata } from './codex-cli-runner.mjs';
 import { sha256File } from './file-hash.mjs';
 import { readPanelProductionInputs, validateEditorialBindings } from './panel-production-plan.mjs';
 import { compilePanelComposition } from './panel-composition-authoring.mjs';
+import { panelImagePlacement } from './panel-layout-runtime.mjs';
 
 const need = (value, message) => { if (!value) throw new Error(`Panel author: ${message}`); };
 const json = value => `${JSON.stringify(value, null, 2)}\n`;
@@ -58,6 +59,24 @@ export function validatePanelAuthorResponse(response, chunk, baseline) {
     need(['contain', 'cover'].includes(row.fit), `explicit fit required for ${row.scene_id}`);
   }
   validateEditorialBindings(baseline, { decisions: response.decisions });
+  const panels = new Map(baseline.panels.map(panel => [panel.id, panel]));
+  const assets = new Map(baseline.assets.map(asset => [asset.id, asset]));
+  const checkFill = (panelId, crop, rect, fit, cameras, sceneId) => {
+    const panel = panels.get(panelId), asset = assets.get(panel.asset_id);
+    const sourceWidth = asset.width * panel.source_rect.width * crop.width;
+    const sourceHeight = asset.height * panel.source_rect.height * crop.height;
+    const viewport = { x: 0, y: 0, width: rect.width * baseline.width, height: rect.height * baseline.height };
+    for (const camera of cameras) {
+      const placed = panelImagePlacement(sourceWidth, sourceHeight, viewport, camera, fit);
+      need(placed.width >= viewport.width - 2 && placed.height >= viewport.height - 2,
+        `unfilled panel viewport ${sceneId}; match rect to crop aspect or choose a reviewed safe cover crop`);
+    }
+  };
+  for (const row of response.decisions) {
+    checkFill(row.panel_id, row.source_rect, row.rect, row.fit, [row.camera_from, row.camera_to], row.scene_id);
+    if (row.context) checkFill(row.context.panel_id, full, row.context.rect, row.context.fit ?? 'contain',
+      [row.context.camera ?? { x: .5, y: .5, zoom: 1 }], `${row.scene_id} context`);
+  }
   return response.decisions;
 }
 
@@ -71,8 +90,8 @@ Author all supplied beats explicitly from their narration and artwork. No fixed 
 Source/caption/spoken text, beat IDs, start/end times and main-panel identity are immutable. All artwork is already accepted; this task generates NO images or story changes. Read image_review_decisions: cropping and disclosure conditions are real requirements. Do not show later information early, including within a shared raster, a thought bubble, UI, context or blurred background. Use an earlier safe background if current art would reveal a later event. Keep faces, hands/contact geometry, relevant bubbles and UI readable and together when needed. Exclude irrelevant or inaccurate details when the supplied review explicitly requires it. Do not try to expose every detail.
 Output one decision per supplied scene with EXACT keys:
 scene_id, layout (full_frame|inset|reveal|reaction_pair|page_pan), panel_id, background_panel_id, editorial_reason (explain this narration's editorial purpose), region_evidence (describe actual visible features and why the proposed crop protects them), source_rect {x,y,width,height}, rect {x,y,width,height}, fit (contain|cover), camera_from {x,y,zoom}, camera_to {x,y,zoom}, entry (null or object), context (null or object).
-Coordinates are normalized. source_rect crops the source artwork; rect places the cropped panel on the 1920x1080 canvas. Both rectangles must remain fully inside [0,1]. Full source is ${JSON.stringify(full)}. Camera x,y are within [0,1] and zoom is 1..4, normally restrained; identical endpoints intentionally hold. Camera zoom may cut content, so choose it from the actual raster. Optional move_start_sec/move_end_sec add holds using ABSOLUTE supplied beat times. Optional blur_px (0..80), background_brightness (0..1), border_px may be explicit.
-For inset or page_pan, place a large sharp panel over a blurred/color-matched safe background. full_frame is appropriate for a necessary wide action or payoff, not a default every time. For reveal/reaction_pair: entry={direction:left|right|up|down,start_sec:ABSOLUTE,duration_sec:positive}; entry must finish strictly before beat end. context={panel_id:current_or_earlier_ID,rect:{x,y,width,height},fit:contain|cover,end_sec:ABSOLUTE}; context must last through entry completion, at most beat end. Optional context.camera={x,y,zoom} can frame an earlier face. Use actual word times for reveal cues. Other layouts require entry:null,context:null. Context/background can reference only supplied current or earlier panels, never later ones. Background does not inherit the main crop. Maintain main panel identity exactly.
+Coordinates are normalized. source_rect crops the source artwork; rect places the cropped panel on the 1920x1080 canvas. Both rectangles must remain fully inside [0,1]. Full source is ${JSON.stringify(full)}. Camera x,y traverse AVAILABLE OVERFLOW, not focal-point coordinates: y=0 aligns the top, y=1 aligns the bottom when the image is taller than its viewport; x=0/1 align left/right when wider. When there is no overflow that axis is centered. Zoom is 1..4, normally restrained; identical endpoints intentionally hold. Camera zoom may cut content, so choose it from the actual raster. Optional move_start_sec/move_end_sec add holds using ABSOLUTE supplied beat times. Optional blur_px (0..80), background_brightness (0..1), border_px may be explicit.
+Fill every foreground/context panel edge to edge, with no internal black padding. For contain, size rect to the actual cropped source aspect: (rect.width*1920)/(rect.height*1080) = (asset.width*panel.source_rect.width*source_rect.width)/(asset.height*panel.source_rect.height*source_rect.height). A wide detail belongs in a wide panel; a portrait belongs in a portrait panel. cover may instead fill a viewport only after checking the actual crop and camera preserve the required faces, complete hair/head silhouettes, hands/contact and lettering. Do not remove an unwanted bubble by slicing through a face; select a different region or panel shape. The renderer preserves aspect and does not stretch artwork. For inset or page_pan, place a large sharp panel over a blurred/color-matched safe background. full_frame is appropriate for a necessary wide action or payoff, not a default every time. For reveal/reaction_pair: entry={direction:left|right|up|down,start_sec:ABSOLUTE,duration_sec:positive}; entry must finish strictly before beat end. context={panel_id:current_or_earlier_ID,rect:{x,y,width,height},fit:contain|cover,end_sec:ABSOLUTE}; context must last through entry completion, at most beat end. Optional context.camera={x,y,zoom} can frame an earlier face. Use actual word times for reveal cues. Other layouts require entry:null,context:null. Context/background can reference only supplied current or earlier panels, never later ones. Background does not inherit the main crop. Maintain main panel identity exactly.
 Only allowed image/panel IDs are in this packet. Attached assets are listed in attachment order; identical hashes may serve several beat-specific aliases. Do not confuse their identities or invent panel sub-IDs.
 ${JSON.stringify({ canvas: { width: 1920, height: 1080 }, instructions: packet.instructions,
     attached_assets: attachedAssets, previous_context_scene: contextScene, scenes: chunk.scenes.map(scene => ({ id: scene.id, start_sec: scene.start_sec, end_sec: scene.end_sec, panel_id: scene.layers[0].panel_id })),
@@ -89,7 +108,7 @@ async function nativeAuthor({ prompt, images, outputPath, repoRoot }) {
   return JSON.parse(text);
 }
 
-export async function authorPanelProduction({ episodeDir, repoRoot, limit = 1000, concurrency = 8, executor = nativeAuthor, onProgress = () => {} }) {
+export async function authorPanelProduction({ episodeDir, repoRoot, limit = 1000, concurrency = 8, reviewedOverridesPath, executor = nativeAuthor, onProgress = () => {} }) {
   need(Number.isInteger(limit) && limit > 0 && Number.isInteger(concurrency) && concurrency > 0 && concurrency <= 8, 'invalid dispatch bounds');
   const started = Date.now(), loaded = await readPanelProductionInputs({ episodeDir });
   need(await exists(loaded.paths.packetPath), 'prepare the official packet first');
@@ -103,7 +122,33 @@ export async function authorPanelProduction({ episodeDir, repoRoot, limit = 1000
   const retainedChunks = await fs.readdir(path.join(job, 'chunks'));
   const assets = new Map(packet.baseline.assets.map(asset => [asset.id, asset]));
   const panels = new Map(packet.baseline.panels.map(panel => [panel.id, panel]));
-  const rows = new Map(); const pending = [];
+  const overrides = new Map(); let overrideReceipt;
+  if (reviewedOverridesPath) {
+    const absolute = path.resolve(reviewedOverridesPath), spec = await read(absolute);
+    need(spec.schema === 'goldflow_panel_author_reviewed_overrides_v1' && spec.source_packet_sha256 === packetHash,
+      'reviewed overrides require the current packet binding');
+    need(spec.actual_composed_frames_reviewed === true && spec.reviewer?.trim() && spec.note?.trim().length > 20,
+      'actual composed-frame review, reviewer and substantive note required');
+    need(spec.frame_review?.path && await sha256File(spec.frame_review.path) === spec.frame_review.sha256,
+      'composed-frame review evidence changed');
+    need(Array.isArray(spec.overrides) && spec.overrides.length > 0, 'exact override scope required');
+    for (const item of spec.overrides) {
+      need(chunks.some(chunk => chunk.id === item.chunk_id) && !overrides.has(item.chunk_id), 'unknown or duplicate override chunk');
+      need(item.reason?.trim().length > 20, 'substantive exact repair reason required');
+      need(path.dirname(path.resolve(item.previous_chunk_path)) === path.join(job, 'chunks')
+        && await sha256File(item.previous_chunk_path) === item.previous_chunk_sha256, 'previous chunk binding changed');
+      const previous = await read(item.previous_chunk_path);
+      need(previous.chunk_id === item.chunk_id && previous.source_packet_sha256 === packetHash,
+        'previous chunk belongs to another scope');
+      if (previous.raw_output_sha256) need(await sha256File(previous.raw_output_path) === previous.raw_output_sha256,
+        'retained native output changed');
+      validatePanelAuthorResponse(item.response, chunks.find(chunk => chunk.id === item.chunk_id), packet.baseline);
+      overrides.set(item.chunk_id, { ...item, previous });
+    }
+    overrideReceipt = { path: absolute, sha256: await sha256File(absolute), reviewer: spec.reviewer,
+      note: spec.note, frame_review: spec.frame_review };
+  }
+  const rows = new Map(); const pending = []; const reconciliations = [];
   for (const chunk of chunks) {
     const contextIndex = packet.baseline.scenes.findIndex(scene => scene.id === chunk.scenes[0].id) - 1;
     const context = contextIndex >= 0 ? packet.baseline.scenes[contextIndex] : null;
@@ -116,15 +161,35 @@ export async function authorPanelProduction({ episodeDir, repoRoot, limit = 1000
     const prompt = panelAuthorPrompt(packet, chunk, attached, context), key = hash({ version: 1, packetHash, codeHashes, chunk: chunk.id, prompt });
     const output = path.join(job, 'chunks', `${chunk.id}-${key}.json`), raw = path.join(job, 'native', `${chunk.id}-${key}.json`);
     const request = { chunk, prompt, attached, key, output, raw };
+    const override = overrides.get(chunk.id);
+    if (override) need(JSON.stringify(override.previous.input_images) === JSON.stringify(attached),
+      `reviewed override input images changed: ${chunk.id}`);
     if (await exists(output)) {
       const prior = await read(output);
       need(prior.request_key === key && prior.source_packet_sha256 === packetHash, `stale cached chunk ${chunk.id}`);
       need(prior.status === 'authored', `failed chunk retained for exact manual repair: ${chunk.id}; ${prior.error}`);
-      validatePanelAuthorResponse(prior.response, chunk, packet.baseline); rows.set(chunk.id, prior);
+      validatePanelAuthorResponse(prior.response, chunk, packet.baseline);
+      if (override) need(prior.reviewed_override?.sha256 === overrideReceipt.sha256,
+        `cached chunk has different reviewed override: ${chunk.id}`);
+      rows.set(chunk.id, prior);
+    } else if (override) {
+      if (await exists(raw)) need(raw === override.previous.raw_output_path
+        && await sha256File(raw) === override.previous.raw_output_sha256, `unreconciled native output retained: ${chunk.id}`);
+      reconciliations.push({ output, row: { schema: 'goldflow_panel_author_chunk_v1', status: 'authored',
+        chunk_id: chunk.id, request_key: key, source_packet_sha256: packetHash, code_hashes: codeHashes,
+        input_images: attached, response: override.response, authoring_method: 'reviewed_manual_reconciliation',
+        reviewed_override: overrideReceipt, previous_chunk: { path: override.previous_chunk_path, sha256: override.previous_chunk_sha256 },
+        repair_reason: override.reason, raw_output_path: override.previous.raw_output_path,
+        raw_output_sha256: override.previous.raw_output_sha256, planner_metadata: override.previous.planner_metadata,
+        new_planner_calls: 0, elapsed_ms: 0, created_at: new Date().toISOString() } });
     } else {
       need(!retainedChunks.some(name => name.startsWith(`${chunk.id}-`)), `changed author contract requires reviewed reconciliation, not redispatch: ${chunk.id}`);
       need(!await exists(raw), `unreconciled native output retained: ${chunk.id}`); pending.push(request);
     }
+  }
+  // Validate every exact adoption before writing receipts or admitting new requests.
+  for (const { output, row } of reconciliations) {
+    await fs.writeFile(output, json(row), { flag: 'wx' }); rows.set(row.chunk_id, row);
   }
   let next = 0; const selected = pending.slice(0, limit), failures = [];
   await Promise.all(Array.from({ length: Math.min(concurrency, selected.length) }, async () => {
@@ -147,6 +212,7 @@ export async function authorPanelProduction({ episodeDir, repoRoot, limit = 1000
   const report = { schema: 'goldflow_panel_author_report_v1', status: failures.length ? 'needs_exact_repair' : rows.size === chunks.length ? 'candidate_ready' : 'partial',
     source_packet: { path: loaded.paths.packetPath, sha256: packetHash }, run_identity: packet.run_identity,
     source_hashes: loaded.inputHashes, code_hashes: codeHashes, chunk_count: chunks.length, authored_count: [...rows.values()].filter(row => row.status === 'authored').length,
+    reviewed_reconciliations: reconciliations.map(item => item.row.chunk_id), reviewed_override: overrideReceipt ?? null,
     failed_chunk_ids: failures, new_planner_calls: selected.length, cached_chunks: rows.size - selected.length,
     elapsed_ms: Date.now() - started, media_provider_calls: 0, planner_cost_usd: null,
     note: 'Candidate authoring only; no image generation, script/audio edits, compilation, playback or final-QA approval.', created_at: new Date().toISOString() };

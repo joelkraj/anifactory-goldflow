@@ -18,6 +18,7 @@ try {
   if (action === 'prepare') result = await preparePanelProductionPlan({ episodeDir });
   else if (action === 'author') result = await authorPanelProduction({ episodeDir,
     repoRoot: path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'),
+    reviewedOverridesPath: flags['reviewed-overrides'],
     limit: Number(flags.limit ?? 1000), concurrency: Number(flags.concurrency ?? 8),
     onProgress: value => process.stdout.write(`${JSON.stringify(value)}\n`) });
   else if (action === 'compile') result = await compilePanelProductionPlan({ episodeDir, recipePath: flags.recipe && path.resolve(flags.recipe) });

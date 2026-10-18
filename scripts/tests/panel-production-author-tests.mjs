@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
+import { sha256File } from '../lib/file-hash.mjs';
 import { panelProductionFixture } from './panel-production-fixture.mjs';
 import { preparePanelProductionPlan, compilePanelProductionPlan } from '../lib/panel-production-plan.mjs';
 import { panelAuthorChunks, validatePanelAuthorResponse, authorPanelProduction } from '../lib/panel-production-author.mjs';
@@ -93,5 +94,59 @@ test('stale source raster blocks authoring before any planner call', async () =>
     await fs.appendFile(f.p('image_a.png'), 'changed');
     await assert.rejects(authorPanelProduction({ ...f, executor: async () => { calls++; } }));
     assert.equal(calls, 0);
+  } finally { await fs.rm(f.root, { recursive: true, force: true }); }
+});
+
+
+test('contain rejects internal letterboxing while aspect-matched panels and safe cover fill', async () => {
+  const f = await fixture('fill');
+  try {
+    const chunk = panelAuthorChunks(f.packet)[0], r = responseFor(chunk.scenes);
+    r.decisions[0].source_rect = { x: .2, y: .4, width: .6, height: .2 };
+    assert.throws(() => validatePanelAuthorResponse(r, chunk, f.packet.baseline), /unfilled panel viewport/);
+    r.decisions[0].rect.height = .3;
+    assert.equal(validatePanelAuthorResponse(r, chunk, f.packet.baseline).length, 2);
+    r.decisions[0].rect.height = .9; r.decisions[0].fit = 'cover';
+    assert.equal(validatePanelAuthorResponse(r, chunk, f.packet.baseline).length, 2);
+  } finally { await fs.rm(f.root, { recursive: true, force: true }); }
+});
+
+test('reviewed exact manual reconciliation preserves original bytes and dispatches no replacement request', async () => {
+  const f = await fixture('reconcile'); let calls = 0;
+  try {
+    const executor = async ({ outputPath }) => {
+      calls++; const response = responseFor(panelAuthorChunks(f.packet)[0].scenes);
+      await fs.writeFile(outputPath, JSON.stringify(response)); return response;
+    };
+    const first = await authorPanelProduction({ ...f, executor });
+    const chunkDir = path.join(path.dirname(first.report_path), 'chunks');
+    const [name] = await fs.readdir(chunkDir), original = path.join(chunkDir, name), old = path.join(chunkDir, 'chunk_001-old-contract.json');
+    await fs.rename(original, old);
+    const before = await fs.readFile(old), prior = JSON.parse(before), rawBefore = await fs.readFile(prior.raw_output_path);
+    const response = structuredClone(prior.response);
+    response.decisions[0].editorial_reason = 'Reviewed manual framing correction preserves the entire source rectangle and all fixture artwork.';
+    const review = f.p('actual-frame-review.json');
+    await fs.writeFile(review, JSON.stringify({ actual_composed_frames_reviewed: true, note: 'Fixture review evidence only.' }));
+    const spec = { schema: 'goldflow_panel_author_reviewed_overrides_v1', source_packet_sha256: first.source_packet.sha256,
+      reviewer: 'Fixture reviewer', actual_composed_frames_reviewed: true, note: 'Manually reviewed the exact existing frame candidate and corrected its framing.',
+      frame_review: { path: review, sha256: await sha256File(review) },
+      overrides: [{ chunk_id: 'chunk_001', previous_chunk_path: old, previous_chunk_sha256: await sha256File(old),
+        reason: 'Exact fixture scope reviewed; retain original native output and apply only this explicit decision.', response }] };
+    const specPath = f.p('reviewed-overrides.json');
+    const write = () => fs.writeFile(specPath, JSON.stringify(spec));
+    await write();
+    const saved = spec.overrides[0].previous_chunk_sha256;
+    spec.overrides[0].previous_chunk_sha256 = '0'.repeat(64); await write();
+    await assert.rejects(authorPanelProduction({ ...f, executor, reviewedOverridesPath: specPath }), /previous chunk binding changed/);
+    spec.overrides[0].previous_chunk_sha256 = saved;
+    spec.overrides.push(structuredClone(spec.overrides[0])); await write();
+    await assert.rejects(authorPanelProduction({ ...f, executor, reviewedOverridesPath: specPath }), /unknown or duplicate override/);
+    spec.overrides.pop(); await write();
+    const repaired = await authorPanelProduction({ ...f, executor, reviewedOverridesPath: specPath });
+    assert.equal(repaired.status, 'candidate_ready'); assert.equal(repaired.new_planner_calls, 0);
+    assert.deepEqual(repaired.reviewed_reconciliations, ['chunk_001']); assert.equal(calls, 1);
+    assert.deepEqual(await fs.readFile(old), before); assert.deepEqual(await fs.readFile(prior.raw_output_path), rawBefore);
+    const resumed = await authorPanelProduction({ ...f, executor });
+    assert.equal(resumed.recipe_sha256, repaired.recipe_sha256); assert.equal(calls, 1);
   } finally { await fs.rm(f.root, { recursive: true, force: true }); }
 });

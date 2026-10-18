@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 export async function startPanelReviewServer({ directory, port = 0 }) {
   const root = await fsp.realpath(directory);
   if (!(await fsp.stat(root)).isDirectory()) throw new Error('Review directory is required');
-  const types = { '.html': 'text/html; charset=utf-8', '.mp4': 'video/mp4', '.wav': 'audio/wav', '.json': 'application/json', '.jpg': 'image/jpeg', '.png': 'image/png' };
+  const types = { '.html': 'text/html; charset=utf-8', '.mp4': 'video/mp4', '.wav': 'audio/wav', '.mp3': 'audio/mpeg', '.json': 'application/json', '.jpg': 'image/jpeg', '.png': 'image/png' };
   const server = http.createServer(async (request, response) => {
     try {
       if (!['GET', 'HEAD'].includes(request.method)) { response.writeHead(405).end(); return; }

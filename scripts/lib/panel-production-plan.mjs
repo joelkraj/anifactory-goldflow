@@ -7,6 +7,7 @@ import sharp from 'sharp';
 import { sha256File } from './file-hash.mjs';
 import { resolveNarrationReport } from './narration-artifacts.mjs';
 import { assertPanelProductionIdentity } from './panel-production-policy.mjs';
+import { verifyPanelProductionTimingIdentity } from './panel-production-carryforward.mjs';
 import { loadPanelAssetPlan, assertPanelPromptAllocation } from './panel-production-assets.mjs';
 import { compilePanelComposition } from './panel-composition-authoring.mjs';
 import { validatePanelTimeline } from './panel-layout-validation.mjs';
@@ -71,7 +72,9 @@ export async function readPanelProductionInputs({ episodeDir }) {
   need(delivery.value.schema === 'goldflow_narration_final_delivery_qa_v2' && delivery.value.status === 'passed' && delivery.value.source_script_hash === script.sha256 && delivery.value.narration_audio_hash === canonicalAudio.sha256 && !(delivery.value.blockers ?? []).length, 'canonical narration delivery QA is missing or stale');
   need(delivery.value.quality_contract_sha256 === identity.narration_quality_contract?.contract_sha256, 'narration quality contract changed');
   const timing = await artifact(`narration_word_timing_${episode}.json`);
-  need(timing.value.status === 'passed' && timing.value.source_script_hash === script.sha256 && timing.value.narration_audio_hash === canonicalAudio.sha256 && timing.value.narration_report_sha256 === narration.ref.sha256 && timing.value.run_identity_sha256 === run.ref.sha256, 'official word timing is stale');
+  const timingIdentity = await verifyPanelProductionTimingIdentity({ episodeDir: dir, identity, currentIdentitySha256: run.ref.sha256, timing: timing.value, timingPath: timing.ref.path, timingSha256: timing.ref.sha256 });
+  for (const [file, expected] of Object.entries(timingIdentity.source_hashes)) await bind(file, expected);
+  need(timing.value.status === 'passed' && timing.value.source_script_hash === script.sha256 && timing.value.narration_audio_hash === canonicalAudio.sha256 && timing.value.narration_report_sha256 === narration.ref.sha256, 'official word timing is stale');
   need(timing.value.word_timing_qa?.status === 'passed' && timing.value.full_stream_transcript_qa?.status === 'passed', 'word timing QA must pass');
   await sources(timing.value);
   const bed = await artifact(`longform_audio_bed_report_${episode}.json`);

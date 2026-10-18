@@ -110,6 +110,17 @@ try {
     }
     assert.equal(panelFrameState(result, 4).scene.id, 's2'); assert.equal(panelFrameState(result, 6).scene.id, 's3'); assert.equal(panelFrameState(result, 10).scene, null);
   });
+  await test('explicit short-distance entry eases position and opacity while legacy entrances remain offscreen', async () => {
+    const f = await fixture('short-entry'), row = f.recipe.decisions[2];
+    row.rect = { x: .3, y: .2, width: .6, height: .6 };
+    row.entry = { direction: 'right', start_sec: 4.2, duration_sec: .6, distance: .12, opacity_from: 0 };
+    const result = compilePanelComposition(f.timeline, f.recipe), state = t => panelFrameState(result, t).layers.at(-1).state;
+    near(state(4.2).rect.x, .42); assert.equal(state(4.2).opacity, 0);
+    near(state(4.5).rect.x, .36); near(state(4.5).opacity, .5);
+    near(state(4.8).rect.x, .3); near(state(4.8).opacity, 1);
+    assert.throws(() => compilePanelComposition(f.timeline, { ...f.recipe, decisions: f.recipe.decisions.map((r, i) => i === 2 ? { ...r, entry: { ...r.entry, distance: -1 } } : r) }), /invalid entry distance/);
+    assert.throws(() => compilePanelComposition(f.timeline, { ...f.recipe, decisions: f.recipe.decisions.map((r, i) => i === 2 ? { ...r, entry: { ...r.entry, opacity_from: 2 } } : r) }), /invalid entry opacity/);
+  });
   await test('sub-nanosecond decimal rounding at reveal completion does not reject an equal overlap endpoint', async () => {
     const f = await fixture('decimal-reveal'), row = f.recipe.decisions[2];
     row.entry = { direction: 'right', start_sec: 4.4, duration_sec: .4 }; row.context.end_sec = 4.8;

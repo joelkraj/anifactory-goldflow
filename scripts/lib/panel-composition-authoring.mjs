@@ -125,12 +125,25 @@ export function compilePanelComposition(timeline, recipe, { mode = 'editing_expe
       if (!Number.isFinite(context.end_sec) || context.end_sec + 1e-9 < entryEnd || context.end_sec > end || !context.rect) fail(`context must cover the reveal: ${scene.id}`);
       const view = row.camera_from ?? camera;
       const from = { ...rect };
-      if (entry.direction === 'left') from.x = -rect.width - 0.03;
-      if (entry.direction === 'right') from.x = 1.03;
-      if (entry.direction === 'up') from.y = -rect.height - 0.03;
-      if (entry.direction === 'down') from.y = 1.03;
+      if (entry.distance != null) {
+        if (!Number.isFinite(entry.distance) || entry.distance <= 0 || entry.distance > 2) fail(`invalid entry distance for ${scene.id}`);
+        if (entry.direction === 'left') from.x -= entry.distance;
+        if (entry.direction === 'right') from.x += entry.distance;
+        if (entry.direction === 'up') from.y -= entry.distance;
+        if (entry.direction === 'down') from.y += entry.distance;
+      } else {
+        if (entry.direction === 'left') from.x = -rect.width - 0.03;
+        if (entry.direction === 'right') from.x = 1.03;
+        if (entry.direction === 'up') from.y = -rect.height - 0.03;
+        if (entry.direction === 'down') from.y = 1.03;
+      }
+      const onset = key(entry.start_sec, from, view);
+      if (entry.opacity_from != null) {
+        if (!Number.isFinite(entry.opacity_from) || entry.opacity_from < 0 || entry.opacity_from > 1) fail(`invalid entry opacity for ${scene.id}`);
+        onset.opacity = entry.opacity_from;
+      }
       main.start_sec = entry.start_sec;
-      main.keyframes = [key(entry.start_sec, from, view), ...cameraKeys(entryEnd, end, rect, { ...row, move_start_sec: row.move_start_sec ?? entryEnd })];
+      main.keyframes = [onset, ...cameraKeys(entryEnd, end, rect, { ...row, move_start_sec: row.move_start_sec ?? entryEnd })];
       layers.push({ id: `${scene.id}__context`, panel_id: context.panel_id, start_sec: start, end_sec: context.end_sec, z: 0, fit: context.fit ?? 'contain', border_px: context.border_px ?? 4, keyframes: [key(start, context.rect, context.camera ?? camera, 'hold'), key(context.end_sec, context.rect, context.camera ?? camera, 'hold')] });
     } else if (row.entry || row.context) fail(`unused entry/context on ${row.layout}: ${scene.id}`);
     layers.push(main);

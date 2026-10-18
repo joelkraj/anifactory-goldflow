@@ -419,9 +419,20 @@ export function applyManualReconciliationRepairForTests(parsed, artifact, script
     if (!row) throw new Error(`Semantic reconciliation repair row missing: ${op.collection}/${op.row_index}`);
     const rowId = row.entity_id ?? row.location_id ?? row.prop_id ?? row.ui_id ?? row.scene_id;
     if (rowId !== op.row_id) throw new Error(`Semantic reconciliation repair row identity changed: ${op.collection}/${op.row_index}`);
-    const key = [op.collection, op.row_index, op.field, op.evidence_index ?? ""].join("/");
+    const key = [op.collection, op.row_index, op.field, op.evidence_index ?? op.ref_index ?? ""].join("/");
     if (seen.has(key)) throw new Error(`Duplicate semantic reconciliation repair operation: ${key}`);
     seen.add(key);
+    if (op.field === "ref_requirement_kind") {
+      const reference = row.ref_requirements?.[op.ref_index];
+      if (op.collection !== "scenes" || !Number.isInteger(op.ref_index) || op.ref_index < 0
+        || !reference || reference.ref_id !== op.ref_id || reference.kind !== op.expected_kind
+        || !["location", "character_state", "prop", "ui", "action"].includes(op.replacement_kind)
+        || String(op.review_note ?? "").trim().length < 20) {
+        throw new Error(`Invalid reviewed reference-kind repair scope: ${key}`);
+      }
+      reference.kind = op.replacement_kind;
+      continue;
+    }
     let parent = row;
     if (op.field === "exact_excerpt") {
       if (op.collection === "scenes" || !Number.isInteger(op.evidence_index) || op.evidence_index < 0) throw new Error(`Invalid evidence repair scope: ${key}`);

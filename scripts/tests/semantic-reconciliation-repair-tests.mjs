@@ -2,6 +2,28 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { applyManualReconciliationRepairForTests, canonicalVisibleEntityCoverageFindingsForTests } from "../semantic-scene-plan.mjs";
 
+test("reviewed reconciliation reference-kind correction preserves identity and all unselected fields", () => {
+  const parsed = { scenes: [{ scene_id: "scene_001", ref_requirements: [
+    { ref_id: "hunter", kind: "person", required: true, reason: "Recurring actor." },
+    { ref_id: "practice_arm", kind: "construct", required: true, reason: "Training apparatus." },
+  ] }] };
+  const context = { sourceScriptHash: "source", failedCheckpointSha256: "failed", inputSha256: "prompt" };
+  const operation = { collection: "scenes", row_index: 0, row_id: "scene_001", field: "ref_requirement_kind",
+    ref_index: 1, ref_id: "practice_arm", expected_kind: "construct", replacement_kind: "prop",
+    review_note: "The source describes an inanimate training apparatus, not an identity-bearing actor." };
+  const artifact = { schema: "goldflow_semantic_reconciliation_repair_v1", status: "approved",
+    source_script_hash: "source", failed_checkpoint_sha256: "failed", input_sha256: "prompt", operations: [operation] };
+  const repaired = applyManualReconciliationRepairForTests(parsed, artifact, "", context);
+  const expected = structuredClone(parsed); expected.scenes[0].ref_requirements[1].kind = "prop";
+  assert.deepEqual(repaired, expected);
+  assert.equal(parsed.scenes[0].ref_requirements[1].kind, "construct");
+  for (const patch of [ { ref_index: -1 }, { ref_id: "other" }, { expected_kind: "prop" },
+    { replacement_kind: "creature" }, { review_note: "" }, { collection: "canonical_entities" } ]) {
+    assert.throws(() => applyManualReconciliationRepairForTests(parsed, { ...artifact, operations: [{ ...operation, ...patch }] }, "", context));
+  }
+  assert.throws(() => applyManualReconciliationRepairForTests(parsed, { ...artifact, operations: [operation, operation] }, "", context));
+});
+
 test("exact-scope semantic reconciliation repair accepts only bound script excerpts", () => {
   const script = "The man opened the door. He left the room. The next visitor arrived.";
   const parsed = {

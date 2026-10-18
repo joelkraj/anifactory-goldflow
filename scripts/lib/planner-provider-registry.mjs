@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { plannerRouteFromRegistry } from "../../apps/goldflow-studio/lib/planning-route-registry.mjs";
+import { CODEX_PLANNING_DEFAULTS } from "./model-defaults.mjs";
 
 export const PLANNING_ROOM_PROVIDER = "planning_room";
 export const FEDERATED_PLANNING_ROOM_SCHEMA = "goldflow_planning_room_v2";
@@ -54,7 +55,7 @@ export const PLANNER_PROVIDER_REGISTRY = Object.freeze({
     id: "codex_cli",
     role: "local_execution_and_reconciliation",
     transport: "codex_cli",
-    default_model: "gpt-5.6-sol",
+    default_model: CODEX_PLANNING_DEFAULTS.model,
     environment: Object.freeze(["ANIFACTORY_CODEX_CLI_PATH", "CODEX_CLI_PATH"]),
   }),
   antigravity_cli: Object.freeze({

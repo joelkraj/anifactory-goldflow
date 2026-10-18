@@ -29,6 +29,7 @@ import {
   ANTIGRAVITY_CLI_MAX_CONCURRENCY,
   antigravityContentFromStdoutForTests,
   antigravityNativeArgsForTests,
+  DEFAULT_CODEX_MODEL,
   isCodexCacheCompatible,
   withAntigravitySlotForTests,
 } from "../lib/codex-cli-runner.mjs";
@@ -145,7 +146,7 @@ await Promise.all(Array.from({ length: 8 }, () => withAntigravitySlotForTests(as
 })));
 assert.equal(maximumAntigravityFixtureCalls, ANTIGRAVITY_CLI_MAX_CONCURRENCY);
 assert.equal(standaloneRuntime.provider, "codex_cli");
-assert.equal(standaloneRuntime.model, CHATGPT_WEB_PLANNING_MODEL);
+assert.equal(standaloneRuntime.model, DEFAULT_CODEX_MODEL);
 assert.equal(standaloneRuntime.effortPolicy, DEFAULT_UNIFORM_PLANNING_EFFORT_POLICY);
 assert.equal(normalizedDoctorProbeResponse("MODEL\\_OK"), "MODEL_OK");
 assert.equal(normalizedDoctorProbeResponse("```text\nMODEL_OK\n```"), "MODEL_OK");

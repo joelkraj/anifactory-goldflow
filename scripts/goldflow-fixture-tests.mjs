@@ -2349,12 +2349,16 @@ async function testCumulativeImagegenHistoryAndEpisodeTruth() {
 }
 
 function testPinnedCodexRuntimeContracts() {
-  assert.equal(DEFAULT_CODEX_MODEL, "gpt-5.6-sol");
+  assert.equal(DEFAULT_CODEX_MODEL, "gpt-6.1-sol");
   assert.equal(DEFAULT_CODEX_REASONING_EFFORT, "medium");
   const oldCli = parseCodexVersion("codex-cli 0.141.0");
   const qualifyingBundledCli = parseCodexVersion("codex-cli 0.144.0-alpha.4");
   assert.equal(codexVersionSupportsModel(oldCli, DEFAULT_CODEX_MODEL), false);
   assert.equal(codexVersionSupportsModel(qualifyingBundledCli, DEFAULT_CODEX_MODEL), true);
+  // Identities that recorded an earlier model keep that model's own CLI gate.
+  assert.equal(codexVersionSupportsModel(oldCli, "gpt-5.6-sol"), false);
+  assert.equal(codexVersionSupportsModel(qualifyingBundledCli, "gpt-5.6-sol"), true);
+  assert.equal(codexVersionSupportsModel(oldCli, "gpt-5.5"), true);
   assert.equal(compareCodexVersions(qualifyingBundledCli, oldCli) > 0, true);
 
   const promptHash = sha256("fixture prompt");
@@ -5171,7 +5175,7 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
   assert.equal(identity.stage_registry_version.length > 0, true);
   assert.equal(identity.model_versions.planning_model, "stage_routed");
   assert.equal(identity.provider_locks.planning_provider_models.chatgpt_web, "gpt-5.6-sol");
-  assert.equal(identity.provider_locks.planning_provider_models.codex_cli, "gpt-5.6-sol");
+  assert.equal(identity.provider_locks.planning_provider_models.codex_cli, DEFAULT_CODEX_MODEL);
   assert.equal(identity.model_versions.tts_model, QWEN_JOEL_PRIMARY_LOCK.model_id);
   assert.equal(identity.model_versions.tts_model_revision, QWEN_JOEL_PRIMARY_LOCK.model_revision);
   assert.equal(identity.model_versions.fallback_tts_model, null);

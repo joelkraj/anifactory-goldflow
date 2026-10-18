@@ -16,9 +16,10 @@ import {
   plannerStageExecutionPolicy,
 } from "./planner-provider-registry.mjs";
 import { plannerRouteFromRegistry } from "../../apps/goldflow-studio/lib/planning-route-registry.mjs";
+import { CODEX_PLANNING_DEFAULTS, minimumCodexCliForModel } from "./model-defaults.mjs";
 
-export const DEFAULT_CODEX_MODEL = "gpt-5.6-sol";
-export const DEFAULT_CODEX_REASONING_EFFORT = "medium";
+export const DEFAULT_CODEX_MODEL = CODEX_PLANNING_DEFAULTS.model;
+export const DEFAULT_CODEX_REASONING_EFFORT = CODEX_PLANNING_DEFAULTS.reasoning_effort;
 export const MINIMUM_GPT56_CODEX_CLI = "0.144.0";
 export const ANTIGRAVITY_CLI_MAX_CONCURRENCY = 3;
 
@@ -87,7 +88,7 @@ export function compareCodexVersions(left, right) {
 }
 
 export function minimumCodexVersionForModel(model) {
-  return /^gpt-5\.6(?:-|$)/i.test(String(model ?? "")) ? parseCodexVersion(MINIMUM_GPT56_CODEX_CLI) : parseCodexVersion("0.0.0");
+  return parseCodexVersion(minimumCodexCliForModel(model));
 }
 
 export function codexVersionSupportsModel(version, model) {
@@ -149,7 +150,7 @@ export async function resolveCodexRuntime({ model = null, refresh = false } = {}
     const selected = compatible[0];
     if (!selected) {
       const found = inspected.map((candidate) => `${candidate.executable} (${candidate.version})`).join(", ") || "none";
-      throw new Error(`No Codex CLI new enough for ${resolvedModel}. Need ${MINIMUM_GPT56_CODEX_CLI}+; found ${found}. Upgrade @openai/codex or set ANIFACTORY_CODEX_CLI_PATH.`);
+      throw new Error(`No Codex CLI new enough for ${resolvedModel}. Need ${minimumCodexCliForModel(resolvedModel)}+; found ${found}. Upgrade @openai/codex or set ANIFACTORY_CODEX_CLI_PATH.`);
     }
     return selected;
   })();

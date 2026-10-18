@@ -19,6 +19,7 @@ import { reviewedBulkSourceReceipt } from "./lib/fal-reviewed-bulk-source-receip
 import { falArtworkOrders, completeFalPanelArtwork } from "./lib/fal-panel-artwork.mjs";
 import { reviewedBulkHoldRecoveryPrompt } from "./lib/fal-reviewed-bulk-hold-recovery.mjs";
 import { inspectReferenceProbeReview, prepareReferenceProbeReview, acceptReferenceProbeReview } from "./lib/fal-reference-probe-review.mjs";
+import { reviewedFalCharacterAdditions } from "./lib/fal-reviewed-character-additions.mjs";
 
 const digest = value => createHash("sha256").update(value).digest("hex");
 const bytes = value => `${JSON.stringify(value, null, 2)}\n`;
@@ -843,6 +844,7 @@ async function main(){
      const promptRow=prompts.prompts.find(row=>row.image_id===directive.image_id);
      need(promptRow,`Locked prompt row missing: ${directive.image_id}`);
      let refs=await nativePromptReferences(ctx,promptRow,approval);
+     refs=await reviewedFalCharacterAdditions({episodeDir:ctx.episodeDir,identity:ctx.identity,promptRow,directive,refs,approval});
      if(directive.ordered_reference_asset_ids){
        const order=directive.ordered_reference_asset_ids;
        need(Array.isArray(order)&&order.length===refs.length&&new Set(order).size===refs.length&&order.every(id=>refs.some(ref=>ref.asset_id===id)),`Reference reorder is not the same approved set: ${directive.image_id}`);
@@ -853,6 +855,14 @@ async function main(){
      const prompt=board?`${directive.replacement_prompt}\n\n${referenceBoardPromptGuidance(board)}`:directive.replacement_prompt;
      need(digest(prompt)!==original.prompt_sha256,`Visual repair prompt unchanged: ${directive.image_id}`);
      const core={image_id:directive.image_id,endpoint:board?FAL_ENDPOINTS.primary_edit:FAL_ENDPOINTS.primary_text,prompt,prompt_sha256:digest(prompt),run_identity_sha256:ctx.identityHash,reference_mode:board?"one_positional_collage":"text_only",reference_asset_ids:refs.map(ref=>ref.asset_id),reference_hashes:refs.map(ref=>ref.sha256),board_path:board?.output_path??null,board_sha256:board?.output_sha256??null,board_manifest_path:board?.manifest_path??null,max_cost_usd:0.05,start_sec:original.start_sec,duration_sec:original.duration_sec,previous_assignment_sha256:original.assignment_sha256,rejected_image_sha256:directive.rejected_image_sha256,repair_reason:directive.finding,qa_report_sha256:directives.qa_report_sha256};
+     if(directive.character_reference_additions){
+       Object.assign(core,{reviewed_character_reference_additions:directive.character_reference_additions,
+         reference_review_directives_sha256:await falFileSha256(f.directives),
+         reference_review_sources:Object.fromEntries(["reference_plan_sha256","reference_approval_sha256",
+           "run_identity_sha256","source_script_sha256","beat_plan_sha256","panel_asset_plan_sha256"]
+           .map(key=>[key,directive[key]])),reference_reviewer:directive.reviewer,
+         reference_review_note:directive.reference_review_note});
+     }
      const repair={...core,assignment_sha256:falObjectSha256(JSON.stringify(core)),submission_receipt_path:path.join(ctx.root,"bulk","review-repair-submission-receipts",`${round.stem}.json`),result_receipt_path:path.join(ctx.root,"bulk","review-repair-result-receipts",`${round.stem}.json`),output_path:path.join(ctx.root,"bulk","review-repair-outputs",`${round.stem}${round.stem===directive.image_id?"-v2":""}.png`),upload_receipt_path:path.join(ctx.root,"bulk","review-repair-upload-receipts",`${round.stem}.json`)};
      await write(round.assignmentPath,repair);
      repairs.push(repair);

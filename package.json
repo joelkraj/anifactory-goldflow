@@ -49,7 +49,7 @@
     "test:recap-source": "node scripts/tests/recap-source-package-tests.mjs && node scripts/tests/recap-adaptation-tests.mjs",
     "test:panel-production": "node scripts/tests/panel-production-policy-tests.mjs && node scripts/tests/panel-production-assets-tests.mjs && node scripts/tests/panel-production-carryforward-tests.mjs && node scripts/tests/panel-production-plan-tests.mjs && node scripts/tests/panel-production-renderer-tests.mjs",
     "test:openart": "node scripts/tests/openart-cli-provider-tests.mjs && node scripts/tests/openart-asset-bank-tests.mjs && node scripts/tests/openart-visual-restart-tests.mjs && node scripts/tests/openart-reference-board-tests.mjs && node --test scripts/tests/openart-production-tests.mjs scripts/tests/openart-shot-binding-tests.mjs",
-    "test:fal": "node --test scripts/tests/fal-reference-probe-review-tests.mjs scripts/tests/fal-provider-tests.mjs scripts/tests/fal-validation-selector-tests.mjs scripts/tests/fal-reference-bank-reuse-tests.mjs scripts/tests/fal-portable-bank-transport-recovery-tests.mjs scripts/tests/fal-repair-failure-tests.mjs scripts/tests/fal-retry-budget-tests.mjs scripts/tests/fal-reviewed-bulk-source-receipt-tests.mjs"
+    "test:fal": "node --test scripts/tests/fal-reference-probe-review-tests.mjs scripts/tests/fal-provider-tests.mjs scripts/tests/fal-validation-selector-tests.mjs scripts/tests/fal-reference-bank-reuse-tests.mjs scripts/tests/fal-portable-bank-transport-recovery-tests.mjs scripts/tests/fal-repair-failure-tests.mjs scripts/tests/fal-retry-budget-tests.mjs scripts/tests/fal-reviewed-bulk-source-receipt-tests.mjs scripts/tests/fal-reviewed-character-additions-tests.mjs"
   },
   "engines": {
     "node": ">=20"

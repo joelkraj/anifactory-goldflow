@@ -27,7 +27,7 @@ export function createPanelProductionContract() {
 }
 
 export function isPanelProductionIdentity(identity = {}) {
-  return identity.render_profile === PANEL_PRODUCTION_RENDER_PROFILE;
+  return identity?.render_profile === PANEL_PRODUCTION_RENDER_PROFILE;
 }
 
 export function assertPanelProductionIdentity(identity = {}) {

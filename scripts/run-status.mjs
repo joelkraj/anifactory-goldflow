@@ -2486,8 +2486,10 @@ async function synthesizedNarrationArtifactsComplete({
   try {
     await validateAppliedFullStreamManualReview(fullQa);
     if (fullQa?.full_stream_manual_review) {
-      const manifestHash = await fileSha256(path.join(episodeDir, `narration_provider_output_manifest_${episode}.json`));
-      if (fullQa.provider_output_manifest_file_sha256 !== manifestHash) add("full-stream review provider manifest hash is stale");
+      const manifestPath = ttsReport?.provider_output_manifest_path;
+      const manifestHash = manifestPath ? await fileSha256(manifestPath) : null;
+      if (!manifestHash || ttsReport.provider_output_manifest_sha256 !== manifestHash
+        || fullQa.provider_output_manifest_file_sha256 !== manifestHash) add("full-stream review provider manifest hash is stale");
       for (const report of [ttsReport, stitchReport]) {
         if (JSON.stringify(report?.full_stream_manual_review) !== JSON.stringify(fullQa.full_stream_manual_review)) {
           add("full-stream manual review provenance differs across narration reports");

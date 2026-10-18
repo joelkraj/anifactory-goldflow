@@ -230,3 +230,36 @@ test('Fal accepted owners produce all panel aliases with zero additional request
   await fs.appendFile(results[0].generated.result_receipt_path, ' ');
   await assert.rejects(completeFalPanelArtwork({ episodeDir: f.dir, prompts: f.prompts, results, cuts }), /receipt changed/);
 });
+
+test('reviewed Fal artwork repair refreshes only its dependent panels and retains prior media and unrelated QA', async t => {
+  const f = await fixture(t, 'fal_ai');
+  const makeOwner = async (prompt, folder, color) => {
+    await fs.mkdir(f.p(folder), { recursive: true });
+    const output = f.p(`${folder}/${prompt.image_id}.png`), receiptPath = `${output}.receipt.json`;
+    await sharp({ create: { width: 320, height: 180, channels: 3, background: color } }).png().toFile(output);
+    const imageHash = sha(await fs.readFile(output));
+    const receipt = { output_path: output, output_sha256: imageHash, request_id: `${folder}-${prompt.image_id}` };
+    const receiptHash = await json(receiptPath, receipt);
+    return { result: { image_id: prompt.image_id, status: 'generated', image_path: output, generated: { ...receipt, provider: 'fal_ai', result_receipt_path: receiptPath, result_receipt_sha256: receiptHash } }, cut: { image_id: prompt.image_id, image_path: output, image_sha256: imageHash, provider: 'fal_ai' } };
+  };
+  const owners = await falArtworkOrders({ episodeDir: f.dir, prompts: f.prompts });
+  const initial = await Promise.all(owners.map((p, i) => makeOwner(p, 'original', i ? '#aa3344' : '#3366aa')));
+  const full = await completeFalPanelArtwork({ episodeDir: f.dir, prompts: f.prompts, results: initial.map(x => x.result), cuts: initial.map(x => x.cut) });
+  full.cuts.forEach(row => { row.image_qa_status = 'approved'; });
+  const preservedResult = JSON.stringify(full.results[2]), preservedCut = JSON.stringify(full.cuts[2]);
+  const preservedMetadata = await fs.readFile(`${full.results[2].image_path}.metadata.json`, 'utf8');
+  const oldAlias = structuredClone(full.results[1]);
+  const repaired = await makeOwner(owners[0], 'reviewed-repair', '#33aa66');
+  full.results[0] = repaired.result; full.cuts[0] = repaired.cut;
+  const updated = await completeFalPanelArtwork({ episodeDir: f.dir, prompts: f.prompts, results: full.results, cuts: full.cuts, ownerImageIds: [owners[0].image_id] });
+  assert.equal(updated.results[1].image_sha256, repaired.cut.image_sha256);
+  assert.notEqual(updated.results[1].image_path, oldAlias.image_path);
+  assert.equal(sha(await fs.readFile(oldAlias.image_path)), oldAlias.image_sha256);
+  assert.equal(updated.results[1].generated.estimated_cost_usd, 0);
+  assert.equal(updated.cuts[0].image_qa_status, 'pending');
+  assert.equal(updated.cuts[1].image_qa_status, 'pending');
+  assert.equal(JSON.stringify(updated.results[2]), preservedResult);
+  assert.equal(JSON.stringify(updated.cuts[2]), preservedCut);
+  assert.equal(await fs.readFile(`${updated.results[2].image_path}.metadata.json`, 'utf8'), preservedMetadata);
+  await assert.rejects(completeFalPanelArtwork({ episodeDir: f.dir, prompts: f.prompts, results: updated.results, cuts: updated.cuts, ownerImageIds: ['ep_01-cut-002'] }), /owners/);
+});

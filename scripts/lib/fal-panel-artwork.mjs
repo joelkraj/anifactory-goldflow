@@ -19,14 +19,15 @@ export async function falArtworkOrders({ episodeDir, prompts, imageIds = null })
   return imageIds ? owners.filter(row => imageIds.includes(row.image_id)) : owners;
 }
 
-/** Bind accepted Fal owners, then materialize authored aliases without a provider call. */
-export async function completeFalPanelArtwork({ episodeDir, prompts, results, cuts }) {
+/** Bind accepted Fal owners; an explicit repair scope refreshes only its dependent aliases. */
+export async function completeFalPanelArtwork({ episodeDir, prompts, results, cuts, ownerImageIds = null }) {
   const allocation = await assertPanelPromptAllocation({ episodeDir, prompts });
   if (!allocation) return { results, cuts };
-  const owners = await falArtworkOrders({ episodeDir, prompts });
+  const owners = await falArtworkOrders({ episodeDir, prompts, imageIds: ownerImageIds });
   const byResult = new Map(results.map(row => [row.image_id, row]));
   const byCut = new Map(cuts.map(row => [row.image_id, row]));
-  need(byResult.size === results.length && results.length === owners.length && byCut.size === cuts.length && cuts.length === owners.length, 'every unique owner needs exactly one accepted result and ledger row');
+  const expectedCount = ownerImageIds ? prompts.length : owners.length;
+  need(byResult.size === results.length && results.length === expectedCount && byCut.size === cuts.length && cuts.length === expectedCount, 'every unique owner needs exactly one accepted result and ledger row');
   // Verify every owner before writing any derived sidecar or alias.
   for (const prompt of owners) {
     const result = byResult.get(prompt.image_id), cut = byCut.get(prompt.image_id);
@@ -47,9 +48,9 @@ export async function completeFalPanelArtwork({ episodeDir, prompts, results, cu
     result.image_sha256 = cut.image_sha256;
     Object.assign(cut, { image_provider: 'fal_ai', panel_asset_id: prompt.panel_asset_id, panel_asset_plan_sha256: allocation.planSha256, authored_prompt_hash: authoredHash(prompt), image_qa_status: 'pending' });
   }
-  const expanded = await materializePanelAssetAliases({ episodeDir, prompts, results });
+  const expanded = await materializePanelAssetAliases({ episodeDir, prompts, results, ownerImageIds });
   need(expanded.length === prompts.length, 'all authored panel bindings must materialize');
-  for (const result of expanded.filter(row => row.status === 'editorial_reuse')) {
+  for (const result of expanded.filter(row => row.status === 'editorial_reuse' && (!ownerImageIds || ownerImageIds.includes(row.generated?.reuse_source_image_id)))) {
     const prompt = prompts.find(row => row.image_id === result.image_id);
     const owner = byCut.get(prompt.reuse_source_image_id);
     need(owner, `alias owner ledger missing: ${result.image_id}`);

@@ -931,6 +931,10 @@ async function main(){
      result.generated={...result.generated,...receipt,output_sha256:receipt.output_sha256,result_receipt_path:assignment.result_receipt_path,result_receipt_sha256:await falFileSha256(assignment.result_receipt_path),recovery_type:recoveryType,previous_image_sha256:assignment.rejected_image_sha256};
      Object.assign(cut,{image_path:receipt.output_path,image_sha256:receipt.output_sha256,prompt_hash:assignment.prompt_sha256,reference_ids:assignment.reference_asset_ids,provider_request_id:receipt.request_id,provider_receipt_path:assignment.result_receipt_path,provider_receipt_sha256:await falFileSha256(assignment.result_receipt_path),recovery_type:recoveryType,previous_image_sha256:assignment.rejected_image_sha256});
    }
+   const promptPlan=await read(path.join(ctx.episodeDir,"section_image_prompts_hardened.json"));
+   const completed=await completeFalPanelArtwork({episodeDir:ctx.episodeDir,prompts:promptPlan.prompts,
+     results:report.results,cuts:ledger.cuts,ownerImageIds:qa.critical_rejected_image_ids});
+   report.results=completed.results;ledger.cuts=completed.cuts;
    report.updated_at=new Date().toISOString();ledger.updated_at=report.updated_at;
    await write(path.join(ctx.root,"bulk","image-reports",`reviewed-${digest(JSON.stringify(report)).slice(0,16)}.json`),report);
    await fs.writeFile(reportPath,bytes(report));await fs.writeFile(ledgerPath,bytes(ledger));

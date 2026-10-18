@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 import { mkdtemp, mkdir, readFile, writeFile, rm, realpath } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { falProductionStageStates } from "../lib/fal-production-state.mjs";
+import { falProductionStageStates, falBlockedStageRecoveryAdmission } from "../lib/fal-production-state.mjs";
 import { validateFalValidationCorrection, validateFalValidationRecovery } from "../lib/fal-validation-recovery.mjs";
 
 const exec = promisify(execFile);
@@ -419,4 +419,15 @@ test('second validation recovery rejects changed source, broadened scope and sta
   if(kind==='review')await writeJson(f.correction.paths.review,{});
   await assert.rejects(validateFalValidationRecovery({root:f.root,correction:f.correction}));
  }finally{await rm(f.dir,{recursive:true,force:true});}}
+});
+
+test('second validation guard admits only the exact status command for missing or blocked image generation',()=>{
+ const flags={'episode-dir':'/episode',action:'dispatch-validation-second','confirm-spend':'exact_fal_validation_second'};
+ for(const current_stage_state of ['missing','blocked']) {
+  const status={current_stage:'image_generation',current_stage_state,episode_dir:'/episode',next_command_shape:'node bin/goldflow.mjs imagegen fal --episode-dir /episode --action dispatch-validation-second --confirm-spend exact_fal_validation_second'};
+  assert.equal(falBlockedStageRecoveryAdmission(status,flags).allowed,true);
+  assert.equal(falBlockedStageRecoveryAdmission(status,{...flags,force:'true'}).allowed,false);
+  assert.equal(falBlockedStageRecoveryAdmission({...status,next_command_shape:null},flags).allowed,false);
+  assert.equal(falBlockedStageRecoveryAdmission(status,{...flags,'confirm-spend':'wrong'}).allowed,false);
+ }
 });

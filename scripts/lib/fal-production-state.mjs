@@ -35,7 +35,7 @@ export function falBlockedStageRecoveryAdmission(status, flags = {}) {
   const action = String(flags.action ?? "");
   if(["dispatch-validation-second","observe-validation-second","review-validation-second"].includes(action)) {
     const extra=action==="dispatch-validation-second"?["confirm-spend"]:action==="review-validation-second"?["reviewer","note","approve-ids","reject-ids"]:[];
-    return {applicable:true,allowed:status.current_stage==="image_generation"&&status.current_stage_state==="blocked"
+    return {applicable:true,allowed:status.current_stage==="image_generation"&&["missing","blocked"].includes(status.current_stage_state)
       &&flags["episode-dir"]===status.episode_dir&&String(status.next_command_shape??"").includes(`--action ${action}`)
       &&Object.keys(flags).sort().join(',')===["episode-dir","action",...extra].sort().join(',')
       &&(action!=="dispatch-validation-second"||flags["confirm-spend"]==="exact_fal_validation_second"),

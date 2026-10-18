@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { isPanelProductionIdentity, assertPanelProductionIdentity } from "./lib/panel-production-policy.mjs";
+import { panelMotionRevisionNext } from "./lib/panel-motion-revision.mjs";
 import {
   PIPELINE_STAGE_REGISTRY_VERSION,
   stageRegistryFor,
@@ -6707,6 +6708,12 @@ async function main() {
       : currentAuthor && authorPointer.status === 'needs_exact_repair'
         ? `node bin/goldflow.mjs visual panel-plan ${commandBase(identity)} --action compile --recipe <exact-reviewed-panel-composition-recipe.json>`
         : `node bin/goldflow.mjs visual panel-plan ${commandBase(identity)} --action author --concurrency 8`;
+    const motionRevision = await panelMotionRevisionNext({ episodeDir, episode, packetHash });
+    if (motionRevision) motionPlan.next_command_shape = motionRevision.action === 'compile'
+      ? `node bin/goldflow.mjs visual panel-plan ${commandBase(identity)} --action compile --recipe ${motionRevision.recipe_path}`
+      : motionRevision.action === 'revise-motion'
+        ? `node bin/goldflow.mjs visual panel-plan ${commandBase(identity)} --action revise-motion --request ${motionRevision.request_path} --concurrency 8`
+        : `node bin/goldflow.mjs visual panel-plan ${commandBase(identity)} --action compile --recipe <exact-reviewed-motion-reconciliation-recipe.json>`;
   }
   const semanticValidation = legacyIdentity
     ? {

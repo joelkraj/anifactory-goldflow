@@ -15,6 +15,31 @@ const hash = v => createHash('sha256').update(JSON.stringify(v)).digest('hex');
 const write = (p, v) => fs.writeFile(p, JSON.stringify(v, null, 2) + '\n', { flag: 'wx' });
 const fields = new Set(['rect_to', 'camera_from', 'camera_to', 'move_start_sec', 'move_end_sec', 'entry']);
 
+/** Status routing only; it never approves the candidate or edits a timeline. */
+export async function panelMotionRevisionNext({ episodeDir, episode, packetHash }) {
+  const requestPath = path.join(episodeDir, `panel_motion_revision_request_${episode}.json`);
+  if (!await exists(requestPath)) return null;
+  const request = await read(requestPath), requestHash = await sha256File(requestPath);
+  need(request.schema === 'goldflow_panel_motion_revision_request_v1' && request.source_packet_sha256 === packetHash
+    && path.isAbsolute(request.recipe?.path ?? '') && await sha256File(request.recipe.path) === request.recipe.sha256,
+  'registered motion request is stale');
+  const job = path.join(episodeDir, 'reports', 'panel-motion-revisions', packetHash, request.recipe.sha256);
+  if (!await exists(job)) return { action: 'revise-motion', request_path: requestPath };
+  const binding = await read(path.join(job, 'binding.json'));
+  need(binding.request_sha256 === requestHash && binding.request_path === requestPath, 'registered revision binding changed');
+  const names = await fs.readdir(path.join(job, 'chunks'));
+  const chunks = await Promise.all(names.filter(n => n.endsWith('.json') && !n.endsWith('.claim.json'))
+    .map(n => read(path.join(job, 'chunks', n))));
+  if (chunks.some(r => r.status === 'failed')) return { action: 'manual_reconciliation', request_path: requestPath };
+  const reports = await Promise.all((await fs.readdir(job)).filter(n => /^report-.*\.json$/.test(n)).map(n => read(path.join(job, n))));
+  const latest = reports.filter(r => r.request_sha256 === requestHash).sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
+  if (latest?.status === 'candidate_ready') {
+    need(path.isAbsolute(latest.recipe_path ?? '') && await sha256File(latest.recipe_path) === latest.recipe_sha256, 'motion candidate changed');
+    return { action: 'compile', recipe_path: latest.recipe_path };
+  }
+  return { action: 'revise-motion', request_path: requestPath };
+}
+
 /** A new, explicitly requested motion treatment, never a retry of artwork/crop authoring. */
 export function applyPanelMotionRevision({ response, chunk, baseline, priorDecisions }) {
   need(Array.isArray(response?.revisions) && response.revisions.length === chunk.scenes.length,

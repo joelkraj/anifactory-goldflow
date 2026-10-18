@@ -7,7 +7,7 @@ import { panelProductionFixture } from './panel-production-fixture.mjs';
 import { preparePanelProductionPlan } from '../lib/panel-production-plan.mjs';
 import { sha256File } from '../lib/file-hash.mjs';
 import { panelAuthorChunks } from '../lib/panel-production-author.mjs';
-import { applyPanelMotionRevision, revisePanelProductionMotion } from '../lib/panel-motion-revision.mjs';
+import { applyPanelMotionRevision, revisePanelProductionMotion, panelMotionRevisionNext } from '../lib/panel-motion-revision.mjs';
 
 async function fixture() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'panel-motion-revision-'));
@@ -97,5 +97,25 @@ test('interrupted admitted revision cannot resubmit even before raw output exist
     await fs.rename(row.raw_output_path, path.join(dir, 'interrupted-raw-retained.json'));
     await assert.rejects(revisePanelProductionMotion({ ...f, executor: async () => { calls++; } }), /revision claim retained/);
     assert.equal(calls, 1);
+  } finally { await fs.rm(f.root, { recursive: true, force: true }); }
+});
+
+test('status routes registered motion work to revision, candidate compile, or manual reconciliation', async () => {
+  const f = await fixture();
+  try {
+    const statusArgs = { episodeDir: f.episodeDir, episode: 'ep_01', packetHash: f.request.source_packet_sha256 };
+    assert.equal(await panelMotionRevisionNext(statusArgs), null);
+    const requestPath = f.p('panel_motion_revision_request_ep_01.json');
+    await fs.copyFile(f.requestPath, requestPath);
+    assert.equal((await panelMotionRevisionNext(statusArgs)).action, 'revise-motion');
+    const result = await revisePanelProductionMotion({ ...f, requestPath, executor: async ({ outputPath }) => {
+      const r = f.response(f.decisions.map(d => d.scene_id)); await fs.writeFile(outputPath, JSON.stringify(r)); return r;
+    } });
+    assert.deepEqual(await panelMotionRevisionNext(statusArgs), { action: 'compile', recipe_path: result.recipe_path });
+    const chunkPath = path.join(path.dirname(result.report_path), 'chunks/chunk_001.json');
+    const chunk = JSON.parse(await fs.readFile(chunkPath)); chunk.status = 'failed'; await fs.writeFile(chunkPath, JSON.stringify(chunk));
+    assert.equal((await panelMotionRevisionNext(statusArgs)).action, 'manual_reconciliation');
+    await fs.appendFile(f.recipePath, 'changed');
+    await assert.rejects(panelMotionRevisionNext(statusArgs), /registered motion request is stale/);
   } finally { await fs.rm(f.root, { recursive: true, force: true }); }
 });

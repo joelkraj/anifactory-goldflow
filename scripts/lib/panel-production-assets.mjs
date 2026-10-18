@@ -153,6 +153,32 @@ export function panelAssetOwnerRows(beats, plan) {
   })).sort((a, b) => beats.indexOf(byBeat.get(a.visual_beat_id)) - beats.indexOf(byBeat.get(b.visual_beat_id)));
 }
 
+// Provider packets need the evidence for every covered beat, but not repeated
+// parent-scene reports, timing diagnostics or artifact provenance. The official
+// allocation and full beat plan remain unchanged and hash-bound on disk.
+export function panelAssetOrderForPrompt(order) {
+  if (!order) return null;
+  const fields = [
+    'visual_beat_id', 'scene_id', 'source_atom_ids',
+    'source_word_start_index', 'source_word_end_index',
+    'start_sec', 'end_sec', 'visual_beat_script_excerpt',
+    'visual_beat_action', 'visual_beat_action_evidence', 'depiction_mode',
+    'physically_visible_entity_ids', 'screen_visible_entity_ids',
+    'preview_visible_entity_ids', 'mentioned_only_entity_ids',
+    'active_state_constraints', 'location_id', 'location',
+    'local_props', 'local_ui_elements', 'narrative_overlays',
+    'background_population', 'continuity_notes',
+  ];
+  return {
+    asset_id: order.asset_id, owner_beat_id: order.owner_beat_id,
+    beat_ids: order.beat_ids, visual_brief: order.visual_brief,
+    editorial_reason: order.editorial_reason,
+    bound_beats: (order.bound_beats ?? []).map(beat => Object.fromEntries(
+      fields.filter(field => beat[field] !== undefined).map(field => [field, beat[field]]),
+    )),
+  };
+}
+
 /** Expand identity/timing aliases only; creative prompt text is preserved verbatim. */
 export function expandPanelAssetPrompts(ownerPrompts, { plan, beats, planSha256 }) {
   const byOwner = new Map(ownerPrompts.map(row => [row.visual_beat_id, row]));

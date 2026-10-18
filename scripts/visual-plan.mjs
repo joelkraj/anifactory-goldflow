@@ -55,7 +55,7 @@ import {
 import { isChatGptWebRateLimitError } from "./lib/chatgpt-web-throttle-state.mjs";
 import { parseJsonObjectFromPlannerOutput } from "./lib/json-output-repair.mjs";
 import { isPanelProductionIdentity } from "./lib/panel-production-policy.mjs";
-import { loadPanelAssetPlan, panelAssetOwnerRows, expandPanelAssetPrompts, assertPanelPromptAllocation } from "./lib/panel-production-assets.mjs";
+import { loadPanelAssetPlan, panelAssetOwnerRows, panelAssetOrderForPrompt, expandPanelAssetPrompts, assertPanelPromptAllocation } from "./lib/panel-production-assets.mjs";
 import { noLtxOverrideStatus } from "./lib/operator-motion-route-override.mjs";
 import { planningRuntimeFromProcessContext } from "./lib/planning-runtime-policy.mjs";
 import {
@@ -469,7 +469,7 @@ function compactSceneForPrompt(scene, stateRefIndex = new Map(), visualReference
     : null;
   return {
     target_image_id: scene.image_id_hint ?? (absoluteIndex == null ? null : `${episode}-cut-${String(absoluteIndex + 1).padStart(3, "0")}`),
-    panel_asset_order: scene.panel_asset_order ?? null,
+    panel_asset_order: panelAssetOrderForPrompt(scene.panel_asset_order),
     editorial_reuse: {
       eligible: Array.isArray(scene.__editorial_reuse_candidate_image_ids) && scene.__editorial_reuse_candidate_image_ids.length > 0,
       candidate_image_ids: scene.__editorial_reuse_candidate_image_ids ?? [],

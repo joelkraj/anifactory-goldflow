@@ -28,6 +28,8 @@ After approved visual beats and reference images, the panel asset stage prepares
 
 Visual prompt planning authors only unique artwork orders, with their covered beats as context. The validated plan expands those orders back into the original beat IDs and timing. Reused rows do not receive provider leases or creative submissions. Materialization records the exact source asset and plan hash, zero generation cost, and separate per-beat acceptance. Missing or failed source art stops that scope; it never silently becomes a fresh paid request. Ordinary wavefront prefetch is disabled for this first profile because it can dispatch before allocation is complete.
 
+Shared-artwork prompt packets project each covered beat to its exact narration, action/evidence, source indices, depiction, entities, local props/UI, state, population and continuity. They omit repeated parent-scene diagnostics and artifact metadata; the complete source-bound beat plan and allocation remain intact. The normal packet byte ceiling still applies and an oversized individual order stops before provider submission.
+
 If an import is interrupted after a source image was accepted, status can select `imagegen panel-reconcile --episode-dir <episode-dir>` to restore missing derivative panels and their ledger rows with zero provider calls. A failed source image is repaired by its exact owner ID. Changed or conflicting accepted bytes stop for triage.
 
 Measure savings as unique scene artwork orders versus covered beats, then compare actual provider receipts. Reference images still have their own cost. Do not claim a savings percentage from the three-minute experiment, which reused artwork already generated for an earlier edit.

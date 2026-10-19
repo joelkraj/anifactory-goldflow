@@ -24,6 +24,7 @@ import { semanticRecoveryAdmission } from "../scripts/lib/semantic-planner-recov
 import { visualPromptRecoveryAdmission } from "../scripts/lib/visual-prompt-recovery.mjs";
 import { visualBeatRecoveryAdmission } from "../scripts/lib/visual-beat-recovery.mjs";
 import { visualBeatExactRepairAdmission } from "../scripts/lib/visual-beat-exact-repair.mjs";
+import { narrationFinalPatchAdmission } from "../scripts/lib/narration-final-patch.mjs";
 import { visualBeatDensityRepairAdmission } from "../scripts/lib/visual-beat-density-repair.mjs";
 import { exactVisualPromptRepairAdmission } from "../scripts/lib/visual-prompt-exact-repair.mjs";
 import { screenIdentityBlockerRepairAdmission } from "../scripts/lib/visual-screen-identity-blocker-repair.mjs";
@@ -247,6 +248,15 @@ function enforceWorkflowGuard(commandName, subcommandName, scriptArgs, episodeDi
     const repair = visualBeatExactRepairAdmission(result, parsedFlags);
     if (!repair.allowed) {
       console.error(`Workflow guard blocked exact visual beat repair: ${repair.reason}.`);
+      if (result.next_command_shape) console.error(`Next valid command shape: ${result.next_command_shape}`);
+      process.exit(1);
+    }
+    return;
+  }
+  if (commandName === "tts" && subcommandName === "patch-final-narration") {
+    const patch = narrationFinalPatchAdmission(result, parsedFlags);
+    if (!patch.allowed) {
+      console.error(`Workflow guard blocked narration final patch: ${patch.reason}.`);
       if (result.next_command_shape) console.error(`Next valid command shape: ${result.next_command_shape}`);
       process.exit(1);
     }
@@ -831,6 +841,8 @@ if (command === "crime-proof" && !helpRequested) {
   run("visual-beat-plan.mjs", flags);
 } else if (command === "visual" && subcommand === "repair-beats") {
   run("visual-beat-exact-repair.mjs", flags);
+} else if (command === "tts" && subcommand === "patch-final-narration") {
+  run("narration-final-patch.mjs", flags);
 } else if (command === "visual" && subcommand === "repair-beat-density") {
   run("visual-beat-density-repair.mjs", flags);
 } else if (command === "visual" && subcommand === "planner-ab") {

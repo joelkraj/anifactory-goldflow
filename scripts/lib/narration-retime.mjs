@@ -17,7 +17,11 @@ export function narrationRetimeAdmission(status = {}, flags = {}) {
   if (keys.length !== 2 || !keys.includes("episode-dir") || !keys.includes("spec")) return deny("exact_episode_dir_and_spec_required");
   if (status.identity?.schema !== "goldflow_run_identity_v2" || status.media_workflow?.id !== "generated_visuals_v1") return deny("unsupported_identity_or_workflow");
   if (status.identity?.render_profile !== "panel_composition_v1") return deny("panel_composition_render_required");
-  if (status.stage_ledger?.find((row) => row.stage === "premium_render")?.state !== "passed") return deny("passed_render_required");
+  // The retime replaces the render, so it gates on the passed composition plan and a final QA
+  // that passed on this production rather than on a render a code change may have staled.
+  const state = (stage) => status.stage_ledger?.find((row) => row.stage === stage)?.state;
+  if (state("motion_edit_plan") !== "passed") return deny("passed_panel_composition_plan_required");
+  if (state("final_qa") !== "passed") return deny("passed_final_qa_required");
   return { allowed: true, reason: "exact_reviewed_narration_retime" };
 }
 

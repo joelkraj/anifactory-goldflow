@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { sha256File } from "./lib/file-hash.mjs";
 import { masterNarrationTwoPass } from "./lib/narration-mastering.mjs";
 import { parsePcm16Wav, unitWindows } from "./lib/narration-final-patch.mjs";
-import { NARRATION_RETIME_RECEIPT_SCHEMA, NARRATION_RETIME_SPEC_SCHEMA, buildRetimeMap, retimeTimeline, retimeWordTiming } from "./lib/narration-retime.mjs";
+import { NARRATION_RETIME_RECEIPT_SCHEMA, NARRATION_RETIME_SPEC_SCHEMA, buildRetimeMap, narrationRetimeAdmission, retimeTimeline, retimeWordTiming } from "./lib/narration-retime.mjs";
 import { validatePanelTimeline } from "./lib/panel-layout-validation.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -29,7 +29,7 @@ const statusCall = spawnSync(process.execPath, [path.join(repoRoot, "bin", "gold
   { cwd: repoRoot, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
 need(statusCall.status === 0, `status failed: ${statusCall.stderr}`);
 const status = JSON.parse(statusCall.stdout);
-need(status.stage_ledger?.find((row) => row.stage === "premium_render")?.state === "passed", "admission requires a passed render");
+need(narrationRetimeAdmission(status, flags).allowed, `admission refused: ${narrationRetimeAdmission(status, flags).reason}`);
 need(status.identity?.render_profile === "panel_composition_v1", "panel composition render required");
 
 const spec = JSON.parse(await fs.readFile(specPath, "utf8"));

@@ -32,10 +32,11 @@ assert.equal(words.words[0].start_sec, mapSeconds(map, 1.2));
 assert.equal(words.narration_audio_hash, "b");
 
 const status = { identity: { schema: "goldflow_run_identity_v2", render_profile: "panel_composition_v1" }, media_workflow: { id: "generated_visuals_v1" },
-  stage_ledger: [{ stage: "premium_render", state: "passed" }] };
+  stage_ledger: [{ stage: "motion_edit_plan", state: "passed" }, { stage: "premium_render", state: "stale" }, { stage: "final_qa", state: "passed" }] };
 const flags = { "episode-dir": "/e", spec: "/e/s.json" };
 assert.equal(narrationRetimeAdmission(status, flags).allowed, true);
-assert.equal(narrationRetimeAdmission({ ...status, stage_ledger: [{ stage: "premium_render", state: "stale" }] }, flags).allowed, false);
+assert.equal(narrationRetimeAdmission({ ...status, stage_ledger: [{ stage: "motion_edit_plan", state: "passed" }, { stage: "final_qa", state: "missing" }] }, flags).allowed, false);
+assert.equal(narrationRetimeAdmission({ ...status, stage_ledger: [{ stage: "motion_edit_plan", state: "stale" }, { stage: "final_qa", state: "passed" }] }, flags).allowed, false);
 assert.equal(narrationRetimeAdmission(status, { ...flags, "workflow-bypass": "true" }).allowed, false);
 assert.throws(() => buildRetimeMap([1], [1, 2], []), /lengths differ/);
 console.log("narration-retime-tests passed");

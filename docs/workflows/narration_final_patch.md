@@ -17,7 +17,7 @@ The command verifies that each accepted unit's exact bytes sit at their offset i
 
 ## Retime when good takes do not fit
 
-When reviewed complete takes are longer than their windows, use `tts retime-final-narration` instead of trimming. It requires a passed panel-composition render. The `goldflow_narration_retime_spec_v1` spec binds the current panel plan and timeline, canonical word timing, audio bed report, stitch report and raw stream, plus each unit's candidate WAV and receipt.
+When reviewed complete takes are longer than their windows, use `tts retime-final-narration` instead of trimming. It requires a passed panel composition plan and a final QA that passed on this production. The `goldflow_narration_retime_spec_v1` spec binds the current panel plan and timeline, canonical word timing, audio bed report, stitch report and raw stream, plus each unit's candidate WAV and receipt.
 
 ```bash
 node bin/goldflow.mjs tts retime-final-narration --episode-dir <episode-dir> --spec <episode-dir>/<approved-retime-spec.json>

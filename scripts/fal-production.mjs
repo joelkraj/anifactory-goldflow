@@ -14,6 +14,7 @@ import { validateFalPrebulkPromptCorrection } from "./lib/fal-prebulk-prompt-cor
 import { applyFalPostplanPromptCorrection, inspectFalPostplanPromptCorrection } from "./lib/fal-postplan-prompt-correction.mjs";
 import { validateFalReviewedReferenceSuccessRepair } from "./lib/fal-reviewed-reference-success-repair.mjs";
 import { recheckFalReferenceHolds } from "./lib/fal-reference-hold-recheck.mjs";
+import { falStateSourceMap, resolveFalApprovedRefId } from "./lib/fal-state-ref-alias.mjs";
 import { reviewedBulkRepairRound } from "./lib/fal-reviewed-bulk-round.mjs";
 import { reviewedBulkSourceReceipt } from "./lib/fal-reviewed-bulk-source-receipt.mjs";
 import { falArtworkOrders, completeFalPanelArtwork } from "./lib/fal-panel-artwork.mjs";
@@ -163,12 +164,16 @@ async function nativePromptReferences(ctx,row,approval){
   const referencePlan=await read(path.join(ctx.root,"reference-plan.json"));
   const approvedImports=new Map(referencePlan.assignments.filter(item=>item.reference_mode==="approved_local_asset")
     .map(item=>[item.ref_id,item.reference_asset_ids[0]]));
+  // Character-state aliases share their approved source target's raster.
+  const sourceByState=falStateSourceMap(await read(path.join(ctx.episodeDir,"character_state_refs.json")).catch(()=>({})));
   const refs=[];
   for(const ref of requirements){
-    const id=String(ref.ref_id??"");const localPath=ref.reference_image_path??ref.conditioning_image_path;
-    need(id&&path.isAbsolute(localPath??""),`Fal prompt reference is missing an exact local path: ${row.image_id}`);
+    const requested=String(ref.ref_id??"");const localPath=ref.reference_image_path??ref.conditioning_image_path;
+    need(requested&&path.isAbsolute(localPath??""),`Fal prompt reference is missing an exact local path: ${row.image_id}`);
+    const id=resolveFalApprovedRefId(requested,approval.reference_hash_by_ref_id??{},sourceByState);
     const sha256=approval.reference_hash_by_ref_id?.[id];
-    need(/^[a-f0-9]{64}$/.test(sha256??"")&&await falFileSha256(localPath)===sha256,`Fal prompt reference is not hash-approved: ${row.image_id}/${id}`);
+    need(/^[a-f0-9]{64}$/.test(sha256??"")&&await falFileSha256(localPath)===sha256,`Fal prompt reference is not hash-approved: ${row.image_id}/${requested}`);
+    if(refs.some(item=>item.sha256===sha256))continue;
     refs.push({asset_id:approvedImports.get(id)??falPortableAssetId(ctx.identity.series_slug,{ref_id:id,kind:ref.kind??"asset"}),asset_class:ref.kind??"asset",path:localPath,sha256});
   }
   return refs;

@@ -1,8 +1,16 @@
 # YouTube CTR Packaging Director V1
 
-Use this prompt after final QA. It creates the operator-review package for a finished longform betrayal and revenge manhwa recap.
+Use this prompt after final QA. It creates the operator-review package for a finished longform manhwa recap.
 
 ```text
+STORY-LED TITLE SELECTION (story_led_hooks_v1)
+
+Choose the strongest hook for the particular story before choosing wording. Privately compare its genuinely supported mechanic, impossible rule, visible victory, status transformation, relationship, survival, mystery, and betrayal angles; these are examples, not a fixed taxonomy or quota. Family betrayal, revenge, first person, third person, and a particular sentence skeleton receive no automatic preference. Do not invent family conflict or inflate ranks to make a template fit.
+
+Judge cold-viewer clarity, specificity, curiosity, desirable payoff, mobile visibility, title-thumbnail agreement, literal story payment, and measured comparable demand. Put the strongest click reason in the first roughly fifty-five characters. Explain why the chosen angle beats the strongest alternative; model scores and raw competitor views are not proof of future CTR. A historical channel premise prior may constrain a requested development batch, but it must not force a title grammar onto an existing or operator-selected story. Preserve emotional stakes and story quality even when betrayal is absent from the headline.
+
+A hook contract records primary_hook (a plain free-form name), hook_phrase and payoff_phrase (both literal title substrings), why_this_hook (comparative editorial rationale), and story_support (at least one entry for each phrase, with title_phrase and evidence naming the specific scene or event that pays it). Before a script exists, evidence is a promised payment scene, not a fabricated quotation. After scripting, each support entry also needs source_quote copied exactly from the locked script. Exact-source matching checks provenance; an editor must still judge whether the passage supports the advertised claim.
+
 You are the CTR packaging director for a YouTube manhwa recap channel.
 
 Your job is to package one finished episode for the click without misrepresenting the story. Work from the approved package-first candidate and package contract, locked script, final render, current channel analytics, and recent niche outliers. Do not package from the premise alone.
@@ -21,7 +29,7 @@ Inspect at least three performance examples before proposing packaging.
 
 Use at least one outlier from this channel. Record its title, video identifier, observation time, one useful metric such as views, click-through rate, average view duration, views per hour, or breakout score, and the packaging lesson that transfers.
 
-Use at least one recent betrayal or revenge niche outlier observed within the last one hundred twenty days. Prefer two. Record its title, URL or video identifier, observation time, one useful performance metric, and the specific packaging lesson.
+Use at least one recent story-relevant niche outlier observed within the last one hundred twenty days. Prefer two. Record its title, URL or video identifier, observation time, one useful performance metric, and the specific packaging lesson.
 
 Do not call a video an outlier without a metric. Do not copy another creator's wording or art. Extract the demand pattern.
 
@@ -33,17 +41,7 @@ Include one close failure analogue when available, especially an own-channel upl
 
 STORY TRUTH
 
-Read the complete locked story and final QA artifacts. Reduce the episode to four facts.
-
-First, who betrayed the protagonist.
-
-Second, exactly what they did.
-
-Third, what the protagonist took back, exposed, destroyed, inherited, or became.
-
-Fourth, the concrete loss suffered by the betrayer.
-
-The selected title must communicate the first three facts in one causal sentence. The thumbnail must supply one concrete proof of the betrayal, reversal, or betrayer loss. It may hard-prove the title's strongest hook through a literal receipt, or add a distinct consequential payoff. Together they must sell the same fantasy and create one compelling unresolved how or why question.
+Read the complete locked story and final QA artifacts. Identify its strongest actual mechanic or situation, human stakes, distinctive proof, and literal final payoff. Also record betrayal and antagonist loss when they are material to this story. Compare supported hook angles before choosing a title; do not invent a family betrayal to fill a worksheet. The selected title and thumbnail must sell the same story-specific fantasy with one concrete proof and one compelling unresolved how or why question.
 
 TITLE CONTRACT
 
@@ -51,19 +49,11 @@ Write three to five candidates.
 
 Every candidate must be one hundred characters or fewer and end with the words vertical bar Manhwa Recap.
 
-Every candidate must contain a concrete betrayal phrase and a concrete revenge or takeback phrase that are both literally present in the title.
+Every candidate must name its selected hook and a concrete payoff through a hook_contract. Neither betrayal nor revenge wording is mandatory.
 
 Every candidate must explain the complete video, not merely tease the setup.
 
-Prefer plain causal structures such as these.
-
-My Family Chose the Fake Heir, So I Took Back Every Skill They Stole.
-
-She Left Me to Die, Then I Became the Strongest Tank.
-
-They Used Me as a Human Shield, So I Let Their Guild Collapse.
-
-Avoid vague curiosity, lore terms that need explanation, crowded clauses, unsupported rank inflation, and titles that hide the revenge.
+Prefer plain story-specific promises. Compare mechanic-led, impossible-rule, visible-victory, relationship, survival, status-change and betrayal angles when they genuinely fit. First- and third-person wording are both eligible. Do not mechanically replace one repeated formula with another. Avoid vague curiosity, unsupported superlatives, invented ranks, crowded clauses, or a payoff hidden behind setup.
 
 THUMBNAIL CONTRACT
 
@@ -93,13 +83,13 @@ For a new thumbnail, use no episode stills, character references, scene referenc
 
 Use headline color, outline, arrows, labels, UI, and panel structure only when the coded winning analogues support that exact job. Do not cargo-cult yellow arrows or all-caps text. Do not add decorative badges, tiny captions, repeated faces, reaction circles, split panels, or background crowds unless the selected evidence-backed composition explicitly requires them.
 
-Review the finished image at roughly ten percent of desktop size. Reject it if the faces, arrow, betrayal, revenge, or main words are not immediately legible.
+Review the finished image at roughly ten percent of desktop size. Reject it if the faces, selected hook, proof, payoff, or main words are not immediately legible.
 
 The finished thumbnail must be a sixteen by nine PNG or JPEG, at least twelve hundred eighty pixels wide, and no larger than fifty megabytes.
 
 DESCRIPTION CONTRACT
 
-The first two lines must plainly explain the betrayal and revenge using one or two primary search phrases.
+The first two lines must plainly explain the selected hook and payoff using one or two relevant primary search phrases.
 
 Keep the rest concise. Explain the setup, reversal, and viewing promise without retelling the whole script.
 
@@ -109,7 +99,7 @@ PINNED COMMENT CONTRACT
 
 Write one comment under five hundred characters.
 
-Ask exactly one clear betrayal dilemma that a viewer can answer without remembering minor lore.
+Ask exactly one clear story-specific dilemma that a viewer can answer without remembering minor lore.
 
 Do not ask several questions, advertise another upload, or summarize the ending.
 
@@ -135,15 +125,15 @@ Pinned Comment
 
 The text under those three sections must exactly match the selected values in the JSON spec.
 
-Create youtube_packaging_spec_EPISODE.json using schema goldflow_youtube_packaging_spec_v2. Start with status draft. Include the episode, expected YouTube channel name or handle, research evidence, title candidates, selected title, thumbnail candidates, selected thumbnail candidate identifier, final thumbnail path, description contract, tags, pinned comment, and publish settings.
+Create youtube_packaging_spec_EPISODE.json using schema goldflow_youtube_packaging_spec_v2. Start with status draft. Set title_selection_policy to story_led_hooks_v1. Include the episode, expected YouTube channel name or handle, research evidence, title candidates, selected title, thumbnail candidates, selected thumbnail candidate identifier, final thumbnail path, description contract, tags, pinned comment, and publish settings.
 
 Include `package_lineage` with the approved package-first artifact path and hash, the original title and thumbnail proof, `preserved_promises`, `changed_elements`, `change_reasons`, and exact locked-script payment evidence for every selected post-render claim.
 
 Each research row needs id, source_type, source_ref, title, observed_at, metrics, and lesson. source_type must be own_channel or niche_outlier.
 
-Each title candidate needs title, betrayal_phrase, revenge_phrase, explains_full_video, research_evidence_ids, and a selection_reason for the selected candidate.
+Each title candidate needs title, hook_contract, explains_full_video, research_evidence_ids, and a selection_reason for the selected candidate. Every hook_contract follows the story-led contract above and binds both title phrases to exact source_quote passages from script_clean.md. Set description_contract.opening_explains_hook_and_payoff to true after review. Pinned-comment metadata uses viewer_dilemma; thumbnail candidates use hook_signal and payoff_signal rather than inventing betrayal or revenge signals.
 
-Each thumbnail candidate needs id, paired_title, subjects with role and emotion, main_text, labels, arrows with purpose, betrayal_signal, revenge_signal, `title_supplies`, `thumbnail_role`, `thumbnail_adds_or_proves`, `package_open_loop`, `proof_device`, `visual_feature_evidence`, single_scene, no_collage, simple_read_order, and research_evidence_ids. The selected candidate also needs a selection_reason, mobile_reviewed, `provider: "google_flow_imagen"` (or an explicitly declared `google_gemini_imagen` / `chatgpt_web_gpt_image` alternative), `generation_mode: "full_raster_from_scratch"`, `reference_count: 0`, `text_rendered_by_model: true`, `locally_composited_text: false`, and `locally_composited_arrows: false`. When the operator explicitly requests an edit of an existing raster, the selected candidate may instead declare `provider: "codex_imagegen"`, `generation_mode: "scoped_edit_from_local_raster"`, `reference_count: 1`, `edit_source_path`, `edit_source_sha256`, `final_sha256`, `edit_scope`, and `edit_user_request`. Keep the source raster as a separate immutable file and review the edit at phone size.
+Each thumbnail candidate needs id, paired_title, subjects with role and emotion, main_text, labels, arrows with purpose, hook_signal, payoff_signal, `title_supplies`, `thumbnail_role`, `thumbnail_adds_or_proves`, `package_open_loop`, `proof_device`, `visual_feature_evidence`, single_scene, no_collage, simple_read_order, and research_evidence_ids. The selected candidate also needs a selection_reason, mobile_reviewed, `provider: "google_flow_imagen"` (or an explicitly declared `google_gemini_imagen` / `chatgpt_web_gpt_image` alternative), `generation_mode: "full_raster_from_scratch"`, `reference_count: 0`, `text_rendered_by_model: true`, `locally_composited_text: false`, and `locally_composited_arrows: false`. When the operator explicitly requests an edit of an existing raster, the selected candidate may instead declare `provider: "codex_imagegen"`, `generation_mode: "scoped_edit_from_local_raster"`, `reference_count: 1`, `edit_source_path`, `edit_source_sha256`, `final_sha256`, `edit_scope`, and `edit_user_request`. Keep the source raster as a separate immutable file and review the edit at phone size.
 
 When two or three genuinely strong title-thumbnail pairs remain, also create `youtube_ab_candidates_EPISODE.json` with schema `goldflow_youtube_ab_candidates_v1`. Give every variant one stable id, its paired title, actual thumbnail path, thumbnail candidate id, provider, and a concrete hypothesis. Name the baseline variant and choose `thumbnail_only`, `title_only`, or `title_and_thumbnail`. Do not create an A/B packet from weak filler variants.
 
@@ -151,7 +141,7 @@ Do not mark the spec approved. The operator approval command owns that state cha
 
 FINAL AUDIT
 
-Verify the title tells the betrayal and revenge.
+Verify the title leads with the strongest story-supported hook and states a literal payoff. Compare it with the strongest alternative angle and verify all supporting quotations against the locked script.
 
 Verify the thumbnail uses no more than three subjects, two arrows, two labels, four main words, and eight total overlay words.
 

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { STORY_LED_TITLE_POLICY, validateStoryLedTitle } from "./story-led-title.mjs";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import sharp from "sharp";
@@ -210,7 +211,9 @@ function validateEvidenceLinks(rows, validEvidenceIds, prefix, blockers) {
   }
 }
 
-function validateTitle(spec, blockers, validEvidenceIds) {
+function validateTitle(spec, blockers, validEvidenceIds, options = {}) {
+  const storyLed = spec?.title_selection_policy === STORY_LED_TITLE_POLICY;
+  push(blockers, spec?.title_selection_policy != null && !storyLed, "title_selection_policy_invalid");
   const title = clean(spec?.selected_title);
   const candidates = Array.isArray(spec?.title_candidates) ? spec.title_candidates : [];
   const candidateTitles = candidates.map((candidate) => clean(candidate?.title));
@@ -227,8 +230,15 @@ function validateTitle(spec, blockers, validEvidenceIds) {
     const revengePhrase = clean(candidate?.revenge_phrase);
     push(blockers, !candidateTitle, `title_candidate_${index}_missing`);
     push(blockers, candidateTitle.length > TITLE_MAX_CHARS, `title_candidate_${index}_exceeds_youtube_limit`);
-    push(blockers, !betrayalPhrase || !lower(candidateTitle).includes(lower(betrayalPhrase)), `title_candidate_${index}_betrayal_clause_not_in_title`);
-    push(blockers, !revengePhrase || !lower(candidateTitle).includes(lower(revengePhrase)), `title_candidate_${index}_revenge_clause_not_in_title`);
+    if (storyLed) {
+      blockers.push(...validateStoryLedTitle(candidateTitle, candidate?.hook_contract, {
+        sourceText: options.scriptText, requireSourceQuotes: true,
+      }).map(code => `title_candidate_${index}_${code}`));
+    } else {
+      push(blockers, !betrayalPhrase || !lower(candidateTitle).includes(lower(betrayalPhrase)), `title_candidate_${index}_betrayal_clause_not_in_title`);
+      push(blockers, !revengePhrase || !lower(candidateTitle).includes(lower(revengePhrase)), `title_candidate_${index}_revenge_clause_not_in_title`);
+    }
+    push(blockers, storyLed && !candidateTitle.endsWith("| Manhwa Recap"), `title_candidate_${index}_suffix_missing`);
     push(blockers, !truthy(candidate?.explains_full_video), `title_candidate_${index}_does_not_assert_full_video`);
   }
   validateEvidenceLinks(candidates, validEvidenceIds, "title_candidate", blockers);
@@ -262,8 +272,13 @@ function validateThumbnail(spec, blockers, validEvidenceIds, options = {}) {
     push(blockers, arrows.length > THUMBNAIL_MAX_ARROWS, `thumbnail_candidate_${index}_too_many_arrows`);
     push(blockers, arrows.some((arrow) => !clean(arrow?.purpose)), `thumbnail_candidate_${index}_arrow_without_purpose`);
     push(blockers, overlayWords > THUMBNAIL_MAX_TOTAL_OVERLAY_WORDS, `thumbnail_candidate_${index}_overlay_too_wordy`);
-    push(blockers, !clean(candidate?.betrayal_signal), `thumbnail_candidate_${index}_betrayal_signal_missing`);
-    push(blockers, !clean(candidate?.revenge_signal), `thumbnail_candidate_${index}_revenge_signal_missing`);
+    if (spec?.title_selection_policy === STORY_LED_TITLE_POLICY) {
+      push(blockers, !clean(candidate?.hook_signal), `thumbnail_candidate_${index}_hook_signal_missing`);
+      push(blockers, !clean(candidate?.payoff_signal), `thumbnail_candidate_${index}_payoff_signal_missing`);
+    } else {
+      push(blockers, !clean(candidate?.betrayal_signal), `thumbnail_candidate_${index}_betrayal_signal_missing`);
+      push(blockers, !clean(candidate?.revenge_signal), `thumbnail_candidate_${index}_revenge_signal_missing`);
+    }
     push(blockers, !truthy(candidate?.single_scene), `thumbnail_candidate_${index}_must_use_one_scene`);
     push(blockers, !truthy(candidate?.no_collage), `thumbnail_candidate_${index}_must_reject_collage`);
     push(blockers, !truthy(candidate?.simple_read_order), `thumbnail_candidate_${index}_simple_read_order_missing`);
@@ -327,7 +342,11 @@ function validateDescriptionAndComment(spec, blockers) {
   push(blockers, description.length > DESCRIPTION_MAX_CHARS, "description_exceeds_youtube_limit");
   push(blockers, keywords.length < 1 || keywords.length > 2, "description_primary_keywords_must_number_one_or_two");
   push(blockers, keywords.some((keyword) => !firstLines.includes(keyword.toLowerCase())), "description_keyword_missing_from_opening");
-  push(blockers, !truthy(spec?.description_contract?.opening_explains_betrayal_and_revenge), "description_opening_does_not_assert_betrayal_and_revenge");
+  if (spec?.title_selection_policy === STORY_LED_TITLE_POLICY) {
+    push(blockers, !truthy(spec?.description_contract?.opening_explains_hook_and_payoff), "description_opening_does_not_assert_hook_and_payoff");
+  } else {
+    push(blockers, !truthy(spec?.description_contract?.opening_explains_betrayal_and_revenge), "description_opening_does_not_assert_betrayal_and_revenge");
+  }
   const tags = uniqueStrings(spec?.tags);
   push(blockers, tags.join(", ").length > TAGS_MAX_CHARS, "tags_exceed_youtube_limit");
 
@@ -336,7 +355,11 @@ function validateDescriptionAndComment(spec, blockers) {
   push(blockers, !comment, "pinned_comment_missing");
   push(blockers, comment.length > PINNED_COMMENT_MAX_CHARS, "pinned_comment_too_long");
   push(blockers, questionMarks < 1, "pinned_comment_needs_one_clear_dilemma");
-  push(blockers, !clean(spec?.pinned_comment?.betrayal_choice), "pinned_comment_betrayal_choice_missing");
+  if (spec?.title_selection_policy === STORY_LED_TITLE_POLICY) {
+    push(blockers, !clean(spec?.pinned_comment?.viewer_dilemma), "pinned_comment_viewer_dilemma_missing");
+  } else {
+    push(blockers, !clean(spec?.pinned_comment?.betrayal_choice), "pinned_comment_betrayal_choice_missing");
+  }
 }
 
 function validatePublishSettings(spec, blockers) {
@@ -414,7 +437,7 @@ export function validateYoutubePackagingSpec(spec, options = {}) {
   push(blockers, !clean(spec?.episode), "packaging_spec_episode_missing");
   validateResearchEvidence(spec, blockers, options);
   const validEvidenceIds = new Set((spec?.research_evidence ?? []).map((row) => clean(row?.id)).filter(Boolean));
-  validateTitle(spec, blockers, validEvidenceIds);
+  validateTitle(spec, blockers, validEvidenceIds, options);
   validateThumbnail(spec, blockers, validEvidenceIds, {
     enforceGenerationContract: schemaMode !== "legacy_adapter_v1",
     thumbnailFinalSha256: options.thumbnailFinalSha256,
@@ -539,6 +562,7 @@ export async function youtubeUploadPackagingComplete(episodeDir, episode, runIde
     return { done: false, state: "blocked", evidence: `final thumbnail unreadable: ${thumbnailPath}` };
   }
   const validation = validateYoutubePackagingSpec(spec, {
+    scriptText: await fs.readFile(path.join(episodeDir, "script_clean.md"), "utf8").catch(() => null),
     runIdentity,
     markdown,
     thumbnailMetadata: evidence.metadata,

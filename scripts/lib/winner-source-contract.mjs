@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { STORY_LED_TITLE_POLICY, validateStoryLedTitle } from "./story-led-title.mjs";
 
 export const WINNER_FORMULA_SCHEMA = "goldflow_channel_winner_formula_v1";
 export const WINNER_EVIDENCE_SNAPSHOT_SCHEMA = "goldflow_source_evidence_snapshot_v1";
@@ -314,6 +315,7 @@ export function validateWinnerFormula(formula) {
     pushIf(blockers, !Number.isFinite(Number(row?.weight)) || Number(row.weight) <= 0, `formula_score_dimension_${id}_weight_invalid`);
     pushIf(blockers, !integerBetween(row?.minimum, 1, 10), `formula_score_dimension_${id}_minimum_invalid`);
   }
+  pushIf(blockers, formula?.title_selection_policy != null && formula.title_selection_policy !== STORY_LED_TITLE_POLICY, "formula_title_selection_policy_invalid");
   const enginePolicy = formula?.reversal_engine_policy ?? {};
   pushIf(blockers, !nonEmpty(enginePolicy?.mandatory_betrayal_spine), "formula_mandatory_betrayal_spine_missing");
   pushIf(blockers, !nonEmpty(enginePolicy?.sequence), "formula_betrayal_engine_sequence_missing");
@@ -544,10 +546,14 @@ export function evaluateWinnerIdeation(document, formula, { recentTitles = [], r
     const titleMax = Number(formula?.candidate_policy?.title_max_characters ?? 100);
     pushIf(blockers, !title.endsWith(titleSuffix), "title_suffix_missing");
     pushIf(blockers, title.length > titleMax, "title_too_long");
-    pushIf(blockers, !exactPhrasePresent(title, candidate?.title_contract?.betrayal_phrase), "title_betrayal_phrase_missing");
-    pushIf(blockers, !exactPhrasePresent(title, candidate?.title_contract?.reversal_phrase), "title_reversal_phrase_missing");
-    for (const field of ["betrayer", "betrayal_action", "reversal_action", "antagonist_loss"]) {
-      pushIf(blockers, !nonEmpty(candidate?.title_contract?.[field]), `title_contract_${field}_missing`);
+    if (formula?.title_selection_policy === STORY_LED_TITLE_POLICY) {
+      blockers.push(...validateStoryLedTitle(title, candidate?.title_contract));
+    } else {
+      pushIf(blockers, !exactPhrasePresent(title, candidate?.title_contract?.betrayal_phrase), "title_betrayal_phrase_missing");
+      pushIf(blockers, !exactPhrasePresent(title, candidate?.title_contract?.reversal_phrase), "title_reversal_phrase_missing");
+      for (const field of ["betrayer", "betrayal_action", "reversal_action", "antagonist_loss"]) {
+        pushIf(blockers, !nonEmpty(candidate?.title_contract?.[field]), `title_contract_${field}_missing`);
+      }
     }
     const thumbnail = candidate?.thumbnail ?? {};
     const subjects = Array.isArray(thumbnail.subjects) ? thumbnail.subjects : [];
@@ -559,7 +565,8 @@ export function evaluateWinnerIdeation(document, formula, { recentTitles = [], r
     pushIf(blockers, arrows.length > Number(formula.candidate_policy.thumbnail_arrows_max ?? 2), "thumbnail_too_many_arrows");
     const totalOverlayWords = wordsInOverlay(thumbnail.main_text) + labels.reduce((sum, label) => sum + wordsInOverlay(label), 0);
     pushIf(blockers, totalOverlayWords > Number(formula.candidate_policy.thumbnail_total_overlay_words_max ?? 8), "thumbnail_total_overlay_words_exceeded");
-    for (const field of ["dominant_proof", "betrayal_signal", "reversal_signal", "additive_fact", "image_prompt"]) {
+    const signals = formula?.title_selection_policy === STORY_LED_TITLE_POLICY ? ["hook_signal", "payoff_signal"] : ["betrayal_signal", "reversal_signal"];
+    for (const field of ["dominant_proof", ...signals, "additive_fact", "image_prompt"]) {
       pushIf(blockers, !nonEmpty(thumbnail[field]), `thumbnail_${field}_missing`);
     }
     if (Array.isArray(formula?.package_contract?.pairing) && formula.package_contract.pairing.length > 0) {
@@ -705,6 +712,7 @@ export function buildWinnerPackageContract({
     channel: formula.channel,
     development_slug: ideation.development_slug,
     formula_version: formula.version,
+    ...(formula.title_selection_policy ? { title_selection_policy: formula.title_selection_policy } : {}),
     formula_path: formulaPath,
     formula_sha256: formulaSha256,
     ideation_path: ideationPath,

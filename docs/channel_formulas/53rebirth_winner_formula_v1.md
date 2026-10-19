@@ -1,5 +1,7 @@
 # Manhwa Joey Winner Formula V1
 
+Effective title policy: **story_led_hooks_v1**, approved by Joel on October 18, 2026. Select the strongest supported hook for each story; neither family betrayal nor revenge is mandatory title syntax. Historical story priors below are context, not a title template.
+
 Version: `2026-08-01.7`
 
 Machine contract: `docs/channel_formulas/53rebirth_winner_formula_v1.json`
@@ -19,6 +21,8 @@ The emotional premise comes first. Systems, ranks, portals, business mechanics, 
 Operator ideas lead. Every supplied seed remains a real finalist unless it violates literal title truth or repeats a recorded rejection. AI changes the engine after the betrayal instead of generating “betrayal concepts” and “mechanic concepts” as separate species.
 
 There are **no forced mechanic lanes, quotas, allowed-family enum, power ceiling, or mandatory nerf**. The raw pool should search freely for the most exciting betrayal-to-ascent equations. Systems, multipliers, regression, lottery, inheritance, genius, hidden identity, jobs, skills, supernatural spouses, demons, gods, devils, ghosts, vampires, genies, wishing willows, curses, objects, contracts, luck, status, and unfamiliar original mechanics are examples—not boxes that must be filled.
+
+Title selection now uses `story_led_hooks_v1`; the following older story-development priors do not impose betrayal wording on a title.
 
 The private pool should still explore materially different engines and avoid six reskins of the same system, spouse title, fantasy noun, or windfall. Diversity breaks ties; it never outranks click strength, operator judgment, or a genuinely better premise. Finalists are selected by package strength and story runway, not quota compliance.
 
@@ -41,9 +45,9 @@ Use one to three decisive details per major application. The goal is satisfying 
 
 Title default:
 
-`My/She [specific betrayal], So/Then [literal complete reversal] | Manhwa Recap`
+`[Strongest story-supported hook] + [specific literal payoff] | Manhwa Recap`
 
-The title should identify who hurt Joey, state the action, and finish with the reversal engine or its literal result. It should normally use one causal pivot and at most one high-signal number, rank, relationship, or mechanic token. A system, lottery, genius reveal, demon spouse, vampire ally, genie, wishing object, or original mechanic may be the click hinge when it launches a desirable transformation. Internal lore cannot be the hinge.
+The title should lead with whichever real mechanic, impossible rule, victory, status shift, relationship, survival problem, or betrayal makes this story most compelling. Compare alternatives before choosing; family betrayal and first-person syntax are optional. It should normally use one causal pivot and at most one high-signal number, rank, relationship, or mechanic token. A system, lottery, genius reveal, demon spouse, vampire ally, genie, wishing object, or original mechanic may be the click hinge when it launches a desirable transformation. Internal lore cannot be the hinge.
 
 The title and thumbnail are scored as one package. The title explains the causal movie; the thumbnail either hard-proves its strongest hook with a concrete receipt or adds a consequential payoff, and together they create one unresolved how or why question. The thumbnail is one phone-readable scene, preferably Joey plus one antagonist or replacement figure. It uses one number, rank change, UI, physical action, status object, role substitution, before/after transformation, or equally specific proof and one 1–4-word judgment or proof token. Repeating the title's core token is allowed when the image turns it into tangible proof; empty verbal repetition over decorative art is not. Zero arrows is the default. One is justified only when measured analogues support the same transfer, identity, or direction job. Three focal subjects are the default ceiling, although background reaction figures may be accepted when they do not compete with the proof. Generate the entire final 16:9 raster from scratch with Codex Imagen and no image references. Imagen must render the final text, labels, and arrows; local processing may only resize, convert format, or compress the unchanged raster.
 

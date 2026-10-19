@@ -3,7 +3,7 @@
   "status": "active",
   "channel": "53rebirth",
   "channel_name": "Manhwa Joey",
-  "version": "2026-08-24.2",
+  "version": "2026-10-18.1",
   "observed_at": "2026-08-24T12:00:00-04:00",
   "research_basis": {
     "path": "/Users/joel/AniFactoryData/channels/53rebirth/source_development/research/2026-08-01-winner-concepts-v1/ranked_premise_research_pool.json",
@@ -16,17 +16,15 @@
     "limits": "The one hundred concept scores are comparative editorial estimates, not predicted CTR. The vidIQ figures are directional snapshots, and the pasted citation tokens are not reusable source links. Operator decisions and measured upload outcomes outrank this pool.",
     "adopted_findings": [
       "own-channel demand and immediate emotional clarity deserve the largest package weights",
-      "betrayal or humiliation is the mandatory premise chassis for every candidate, never a competing idea lane",
       "the healthy mix comes from changing the reversal engine after the betrayal: explicit systems, fortune, genius, supernatural partners, magical boons, or original high-scaling mechanics",
       "recent niche winners materially support forbidden mechanics, measurable multipliers, and human betrayal paired with a corrective reversal engine; current own-channel evidence decides whether rank or institution shorthand transfers to this channel",
-      "the reversal engine is secondary to the plain human betrayal and visible loss, but every candidate still needs one clear engine",
       "the current own-channel catalog shows a 38.27-times median raw-view advantage for familiar money and status mechanics over abstract rank ladders; use that as a controlled ten-premise prior while retaining impression and distribution caveats",
       "identity comedy and supernatural romance remain valid challengers when the social reversal is instantly legible; the suppressed default is rank-ladder abstraction, not fantasy itself",
       "the repeated asset-theft-plus-multiplier package is a reliable floor rather than proven ceiling; do not mistake one working grammar for the whole channel",
       "acquisition, ownership, and public status transfer more directly from the strongest money videos than self-improvement alone",
-      "the first mobile-visible title phrase must expose both the wound and the reversal engine rather than spending scarce characters on a redundant lover clause",
       "one proof object or relationship should make the reversal phone-readable",
-      "documentary proof may enable an active reversal but must not become a procedural climax"
+      "documentary proof may enable an active reversal but must not become a procedural climax",
+      "Story-led hook selection supersedes mandatory betrayal wording; older own-channel priors are evidence rather than a title grammar."
     ],
     "rejected_findings": [
       "a rigid fifty-percent AI-generated supernatural quota",
@@ -36,9 +34,9 @@
     ]
   },
   "formula_name": "concrete_betrayal_explained_power_reversal",
-  "formula_statement": "Every premise begins with a personally legible betrayal or humiliation that removes Joey's status, relationship, safety, work, or future. Joey makes an early irreversible boundary, receives or discovers one clear reversal engine, and uses its potentially overpowered or hyper-scaling effect to build an understandable ascent. The engine does not need to mirror the betrayal; it must causally power the promised transformation. The story explains how Joey converts that power into results at both the scale of his whole ascent and the moment of each decisive victory, imposing a visible loss on the betrayer while building a far larger life beyond them.",
+  "formula_statement": "Choose each story\u2019s strongest legible viewer promise. Human stakes and consequential protagonist choices remain essential; betrayal may supply them when present, but neither family betrayal nor revenge is mandatory title syntax. A single clear advantage, impossible rule, relationship, survival problem or visible payoff may lead. Deliver every selected promise causally and literally in the story.",
   "audience_promise": {
-    "click_reason": "See an unfair personal betrayal reversed completely and visibly.",
+    "click_reason": "See the selected story-specific power, status, relationship, survival or reversal promise fulfilled clearly and satisfyingly.",
     "emotional_sequence": [
       "understand the wound immediately",
       "hate the unfair arrangement",
@@ -105,8 +103,8 @@
   },
   "reversal_engine_policy": {
     "operator_seed_policy": "Preserve every supplied operator seed as a real finalist unless it violates literal title truth or duplicates a recorded rejection. AI challenges and develops operator seeds; it does not silently replace them.",
-    "mandatory_betrayal_spine": "Every candidate must name who betrayed, rejected, abandoned, stole from, cursed, framed, cheated on, fired, disowned, or publicly humiliated Joey; state the literal act and concrete loss; then launch Joey into one primary reversal engine and a visible transformation.",
-    "sequence": "CONCRETE BETRAYAL OR HUMILIATION -> ONE REVERSAL ENGINE -> EARLY VISIBLE PROOF -> HYPER-SCALING BUT CAUSALLY EXPLAINED ASCENT -> VISIBLE PAYBACK",
+    "mandatory_betrayal_spine": "Compatibility field: when betrayal exists, record its literal act and consequence in story context. Do not invent a betrayer, family conflict or revenge clause to satisfy a title template; identify the actual human stakes instead.",
+    "sequence": "STORY-SPECIFIC HOOK -> OWNED CHOICE -> CLEAR ENGINE OR ADVANTAGE -> VISIBLE PROOF -> CAUSAL ASCENT -> PROMISED PAYOFF",
     "discovery_rule": "There are no fixed reversal-engine lanes, quotas, allowed-family enum, power ceiling, or mandatory nerf. Search freely for the strongest clear mechanic that can launch Joey's post-betrayal ascent. Systems, lotteries, genius, hidden identity, supernatural spouses, demons, gods, devils, ghosts, vampires, genies, wishing willows, curses, jobs, skills, objects, contracts, luck, status, and unfamiliar original mechanics are examples rather than boxes to fill.",
     "batch_diversity_rule": "The private raw pool should explore materially different mechanics and title movies. Never return six reskins of 'my wife or fiancee took one asset, then every unit became a multiplier,' one system, one spouse title, one fantasy noun, or one windfall. During the active three-upload test, at most two recommendations may use the same asset-theft-plus-unit-multiplier skeleton; include at least one evidence-backed shape-breaker from identity comedy, hidden status, supernatural romance, or another materially different viewer desire. Diversity breaks ties; it never outranks click strength, operator judgment, or a genuinely better premise.",
     "selection_rule": "Select finalists by package strength and story runway, not quota compliance. Preserve operator seeds. Do not reject an original mechanic because it does not fit a predefined family.",
@@ -119,7 +117,7 @@
       "required_package_examples": "Before scripting, preserve at least two fully explained decisive applications: the first proof and the climax or another late-scale proof. These examples establish the engine's usable causal grammar without forcing the narration into a beat sheet.",
       "boxing_example": "Bad: Joey used an intelligence system and outboxed a professional. Sufficient: the system identifies the professional's repeated tell, grants or accelerates the perception and motor control needed to exploit it, Joey deliberately baits the expected attack and executes a named counter, the professional commits to the trap, and the result includes a visible margin proving Joey was overwhelmingly superior rather than lucky. If the system grants analysis only, it cannot also grant professional reflexes or technique without training or another execution bridge."
     },
-    "rule": "Every concept is betrayal first and reversal-engine second. The engine need not thematically counter or mirror the wound. It must be nameable in one short phrase, produce visible proof, support dramatic hyper-scaling, and causally power the title transformation. Unlimited, compounding, or wildly overpowered mechanics are welcome. Do not invent a limit, cost, cooldown, or weakness merely to balance them. Instead define the acquisition, effect, scaling rule, execution bridge, first proof logic, and the major causal steps that turn the mechanic into status, money, mastery, relationships, companies, kingdoms, or worlds. Joey supplies direction and concrete application; the engine may supply enormous power. Do not stack unrelated mechanics when one strong engine can carry the fantasy."
+    "rule": "Every title leads with its strongest story-specific hook. Betrayal is eligible when it is genuinely the best hook, not compulsory wording. The engine need not thematically counter or mirror the wound. It must be nameable in one short phrase, produce visible proof, support dramatic hyper-scaling, and causally power the title transformation. Unlimited, compounding, or wildly overpowered mechanics are welcome. Do not invent a limit, cost, cooldown, or weakness merely to balance them. Instead define the acquisition, effect, scaling rule, execution bridge, first proof logic, and the major causal steps that turn the mechanic into status, money, mastery, relationships, companies, kingdoms, or worlds. Joey supplies direction and concrete application; the engine may supply enormous power. Do not stack unrelated mechanics when one strong engine can carry the fantasy."
   },
   "score_dimensions": {
     "own_channel_demand_fit": {
@@ -135,12 +133,12 @@
     "instant_emotional_clarity": {
       "weight": 15,
       "minimum": 8,
-      "question": "Can a cold viewer understand the relationship, betrayal, and reversal without lore?"
+      "question": "Can a cold viewer understand the selected hook, human stakes and desirable payoff without lore?"
     },
     "literal_complete_title_reversal": {
       "weight": 15,
       "minimum": 8,
-      "question": "Does the title state the concrete wound and the complete literal transformation rather than merely setting up a mystery?"
+      "question": "Does the title state its strongest story-native hook and a complete literal payoff without unsupported claims?"
     },
     "one_glance_thumbnail_proof": {
       "weight": 10,
@@ -155,7 +153,7 @@
     "power_fantasy_engine_and_causal_scaling": {
       "weight": 10,
       "minimum": 7,
-      "question": "After the mandatory betrayal, does one clear reversal engine deliver an exciting power fantasy with visible acceleration or hyper-scaling? Does each major proof explain the obstacle, mechanic output or granted capability, Joey's concrete execution, the response, the result, and a visible comparison proving how overpowered he is? Can the premise bridge every required capability without artificially nerfing the mechanic or using vague claims such as he used his intelligence or simply outsmarted them?"
+      "question": "Within the chosen story, does one clear reversal engine deliver an exciting power fantasy with visible acceleration or hyper-scaling? Does each major proof explain the obstacle, mechanic output or granted capability, Joey's concrete execution, the response, the result, and a visible comparison proving how overpowered he is? Can the premise bridge every required capability without artificially nerfing the mechanic or using vague claims such as he used his intelligence or simply outsmarted them?"
     },
     "fresh_from_recent_uploads": {
       "weight": 5,
@@ -179,14 +177,38 @@
     "climax_start_percent_max": 92,
     "resolution_script_percent_max": 8,
     "score_dimensions": {
-      "opening_and_ten_minute_payoff_map": {"weight": 15, "minimum": 7},
-      "clear_advantage_rule_and_scaling_path": {"weight": 15, "minimum": 7},
-      "joey_agency_and_audience_trust": {"weight": 15, "minimum": 7},
-      "causal_movement_runway": {"weight": 20, "minimum": 7},
-      "conflict_variety_and_procedure_restraint": {"weight": 10, "minimum": 7},
-      "intelligent_opposition_and_scaling_pressure": {"weight": 10, "minimum": 7},
-      "active_title_native_climax": {"weight": 10, "minimum": 7},
-      "concise_closure": {"weight": 5, "minimum": 7}
+      "opening_and_ten_minute_payoff_map": {
+        "weight": 15,
+        "minimum": 7
+      },
+      "clear_advantage_rule_and_scaling_path": {
+        "weight": 15,
+        "minimum": 7
+      },
+      "joey_agency_and_audience_trust": {
+        "weight": 15,
+        "minimum": 7
+      },
+      "causal_movement_runway": {
+        "weight": 20,
+        "minimum": 7
+      },
+      "conflict_variety_and_procedure_restraint": {
+        "weight": 10,
+        "minimum": 7
+      },
+      "intelligent_opposition_and_scaling_pressure": {
+        "weight": 10,
+        "minimum": 7
+      },
+      "active_title_native_climax": {
+        "weight": 10,
+        "minimum": 7
+      },
+      "concise_closure": {
+        "weight": 5,
+        "minimum": 7
+      }
     },
     "required_checkpoint_ids": [
       "title_contradiction_30s",
@@ -196,7 +218,7 @@
       "scaling_pressure_and_adaptive_response",
       "literal_title_payoff"
     ],
-    "rule": "This is a post-generation review log, not a source-release gate. It may identify likely slow, repetitive, or overlong spans for optional human review, but it never triggers automatic rewriting, regeneration, or ingest blocking. Upload retention—not an LLM checklist—decides whether the formula works."
+    "rule": "This is a post-generation review log, not a source-release gate. It may identify likely slow, repetitive, or overlong spans for optional human review, but it never triggers automatic rewriting, regeneration, or ingest blocking. Upload retention\u2014not an LLM checklist\u2014decides whether the formula works."
   },
   "package_contract": {
     "pairing": [
@@ -207,14 +229,11 @@
       "Reject attractive-character-plus-arrow packages whose only overlay is a broad verdict without a visible number, rank, UI, object, action, role change, or transformation."
     ],
     "title": [
-      "Use one plain causal sentence.",
-      "Assume mobile browse may expose only the first fifty-five characters. Put the concrete wound and enough of the reversal engine inside that visible prefix; remove redundant clauses such as 'for her lover' when the thumbnail already supplies the affair.",
-      "Name the relationship or institution that betrayed Joey.",
-      "State the concrete betrayal.",
-      "State the concrete reversal, takeback, exposure, alliance, or new status.",
-      "Use at most one impossible contradiction, and require it to materially drive the ascent, conflict, visual identity, or payoff rather than merely decorate the title.",
-      "Use no unexplained lore term as the click hinge.",
-      "Make every verb, count, rank, relationship, and payoff literally true in the eventual script."
+      "Compare the strongest story-supported hook angles before writing titles; no family-betrayal, first-person, revenge, or genre-wide sentence template.",
+      "Put the primary click reason in the first roughly fifty-five mobile-visible characters.",
+      "Use a plain, complete promise with a specific payoff; do not replace it with generic shock or dominance language.",
+      "Record primary_hook, exact hook_phrase and payoff_phrase, why_this_hook, and story_support for those claims. Explain why the selected angle beats the strongest alternative.",
+      "Keep all verbs, counts, ranks, relationships and outcomes literally supported; compare current own-channel and relevant niche evidence without treating raw views as causal proof."
     ],
     "thumbnail": [
       "Use one scene, not a collage.",
@@ -338,7 +357,7 @@
       "id": "niche_betrayal_villain_system",
       "source_type": "niche_outlier",
       "source_ref": "KQMPGyt6PxA",
-      "title": "She Dumped Me for the Hero—Now I Awakened VILLAIN System To Crush Them! - Manhwa Recap in Hindi",
+      "title": "She Dumped Me for the Hero\u2014Now I Awakened VILLAIN System To Crush Them! - Manhwa Recap in Hindi",
       "metrics": {
         "views": 450012,
         "age_days_at_snapshot": 4,
@@ -417,5 +436,12 @@
       "same final takeback"
     ],
     "allowed_transfer": "Reuse winning emotional grammar, not the same plot skin."
+  },
+  "title_selection_policy": "story_led_hooks_v1",
+  "title_selection_update": {
+    "approved_by": "Joel",
+    "operator_instruction": "update our title planner so it picks the strongest hook for each story instead of forcing the family betrayal formula every time",
+    "scope": "Title/premise packaging and hook selection; no retroactive rewriting of accepted scripts, packages, or run identities.",
+    "rule": "The LLM compares the actual story\u2019s strongest mechanic, impossible rule, visible victory, status change, relationship, survival, mystery, or betrayal hooks. Choose on clarity, desire, specificity, story payment and measured comparable demand. No fixed family, first-person, betrayal, revenge, or hook-type quota."
   }
 }

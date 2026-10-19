@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { STORY_LED_TITLE_POLICY, validateStoryLedTitle } from "./story-led-title.mjs";
 
 export const MANUFACTURING_BRIEF_SCHEMA = "goldflow_manhwa_manufacturing_brief_v1";
 export const MANUFACTURING_TOPIC_POOL_SCHEMA = "goldflow_manhwa_topic_pool_v1";
@@ -98,6 +99,7 @@ export function validateManufacturingTopicPool(document) {
   const blockers = [];
   if (document?.schema !== MANUFACTURING_TOPIC_POOL_SCHEMA) blockers.push("manufacturing_topic_pool_schema_invalid");
   if (document?.status !== "completed") blockers.push("manufacturing_topic_pool_not_completed");
+  if (document?.title_selection_policy != null && document.title_selection_policy !== STORY_LED_TITLE_POLICY) blockers.push("manufacturing_topic_pool_hook_policy_invalid");
   const candidates = Array.isArray(document?.candidates) ? document.candidates : [];
   if (candidates.length !== 30) blockers.push("manufacturing_topic_pool_count_invalid");
   const numbers = candidates.map((row) => Number(row?.number));
@@ -125,6 +127,9 @@ export function validateManufacturingTopicShortlist(document, { topicPool = null
   if (document?.status !== "shortlisted") blockers.push("manufacturing_topic_shortlist_not_completed");
   const rankings = Array.isArray(document?.rankings) ? document.rankings : [];
   if (rankings.length !== 10) blockers.push("manufacturing_topic_shortlist_count_invalid");
+  if (document?.title_selection_policy != null && document.title_selection_policy !== STORY_LED_TITLE_POLICY) blockers.push("manufacturing_topic_shortlist_hook_policy_invalid");
+  const storyLed = topicPool?.title_selection_policy === STORY_LED_TITLE_POLICY || document?.title_selection_policy === STORY_LED_TITLE_POLICY;
+  if (storyLed && document?.title_selection_policy !== STORY_LED_TITLE_POLICY) blockers.push("manufacturing_topic_shortlist_hook_policy_missing");
   const candidates = new Map((topicPool?.candidates ?? []).map((row) => [Number(row.number), row.title]));
   const seen = new Set();
   for (const [index, row] of rankings.entries()) {
@@ -137,6 +142,7 @@ export function validateManufacturingTopicShortlist(document, { topicPool = null
     for (const field of ["core_premise", "opening_target", "demand_transfer", "why_it_can_win"]) {
       if (!text(row?.[field])) blockers.push(`manufacturing_topic_shortlist_rank_${index}_${field}_missing`);
     }
+    if (storyLed) blockers.push(...validateStoryLedTitle(row?.title, row?.hook_contract).map(code => `manufacturing_topic_shortlist_rank_${index}_${code}`));
     if (!["low", "medium", "high"].includes(row?.complexity_risk)) blockers.push(`manufacturing_topic_shortlist_rank_${index}_complexity_risk_invalid`);
   }
   return { done: blockers.length === 0, blockers };

@@ -71,7 +71,7 @@ assert.equal(youtubeFinalQaDurationSeconds({ media_probe: { duration_sec: 4500 }
 assert.equal(youtubeFinalQaDurationSeconds({ final_duration_sec: 4600 }), 4600);
 assert.equal(Number.isNaN(youtubeFinalQaDurationSeconds({ media_probe: {} })), true);
 
-function validSpec(now = new Date()) {
+export function validSpec(now = new Date()) {
   const observedAt = now.toISOString();
   return {
     schema: YOUTUBE_PACKAGING_SPEC_SCHEMA,

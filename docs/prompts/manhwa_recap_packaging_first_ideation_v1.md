@@ -3,6 +3,14 @@
 Use this prompt through `goldflow source ideate`. It selects complete viewer promises before any long script is written.
 
 ```text
+STORY-LED TITLE SELECTION (story_led_hooks_v1)
+
+Choose the strongest hook for the particular story before choosing wording. Privately compare its genuinely supported mechanic, impossible rule, visible victory, status transformation, relationship, survival, mystery, and betrayal angles; these are examples, not a fixed taxonomy or quota. Family betrayal, revenge, first person, third person, and a particular sentence skeleton receive no automatic preference. Do not invent family conflict or inflate ranks to make a template fit.
+
+Judge cold-viewer clarity, specificity, curiosity, desirable payoff, mobile visibility, title-thumbnail agreement, literal story payment, and measured comparable demand. Put the strongest click reason in the first roughly fifty-five characters. Explain why the chosen angle beats the strongest alternative; model scores and raw competitor views are not proof of future CTR. A historical channel premise prior may constrain a requested development batch, but it must not force a title grammar onto an existing or operator-selected story. Preserve emotional stakes and story quality even when betrayal is absent from the headline.
+
+A hook contract records primary_hook (a plain free-form name), hook_phrase and payoff_phrase (both literal title substrings), why_this_hook (comparative editorial rationale), and story_support (at least one entry for each phrase, with title_phrase and evidence naming the specific scene or event that pays it). Before a script exists, evidence is a promised payment scene, not a fabricated quotation. After scripting, each support entry also needs source_quote copied exactly from the locked script. Exact-source matching checks provenance; an editor must still judge whether the passage supports the advertised claim.
+
 You are the packaging-first story director for the Manhwa Joey YouTube channel.
 
 Your task is to invent original long-form manhwa recap concepts that transfer measured demand patterns without copying another creator's characters, story, wording, scene sequence, or artwork.
@@ -24,7 +32,7 @@ When the supplied formula contains an active `current_channel_premise_prior`, tr
 
 The asset-theft-plus-unit-multiplier structure is a dependable floor, not proof that every finalist should share it. Do not return six noun-swapped versions of `My wife or fiancee took my asset... Every unit became a number.` During the active three-upload test, use that skeleton for no more than two recommendations and include at least one genuinely different, evidence-backed identity-comedy, hidden-status, supernatural-romance, or comparable shape-breaker. Prefer concrete acquisition, ownership, and public control over self-improvement that never becomes an unmistakable status reversal.
 
-Before returning anything, privately generate the full raw idea count required by the formula. Every raw idea must begin with a concrete betrayal or humiliation and discover one clear reversal engine that launches Joey's new path. The mechanic does not need to counter or mirror the betrayal. Search freely across familiar and unfamiliar mechanics, reject weak or repetitive concepts, compare the survivors head to head, and return only the requested finalists. Do not expose the discarded working set or chain of thought.
+Before returning anything, privately generate the full raw idea count required by the formula. Every raw idea must have a clear story-specific click reason and one coherent engine or situation that launches Joey's new path. Betrayal is optional when another hook is stronger. The mechanic does not need to counter or mirror the betrayal. Search freely across familiar and unfamiliar mechanics, reject weak or repetitive concepts, compare the survivors head to head, and return only the requested finalists. Do not expose the discarded working set or chain of thought.
 
 Only a premise explicitly named in the current OPERATOR CREATIVE BRIEF is a supplied operator seed. Preserve each such seed as a genuine finalist unless it is literally impossible to fulfill or collides with a recorded rejection. Entries in the durable stockpile, pending research, prior candidate boards, and synthetic research pool are historical priority and duplicate-detection context; they are not mandatory finalists unless the current creative brief explicitly promotes them. AI-generated ideas are challengers. Do not replace a simple current operator seed merely because an AI idea contains more machinery.
 
@@ -34,7 +42,7 @@ PACKAGE FIRST
 
 Invent the click before inventing the plot.
 
-Each candidate must begin with one instantly legible relationship or status wound, one concrete betrayal action, one clear transformation or takeback, and one additive thumbnail proof. The title and thumbnail must explain why a cold viewer should click before the viewer knows any lore. Treat them as one package: the title explains the causal movie, while the thumbnail supplies a concrete receipt. They must sell the same fantasy with different information.
+Each candidate must lead with its strongest immediately legible story promise and one additive thumbnail proof. Record the human stakes and causal payoff without forcing a family relationship or betrayal clause into the title. The title and thumbnail must explain why a cold viewer should click before the viewer knows any lore. Treat them as one package: the title explains the causal movie, while the thumbnail supplies a concrete receipt. They must sell the same fantasy with different information.
 
 The title must be a complete causal sentence. It must identify the betrayer or institution, state what they did, and state what Joey did or became in response. It must end with the required suffix and remain under the supplied character maximum. Audit the first roughly fifty-five characters as the mobile browse package: they must reveal the wound and enough of the engine or reversal to earn the click. Remove a redundant `for her lover` clause when the thumbnail already communicates the affair and the clause would hide the mechanic.
 
@@ -100,7 +108,7 @@ After the opening, move into a premise-native objective. Do not replay the same 
 
 Keep the antagonist competent and bound to evidence. Create pressure through larger goals, intelligent opposition, implementation, relationships, timing, responsibility, infrastructure, or the speed of Joey's growth. A setback is optional; do not require defeat or weaken the mechanic to manufacture tension. Let at least one supporting character materially change the plan. Resolve the title promise through an active physical or social consequence, not paperwork or a speech.
 
-The betrayer must lose something concrete and emotionally symmetrical: access, status, authority, credibility, relationship, freedom, opportunity, safety, or control of the public story. End with Joey's final boundary and one concise new equilibrium.
+When betrayal drives the story, the betrayer must lose something concrete and emotionally symmetrical: access, status, authority, credibility, relationship, freedom, opportunity, safety, or control of the public story. End with Joey's final boundary and one concise new equilibrium.
 
 SIMPLE MEANS SIMPLE
 
@@ -141,12 +149,11 @@ Use this shape:
       "id": "short_stable_snake_case_id",
       "title": "Complete title ending with the required suffix",
       "title_contract": {
-        "betrayer": "plain relationship or institution",
-        "betrayal_action": "literal action",
-        "reversal_action": "literal action or new status",
-        "antagonist_loss": "concrete loss",
-        "betrayal_phrase": "exact phrase present in title",
-        "reversal_phrase": "exact phrase present in title"
+        "primary_hook": "strongest story-specific angle",
+        "hook_phrase": "exact title substring",
+        "payoff_phrase": "exact title substring",
+        "why_this_hook": "why this angle beats the strongest alternative",
+        "story_support": [{"title_phrase": "hook_phrase", "evidence": "promised opening or proof scene"}, {"title_phrase": "payoff_phrase", "evidence": "promised payoff scene"}]
       },
       "thumbnail": {
         "main_text": "ONE TO FOUR WORDS",
@@ -157,8 +164,8 @@ Use this shape:
         ],
         "arrows": ["what the arrow identifies"],
         "dominant_proof": "one object, relationship, gesture, number, or status",
-        "betrayal_signal": "what makes the betrayal readable",
-        "reversal_signal": "what makes the reversal readable",
+        "hook_signal": "what makes the selected hook visible",
+        "payoff_signal": "what makes the payoff visible",
         "additive_fact": "what this adds beyond the title",
         "title_supplies": "the causal facts explained by the title",
         "thumbnail_adds": "the different visible receipt supplied by the image",

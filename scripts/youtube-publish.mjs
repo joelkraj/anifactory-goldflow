@@ -170,6 +170,7 @@ async function packagingInputs(episodeDir, episode) {
       format: metadata.format,
     },
     thumbnailBytes: stat.size,
+    scriptText: await fs.readFile(path.join(episodeDir, "script_clean.md"), "utf8").catch(() => null),
     thumbnailFinalSha256: await sha256File(thumbnailPath),
     ...(selected?.generation_mode === YOUTUBE_THUMBNAIL_GENERATION_CONTRACT.scoped_edit_mode
       ? { thumbnailEditSourceSha256: await sha256File(path.resolve(episodeDir, clean(selected.edit_source_path))).catch(() => null) }
@@ -211,6 +212,7 @@ async function channelExperimentContext({ episodeDir, identity, episode, spec })
 function packagingValidation(inputs, options = {}) {
   return validateYoutubePackagingSpec(inputs.spec, {
     markdown: inputs.markdown,
+    scriptText: inputs.scriptText,
     thumbnailMetadata: inputs.thumbnailMetadata,
     thumbnailBytes: inputs.thumbnailBytes,
     thumbnailFinalSha256: inputs.thumbnailFinalSha256,
@@ -234,6 +236,7 @@ async function approvePackaging() {
   const validation = validateYoutubePackagingSpec(approvedSpec, {
     runIdentity: identity,
     markdown: inputs.markdown,
+    scriptText: inputs.scriptText,
     thumbnailMetadata: inputs.thumbnailMetadata,
     thumbnailBytes: inputs.thumbnailBytes,
     thumbnailFinalSha256: inputs.thumbnailFinalSha256,
@@ -395,6 +398,7 @@ async function prepareManifest() {
     finalQaPath,
     inputs.packagePath,
     inputs.specPath,
+    ...(inputs.spec.title_selection_policy === "story_led_hooks_v1" ? [path.join(episodeDir, "script_clean.md")] : []),
     inputs.thumbnailPath,
     ...(selectedThumbnail?.generation_mode === YOUTUBE_THUMBNAIL_GENERATION_CONTRACT.scoped_edit_mode
       ? [path.resolve(episodeDir, clean(selectedThumbnail.edit_source_path))] : []),
@@ -416,6 +420,7 @@ async function prepareManifest() {
     source_hashes: sourceHashes,
     packaging_spec_path: inputs.specPath,
     packaging_spec_sha256: sourceHashes[inputs.specPath],
+    title_selection_policy: inputs.spec.title_selection_policy ?? null,
     packaging_schema_mode: validation.schema_mode,
     packaging_validation_warnings: validation.warnings,
     upload_package_path: inputs.packagePath,
@@ -457,6 +462,7 @@ async function prepareManifest() {
       text: clean(inputs.spec.pinned_comment?.text),
       text_sha256: youtubeTextSha256(inputs.spec.pinned_comment?.text),
       betrayal_choice: clean(inputs.spec.pinned_comment?.betrayal_choice),
+      ...(inputs.spec.title_selection_policy === "story_led_hooks_v1" ? { viewer_dilemma: clean(inputs.spec.pinned_comment?.viewer_dilemma) } : {}),
     },
     publish_settings: inputs.spec.publish_settings,
     channel_experiment: experiment?.validation.applies ? {

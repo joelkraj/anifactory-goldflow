@@ -473,7 +473,7 @@ The wavefront may also prebuild ordinary motion clips for every accepted, hash-f
 25. Upload packaging.
    - Availability gate: these actions require a supported packaging route (manhwa or an unchanged historical identity). New workflow-locked documentary/custom profiles stop here until their profile-specific adapter is implemented.
    - Manhwa-only direction: Use `docs/prompts/youtube_ctr_packaging_director_v1.md` after the story and final render are understood. Research at least one own-channel outlier plus recent niche outliers; every evidence row needs a real metric and an observation time.
-   - Manhwa-only direction: Write three to five title candidates. Each title must stay within YouTube's one-hundred-character limit, state the concrete betrayal and revenge/takeback, explain the whole video, and end with `| Manhwa Recap`.
+   - Manhwa-only direction: Write three to five title candidates. Each title must stay within YouTube's one-hundred-character limit, lead with the strongest story-supported hook, promise a literal payoff, and end with `| Manhwa Recap`. New plans use `story_led_hooks_v1`; neither betrayal nor revenge wording is compulsory.
    - Read the approved package-first candidate and contract before ideating the post-render package. Preserve valid literal promises, but allow evidence-backed upgrades from the finished script. Record package lineage: original package, preserved promises, changed elements, reasons, and exact script payment evidence.
    - Manhwa-only direction: Write two or three thumbnail candidates, then create one final thumbnail. The selected image uses one scene, one to three subjects, one clear arrow with two maximum, one to four main words, no more than two short labels, and no more than eight total overlay words. Collages, repeated faces, tiny captions, decorative badges, and background crowds fail the contract.
    - Generate the selected thumbnail with Google Flow / Imagen as one complete sixteen-by-nine raster from scratch. Supply no episode still, character, scene, style, or other image reference. ChatGPT Web GPT Image may be an explicitly declared fallback or comparison, not an automatic duplicate. The model renders the final scene, text, labels, and arrows in-image; local compositing and paint-over are forbidden. Review the finished raster at phone size.
@@ -706,7 +706,7 @@ Use this checklist before spending generation time:
 7. Upload packaging
    - Supported manhwa or unchanged historical routes only. New workflow-locked non-manhwa runs stop at the unsupported-packaging gate pending their profile-specific adapter.
    - Use current own-channel and niche outlier evidence rather than a generic recipe.
-   - Manhwa-only direction: Make the title explain both betrayal and revenge. Make the thumbnail one scene with one to three subjects, one clear arrow, one to four main words, at most two short labels, and no collage.
+   - Manhwa-only direction: Choose the strongest story-supported title hook and literal payoff; compare alternative angles rather than requiring betrayal and revenge wording. Make the thumbnail one scene with one to three subjects, one clear arrow, one to four main words, at most two short labels, and no collage.
    - Approve the package, prepare the hash-bound manifest, upload privately first through the browser skill, and record upload and pinned-comment receipts.
 
 ## Change Policy

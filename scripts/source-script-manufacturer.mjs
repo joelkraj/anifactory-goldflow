@@ -32,6 +32,8 @@ import {
   validateDirectorNotes,
 } from "./lib/source-fast-improvement-contract.mjs";
 
+import { STORY_LED_TITLE_POLICY } from "./lib/story-led-title.mjs";
+
 const REPO_ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
 const DATA_ROOT = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const BASE_TEMPLATE_PATH = path.join(REPO_ROOT, "docs/prompts/manhwa_recap_manufacturing_template_v1.txt");
@@ -244,6 +246,7 @@ async function ideateTopics(directory, flags) {
   const candidates = parseManufacturingTopicTitles(stripFence(poolResponse.content));
   const pool = {
     schema: MANUFACTURING_TOPIC_POOL_SCHEMA,
+    title_selection_policy: STORY_LED_TITLE_POLICY,
     status: "completed",
     evidence_path: evidencePath,
     evidence_sha256: sha256Text(evidence),

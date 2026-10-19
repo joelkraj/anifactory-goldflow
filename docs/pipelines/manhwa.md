@@ -63,7 +63,7 @@ For original-story editing experiments up to 30 minutes and comic/prose adaptati
 
 ## Manhwa Packaging
 
-- Thumbnail packaging is separate from production scene imagegen. Use `docs/prompts/youtube_ctr_packaging_director_v1.md` after final QA and ground every package in at least one measured own-channel outlier plus recent measured niche outliers. Titles must explain the concrete betrayal and revenge/takeback, stay within one hundred characters, and end with `| Manhwa Recap`.
+- Thumbnail packaging is separate from production scene imagegen. Use `docs/prompts/youtube_ctr_packaging_director_v1.md` after final QA and ground every package in at least one measured own-channel outlier plus recent measured niche outliers. Use [story-led title selection](../prompts/manhwa_title_hook_selection_v1.md): the planner compares the actual story’s strongest hooks and records why its choice wins. A mechanic, impossible rule, victory, relationship, survival, status change, or betrayal can lead; no mandatory family-betrayal, revenge, or person-of-narration formula. New packaging uses `title_selection_policy: story_led_hooks_v1` with source-supported hook contracts. Historical packages retain their original validators. Titles stay within one hundred characters and end with `| Manhwa Recap`.
 
 ## Manhwa Audio Command Examples
 

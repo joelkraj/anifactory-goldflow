@@ -211,7 +211,10 @@ export async function falProductionStageStates({ episodeDir, identity } = {}) {
       ].filter((index, position, all) => index >= 0 && all.indexOf(index) === position);
       const pendingProbe = probes.find(index => !completed[index] && !failures[index] && !holds[index]);
       const visualPlan = completed.every(Boolean) ? await read(path.join(episodeDir, "visual_reference_plan.json")) : null;
-      const materialized = visualPlan?.reference_targets?.length === referencePlan.assignments.length
+      // Non-required manual_review targets are draft placeholders that prepare never assigns.
+      const generatedTargets = (visualPlan?.reference_targets ?? []).filter(target =>
+        target.required_before_imagegen === true || target.generation_mode === "standalone_ref");
+      const materialized = generatedTargets.length === referencePlan.assignments.length
         && referencePlan.assignments.every((row, index) => visualPlan.reference_targets.some(target =>
           target.ref_id === row.ref_id
           && [row.output_path, reviewedV2Path[index], effectivePath[index]].filter(Boolean).includes(target.reference_image_path)

@@ -169,3 +169,29 @@ test("reference hold recheck refuses a changed original request binding", async 
     assert.equal(observed, false);
   } finally { await rm(episodeDir, { recursive: true, force: true }); }
 });
+
+test("materialized references pass status while draft manual_review placeholders stay imageless", async () => {
+  const { episodeDir, row } = await fixture();
+  try {
+    const planPath = path.join(episodeDir, "visual_reference_plan.json");
+    const plan = JSON.parse(await readFile(planPath, "utf8"));
+    plan.reference_targets.push({ ref_id: "draft_area_review", generation_mode: "manual_review",
+      required_before_imagegen: false });
+    await writeFile(planPath, JSON.stringify(plan));
+    await mkdir(path.dirname(row.result_receipt_path), { recursive: true });
+    await mkdir(path.dirname(row.output_path), { recursive: true });
+    const raster = "generated reference raster";
+    await writeFile(row.output_path, raster);
+    await writeFile(row.result_receipt_path, JSON.stringify({ output_path: row.output_path,
+      output_sha256: createHash("sha256").update(raster).digest("hex") }));
+    let state = await falProductionStageStates({ episodeDir, identity });
+    assert.match(state.stageStates.reference_generation.next_command_shape, /--action finalize-references$/);
+    const finalized = spawnSync(process.execPath, [productionScript, "--episode-dir", episodeDir,
+      "--action", "finalize-references"], { encoding: "utf8" });
+    assert.equal(finalized.status, 0, finalized.stderr);
+    state = await falProductionStageStates({ episodeDir, identity });
+    assert.equal(state.stageStates.reference_generation.done, true);
+    const updated = JSON.parse(await readFile(planPath, "utf8"));
+    assert.equal(updated.reference_targets[1].reference_image_path, undefined);
+  } finally { await rm(episodeDir, { recursive: true, force: true }); }
+});

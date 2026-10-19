@@ -25,6 +25,7 @@ import { visualPromptRecoveryAdmission } from "../scripts/lib/visual-prompt-reco
 import { visualBeatRecoveryAdmission } from "../scripts/lib/visual-beat-recovery.mjs";
 import { visualBeatExactRepairAdmission } from "../scripts/lib/visual-beat-exact-repair.mjs";
 import { narrationFinalPatchAdmission } from "../scripts/lib/narration-final-patch.mjs";
+import { narrationRetimeAdmission } from "../scripts/lib/narration-retime.mjs";
 import { visualBeatDensityRepairAdmission } from "../scripts/lib/visual-beat-density-repair.mjs";
 import { exactVisualPromptRepairAdmission } from "../scripts/lib/visual-prompt-exact-repair.mjs";
 import { screenIdentityBlockerRepairAdmission } from "../scripts/lib/visual-screen-identity-blocker-repair.mjs";
@@ -248,6 +249,15 @@ function enforceWorkflowGuard(commandName, subcommandName, scriptArgs, episodeDi
     const repair = visualBeatExactRepairAdmission(result, parsedFlags);
     if (!repair.allowed) {
       console.error(`Workflow guard blocked exact visual beat repair: ${repair.reason}.`);
+      if (result.next_command_shape) console.error(`Next valid command shape: ${result.next_command_shape}`);
+      process.exit(1);
+    }
+    return;
+  }
+  if (commandName === "tts" && subcommandName === "retime-final-narration") {
+    const retime = narrationRetimeAdmission(result, parsedFlags);
+    if (!retime.allowed) {
+      console.error(`Workflow guard blocked narration retime: ${retime.reason}.`);
       if (result.next_command_shape) console.error(`Next valid command shape: ${result.next_command_shape}`);
       process.exit(1);
     }
@@ -841,6 +851,8 @@ if (command === "crime-proof" && !helpRequested) {
   run("visual-beat-plan.mjs", flags);
 } else if (command === "visual" && subcommand === "repair-beats") {
   run("visual-beat-exact-repair.mjs", flags);
+} else if (command === "tts" && subcommand === "retime-final-narration") {
+  run("narration-retime.mjs", flags);
 } else if (command === "tts" && subcommand === "patch-final-narration") {
   run("narration-final-patch.mjs", flags);
 } else if (command === "visual" && subcommand === "repair-beat-density") {

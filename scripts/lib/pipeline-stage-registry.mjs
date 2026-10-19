@@ -396,7 +396,7 @@ const stages = [
     output_artifact: "final_qa_<episode>.json",
     approval: "operator_or_agent",
     validator: "final_qa_status_and_hashes",
-    commands: ["final qa", "tts patch-final-narration"],
+    commands: ["final qa", "tts patch-final-narration", "tts retime-final-narration"],
   },
   {
     id: "upload_packaging",

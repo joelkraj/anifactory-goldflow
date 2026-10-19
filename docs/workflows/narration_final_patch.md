@@ -14,3 +14,15 @@ node bin/goldflow.mjs tts patch-final-narration --episode-dir <episode-dir> --sp
 ```
 
 The command verifies that each accepted unit's exact bytes sit at their offset in the raw stream, splices the retakes, re-masters the whole stream with the standard two-pass mastering, copies the video stream and re-encodes AAC with the renderer's settings. It writes a new `render_report_<episode>-narration-patch-<id>.json` (status selects the latest report) and an immutable receipt under `reports/narration_final_patch/<id>/`. The previous render, report and audio stay untouched. Rerun status: final QA becomes stale and must be rerun and reviewed against the patched video before packaging.
+
+## Retime when good takes do not fit
+
+When reviewed complete takes are longer than their windows, use `tts retime-final-narration` instead of trimming. It requires a passed panel-composition render. The `goldflow_narration_retime_spec_v1` spec binds the current panel plan and timeline, canonical word timing, audio bed report, stitch report and raw stream, plus each unit's candidate WAV and receipt.
+
+```bash
+node bin/goldflow.mjs tts retime-final-narration --episode-dir <episode-dir> --spec <episode-dir>/<approved-retime-spec.json>
+```
+
+The command rebuilds the narration from original unit bytes or reviewed retakes, keeping every pause's exact original samples, and masters it with the standard two-pass mastering. It maps every time with a monotonic sample-exact map: pauses keep their sample counts and each retaken unit's interior scales linearly to its new length. It writes a retimed panel timeline and word timing (captions follow beat word indices) and an immutable receipt under `reports/narration_retime/<id>/`. No planner, image, tempo or trimming change is made, and original artifacts stay untouched and hash-bound.
+
+Render the retimed variant through the normal renderer with `--narration-retime-receipt <receipt.json>` (a passed render needs the operator-approved full-stage rerun override). The renderer still validates every original panel input, then verifies that the receipt binds those exact originals before substituting the retimed timeline, word timing and master. The master passes the same mastering passthrough check. Then rerun and review final QA.

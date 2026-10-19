@@ -69,6 +69,8 @@ async function validationReviewPath(ctx){
   return (await validationPlanPath(ctx)).endsWith("-v2.json")
     ?path.join(ctx.root,"validation-review-v2.json"):path.join(ctx.root,"validation-review.json");
 }
+// Non-required manual_review targets are draft placeholders, not generated refs.
+const falGeneratedReferenceTargets=plan=>plan.reference_targets.filter(row=>row.required_before_imagegen===true||row.generation_mode==="standalone_ref");
 async function prepareReferences(ctx){
   need(ctx.identity.visual_restart?.fork_at==="visual_reference_plan","Native Fal reference generation requires the early reference fork.");
   const plan=await read(path.join(ctx.episodeDir,"visual_reference_plan.json"));
@@ -78,7 +80,7 @@ async function prepareReferences(ctx){
   const bank=await read(ctx.contract.reference_bank_manifest);
   const joey=bank.assets?.find(row=>row.asset_id==="gf.global.character.joey_manhwa"&&row.approval_state==="approved");
   need(joey?.local_absolute_path&&joey?.sha256&&await falFileSha256(joey.local_absolute_path)===joey.sha256,"Shared canonical Joey identity is unavailable or changed.");
-  const targets=plan.reference_targets.filter(row=>row.required_before_imagegen===true||row.generation_mode==="standalone_ref");
+  const targets=falGeneratedReferenceTargets(plan);
   need(targets.length>0,"No standalone canonical references were selected.");
   const assignments=[];
   for(const target of targets){
@@ -137,12 +139,15 @@ async function finalizeReferences(ctx){
   }
   const planPath=path.join(ctx.episodeDir,"visual_reference_plan.json");
   const plan=await read(planPath);
-  need(plan.status==="passed"&&plan.reference_targets?.length===referencePlan.assignments.length,
+  const expectedIds=plan.status==="passed"&&Array.isArray(plan.reference_targets)
+    ?falGeneratedReferenceTargets(plan).map(target=>target.ref_id):[];
+  need(expectedIds.length===referencePlan.assignments.length
+    &&expectedIds.every((id,index)=>id===referencePlan.assignments[index].ref_id),
     "Fal reference materialization no longer matches the approved plan.");
   const updatedAt=new Date().toISOString();
-  const updatedPlan={...plan,reference_targets:plan.reference_targets.map(target=>({
+  const updatedPlan={...plan,reference_targets:plan.reference_targets.map(target=>byId.has(target.ref_id)?{
     ...target,reference_image_path:byId.get(target.ref_id),conditioning_image_path:byId.get(target.ref_id),
-  })),reference_generation_updated_at:updatedAt};
+  }:target),reference_generation_updated_at:updatedAt};
   const characterPath=path.join(ctx.episodeDir,"character_state_refs.json");
   const characterRefs=await read(characterPath);
   const updatedCharacters={...characterRefs,character_state_refs:characterRefs.character_state_refs.map(ref=>({

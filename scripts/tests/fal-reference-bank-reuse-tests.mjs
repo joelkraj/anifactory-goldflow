@@ -105,3 +105,34 @@ test("Fal refuses a changed locked bank before preparing reference assignments",
     assert.equal(await exists(path.join(episodeDir, "fal", "reference-plan.json")), false);
   } finally { await rm(episodeDir, { recursive: true, force: true }); }
 });
+
+test("Fal finalize materializes exactly the prepared targets and leaves draft placeholders imageless", async () => {
+  const { episodeDir } = await fixture();
+  try {
+    const planPath = path.join(episodeDir, "visual_reference_plan.json");
+    const plan = JSON.parse(await readFile(planPath, "utf8"));
+    const placeholder = { ref_id: "monitored_area_review", kind: "location", subject: "Draft test area",
+      generation_mode: "manual_review", required_before_imagegen: false, prompt_anchor: prompt };
+    plan.reference_targets.push(placeholder);
+    await writeFile(planPath, JSON.stringify(plan));
+    await writeFile(path.join(episodeDir, "character_state_refs.json"), JSON.stringify({ character_state_refs: [] }));
+    assert.equal(prepare(episodeDir).status, 0);
+    const prepared = JSON.parse(await readFile(path.join(episodeDir, "fal", "reference-plan.json"), "utf8"));
+    assert.deepEqual(prepared.assignments.map(row => row.ref_id), ["joey_base_identity", "joey_clinic_state"]);
+    const state = prepared.assignments.find(row => row.ref_id === "joey_clinic_state");
+    const raster = Buffer.from("generated clinic state raster");
+    await writeFile(state.output_path, raster);
+    await writeFile(state.result_receipt_path, JSON.stringify({ output_path: state.output_path, output_sha256: sha256(raster) }));
+    const finalize = spawnSync(process.execPath, [script, "--episode-dir", episodeDir, "--action", "finalize-references"], { encoding: "utf8" });
+    assert.equal(finalize.status, 0, finalize.stderr);
+    const updated = JSON.parse(await readFile(planPath, "utf8"));
+    assert.equal(updated.reference_targets.find(row => row.ref_id === "joey_clinic_state").reference_image_path, state.output_path);
+    assert.deepEqual(updated.reference_targets.find(row => row.ref_id === "monitored_area_review"), placeholder);
+
+    updated.reference_targets = updated.reference_targets.filter(row => row.ref_id !== "joey_clinic_state");
+    await writeFile(planPath, JSON.stringify(updated));
+    const stale = spawnSync(process.execPath, [script, "--episode-dir", episodeDir, "--action", "finalize-references"], { encoding: "utf8" });
+    assert.notEqual(stale.status, 0);
+    assert.match(stale.stderr, /no longer matches the approved plan/);
+  } finally { await rm(episodeDir, { recursive: true, force: true }); }
+});

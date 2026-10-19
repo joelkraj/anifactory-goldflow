@@ -29,7 +29,7 @@ async function fixture() {
   await mkdir(path.dirname(holdPath), { recursive: true });
   await writeFile(path.join(root, "reference-plan.json"), JSON.stringify({ assignments: [row] }));
   await writeFile(path.join(episodeDir, "visual_reference_plan.json"), JSON.stringify({ status: "passed",
-    reference_targets: [{ ref_id: row.ref_id, reference_image_path: "pending",
+    reference_targets: [{ ref_id: row.ref_id, generation_mode: "standalone_ref", reference_image_path: "pending",
       conditioning_image_path: "pending" }] }));
   await writeFile(path.join(episodeDir, "character_state_refs.json"), JSON.stringify({
     character_state_refs: [{ source_ref_id: row.ref_id, reference_image_path: null,

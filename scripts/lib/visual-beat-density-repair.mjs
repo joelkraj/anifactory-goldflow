@@ -29,6 +29,16 @@ export function visualBeatDensityRepairAdmission(status = {}, flags = {}) {
   return { allowed: true, reason: "failed_closed_timeline_exact_atom_split" };
 }
 
+// The density failure can surface on the first locked invocation or on an
+// exact failed-chunk resume; cache-only assembly reads the same reviewed
+// ledger outputs either way. Any other resume value is not a locked run.
+export function priorBeatInvocationAdmissible(priorFlags = {}, identity = {}) {
+  return ["channel", "week", "episode"].every((key) => priorFlags[key] === identity[key])
+    && priorFlags.series === (identity.series_slug ?? identity.series)
+    && [undefined, "true"].includes(priorFlags["resume-incomplete-chunks"])
+    && priorFlags["beat-timing-enforcement"] === "hard_max";
+}
+
 export function validateDensityRepairSpec(spec, expectedBeatId) {
   if (!only(spec, ["schema", "status", "episode_dir", "run_identity_sha256", "source_script_sha256",
     "timed_scene_plan_sha256", "word_timing_sha256", "story_fact_ledger_sha256",

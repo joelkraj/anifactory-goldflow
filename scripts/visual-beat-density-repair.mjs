@@ -6,7 +6,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { groupingLockHash } from "./lib/editorial-beat-director.mjs";
-import { visualBeatDensityRepairAdmission, validateDensityRepairSpec } from "./lib/visual-beat-density-repair.mjs";
+import { priorBeatInvocationAdmissible, visualBeatDensityRepairAdmission, validateDensityRepairSpec } from "./lib/visual-beat-density-repair.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
@@ -86,10 +86,7 @@ for (let index = 0; index < original.args.length; index += 2) {
   priorFlags[name] = value;
 }
 const identity = JSON.parse(identityBytes);
-if (["channel", "week", "episode"].some((key) => priorFlags[key] !== identity[key])
-  || priorFlags.series !== (identity.series_slug ?? identity.series)
-  || priorFlags["resume-incomplete-chunks"] !== "true"
-  || priorFlags["beat-timing-enforcement"] !== "hard_max") {
+if (!priorBeatInvocationAdmissible(priorFlags, identity)) {
   throw new Error("Prior beat invocation is not the exact locked failed recovery.");
 }
 const originalArgs = original.args.filter((value, index) => value !== "--resume-incomplete-chunks"

@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { verifyVoiceMigrationHandoff } from "./lib/narration-voice-migration.mjs";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { constants as fsConstants, promises as fs } from "node:fs";
@@ -2732,8 +2733,8 @@ async function applyQwenVoiceContinuityQa({
       ?? referenceManifest?.samples
       ?? [];
     const bankPaths = bankRows
-      .filter((row) => row?.status === "ready" && row?.wav_path)
-      .map((row) => path.resolve(row.wav_path));
+      .filter((row) => row?.status === "ready" && (row?.wav_path || row?.audio_path))
+      .map((row) => path.resolve(row.wav_path ?? row.audio_path));
     if (bankPaths.length >= Number(
       narrationQualityContract.voice_identity_qa.minimum_reference_count ?? 3,
     )) {
@@ -3234,7 +3235,7 @@ async function main() {
   const scriptPath = path.resolve(
     flags.script ?? path.join(episodeDir, "script_clean.md"),
   );
-  const outputDir = path.resolve(
+  let outputDir = path.resolve(
     flags["output-dir"] ?? path.join(episodeDir, "assets/audio/narration_tts"),
   );
   const python = path.resolve(flags.python ?? process.env.ANIFACTORY_LOCAL_TTS_PYTHON ?? DEFAULT_PYTHON);
@@ -3280,6 +3281,11 @@ async function main() {
     sha256File(identityPath),
     sha256File(planPath),
   ]);
+  if (!flags["output-dir"] && identity.narration_identity_relock?.recovery_kind === "operator_selected_qwen_voice_migration") {
+    const voiceId = identity.narration_identity_relock.narrator_voice_id;
+    if (!/^[a-zA-Z0-9_-]+$/.test(voiceId ?? "")) throw new Error("Unsafe migrated narrator voice ID");
+    outputDir = path.join(outputDir, voiceId);
+  }
   const planSha256 = String(plan.plan_sha256 ?? planFileSha256);
   const narrationQualityContract = narrationQualityContractForIdentity(identity);
   const narrationQualityV2 = Boolean(narrationQualityContract);
@@ -3600,18 +3606,32 @@ async function main() {
   }
   const priorNarrationReportBuffer = await fs.readFile(reportPath).catch(() => null);
   const priorUnitQaBuffer = await fs.readFile(unitQaPath).catch(() => null);
-  const priorNarrationReport = priorNarrationReportBuffer
+  let priorNarrationReport = priorNarrationReportBuffer
     ? JSON.parse(priorNarrationReportBuffer.toString("utf8"))
     : null;
-  const priorNarrationReportSha256 = priorNarrationReportBuffer
+  let priorNarrationReportSha256 = priorNarrationReportBuffer
     ? createHash("sha256").update(priorNarrationReportBuffer).digest("hex")
     : null;
-  const priorUnitQa = priorUnitQaBuffer
+  let priorUnitQa = priorUnitQaBuffer
     ? JSON.parse(priorUnitQaBuffer.toString("utf8"))
     : null;
-  const priorUnitQaSha256 = priorUnitQaBuffer
+  let priorUnitQaSha256 = priorUnitQaBuffer
     ? createHash("sha256").update(priorUnitQaBuffer).digest("hex")
     : null;
+  if (priorNarrationReport && priorNarrationReport.voice_id !== policy.primary.voice_id
+    && identity.narration_identity_relock?.recovery_kind === "operator_selected_qwen_voice_migration") {
+    const handoff = await verifyVoiceMigrationHandoff({
+      identity, identityFileSha256, episodeDir, reportPath, unitQaPath,
+      reportSha256: priorNarrationReportSha256, unitQaSha256: priorUnitQaSha256,
+      workflowBypass, allowFullStageRerun: boolFlag(flags["allow-full-stage-rerun"]),
+      reason: flags["rerun-reason"], outputDir, planSha256,
+    });
+    await atomicWriteJson(path.join(episodeDir, "reports", `voice_migration_handoff_${invocationId}.json`), handoff);
+    priorNarrationReport = null;
+    priorUnitQa = null;
+    priorNarrationReportSha256 = null;
+    priorUnitQaSha256 = null;
+  }
   let interruptedAdoption = null;
   let completedInterruptedRunner = null;
   if (priorNarrationReport?.status === "interrupted_adoption_partial"

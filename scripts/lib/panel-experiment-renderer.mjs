@@ -91,7 +91,7 @@ export function planPanelExperimentChunks(timeline, { chunkDurationSec = 10 } = 
 export function panelExperimentChunkKey({ timeline, chunk, assets, code_hashes, environment, identitySha256 = timeline.experiment_identity?.sha256, cacheSchema = 'goldflow_panel_chunk_cache_v2' }) {
   if (!/^[a-f0-9]{64}$/.test(identitySha256 ?? '')) fail('picture cache requires an exact identity hash');
   const scenes = chunk.scenes.map(scene => ({ id: scene.id, start_sec: Math.max(scene.start_sec, chunk.start_sec), end_sec: Math.min(scene.end_sec, (chunk.end_frame / timeline.fps)), background: scene.background,
-    layers: scene.layers.map(layer => ({ id: layer.id, panel_id: layer.panel_id, z: layer.z, fit: layer.fit, border_px: layer.border_px, ...(layer.placeholder ? { placeholder: true, placeholder_fill: layer.placeholder_fill ?? null } : {}), ...(layer.shadow === false ? { shadow: false } : {}), start_sec: Math.max(layer.start_sec, chunk.start_sec), end_sec: Math.min(layer.end_sec, chunk.end_frame / timeline.fps), keyframes: affectingKeys(layer.keyframes, Math.max(chunk.start_sec, layer.start_sec), Math.min(chunk.last_sec, layer.end_sec)) })) }));
+    layers: scene.layers.map(layer => ({ id: layer.id, panel_id: layer.panel_id, z: layer.z, fit: layer.fit, border_px: layer.border_px, start_sec: Math.max(layer.start_sec, chunk.start_sec), end_sec: Math.min(layer.end_sec, chunk.end_frame / timeline.fps), keyframes: affectingKeys(layer.keyframes, Math.max(chunk.start_sec, layer.start_sec), Math.min(chunk.last_sec, layer.end_sec)) })) }));
   return hash(canonical({ schema: cacheSchema, identity_sha256: identitySha256, width: timeline.width, height: timeline.height, fps: timeline.fps, start_frame: chunk.start_frame, end_frame: chunk.end_frame, scenes,
     panels: chunk.panels.map(({ id, asset_id, source_rect }) => ({ id, asset_id, source_rect })), assets: assets.filter(asset => chunk.asset_ids.includes(asset.id)).map(({ id, sha256 }) => ({ id, sha256 })), code_hashes, environment, codec: cacheCodec }));
 }
@@ -147,7 +147,6 @@ function framePictureSignature(timeline, time) {
     background: background ? { panel_id: background.panel_id, blur_px: background.blur_px, brightness: background.brightness } : null,
     layers: frame.layers.filter(layer => layer.state.opacity > 0).map(layer => ({
       panel_id: layer.panel_id, fit: layer.fit, border_px: layer.border_px,
-      placeholder: layer.placeholder === true, placeholder_fill: layer.placeholder_fill ?? null, shadow: layer.shadow !== false,
       rect: layer.state.rect, camera: layer.state.camera, opacity: layer.state.opacity,
     })),
   });

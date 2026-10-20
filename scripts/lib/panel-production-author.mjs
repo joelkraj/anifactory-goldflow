@@ -14,7 +14,7 @@ const hash = value => createHash('sha256').update(JSON.stringify(value)).digest(
 const read = async file => JSON.parse(await fs.readFile(file, 'utf8'));
 const exists = file => fs.stat(file).then(() => true, () => false);
 const full = { x: 0, y: 0, width: 1, height: 1 };
-const layouts = new Set(['full_frame', 'inset', 'reveal', 'reaction_pair', 'page_pan', 'page_build']);
+const layouts = new Set(['full_frame', 'inset', 'reveal', 'reaction_pair', 'page_pan']);
 
 // These are bounded request envelopes, not editing decisions. Actual parent
 // scenes, beat order and shared rasters remain intact; no timer chooses layouts.
@@ -47,9 +47,7 @@ export function validatePanelAuthorResponse(response, chunk, baseline) {
     need(layouts.has(row.layout) && row.editorial_reason?.trim().length > 20, `authored layout and substantive reason required for ${row.scene_id}`);
     need(row.panel_id === scene.layers[0].panel_id, `substituted main artwork ${row.scene_id}`);
     need(row.rect && row.source_rect && row.camera_from && row.camera_to, `explicit crop, placement and camera required for ${row.scene_id}`);
-    // page_build places the whole page (it may exceed the canvas to push in on
-    // a zone); the compiler validates that rectangle, aspect and zone geometry.
-    for (const box of row.layout === 'page_build' ? [row.source_rect] : [row.rect, row.source_rect]) {
+    for (const box of [row.rect, row.source_rect]) {
       need(['x', 'y', 'width', 'height'].every(key => Number.isFinite(box[key])) && box.x >= 0 && box.y >= 0
         && box.width > 0 && box.height > 0 && box.x + box.width <= 1 && box.y + box.height <= 1,
       `out-of-bounds crop or placement ${row.scene_id}`);
@@ -75,7 +73,6 @@ export function validatePanelAuthorResponse(response, chunk, baseline) {
     }
   };
   for (const row of response.decisions) {
-    if (row.layout === 'page_build') continue;
     checkFill(row.panel_id, row.source_rect, row.rect, row.fit, [row.camera_from, row.camera_to], row.scene_id);
     if (row.context) checkFill(row.context.panel_id, full, row.context.rect, row.context.fit ?? 'contain',
       [row.context.camera ?? { x: .5, y: .5, zoom: 1 }], `${row.scene_id} context`);

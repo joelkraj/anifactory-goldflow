@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { isSameValueNumberContraction } from "./lib/narration-number-contraction.mjs";
+import { localWhisperPython } from "./lib/local-whisper-policy.mjs";
 import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
@@ -1756,7 +1758,7 @@ function transcriptInputText(value) {
     : String(value ?? "");
 }
 
-export const TRANSCRIPT_QA_COMPARISON_VERSION = "unicode_words_exact_im_numeric_currency_cents_half_scale_v10";
+export const TRANSCRIPT_QA_COMPARISON_VERSION = "unicode_words_exact_stable_source_numeric_alignment_v13";
 
 const TRANSCRIPT_PUNCTUATION = new Set([".", ",", ";", ":", "!", "?", "…"]);
 
@@ -1771,6 +1773,9 @@ function rawTranscriptTokens(value) {
     // Do not expand ambiguous 's/'d forms or an unpunctuated name such as Im.
     .replace(/(?<![\p{L}\p{M}])I['’]m(?![\p{L}\p{M}])/giu, "I am")
     .replace(/\b(thousand|million|billion)fold\b/gi, "$1 fold")
+    .replace(/\bDr\.(?=\s|$)/g, "doctor")
+    .replace(/\bMr\.(?=\s|$)/g, "mister")
+    .replace(/\bcancelled\b/gi, "canceled")
     .replace(/([\p{L}\p{M}])[-‐‑‒–—]([\p{L}\p{M}])/gu, "$1 $2")
     .match(/[+-]?\d+(?:,\d{3})*(?:\.\d+)?(?:st|nd|rd|th|%|[xXsS])?|\bSt\.|[\p{L}\p{M}]+(?:['’][\p{L}\p{M}]+)?|[/$%.,;:!?…]/giu) ?? [])
     .map((raw) => {
@@ -1779,6 +1784,7 @@ function rawTranscriptTokens(value) {
       // Preserve the lexical contraction; stripping its apostrophe creates the
       // unrelated protected initialism ID. Its had/would sense is not inferred.
       if (/^i['’]d$/.test(lower)) return "i'd";
+      if (/^one['’]s$/.test(lower)) return "one's";
       if (TRANSCRIPT_PUNCTUATION.has(lower)) return lower;
       if (/^[+-]?\d/.test(lower) || ["/", "%", "$"].includes(lower)) return lower.replaceAll(",", "");
       return lower.replace(/[.'’]/g, "").replace(/[^\p{L}\p{M}0-9]+/gu, "");
@@ -1952,6 +1958,9 @@ function canonicalTranscriptTokensWithoutAliases(value, preserveBoundaries = fal
     } else if (base[index] === "wi" && base[index + 1] === "fi") {
       compounds.push("wifi");
       index += 1;
+    } else if (base[index] === "every" && base[index + 1] === "one") {
+      compounds.push("everyone");
+      index += 1;
     } else if (base[index] === "every" && base[index + 1] === "body") {
       compounds.push("everybody");
       index += 1;
@@ -2072,6 +2081,56 @@ function transcriptTokens(value, equivalentPhrases = [], preserveBoundaries = fa
   }).sort((left, right) => right.pattern.length - left.pattern.length);
   for (const { pattern, alias } of aliases) tokens = replaceTokenSequence(tokens, pattern, alias);
   return tokens;
+}
+
+// Pairwise notation reconciliation only. Adjacent spoken number groups can be
+// written as one identifier/clock string by ASR. Punctuation, currencies, changed
+// digits, intervening words, and ordinary hundred/scale arithmetic remain distinct.
+function alignGroupedNumberNotation(leftTokens, rightTokens, leftText, rightText, aliases) {
+  const left = [...leftTokens], right = [...rightTokens];
+  const leftParts = leftTokens.map((token) => [token]);
+  const collapse = (tokens, other, text, parts = null) => {
+    const marked = transcriptTokens(text, aliases, true);
+    const boundaries = new Set();
+    let cursor = 0;
+    for (const token of marked) {
+      if (token === "transcript_boundary") boundaries.add(cursor);
+      else cursor += 1;
+    }
+    if (cursor !== tokens.length) return;
+    const groups = [];
+    for (let i = 0; i < tokens.length; i += 1) {
+      if (!/^num:[1-9]\d?$/.test(tokens[i])) continue;
+      let digits = tokens[i].slice(4);
+      for (let end = i + 1; end <= Math.min(i + 2, tokens.length - 1); end += 1) {
+        if (boundaries.has(end)) break;
+        const part = tokens[end] === "oh" ? "0" : /^num:\d{1,2}$/.test(tokens[end]) ? tokens[end].slice(4) : null;
+        if (part === null) break;
+        digits += part;
+        if (tokens[end] === "oh") continue;
+        const matches = [...new Set(other.filter((t) => /^num:\d{3,4}$/.test(t) && t.slice(4) === digits
+          || /^num:\d{1,2}\.\d{2}$/.test(t) && t.slice(4).replace(".", "") === digits))];
+        if (matches.length === 1) { groups.push({ start: i, count: end - i + 1, token: matches[0] }); i = end; break; }
+      }
+    }
+    for (const group of groups.reverse()) {
+      tokens.splice(group.start, group.count, group.token);
+      if (parts) parts.splice(group.start, group.count, parts.slice(group.start, group.start + group.count).flat());
+    }
+  };
+  collapse(left, right, leftText, leftParts);
+  collapse(right, left, rightText);
+  // Source token coordinates are authoritative for full-stream window planning.
+  // Expand a matched ASR shorthand back to the source's numeric groups rather
+  // than collapsing the source. Keep its words and every nonmatching edit.
+  const expandedRight = [];
+  let leftIndex = 0;
+  for (const op of transcriptAlignment(left, right)) {
+    if (op.recognized != null) expandedRight.push(...(op.type === "match"
+      ? leftParts[leftIndex] : [op.recognized]));
+    if (op.intended != null) leftIndex += 1;
+  }
+  return { left: [...leftTokens], right: expandedRight };
 }
 
 function alignTranscriptNotation(intendedTokens, recognizedTokens) {
@@ -2309,9 +2368,11 @@ function transcriptQa(intendedText, recognizedText, {
   const wordsOnly = (tokens) => tokens.filter((token) => !TRANSCRIPT_PUNCTUATION.has(token) && token !== "$");
   const intendedRaw = wordsOnly(rawTranscriptTokens(intendedText));
   const recognizedRaw = wordsOnly(rawTranscriptTokens(recognizedText));
-  const { intended, recognized } = alignTranscriptNotation(
+  const grouped = alignGroupedNumberNotation(
     transcriptTokens(intendedText, equivalentPhrases), transcriptTokens(recognizedText, equivalentPhrases),
+    intendedText, recognizedText, equivalentPhrases,
   );
+  const { intended, recognized } = alignTranscriptNotation(grouped.left, grouped.right);
   const operations = transcriptAlignment(intended, recognized);
   const phoneticSpellingEquivalences = alignContractionRecognition(
     operations, intended, recognized, intendedText, recognizedText, equivalentPhrases,
@@ -2361,6 +2422,7 @@ function transcriptQa(intendedText, recognizedText, {
   }
   const protectedMismatches = operations.filter((operation) => (
     operation.type === "substitution"
+    && !isSameValueNumberContraction(operation)
     && (protectedToken(operation.intended) || protectedToken(operation.recognized))
   ));
   const protectedDeletions = operations.filter((operation) => operation.type === "deletion" && protectedToken(operation.intended));
@@ -2538,7 +2600,7 @@ with open(output_path, "w", encoding="utf-8") as handle:
   try {
     const timeoutMs = Number(process.env.ANIFACTORY_MODELSLAB_QWEN_UNIT_QA_TIMEOUT_MS ?? 7_200_000);
     await new Promise((resolve, reject) => {
-      const child = spawn("python3", [
+      const child = spawn(localWhisperPython(), [
         "-c", python,
         inputPath,
         outputPath,

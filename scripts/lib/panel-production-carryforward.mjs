@@ -1,3 +1,4 @@
+import { retainedBaselineSource } from './retained-baseline-source.mjs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { sha256File } from './file-hash.mjs';
@@ -18,7 +19,8 @@ export async function verifyPanelProductionTimingIdentity({ episodeDir, identity
   need(state?.done, `Fal carryforward is stale: ${state?.evidence ?? 'missing'}`);
   const receipt = JSON.parse(await fs.readFile(binding.receipt_path, 'utf8'));
   const baselineIdentityPath = path.join(binding.baseline_episode_dir, 'run_identity.json');
-  const baseline = JSON.parse(await fs.readFile(baselineIdentityPath, 'utf8'));
+  const retainedIdentity = await retainedBaselineSource(identity, baselineIdentityPath, binding.baseline_identity_sha256);
+  const baseline = JSON.parse(await fs.readFile(retainedIdentity, 'utf8'));
   assertRestartBaselineIdentity(baseline);
   need(objectHash(nonvisualIdentityBinding(identity)) === objectHash(nonvisualIdentityBinding(baseline)), 'nonvisual contract changed');
   need(timing.run_identity_sha256 === binding.baseline_identity_sha256, 'timing does not bind the approved baseline identity');

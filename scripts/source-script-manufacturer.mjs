@@ -8,7 +8,7 @@ import { runCodexCli, readCodexCallMetadata } from "./lib/codex-cli-runner.mjs";
 import { sourceWriterPolicy, improvementEfforts } from "./lib/source-writer-policy.mjs";
 import { recoverBrowserDraft } from "./lib/source-browser-draft-recovery.mjs";
 import { parseJsonObjectFromPlannerOutput } from "./lib/json-output-repair.mjs";
-import { DEFAULT_NARRATOR_VOICE_ID, qwenPrimaryLockForVoice } from "./lib/narration-tts-policy.mjs";
+import { DEFAULT_NEW_NARRATOR_VOICE_ID as DEFAULT_NARRATOR_VOICE_ID, qwenPrimaryLockForVoice } from "./lib/narration-tts-policy.mjs";
 import { extractOpeningAuditionText, sentenceCompleteAuditionUnits } from "./lib/source-opening-audio-audition-contract.mjs";
 import {
   MANUFACTURING_BRIEF_SCHEMA,

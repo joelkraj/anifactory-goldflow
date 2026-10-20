@@ -5,7 +5,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import {
-  DEFAULT_NARRATOR_VOICE_ID,
+  DEFAULT_NEW_NARRATOR_VOICE_ID as DEFAULT_NARRATOR_VOICE_ID,
   qwenPrimaryLockForVoice,
 } from "./lib/narration-tts-policy.mjs";
 import {

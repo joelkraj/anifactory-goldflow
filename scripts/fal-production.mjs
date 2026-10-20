@@ -17,6 +17,7 @@ import { validateFalPrebulkPromptCorrection } from "./lib/fal-prebulk-prompt-cor
 import { applyFalPostplanPromptCorrection, inspectFalPostplanPromptCorrection } from "./lib/fal-postplan-prompt-correction.mjs";
 import { validateFalReviewedReferenceSuccessRepair } from "./lib/fal-reviewed-reference-success-repair.mjs";
 import { recheckFalReferenceHolds } from "./lib/fal-reference-hold-recheck.mjs";
+import { falStateSourceMap, resolveFalApprovedRefId } from "./lib/fal-state-ref-alias.mjs";
 import { reviewedBulkRepairRound } from "./lib/fal-reviewed-bulk-round.mjs";
 import { reviewedBulkSourceReceipt } from "./lib/fal-reviewed-bulk-source-receipt.mjs";
 import { falArtworkOrders, completeFalPanelArtwork } from "./lib/fal-panel-artwork.mjs";
@@ -73,6 +74,8 @@ async function validationReviewPath(ctx){
   return (await validationPlanPath(ctx)).endsWith("-v2.json")
     ?path.join(ctx.root,"validation-review-v2.json"):path.join(ctx.root,"validation-review.json");
 }
+// Non-required manual_review targets are draft placeholders, not generated refs.
+const falGeneratedReferenceTargets=plan=>plan.reference_targets.filter(row=>row.required_before_imagegen===true||row.generation_mode==="standalone_ref");
 async function prepareReferences(ctx){
   need(ctx.identity.visual_restart?.fork_at==="visual_reference_plan","Native Fal reference generation requires the early reference fork.");
   const plan=await read(path.join(ctx.episodeDir,"visual_reference_plan.json"));
@@ -82,7 +85,7 @@ async function prepareReferences(ctx){
   const bank=await read(ctx.contract.reference_bank_manifest);
   const joey=bank.assets?.find(row=>row.asset_id==="gf.global.character.joey_manhwa"&&row.approval_state==="approved");
   need(joey?.local_absolute_path&&joey?.sha256&&await falFileSha256(joey.local_absolute_path)===joey.sha256,"Shared canonical Joey identity is unavailable or changed.");
-  const targets=plan.reference_targets.filter(row=>row.required_before_imagegen===true||row.generation_mode==="standalone_ref");
+  const targets=falGeneratedReferenceTargets(plan);
   need(targets.length>0,"No standalone canonical references were selected.");
   const assignments=[];
   for(const target of targets){
@@ -141,12 +144,15 @@ async function finalizeReferences(ctx){
   }
   const planPath=path.join(ctx.episodeDir,"visual_reference_plan.json");
   const plan=await read(planPath);
-  need(plan.status==="passed"&&plan.reference_targets?.length===referencePlan.assignments.length,
+  const expectedIds=plan.status==="passed"&&Array.isArray(plan.reference_targets)
+    ?falGeneratedReferenceTargets(plan).map(target=>target.ref_id):[];
+  need(expectedIds.length===referencePlan.assignments.length
+    &&expectedIds.every((id,index)=>id===referencePlan.assignments[index].ref_id),
     "Fal reference materialization no longer matches the approved plan.");
   const updatedAt=new Date().toISOString();
-  const updatedPlan={...plan,reference_targets:plan.reference_targets.map(target=>({
+  const updatedPlan={...plan,reference_targets:plan.reference_targets.map(target=>byId.has(target.ref_id)?{
     ...target,reference_image_path:byId.get(target.ref_id),conditioning_image_path:byId.get(target.ref_id),
-  })),reference_generation_updated_at:updatedAt};
+  }:target),reference_generation_updated_at:updatedAt};
   const characterPath=path.join(ctx.episodeDir,"character_state_refs.json");
   const characterRefs=await read(characterPath);
   const updatedCharacters={...characterRefs,character_state_refs:characterRefs.character_state_refs.map(ref=>({
@@ -163,12 +169,16 @@ async function nativePromptReferences(ctx,row,approval){
   const referencePlan=await read(path.join(ctx.root,"reference-plan.json"));
   const approvedImports=new Map(referencePlan.assignments.filter(item=>item.reference_mode==="approved_local_asset")
     .map(item=>[item.ref_id,item.reference_asset_ids[0]]));
+  // Character-state aliases share their approved source target's raster.
+  const sourceByState=falStateSourceMap(await read(path.join(ctx.episodeDir,"character_state_refs.json")).catch(()=>({})));
   const refs=[];
   for(const ref of requirements){
-    const id=String(ref.ref_id??"");const localPath=ref.reference_image_path??ref.conditioning_image_path;
-    need(id&&path.isAbsolute(localPath??""),`Fal prompt reference is missing an exact local path: ${row.image_id}`);
+    const requested=String(ref.ref_id??"");const localPath=ref.reference_image_path??ref.conditioning_image_path;
+    need(requested&&path.isAbsolute(localPath??""),`Fal prompt reference is missing an exact local path: ${row.image_id}`);
+    const id=resolveFalApprovedRefId(requested,approval.reference_hash_by_ref_id??{},sourceByState);
     const sha256=approval.reference_hash_by_ref_id?.[id];
-    need(/^[a-f0-9]{64}$/.test(sha256??"")&&await falFileSha256(localPath)===sha256,`Fal prompt reference is not hash-approved: ${row.image_id}/${id}`);
+    need(/^[a-f0-9]{64}$/.test(sha256??"")&&await falFileSha256(localPath)===sha256,`Fal prompt reference is not hash-approved: ${row.image_id}/${requested}`);
+    if(refs.some(item=>item.sha256===sha256))continue;
     refs.push({asset_id:approvedImports.get(id)??falPortableAssetId(ctx.identity.series_slug,{ref_id:id,kind:ref.kind??"asset"}),asset_class:ref.kind??"asset",path:localPath,sha256});
   }
   return refs;

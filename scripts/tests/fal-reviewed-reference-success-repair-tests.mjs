@@ -31,7 +31,7 @@ test("successful reviewed references require exact source-bound v3 admission and
       await json(result, { output_path: output, output_sha256: sha(`original-${id}`) });
       assignments.push({ image_id: id, ref_id: id, output_path: output, result_receipt_path: result,
         assignment_sha256: `original-${id}` });
-      targets.push({ ref_id: id, kind: "location", reference_image_path: output, conditioning_image_path: output });
+      targets.push({ ref_id: id, kind: "location", generation_mode: "standalone_ref", reference_image_path: output, conditioning_image_path: output });
     }
     const v2 = new Map();
     for (const id of repairIds) {

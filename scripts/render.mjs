@@ -1,5 +1,7 @@
 #!/usr/bin/env node
+import { retainedBaselineSource } from './lib/retained-baseline-source.mjs';
 
+import { loadNarrationRetimeForRender } from "./lib/narration-retime.mjs";
 import { execFile as execFileCb } from "node:child_process";
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
@@ -137,9 +139,10 @@ async function exists(filePath) {
   return Boolean(filePath) && fs.stat(filePath).then((stat) => stat.isFile()).catch(() => false);
 }
 
-async function assertSourceHashesCurrent(report, label) {
+async function assertSourceHashesCurrent(report, label, identity = null) {
   for (const [filePath, expectedHash] of Object.entries(report?.source_hashes ?? {})) {
-    const actualHash = await hashFile(filePath).catch(() => null);
+    const retainedPath = identity ? await retainedBaselineSource(identity, filePath, expectedHash) : filePath;
+    const actualHash = await hashFile(retainedPath).catch(() => null);
     if (!actualHash || actualHash !== expectedHash) throw new Error(`${label} source hash is stale: ${filePath}`);
   }
 }
@@ -2640,7 +2643,7 @@ async function main() {
   const panelMode = motionMode === "panel_composition_v1";
   if (panelMode && (lockedRenderProfile !== "panel_composition_v1" || !v2Run || diagnosticProof || Number.isFinite(proofScopeEndSec))) throw new Error("Panel production render requires its exact production identity and complete authored timeline; private proof flags cannot enable it.");
   if (panelMode && (prebuildMotionClipsOnly || allowTransitionSfxOnNarratorOnly)) throw new Error("Panel production does not support legacy motion prebuild or render-layer transition SFX overrides.");
-  const panelPlan = panelMode ? await loadPanelProductionPlan({ episodeDir }) : null;
+  let panelPlan = panelMode ? await loadPanelProductionPlan({ episodeDir }) : null;
   if (panelMode) {
     for (const file of [runIdentityPath, promptPlanPath, visualBeatPlanPath, imagegenReportPath, wordTimingPath, audioBedReportPath, audioStitchReportPath, imageOutputQaPath, cutExecutionLedgerPath]) {
       const canonicalPath = await fs.realpath(file);
@@ -2652,6 +2655,25 @@ async function main() {
       wordTiming = panelPlan.wordTiming;
       audioBedReport = panelPlan.audioBedReport;
     }
+  }
+  // A reviewed narration retime keeps every original input bound above, then supplies the
+  // retimed timeline, word timing and master it hash-binds (docs/workflows/narration_final_patch.md).
+  const narrationRetime = panelMode && flags["narration-retime-receipt"]
+    ? await loadNarrationRetimeForRender({ receiptPath: path.resolve(flags["narration-retime-receipt"]), panelPlan,
+      wordTimingPath, audioBedReportPath, audioStitchReportPath })
+    : null;
+  if (narrationRetime) {
+    const retainedHashes = {};
+    for (const [file, hash] of Object.entries(panelPlan.inputHashes)) {
+      retainedHashes[await retainedBaselineSource(runIdentity, file, hash)] = hash;
+    }
+    panelPlan = { ...panelPlan, inputHashes: { ...retainedHashes, ...narrationRetime.sourceHashes } };
+    panelPlan = { ...panelPlan, timeline: narrationRetime.timeline, audio: narrationRetime.audio };
+    wordTiming = narrationRetime.wordTiming;
+    audioBedReport = { ...audioBedReport, final_audio_path: narrationRetime.audio.path, final_audio_sha256: narrationRetime.audio.sha256,
+      mixed_duration_sec: narrationRetime.durationSec,
+      mix: { ...audioBedReport.mix, render_input_path: narrationRetime.audio.path, wav_path: narrationRetime.audio.path,
+        duration_sec: narrationRetime.durationSec, mastering: narrationRetime.mastering } };
   }
   if (prebuildMotionClipsOnly) {
     if (motionEditPlan?.status !== "passed") throw new Error(`Motion-clip prebuild requires a passed hash-bound partial motion plan: ${motionEditPlanPath}`);
@@ -2708,7 +2730,7 @@ async function main() {
   }
   if (wordTiming?.status !== "passed") throw new Error(`Missing passed Whisper word timing: ${wordTimingPath}`);
   if (v2Run && visualBeatPlan?.status !== "passed") throw new Error(`Missing passed visual beat plan for locked-script captions: ${visualBeatPlanPath}`);
-  if (visualBeatPlan?.status === "passed") await assertSourceHashesCurrent(visualBeatPlan, "Visual beat plan");
+  if (visualBeatPlan?.status === "passed") await assertSourceHashesCurrent(visualBeatPlan, "Visual beat plan", runIdentity);
   const validatedSubtitleRows = buildSubtitleEvents(wordTiming, audioStitchReport, visualBeatPlan);
   const contractionCaptionSpan = contractionCaptionWordSpanForTests({
     segments: audioStitchReport?.segments, words: wordTiming?.words,
@@ -2898,6 +2920,7 @@ async function main() {
   });
   if (panelPicture) await assertPanelProductionPictureCurrent(panelPicture);
   const sourceHashes = panelPicture ? { ...panelPicture.source_hashes, ...panelPicture.code_hashes, [panelPicture.report_path]: panelPicture.report_sha256 } : {};
+  if (narrationRetime) Object.assign(sourceHashes, narrationRetime.sourceHashes);
   for (const sourcePath of [
     promptPlanPath,
     visualBeatPlanPath,
@@ -2933,6 +2956,7 @@ async function main() {
     render_audio_path: renderAudio.audio_path,
     final_mux_audio_path: finalMuxAudioPath,
     final_audio_loudnorm: finalAudioNormalization,
+    narration_retime: narrationRetime ? { receipt_path: narrationRetime.receiptPath, receipt_sha256: narrationRetime.receiptSha256, duration_sec: narrationRetime.durationSec } : null,
     ffmpeg_bin: ffmpegBin,
     ffprobe_bin: ffprobeBin,
     silent_concat_stream: concatStream,

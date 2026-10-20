@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { groupingLockHash } from "../lib/editorial-beat-director.mjs";
 import { commandStageFor } from "../lib/pipeline-stage-registry.mjs";
-import { reviewedChunkInputHash, reviewedChunkPrompt, splitReviewedVisualBeat, validateDensityRepairSpec,
-  visualBeatDensityRepairAdmission } from "../lib/visual-beat-density-repair.mjs";
+import { priorBeatInvocationAdmissible, reviewedChunkInputHash, reviewedChunkPrompt, splitReviewedVisualBeat,
+  validateDensityRepairSpec, visualBeatDensityRepairAdmission } from "../lib/visual-beat-density-repair.mjs";
 
 const hash = (value) => createHash("sha256").update(value).digest("hex");
 const location = "/tmp/episode";
@@ -137,4 +137,14 @@ for (const mutate of [
   assert.throws(() => splitReviewedVisualBeat(beats, atoms, changed, "ep_01", timing));
 }
 assert.deepEqual(beats, [prior, original, next], "manual split does not mutate reviewed source beats");
+
+const lockedIdentity = { channel: "53rebirth", series_slug: "series", week: "2026-W01", episode: "ep_01" };
+const firstRun = { channel: "53rebirth", series: "series", week: "2026-W01", episode: "ep_01",
+  "beat-timing-enforcement": "hard_max" };
+assert.equal(priorBeatInvocationAdmissible(firstRun, lockedIdentity), true, "first locked run is admissible");
+assert.equal(priorBeatInvocationAdmissible({ ...firstRun, "resume-incomplete-chunks": "true" }, lockedIdentity), true);
+for (const changed of [{ "resume-incomplete-chunks": "false" }, { "beat-timing-enforcement": "advisory" },
+  { episode: "ep_02" }, { series: "other" }]) {
+  assert.equal(priorBeatInvocationAdmissible({ ...firstRun, ...changed }, lockedIdentity), false);
+}
 console.log("visual-beat-density-repair-tests passed");

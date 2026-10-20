@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { verifyVoiceMigrationHandoff } from "./lib/narration-voice-migration.mjs";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { constants as fsConstants, promises as fs } from "node:fs";
@@ -2732,8 +2733,8 @@ async function applyQwenVoiceContinuityQa({
       ?? referenceManifest?.samples
       ?? [];
     const bankPaths = bankRows
-      .filter((row) => row?.status === "ready" && row?.wav_path)
-      .map((row) => path.resolve(row.wav_path));
+      .filter((row) => row?.status === "ready" && (row?.wav_path || row?.audio_path))
+      .map((row) => path.resolve(row.wav_path ?? row.audio_path));
     if (bankPaths.length >= Number(
       narrationQualityContract.voice_identity_qa.minimum_reference_count ?? 3,
     )) {
@@ -2914,7 +2915,11 @@ export async function adoptInterruptedQwenFirstTakes(flags = {}) {
   const planPath = path.join(episodeDir, "narration_generation_plan.json");
   const scriptPath = path.join(episodeDir, "script_clean.md");
   const gatePath = path.join(episodeDir, `narration_tts_pre_synthesis_gate_${episode}.json`);
-  const outputDir = path.join(episodeDir, "assets/audio/narration_tts");
+  const adoptionIdentity = await readJson(identityPath, null);
+  const migratedVoiceId = adoptionIdentity?.narration_identity_relock?.recovery_kind === "operator_selected_qwen_voice_migration"
+    ? adoptionIdentity.narration_identity_relock.narrator_voice_id : null;
+  if (migratedVoiceId && !/^[a-zA-Z0-9_-]+$/.test(migratedVoiceId)) throw new Error("Unsafe migrated narrator voice ID");
+  const outputDir = path.join(episodeDir, "assets/audio/narration_tts", ...(migratedVoiceId ? [migratedVoiceId] : []));
   const reportPath = path.join(episodeDir, `narration_tts_report_${episode}.json`);
   const unitQaPath = path.join(episodeDir, `narration_tts_unit_qa_${episode}.json`);
   const receiptPath = path.join(episodeDir, `narration_interrupted_qwen_adoption_${episode}.json`);
@@ -3234,7 +3239,7 @@ async function main() {
   const scriptPath = path.resolve(
     flags.script ?? path.join(episodeDir, "script_clean.md"),
   );
-  const outputDir = path.resolve(
+  let outputDir = path.resolve(
     flags["output-dir"] ?? path.join(episodeDir, "assets/audio/narration_tts"),
   );
   const python = path.resolve(flags.python ?? process.env.ANIFACTORY_LOCAL_TTS_PYTHON ?? DEFAULT_PYTHON);
@@ -3280,6 +3285,11 @@ async function main() {
     sha256File(identityPath),
     sha256File(planPath),
   ]);
+  if (!flags["output-dir"] && identity.narration_identity_relock?.recovery_kind === "operator_selected_qwen_voice_migration") {
+    const voiceId = identity.narration_identity_relock.narrator_voice_id;
+    if (!/^[a-zA-Z0-9_-]+$/.test(voiceId ?? "")) throw new Error("Unsafe migrated narrator voice ID");
+    outputDir = path.join(outputDir, voiceId);
+  }
   const planSha256 = String(plan.plan_sha256 ?? planFileSha256);
   const narrationQualityContract = narrationQualityContractForIdentity(identity);
   const narrationQualityV2 = Boolean(narrationQualityContract);
@@ -3600,18 +3610,33 @@ async function main() {
   }
   const priorNarrationReportBuffer = await fs.readFile(reportPath).catch(() => null);
   const priorUnitQaBuffer = await fs.readFile(unitQaPath).catch(() => null);
-  const priorNarrationReport = priorNarrationReportBuffer
+  let priorNarrationReport = priorNarrationReportBuffer
     ? JSON.parse(priorNarrationReportBuffer.toString("utf8"))
     : null;
-  const priorNarrationReportSha256 = priorNarrationReportBuffer
+  let priorNarrationReportSha256 = priorNarrationReportBuffer
     ? createHash("sha256").update(priorNarrationReportBuffer).digest("hex")
     : null;
-  const priorUnitQa = priorUnitQaBuffer
+  let priorUnitQa = priorUnitQaBuffer
     ? JSON.parse(priorUnitQaBuffer.toString("utf8"))
     : null;
-  const priorUnitQaSha256 = priorUnitQaBuffer
+  let priorUnitQaSha256 = priorUnitQaBuffer
     ? createHash("sha256").update(priorUnitQaBuffer).digest("hex")
     : null;
+  if (priorNarrationReport && (priorNarrationReport.voice_id ?? priorNarrationReport.narrator_voice_id
+    ?? priorNarrationReport.policy?.primary?.voice_id) !== policy.primary.voice_id
+    && identity.narration_identity_relock?.recovery_kind === "operator_selected_qwen_voice_migration") {
+    const handoff = await verifyVoiceMigrationHandoff({
+      identity, identityFileSha256, episodeDir, reportPath, unitQaPath,
+      reportSha256: priorNarrationReportSha256, unitQaSha256: priorUnitQaSha256,
+      workflowBypass, allowFullStageRerun: boolFlag(flags["allow-full-stage-rerun"]),
+      reason: flags["rerun-reason"], outputDir, planSha256,
+    });
+    await atomicWriteJson(path.join(episodeDir, "reports", `voice_migration_handoff_${invocationId}.json`), handoff);
+    priorNarrationReport = null;
+    priorUnitQa = null;
+    priorNarrationReportSha256 = null;
+    priorUnitQaSha256 = null;
+  }
   let interruptedAdoption = null;
   let completedInterruptedRunner = null;
   if (priorNarrationReport?.status === "interrupted_adoption_partial"
@@ -3817,8 +3842,10 @@ async function main() {
     finalSynthesisScope.interrupted_adoption_receipt_sha256 =
       interruptedAdoption.receipt_sha256;
   }
-  if (interruptedAdoption && (finalSynthesisScope.mode
+  const completedAdoption = Boolean(interruptedAdoption?.complete_original_run);
+  if (interruptedAdoption && ((finalSynthesisScope.mode
       !== "interrupted_full_synthesis_resume_preserving_accepted_units"
+      && !(completedAdoption && finalSynthesisScope.mode === "already_complete_no_synthesis_authorized"))
       || JSON.stringify(finalSynthesisScope.preserved_unit_ids)
         !== JSON.stringify(interruptedAdoption.receipt.accepted_unit_ids)
       || JSON.stringify(finalSynthesisScope.authorized_synthesis_unit_ids)
@@ -3831,9 +3858,9 @@ async function main() {
   const alreadyComplete = finalSynthesisScope.mode
     === "already_complete_no_synthesis_authorized";
   const allowAlreadyCompleteFinalization = alreadyComplete
-    && workflowBypass
-    && boolFlag(flags["allow-full-stage-rerun"])
-    && String(flags["rerun-reason"] ?? "").trim().length > 0;
+    && (completedAdoption || (workflowBypass
+      && boolFlag(flags["allow-full-stage-rerun"])
+      && String(flags["rerun-reason"] ?? "").trim().length > 0));
   if (finalSynthesisScope.mode
     === "interrupted_full_synthesis_resume_preserving_accepted_units") {
     const previouslySubmittedIds = new Set(
@@ -4019,7 +4046,9 @@ async function main() {
       units,
       candidatePool: preservedCandidates,
       preservedForInvocation,
-      priorSynthesisRuns: priorNarrationReport?.synthesis_runs ?? [],
+      priorSynthesisRuns: completedAdoption
+        ? [interruptedAdoption.complete_original_run]
+        : priorNarrationReport?.synthesis_runs ?? [],
       policy,
     });
     candidates.push(...preservedFinalInputs.candidates);
@@ -4666,8 +4695,8 @@ async function main() {
       status: "validated_existing_candidates_no_synthesis",
       preserved_unit_ids: finalSynthesisScope.preserved_unit_ids,
       preserved_unit_count: finalSynthesisScope.preserved_unit_ids.length,
-      workflow_bypass: true,
-      rerun_reason: String(flags["rerun-reason"]).trim(),
+      workflow_bypass: workflowBypass,
+      rerun_reason: completedAdoption ? "Verified complete original runner; QA-only continuation" : String(flags["rerun-reason"]).trim(),
       model_loaded: false,
       synthesis_invoked: false,
     };

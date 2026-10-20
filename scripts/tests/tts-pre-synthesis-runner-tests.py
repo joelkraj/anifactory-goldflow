@@ -140,5 +140,54 @@ def test_preserved_unit_never_enters_resume_jobs() -> None:
             raise AssertionError("Preserved WAV mutation was not detected")
 
 
+def test_cohort_members_generate_as_isolated_sequences() -> None:
+    seeds: list[int] = []
+    calls: list[list[str]] = []
+
+    class FakeRandom:
+        @staticmethod
+        def seed(value: int) -> None:
+            seeds.append(value)
+
+    class FakeMx:
+        random = FakeRandom
+
+    class Result:
+        def __init__(self, text: str) -> None:
+            self.audio = text
+            self.sample_rate = 24000
+            self.token_count = len(text)
+            self.sequence_idx = 0
+
+    class FakeModel:
+        def batch_generate(self, texts: list[str], **_kwargs: object):
+            calls.append(list(texts))
+            return [Result(text) for text in texts]
+
+    params = {"temperature": 0.6, "top_p": 0.8, "top_k": 50, "repetition_penalty": 1.2, "max_tokens": 1200}
+    previous_mx = RUNNER.mx
+    RUNNER.mx = FakeMx
+    try:
+        results = RUNNER.isolated_cohort_generate(FakeModel(), ["aa", "bbb", "c"], 77, object(), "ref", params)
+        assert calls == [["aa"], ["bbb"], ["c"]]
+        assert seeds == [77, 77, 77]
+        assert [row.sequence_idx for row in results] == [0, 1, 2]
+        assert [row.token_count for row in results] == [2, 3, 1]
+
+        class DoubleModel(FakeModel):
+            def batch_generate(self, texts: list[str], **_kwargs: object):
+                return [Result(texts[0]), Result(texts[0])]
+
+        try:
+            RUNNER.isolated_cohort_generate(DoubleModel(), ["aa"], 1, object(), "ref", params)
+        except RuntimeError as error:
+            assert "returned 2 results" in str(error)
+        else:
+            raise AssertionError("A multi-sequence result was accepted for one cohort member")
+    finally:
+        RUNNER.mx = previous_mx
+
+
 test_preserved_unit_never_enters_resume_jobs()
+test_cohort_members_generate_as_isolated_sequences()
 print("TTS pre-synthesis runner tests passed")

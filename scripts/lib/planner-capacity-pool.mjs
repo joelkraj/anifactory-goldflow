@@ -111,7 +111,7 @@ function poolRows(identity, stageName, env) {
   const available = new Set(planningProvidersForStage(identity, stageName, { env }));
   const identityKey = runIdentityKey(identity);
   const stageKey = plannerStageKey(stageName);
-  return ["codex_cli", "antigravity_cli"]
+  return ["codex_cli", "claude_cli", "antigravity_cli"]
     .filter((provider) => available.has(provider))
     .map((provider) => ({
       provider,

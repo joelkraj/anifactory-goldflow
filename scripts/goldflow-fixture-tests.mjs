@@ -2368,13 +2368,18 @@ async function testCumulativeImagegenHistoryAndEpisodeTruth() {
 }
 
 function testPinnedCodexRuntimeContracts() {
-  assert.equal(DEFAULT_CODEX_MODEL, "gpt-6-sol");
+  assert.equal(DEFAULT_CODEX_MODEL, "gpt-6.1-sol");
   assert.equal(DEFAULT_CODEX_REASONING_EFFORT, "medium");
   const oldCli = parseCodexVersion("codex-cli 0.141.0");
-  const qualifyingBundledCli = parseCodexVersion("codex-cli 0.144.0-alpha.4");
-  const versionGatedModel = "gpt-5.6-sol";
-  assert.equal(codexVersionSupportsModel(oldCli, versionGatedModel), false);
-  assert.equal(codexVersionSupportsModel(qualifyingBundledCli, versionGatedModel), true);
+  const qualifyingBundledCli = parseCodexVersion("codex-cli 0.159.1");
+  const gpt56OnlyCli = parseCodexVersion("codex-cli 0.144.0-alpha.4");
+  assert.equal(codexVersionSupportsModel(oldCli, DEFAULT_CODEX_MODEL), false);
+  assert.equal(codexVersionSupportsModel(gpt56OnlyCli, DEFAULT_CODEX_MODEL), false);
+  assert.equal(codexVersionSupportsModel(qualifyingBundledCli, DEFAULT_CODEX_MODEL), true);
+  // Identities that recorded an earlier model keep that model's own CLI gate.
+  assert.equal(codexVersionSupportsModel(oldCli, "gpt-5.6-sol"), false);
+  assert.equal(codexVersionSupportsModel(gpt56OnlyCli, "gpt-5.6-sol"), true);
+  assert.equal(codexVersionSupportsModel(oldCli, "gpt-5.5"), true);
   assert.equal(compareCodexVersions(qualifyingBundledCli, oldCli) > 0, true);
 
   const promptHash = sha256("fixture prompt");
@@ -3752,8 +3757,10 @@ function testQwenTtsOutputQaContracts() {
     "I did not take his power.",
     "I'd not take his power.",
   );
-  assert.equal(asrContractedIDidNot.word_error_rate, 0);
-  assert.deepEqual(asrContractedIDidNot.findings, []);
+  // The current comparator keeps ambiguous had/would contractions lexical.
+  // "I'd" cannot silently stand in for the approved words "I did".
+  assert.ok(asrContractedIDidNot.word_error_rate > 0);
+  assert.ok(asrContractedIDidNot.findings.some((finding) => finding.code === "tts_transcript_word_substitutions"));
   const asrCompoundSpacing = transcriptQaForTests(
     "New status. Deedholder.",
     "New status. Deed holder.",
@@ -4978,6 +4985,9 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
     "--reference-model", "gpt-image-2-i2i",
     "--image-fallback-provider", "codex_imagegen",
     "--image-fallback-condition", "modelslab_credit_exhausted",
+    // The merged host defaults new qwen_local identities to the operator-selected
+    // deepmale voice; this fixture checks the owned Joel lock values explicitly.
+    "--narrator-voice-id", "joel_owned_narrator_clone",
     "--run-intent", "diagnostic",
     "--allow-dirty-worktree", "true",
     "--dirty-reason", "fixture test",
@@ -5191,7 +5201,7 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
   assert.equal(identity.stage_registry_version.length > 0, true);
   assert.equal(identity.model_versions.planning_model, "stage_routed");
   assert.equal(identity.provider_locks.planning_provider_models.chatgpt_web, "gpt-6-sol");
-  assert.equal(identity.provider_locks.planning_provider_models.codex_cli, "gpt-6-sol");
+  assert.equal(identity.provider_locks.planning_provider_models.codex_cli, DEFAULT_CODEX_MODEL);
   assert.equal(identity.model_versions.tts_model, QWEN_JOEL_PRIMARY_LOCK.model_id);
   assert.equal(identity.model_versions.tts_model_revision, QWEN_JOEL_PRIMARY_LOCK.model_revision);
   assert.equal(identity.model_versions.fallback_tts_model, null);

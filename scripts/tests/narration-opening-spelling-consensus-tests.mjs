@@ -21,7 +21,7 @@ const decide = (source, small, medium, contract = automated) =>
 const blockerCodes = (decision) => decision.blockers.map((row) => row.code);
 
 const spelling = decide("Vale watched my face.", "Vail watched my face.", "Veil watch, my face.");
-assert.equal(NARRATION_DELIVERY_CONSENSUS_VERSION, "protected_operations_edge_spelling_v2");
+assert.equal(NARRATION_DELIVERY_CONSENSUS_VERSION, "protected_operations_lexical_number_contraction_v3");
 assert.deepEqual(blockerCodes(spelling), []);
 assert.equal(spelling.status, "passed_with_warnings");
 assert.ok(spelling.warnings.some((row) => row.code === "narration_opening_asr_spelling_ambiguity"

@@ -1,0 +1,94 @@
+{
+  "schema": "goldflow_narration_delivery_reference_bank_v1",
+  "status": "operator_selected_single_reference",
+  "voice_id": "deepmale_narration_reference_20261019",
+  "voice_sha256": "05b3ac6f3e8c11c69c8976524862f75b5b2b5985e15275765d55da594d00f86d",
+  "default_delivery_id": "neutral_forward",
+  "required_delivery_ids": [
+    "neutral_forward",
+    "urgent",
+    "intimate",
+    "cold_reveal",
+    "restrained_grief"
+  ],
+  "production_active_delivery_ids": [
+    "neutral_forward"
+  ],
+  "production_activation_contract": "single_active_reference_v1",
+  "blind_approved_delivery_ids": [],
+  "operator_approved_delivery_ids": [
+    "neutral_forward"
+  ],
+  "operator_selection": {
+    "authority": "explicit_user_request",
+    "request": "use this as our default voice for future videos. can we actuall redo comas narration with this voice.",
+    "selected_after_reference_and_reuse_demo_delivery": true,
+    "voice_id": "deepmale_narration_reference_20261019",
+    "reference_audio_sha256": "178b663c91712249d791ea064817c32b53b23deda061a9611aa85ccdb1c1fdf5"
+  },
+  "promotion_policy": {
+    "unpromoted_fallback": "neutral_forward",
+    "voice_identity_drift_is_veto": true
+  },
+  "references": [
+    {
+      "delivery_id": "neutral_forward",
+      "source_sample_id": "deepmale_narration_reference",
+      "source_style_label": "operator_selected_neutral_reference",
+      "status": "production_approved",
+      "audio_path": "/Users/joel/AniFactoryData/voice_bank/qwen/reference_samples/deepmale_voicedesign_20261019/deepmale_narration_reference.wav",
+      "audio_sha256": "178b663c91712249d791ea064817c32b53b23deda061a9611aa85ccdb1c1fdf5",
+      "reference_text": "The room fell quiet as I opened the envelope. Inside was a key, a folded map, and a note written in blue ink. I read it once, took a slow breath, and stepped into the morning light.",
+      "reference_text_sha256": "d40a51c2564f87b16a929aa60c6a1c0c7f670263677aa3dab1efd98e7f10dfd0",
+      "promotion_evidence": {
+        "basis": "explicit_operator_voice_selection",
+        "blind_review": null,
+        "fatigue_soak": null
+      }
+    },
+    {
+      "delivery_id": "urgent",
+      "source_sample_id": "deepmale_narration_reference",
+      "source_style_label": "unpromoted_style_uses_neutral",
+      "status": "candidate_unpromoted",
+      "audio_path": "/Users/joel/AniFactoryData/voice_bank/qwen/reference_samples/deepmale_voicedesign_20261019/deepmale_narration_reference.wav",
+      "audio_sha256": "178b663c91712249d791ea064817c32b53b23deda061a9611aa85ccdb1c1fdf5",
+      "reference_text": "The room fell quiet as I opened the envelope. Inside was a key, a folded map, and a note written in blue ink. I read it once, took a slow breath, and stepped into the morning light.",
+      "reference_text_sha256": "d40a51c2564f87b16a929aa60c6a1c0c7f670263677aa3dab1efd98e7f10dfd0",
+      "promotion_evidence": null
+    },
+    {
+      "delivery_id": "intimate",
+      "source_sample_id": "deepmale_narration_reference",
+      "source_style_label": "unpromoted_style_uses_neutral",
+      "status": "candidate_unpromoted",
+      "audio_path": "/Users/joel/AniFactoryData/voice_bank/qwen/reference_samples/deepmale_voicedesign_20261019/deepmale_narration_reference.wav",
+      "audio_sha256": "178b663c91712249d791ea064817c32b53b23deda061a9611aa85ccdb1c1fdf5",
+      "reference_text": "The room fell quiet as I opened the envelope. Inside was a key, a folded map, and a note written in blue ink. I read it once, took a slow breath, and stepped into the morning light.",
+      "reference_text_sha256": "d40a51c2564f87b16a929aa60c6a1c0c7f670263677aa3dab1efd98e7f10dfd0",
+      "promotion_evidence": null
+    },
+    {
+      "delivery_id": "cold_reveal",
+      "source_sample_id": "deepmale_narration_reference",
+      "source_style_label": "unpromoted_style_uses_neutral",
+      "status": "candidate_unpromoted",
+      "audio_path": "/Users/joel/AniFactoryData/voice_bank/qwen/reference_samples/deepmale_voicedesign_20261019/deepmale_narration_reference.wav",
+      "audio_sha256": "178b663c91712249d791ea064817c32b53b23deda061a9611aa85ccdb1c1fdf5",
+      "reference_text": "The room fell quiet as I opened the envelope. Inside was a key, a folded map, and a note written in blue ink. I read it once, took a slow breath, and stepped into the morning light.",
+      "reference_text_sha256": "d40a51c2564f87b16a929aa60c6a1c0c7f670263677aa3dab1efd98e7f10dfd0",
+      "promotion_evidence": null
+    },
+    {
+      "delivery_id": "restrained_grief",
+      "source_sample_id": "deepmale_narration_reference",
+      "source_style_label": "unpromoted_style_uses_neutral",
+      "status": "candidate_unpromoted",
+      "audio_path": "/Users/joel/AniFactoryData/voice_bank/qwen/reference_samples/deepmale_voicedesign_20261019/deepmale_narration_reference.wav",
+      "audio_sha256": "178b663c91712249d791ea064817c32b53b23deda061a9611aa85ccdb1c1fdf5",
+      "reference_text": "The room fell quiet as I opened the envelope. Inside was a key, a folded map, and a note written in blue ink. I read it once, took a slow breath, and stepped into the morning light.",
+      "reference_text_sha256": "d40a51c2564f87b16a929aa60c6a1c0c7f670263677aa3dab1efd98e7f10dfd0",
+      "promotion_evidence": null
+    }
+  ]
+}

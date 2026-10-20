@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { panelRenderExpectedSourceHashes, finalQaMatchesLatestRender } from './lib/panel-render-retime-provenance.mjs';
 
 import { promises as fs } from "node:fs";
 import { createHash } from "node:crypto";
@@ -1620,7 +1621,9 @@ async function renderComplete(episodeDir, episode, identity) {
   if (isPanelProductionIdentity(identity)) {
     const panelPlan = await panelArtifactComplete({ episodeDir, identity, kind: "composition" });
     if (!panelPlan.done) return { done: false, state: "stale", evidence: panelPlan.evidence };
-    const expectedSources = panelPlan.loaded.inputHashes ?? {};
+    let expectedSources;
+    try { expectedSources = await panelRenderExpectedSourceHashes({episodeDir,loadedPlan:panelPlan.loaded,report}); }
+    catch (error) { return {done:false,state:"stale",evidence:`${latest.name}; ${error.message}`}; }
     const missing = Object.entries(expectedSources).filter(([sourcePath, hash]) => report.source_hashes?.[sourcePath] !== hash);
     if (report.render_profile !== "panel_composition_v1" || !Object.keys(expectedSources).length || missing.length) {
       return { done: false, state: "stale", evidence: `${latest.name}; panel render profile or current panel plan/art/audio provenance missing` };
@@ -1651,6 +1654,11 @@ async function finalQaComplete(episodeDir, episode, identity) {
     return { done: false, state: "needs_review", evidence: `${path.basename(reportPath)} advisory findings require recorded review` };
   }
   if (status !== "passed") return { done: false, state: status === "failed" ? "failed" : "blocked", evidence: `${path.basename(reportPath)} status=${status || "missing"}` };
+  const latestRender = await latestMatching(episodeDir, new RegExp(`^render_report_${episode}.*\\.json$`));
+  const latestRenderReport = latestRender ? await readJson(latestRender.filePath, null) : null;
+  if (!finalQaMatchesLatestRender(report, latestRenderReport)) {
+    return { done:false, state:'stale', evidence:`${path.basename(reportPath)} belongs to an earlier render; current render needs its own final QA` };
+  }
   const finalVideoPath = report.final_video_path;
   const finalVideoHash = finalVideoPath ? await fileSha256(finalVideoPath) : null;
   if (!finalVideoHash || finalVideoHash !== report.final_video_sha256) {
@@ -4771,7 +4779,11 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
       try {
         const planPath = path.join(episodeDir, "narration_generation_plan.json");
         const plan = await readJson(planPath, null);
-        const outputDir = path.join(episodeDir, "assets/audio/narration_tts");
+        const rawIdentity = await readJson(path.join(episodeDir, "run_identity.json"), null);
+        const migratedVoiceId = rawIdentity?.narration_identity_relock?.recovery_kind === "operator_selected_qwen_voice_migration"
+          ? rawIdentity.narration_identity_relock.narrator_voice_id : null;
+        if (migratedVoiceId && !/^[a-zA-Z0-9_-]+$/.test(migratedVoiceId)) throw new Error("Unsafe migrated voice ID");
+        const outputDir = path.join(episodeDir, "assets/audio/narration_tts", ...(migratedVoiceId ? [migratedVoiceId] : []));
         const runsDir = path.join(outputDir, "runs");
         const completedRunners = [];
         for (const name of await fs.readdir(runsDir).catch(() => [])) {

@@ -317,7 +317,36 @@ export async function verifyInterruptedQwenAdoptionReceipt({
       && actualFiles.every((filePath) => expectedFiles.has(filePath)),
     "unit output tree contains a newly submitted but unadopted file");
   }
-  return { receipt, report, unitQa, receipt_path: target, receipt_sha256: await fileHash(target) };
+  let completeOriginalRun = null;
+  if (receipt.never_submitted_unit_ids.length === 0) {
+    const runnerPath = path.join(outputDir, "runs", path.basename(receipt.original_job_path));
+    const runner = JSON.parse(await fs.readFile(runnerPath, "utf8"));
+    required(runner.schema === "goldflow_local_tts_production_run_v2"
+      && runner.status === "passed" && runner.jobs_path === receipt.original_job_path
+      && runner.jobs_sha256 === receipt.original_job_file_sha256
+      && runner.synthesis_mode === originalJob.synthesis_mode
+      && runner.voice_id === originalJob.voice_id
+      && runner.batch_plan_sha256 === originalJob.batch_plan_sha256
+      && Number(runner.job_count) === units.length
+      && Number(runner.result_count) === units.length
+      && (runner.results ?? []).length === units.length
+      && same(runner.results.map((row) => row.unit_id), ids)
+      && runner.results.every((row, index) => row.status === "generated"
+        && row.output_path === artifacts[index].audio_path
+        && row.output_sha256 === artifacts[index].audio_sha256),
+    "fully generated adoption requires its exact successful original runner report");
+    completeOriginalRun = { attempt: 1, synthesis_mode: runner.synthesis_mode,
+      report_path: runnerPath, report_sha256: await fileHash(runnerPath),
+      batch_plan_sha256: runner.batch_plan_sha256,
+      model_load_count: runner.model_load_count, resident_model_count: runner.resident_model_count,
+      model_instance_concurrency: runner.model_instance_concurrency,
+      results_restored_to_original_order: runner.results_restored_to_original_order,
+      cohort_executions: runner.cohort_executions,
+      cohort_events_path: receipt.cohort_events_path,
+      cohort_events_sha256: receipt.cohort_events_file_sha256 };
+  }
+  return { receipt, report, unitQa, receipt_path: target, receipt_sha256: await fileHash(target),
+    complete_original_run: completeOriginalRun };
 }
 
 // The original resident runner was interrupted before it could write a final

@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { localWhisperPython } from "./lib/local-whisper-policy.mjs";
 import { execFile as execFileCb, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
@@ -378,7 +379,7 @@ print(json.dumps({"status": "ok", "word_count": len(rows)}, ensure_ascii=False))
 `;
   await new Promise((resolve, reject) => {
     const timeoutMs = Number(process.env.ANIFACTORY_WHISPER_TIMEOUT_MS ?? 7_200_000);
-    const child = spawn("python3", [
+    const child = spawn(localWhisperPython(), [
       "-c",
       py,
       audioPath,

@@ -238,7 +238,26 @@ QWEN_PUCK_REFERENCE = {
         "max_tokens": 1200,
     },
 }
+# Same operator-selected immutable lock consumed by the JS policy layer.
+_DEEPMALE_LOCK = json.loads((Path(__file__).resolve().parent.parent / "config/qwen_deepmale_voice.json").read_text())
+QWEN_DEEPMALE_REFERENCE = {
+    **QWEN_JOEL_REFERENCE,
+    "contract_id": "qwen_operator_selected_primary_v1",
+    "voice_id": _DEEPMALE_LOCK["voice_id"],
+    "voice_sha256": _DEEPMALE_LOCK["voice_sha256"],
+    "voice_continuity_contract": _DEEPMALE_LOCK["voice_continuity_contract"],
+    "voice_clone_contract": _DEEPMALE_LOCK["voice_clone_contract"],
+    **{dst: _DEEPMALE_LOCK[src] for dst, src in {
+        "audio_path": "reference_audio_path", "audio_sha256": "reference_audio_sha256",
+        "text": "reference_text", "text_sha256": "reference_text_sha256",
+        "manifest_path": "reference_manifest_path", "manifest_sha256": "reference_manifest_sha256",
+        "metadata_path": "reference_metadata_path", "metadata_sha256": "reference_metadata_sha256",
+        "source_provider": "reference_source_provider", "source_model_id": "reference_source_model_id",
+        "source_model_revision": "reference_source_model_revision", "source_unit_id": "reference_origin_unit_id",
+    }.items()},
+}
 QWEN_REFERENCE_CONTRACTS = {
+    QWEN_DEEPMALE_REFERENCE["voice_continuity_contract"]: QWEN_DEEPMALE_REFERENCE,
     QWEN_JOEL_REFERENCE["voice_continuity_contract"]: QWEN_JOEL_REFERENCE,
     QWEN_JOEL_DRY_DEADPAN_REFERENCE["voice_continuity_contract"]: (
         QWEN_JOEL_DRY_DEADPAN_REFERENCE
@@ -1284,6 +1303,59 @@ def generate_audio(
     return output, sample_rates.pop(), generated, generated_token_count
 
 
+COHORT_SEQUENCE_ISOLATION = "single_sequence_batch_generate_v1"
+
+
+class _IsolatedSequenceResult:
+    def __init__(self, result: Any, sequence_index: int) -> None:
+        self.audio = result.audio
+        self.sample_rate = result.sample_rate
+        self.token_count = result.token_count
+        self.sequence_idx = sequence_index
+
+
+def isolated_cohort_generate(
+    model: Any,
+    texts: list[str],
+    batch_seed: int,
+    reference_array: Any,
+    reference_text: str,
+    generation_parameters: dict[str, Any],
+) -> list[Any]:
+    # mlx-audio 0.4.6 multi-sequence Qwen3 ICL batches end sequences early
+    # (paired premature EOS that truncates final words). One sequence per
+    # batch_generate call is complete, so each cohort member runs alone with
+    # the cohort seed and keeps its cohort position as the sequence index.
+    results: list[Any] = []
+    for position, text in enumerate(texts):
+        mx.random.seed(batch_seed)
+        generated = list(
+            model.batch_generate(
+                texts=[text],
+                voices=[None],
+                instructs=[None],
+                ref_audio=reference_array,
+                ref_text=reference_text,
+                temperature=float(generation_parameters["temperature"]),
+                top_p=float(generation_parameters["top_p"]),
+                top_k=int(generation_parameters["top_k"]),
+                repetition_penalty=float(
+                    generation_parameters["repetition_penalty"]
+                ),
+                max_tokens=int(generation_parameters["max_tokens"]),
+                verbose=False,
+                stream=False,
+            )
+        )
+        if len(generated) != 1:
+            raise RuntimeError(
+                f"Isolated Qwen cohort member {position} returned "
+                f"{len(generated)} results"
+            )
+        results.append(_IsolatedSequenceResult(generated[0], position))
+    return results
+
+
 def collect_batch_audio(
     generated: list[Any],
     expected_count: int,
@@ -1630,42 +1702,13 @@ def main() -> None:
                 publish_cohort_complete(cohort, execution, cohort_jobs)
                 continue
             try:
-                mx.random.seed(int(cohort["batch_seed"]))
-                generated = list(
-                    model.batch_generate(
-                        texts=[job["spoken_text"] for job in cohort_jobs],
-                        voices=[None] * len(cohort_jobs),
-                        instructs=[None] * len(cohort_jobs),
-                        ref_audio=reference_array,
-                        ref_text=reference_text,
-                        temperature=float(
-                            qwen_reference_contract[
-                                "generation_parameters"
-                            ]["temperature"]
-                        ),
-                        top_p=float(
-                            qwen_reference_contract[
-                                "generation_parameters"
-                            ]["top_p"]
-                        ),
-                        top_k=int(
-                            qwen_reference_contract[
-                                "generation_parameters"
-                            ]["top_k"]
-                        ),
-                        repetition_penalty=float(
-                            qwen_reference_contract[
-                                "generation_parameters"
-                            ]["repetition_penalty"]
-                        ),
-                        max_tokens=int(
-                            qwen_reference_contract[
-                                "generation_parameters"
-                            ]["max_tokens"]
-                        ),
-                        verbose=False,
-                        stream=False,
-                    )
+                generated = isolated_cohort_generate(
+                    model,
+                    [job["spoken_text"] for job in cohort_jobs],
+                    int(cohort["batch_seed"]),
+                    reference_array,
+                    reference_text,
+                    qwen_reference_contract["generation_parameters"],
                 )
                 collected = collect_batch_audio(
                     generated,
@@ -1856,6 +1899,7 @@ def main() -> None:
                             else "generated"
                         ),
                         "model_call_performed": True,
+                        "sequence_isolation": COHORT_SEQUENCE_ISOLATION,
                         "wall_sec": round(
                             time.perf_counter() - cohort_started,
                             6,
@@ -1898,6 +1942,7 @@ def main() -> None:
                         ],
                         "status": "failed",
                         "model_call_performed": True,
+                        "sequence_isolation": COHORT_SEQUENCE_ISOLATION,
                         "error_type": type(error).__name__,
                         "error": str(error),
                         "wall_sec": round(

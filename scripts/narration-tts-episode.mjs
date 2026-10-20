@@ -74,6 +74,11 @@ import {
   verifyInterruptedQwenAdoptionReceipt,
   verifyInterruptedQwenInventory,
 } from "./lib/qwen-interrupted-adoption.mjs";
+import {
+  narrationRuntimeFingerprintMismatch,
+  narrationRuntimePreflightGateField,
+  runNarrationRuntimePreflight,
+} from "./lib/narration-runtime-preflight.mjs";
 
 const DATA_ROOT = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const DEFAULT_PYTHON = "/Users/joel/AniFactoryData/voice_bank/bakeoff/.venv-kokoro-mlx-audio-0.4.6/bin/python";
@@ -3473,6 +3478,42 @@ async function main() {
     referenceAssetHashes,
     historicalSynthesisAuthorized,
   };
+  // R04: resolve every narration interpreter explicitly and import its runtime
+  // before any gate authorization or model load. The fingerprint is an additive
+  // gate field for new gates; a retained gate without it is legacy and keeps
+  // its original hash, so interrupted finalization still binds to it.
+  const runtimePreflight = await runNarrationRuntimePreflight({
+    ttsPython: python,
+    similarityPython,
+  });
+  const legacyRuntimeGate = finalizeInterrupted
+    && !priorPreSynthesisGate?.runtime_preflight;
+  if (!legacyRuntimeGate) {
+    gateInputs.runtimePreflight = narrationRuntimePreflightGateField(runtimePreflight);
+  }
+  if (runtimePreflight.status !== "passed") {
+    const blockedGate = buildNarrationPreSynthesisGate({
+      ...gateInputs,
+      runtimePreflight: narrationRuntimePreflightGateField(runtimePreflight),
+      synthesisScope: preliminarySynthesisScope,
+    });
+    if (!finalizeInterrupted) await atomicWriteJson(preSynthesisGatePath, blockedGate);
+    throw new Error(
+      "Narration runtime preflight failed before helper import/model load: "
+      + JSON.stringify(runtimePreflight.findings),
+    );
+  }
+  const resumingRetainedGate = finalizeInterrupted
+    || Boolean(String(flags["interrupted-adoption-receipt"] ?? "").trim());
+  if (resumingRetainedGate && priorPreSynthesisGate?.runtime_preflight) {
+    const mismatch = narrationRuntimeFingerprintMismatch(priorPreSynthesisGate, runtimePreflight);
+    if (mismatch) {
+      throw new Error(
+        "Narration runtime fingerprint changed since the retained gate; resume refused without re-synthesis: "
+        + JSON.stringify(mismatch),
+      );
+    }
+  }
   let preSynthesisGate = buildNarrationPreSynthesisGate({
     ...gateInputs,
     synthesisScope: preliminarySynthesisScope,

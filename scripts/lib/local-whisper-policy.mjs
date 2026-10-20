@@ -1,10 +1,42 @@
 import { existsSync } from "node:fs";
 
 // Keep ASR on the installed dependency runtime when Homebrew advances python3.
-// An explicit environment choice always wins; other hosts retain PATH behavior.
-export function localWhisperPython(env = process.env, exists = existsSync) {
-  return String(env.ANIFACTORY_ASR_PYTHON ?? "").trim()
-    || (exists("/opt/homebrew/bin/python3.14") ? "/opt/homebrew/bin/python3.14" : "python3");
+// An explicit environment choice always wins. The pinned Homebrew interpreter
+// is the only host interpreter with faster_whisper installed. There is no
+// silent PATH fallback in production: a bare `python3` is admitted only for an
+// explicitly diagnostic run (ANIFACTORY_ASR_PYTHON_DIAGNOSTIC_PATH_FALLBACK=true
+// or { allowPathFallback: true }); otherwise resolution fails closed before any
+// model load (stabilization roadmap R04).
+export const PINNED_LOCAL_WHISPER_PYTHON = "/opt/homebrew/bin/python3.14";
+export const LOCAL_WHISPER_PYTHON_ENV = "ANIFACTORY_ASR_PYTHON";
+export const LOCAL_WHISPER_PYTHON_DIAGNOSTIC_FALLBACK_ENV =
+  "ANIFACTORY_ASR_PYTHON_DIAGNOSTIC_PATH_FALLBACK";
+
+export class LocalWhisperPythonUnresolvedError extends Error {
+  constructor() {
+    super(
+      "No pinned ASR interpreter is available: set "
+      + `${LOCAL_WHISPER_PYTHON_ENV} to an interpreter with faster_whisper installed `
+      + `or install ${PINNED_LOCAL_WHISPER_PYTHON}. A bare PATH python3 is refused in `
+      + `production (diagnostic runs may set ${LOCAL_WHISPER_PYTHON_DIAGNOSTIC_FALLBACK_ENV}=true).`,
+    );
+    this.code = "local_whisper_python_unresolved";
+  }
+}
+
+export function localWhisperPython(
+  env = process.env,
+  exists = existsSync,
+  { allowPathFallback = false } = {},
+) {
+  const explicit = String(env[LOCAL_WHISPER_PYTHON_ENV] ?? "").trim();
+  if (explicit) return explicit;
+  if (exists(PINNED_LOCAL_WHISPER_PYTHON)) return PINNED_LOCAL_WHISPER_PYTHON;
+  if (allowPathFallback
+    || String(env[LOCAL_WHISPER_PYTHON_DIAGNOSTIC_FALLBACK_ENV] ?? "").trim() === "true") {
+    return "python3";
+  }
+  throw new LocalWhisperPythonUnresolvedError();
 }
 
 export const LOCAL_WHISPER_CONTRACT_VERSION =

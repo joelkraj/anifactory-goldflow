@@ -629,6 +629,7 @@ ${registryCommands}
   goldflow audio modelslab-stt-candidate Run an opt-in, spend-confirmed ModelsLab STT timing candidate without replacing local Whisper
   goldflow tts throughput-bakeoff  Run an isolated serial/batch-2/batch-4 Qwen/Liam diagnostic
   goldflow tts import-provider     Import hash-bound WAV results from the identity-locked TTS provider
+  goldflow tts preflight-runtime   Fail-closed narration runtime check: explicit ASR/TTS/similarity interpreters, imports, ffmpeg (no model load)
   goldflow tts finalize-provider   Run delivery, continuity, stitch, mastering, and full-stream QA
   goldflow tts repair-boundary     Repair only reviewed blocked Qwen sentence/word boundaries, then rerun narration QA
   goldflow tts complete-tail       Append bounded silence to reviewed intact raw Qwen tails; no synthesis
@@ -826,6 +827,8 @@ if (command === "crime-proof" && !helpRequested) {
   run("semantic-scene-plan.mjs", flags);
 } else if (command === "voice" && subcommand === "plan") {
   run("voice-direction-gate.mjs", flags);
+} else if (command === "tts" && subcommand === "preflight-runtime") {
+  run("narration-runtime-preflight.mjs", flags);
 } else if (command === "tts" && subcommand === "narrate") {
   run("narration-tts-episode.mjs", flags);
 } else if (command === "tts" && subcommand === "adopt-interrupted") {

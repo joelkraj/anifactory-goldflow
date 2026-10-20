@@ -106,7 +106,7 @@ export function referenceBoardPromptGuidance(board) {
 // reproduce ... gutters") is replaced. Everything else, including the
 // identity-separation rules and the positional mapping, is unchanged.
 const SINGLE_FRAME_LINE = 'Create one coherent cinematic manhwa frame. Do not reproduce the board, borders, gutters, reference-sheet layout, or multiple copies of a character. Do not add labels, captions, watermarks, or unintended text.';
-export const PAGE_FRAME_BOARD_LINE = 'Create the multi-panel page described above, with exactly its requested panels and white gutters. Do not reproduce this reference board, its gray gutters, its layout, labels, or reference-sheet poses. Within each panel, do not add copies of a character. Do not add labels, captions, watermarks, or unintended text.';
+export const PAGE_FRAME_BOARD_LINE = 'Create the multi-panel page described above, with exactly its requested panels and white gutters. Do not reproduce this reference board, its gray gutters, its layout, labels, or reference-sheet poses. Within each panel, do not add copies of a character. Do not add labels, watermarks, or any text the page instructions do not request.';
 export function pageReferenceBoardPromptGuidance(board) {
   const guidance = referenceBoardPromptGuidance(board);
   if (!guidance.includes(SINGLE_FRAME_LINE)) throw new Error('Reference board guidance changed; page variant must be reviewed.');

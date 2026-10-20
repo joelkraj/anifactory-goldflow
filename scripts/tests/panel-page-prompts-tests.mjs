@@ -16,7 +16,7 @@ Panel 3 (right-bottom): Joey's jaw tightens; no one else is in this panel.`;
 const prompt = (overrides = {}) => ({ image_id: 'ep-cut-007', scene_id: 'scene_3', provider_prompt: authored(), reference_requirements: [{ ref_id: 'joey' }, { ref_id: 'elena' }, { ref_id: 'room' }], shot_manifest: { visible_characters: [{ name: 'Joey' }, { name: 'Elena' }] }, ...overrides });
 
 test('page frames are fixed per template and name every panel', () => {
-  for (const template of ['P2V', 'P2H', 'P3L', 'P4G']) assert.match(pageFrameText(template), /white gutters .* No captions, speech bubbles/);
+  for (const template of ['P2V', 'P2H', 'P3L', 'P4G']) assert.match(pageFrameText(template), /white gutters .* Keep the gutters and page edges free of any text/);
   assert.match(pageFrameText('P4G'), /divided into 4 fully separate/);
   assert.deepEqual(pagePanelHeadings({ page_template: 'P4G' }), ['Panel 1 (top-left):', 'Panel 2 (top-right):', 'Panel 3 (bottom-left):', 'Panel 4 (bottom-right):']);
   assert.throws(() => pageFrameText('P5'), /unknown template/);

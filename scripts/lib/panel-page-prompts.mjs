@@ -17,7 +17,7 @@ export const pageSlotLabel = slot => String(slot).replaceAll('_', '-');
 export function pageFrameText(template) {
   need(PAGE_TEMPLATES[template] && GEOMETRY[template], `unknown template ${template}`);
   const count = PAGE_TEMPLATES[template].length;
-  return `One 16:9 landscape anime/manhwa page divided into ${count} fully separate rectangular panels by straight solid white gutters of equal width that run edge to edge. ${GEOMETRY[template]} Nothing (no limb, hair, prop, light streak or effect) crosses a gutter. No captions, speech bubbles, sound effects, numbers, logos or lettering anywhere, including inside the gutters.`;
+  return `One 16:9 landscape anime/manhwa page divided into ${count} fully separate rectangular panels by straight solid white gutters of equal width that run edge to edge. ${GEOMETRY[template]} Nothing (no limb, hair, prop, light streak, effect or lettering) crosses a gutter. Keep the gutters and page edges free of any text; add a caption or thought bubble only where a panel section explicitly asks for it, entirely inside that panel.`;
 }
 
 /** The required "Panel k (slot):" headings, in the template's reading order. */
@@ -27,7 +27,7 @@ export function pagePanelHeadings(order) {
 }
 
 /** Planner guidance for page owners; the order supplies its page_frame and zones. */
-export const PAGE_PLANNER_GUIDANCE = '- If panel_asset_order.kind is page, author ONE provider_prompt for the whole page: begin with its page_frame verbatim; then one shared-context paragraph (location, time, lighting, palette and who is present with identity and wardrobe anchors); then exactly one section per zone in the listed order, headed exactly as in panel_headings, drawn from that zone\'s visual_brief and bound beats. Each section names who is in that panel and who is not, and gives the panel its own drawable subject. Attach references for the whole page (at most four) and show at most three distinct people on the page. Do not add text, bubbles or extra panels.';
+export const PAGE_PLANNER_GUIDANCE = '- If panel_asset_order.kind is page, author ONE provider_prompt for the whole page: begin with its page_frame verbatim; then one shared-context paragraph (location, time, lighting, palette and who is present with identity and wardrobe anchors); then exactly one section per zone in the listed order, headed exactly as in panel_headings, drawn from that zone\'s visual_brief and bound beats. Each section names who is in that panel and who is not, and gives the panel its own drawable subject. Attach references for the whole page (at most four) and show at most three distinct people on the page. Add text or bubbles only inside the panel whose section asks for them, never in gutters; add no extra panels.';
 
 function visiblePeople(prompt) {
   const names = (prompt.shot_manifest?.visible_characters ?? []).map(row => String(row?.name ?? row ?? '').trim().toLowerCase()).filter(Boolean);

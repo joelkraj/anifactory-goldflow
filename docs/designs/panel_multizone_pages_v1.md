@@ -6,7 +6,7 @@ Scope: `manhwa_recap_v1` + `generated_visuals_v1` + `render_profile: panel_compo
 
 ## Goal
 
-Cut generated images per episode by about half, along with the per-image review load, without losing identity continuity, and present the pages so the video feels like a manhwa comic brought to life. Three changes do that, listed here by how much they save:
+Cut generated images per episode by about half, along with the per-image review load, without losing identity continuity and **without changing the current panel presentation**. Pages are a generation-side efficiency: the composer keeps its existing layouts and simply crops each zone. Three changes do that, listed here by how much they save:
 
 | Change | What it removes | Coma-healer effect |
 | --- | --- | --- |
@@ -160,23 +160,25 @@ The composer already supports panel-level crops: `panel-production-plan.mjs` cre
 
 Composer validator changes:
 
-- **Magnification is reported, not capped.** Effective magnification (displayed px × max zoom ÷ zone-crop source px) is written to the composition report for review. It does not block. Operator decision (2026-10-19): stretching a zone to fill the frame is acceptable; the look is a manhwa comic brought to life, not maximum sharpness. The existing camera zoom limit (1–4) and the renderer's high-quality resampling stay as they are.
-- **Disclosure across zones.** A page carries future zones. No decision, background or context panel may show any pixel of a zone before that zone's first bound beat starts. A view of the **whole page** (`page_pan`, a background, or the new `page_build` layout below) must mask every zone that is not yet disclosed. The existing rule "a later panel cannot be disclosed before its beat" is extended from panels to zones, using the zone rectangles.
+- **Magnification is reported, not capped.** Effective magnification (displayed px × max zoom ÷ zone-crop source px) is written to the composition report for review. It does not block. Operator decision (2026-10-19): stretching a zone to fill the frame is acceptable; image count matters more than maximum sharpness. The existing camera zoom limit (1–4) and the renderer's high-quality resampling stay as they are.
+- **Disclosure across zones.** A page carries future zones. No decision, background or context panel may show any pixel of a zone before that zone's first bound beat starts. A background or context panel may use only zones that are already disclosed. The existing rule "a later panel cannot be disclosed before its beat" is extended from panels to zones, using the zone rectangles.
 
 ### Resolution and quality
 
 Locked: 1920×1080 at `quality: low`, the same request settings as today. There is no higher-resolution or higher-quality arm (operator decision, 2026-10-19). The adapter's 1920×1080 output check stays unchanged.
 
-### Presentation: a manhwa comic brought to life
+### Presentation: unchanged
 
-The target look is a real manhwa page being read and animated, not a sequence of separate full-screen stills. Pages are the stage, not just a cropping source. The recommended composition policy:
+Operator decision (2026-10-19): keep the current panel look. Pages change only how artwork is generated. Each beat still gets an ordinary panel through the existing layouts (`full_frame`, `inset`, `reveal`, `reaction_pair`, `page_pan`) over the blurred background. The only difference is that the panel's source is a zone of a page instead of a whole image. The viewer never sees a page as a page, so there is no new layout and no page reveal. Wide single images remain for beats whose recipe needs a large full-frame wide shot.
 
-1. **Page build (new layout, `page_build`).** The page is shown with its gutters, on a paper or dark backdrop. Each zone appears on its own beat: slide, pop or wipe-in, using the existing entry vocabulary. Zones not yet disclosed are masked as empty panel frames. The camera glides from the current zone to the next. This should be the main way pages appear, because it reads like a comic.
-2. **Punch-in.** For emphasis beats (a line that lands, a reaction, a reveal), one zone fills or nearly fills the frame, even when that stretches it. This uses the existing `full_frame` / `inset` layouts with the zone as the panel.
-3. **Panel-to-panel moves.** `reveal` and `reaction_pair` combine zones from the same page or an earlier one. A tall half-zone next to a reaction zone gives the side-by-side manhwa beat.
-4. **Splash singles: about 10–15% of beats.** Single full-image orders are reserved for the opening hook, establishing shots, big action and payoffs. Coma-healer used 14% (120 of 867 beats). Splashes are not eliminated; they are the contrast that makes the page sections feel deliberate.
+### Optional style ideas (separate from this change)
 
-The mix is authored per beat. There is no quota or fixed cycle. `page_build` needs renderer support: a page-level camera with per-zone masks and per-zone entries, bound to the zone rectangles. Everything else uses existing layouts.
+Observed on Manhwa Fresh (`@manhwa_fresh`, recap `CSLYvUejF3w`), the leading channel in the niche, as ideas for our own style. They are not part of this proposal and not a target format:
+
+- Shots last 2–4 s, and 1–2 s in action bursts. Our beats average about 5.4 s. Two or three authored crops within one long beat would quicken the rhythm, and zones make extra crops cheap.
+- The screen shakes on hits, explosions and shocks. That would need a small authored camera-shake feature.
+- Faces get slow push-ins on reactions and revelations, and wide reveals get pull-outs. Our camera paths already support both.
+- Sound-effect lettering and system/stat windows stay on screen. Our prompts currently ban lettering, so keeping it would be an editorial choice.
 
 ### Image QA: page vs zones
 
@@ -263,12 +265,12 @@ Request settings are unchanged (1920×1080, `quality: low`), so the per-request 
 | Risk | Mitigation |
 | --- | --- |
 | Model ignores geometry: merged panels, missing gutters, limbs crossing gutters | Closed templates, fixed frame sentence, deterministic gutter detection, zone-scoped repair; measured in the proof |
-| Stretched zones look soft | Accepted by the operator as part of the comic look; magnification is reported, and playback review judges it |
+| Stretched zones look soft | Stretching is accepted by the operator; magnification is reported, and playback review judges it |
 | Future zone leaks before its beat (spoiler) | Zone-level disclosure rule in the composer validator; whole-page pans only after full disclosure |
 | Identity bleed between people on one page | ≤ 3 human identities and ≤ 4 refs per page; page semantic QA checks bleed explicitly |
 | Larger repair blast radius | Siblings stay accepted; rejected zones re-bind to singles; at most one reviewed page regeneration |
 | Contradictory board instruction ("do not reproduce gutters") | Page-specific board instruction variant |
-| Pages read as a static comic scan | `page_build` reveals zones on their beats with authored camera moves; punch-ins and splash singles vary the rhythm |
+| Zone crops feel repetitive | Allocation gives each zone its own drawable subject; the existing layouts, crops and camera paths vary the edit |
 | Prompt-only subjects drift across pages | Bases 2–3 keep cross-page subjects as refs; two-page subjects get one reviewed promoted crop, re-anchored |
 | Policy conflict with "no story cut as identity ref" | `state_continuity` never supplies identity; requires explicit operator approval of the amendment |
 | Editorial over-packing to hit a count | No quota; the validator checks structure only; the proof compares edits by actual playback |
@@ -296,21 +298,20 @@ The existing accepted coma-healer chapter is the A/B control.
 1. **No-spend:**
    - Author the chapter's page allocation (v2) and the trimmed ref set for these scenes; prompt-plan and harden the pages.
    - Unit-test the gutter detector on the existing precedent PNG and on synthetic rasters.
-   - Implement and test `page_build` (zone masks, per-zone entries, page camera) on the precedent PNG.
 2. **Generate pages** at locked 1920×1080 `quality: low`, using only the chapter's kept refs. Expected about 15 generations. Budget ceiling: 24 requests × $0.05 = $1.20.
 3. **Structural and semantic QA:** page geometry pass rate, then zone acceptance on review crops. Record per-zone findings.
 4. **Promote derived refs** (`location_continuity` / `state_continuity`) from first-page zones for two-page subjects, reviewed and re-anchored. Then generate those subjects' later pages.
 5. **Zone repairs** for rejected zones as singles: at most one per zone, within the ceiling.
-6. **Compose** the chapter through the normal panel author/compile path in the proof directory, using the presentation policy above (page builds, punch-ins, splashes) and the zone validator rules. **Render** a chapter-length proof with the existing chapter narration.
+6. **Compose** the chapter through the normal panel author/compile path in the proof directory, using the existing layouts and the zone validator rules. **Render** a chapter-length proof with the existing chapter narration.
 
 **Measured outcomes** (written to `docs/proofs/panel_multizone_pages_v1_result.md`):
 
 - Generations: pages + repairs + promotions versus 47 baseline owners; actual Fal receipts versus baseline cost.
 - Page geometry pass rate, zone acceptance rate, and zone rejection reasons by category: geometry, bleed, identity, state, text.
 - Identity/wardrobe drift across pages for prompt-only and promoted subjects, against the baseline chapter.
-- The presentation mix (page builds, punch-ins, splashes) and the zone magnification distribution, for review only.
+- The zone magnification distribution, for review only.
 - QA reviewer effort: page reviews plus zone findings, versus the baseline chapter's risk cuts.
-- **Actual playback review** of the proof chapter against the baseline chapter: whether it feels like a manhwa brought to life, disclosure order, variety, crop quality. Technical pass rates do not approve the format.
+- **Actual playback review** of the proof chapter against the baseline chapter: whether it looks as good as the current panels, disclosure order, variety, crop quality. Technical pass rates do not approve the format.
 
 **Pass bar to scale:**
 
@@ -329,7 +330,7 @@ Anything short of that is a triage point, not a rerun order.
 3. Fal adapter: page assignments at the existing locked request settings.
 4. A new `panel-page-geometry` module: deterministic gutter detection, the geometry receipt, and review crops.
 5. Image QA: page structural and semantic checks, zone acceptance on crops, and zone-scoped repair rebinding.
-6. `panel-production-plan.mjs` / author validator / renderer: zone `source_rect` binding, magnification reporting, zone disclosure, and the `page_build` layout.
+6. `panel-production-plan.mjs` / author validator: zone `source_rect` binding, magnification reporting and zone disclosure. The renderer is unchanged.
 7. Reference director contract: `selection_basis` and the validator, `prompt_only` / `derived_promotion_candidate`.
 8. `imagegen promote-zone-ref`: the guarded promotion route and the receipts, plus the policy amendment in `generated_visuals.md` once approved.
 9. Docs: a `panel_production_v1.md` section and run-status routing for the new stages.

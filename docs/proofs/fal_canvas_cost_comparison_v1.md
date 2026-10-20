@@ -63,3 +63,20 @@ They will be compared against the 1920×1080 originals of the same pages on:
 - actual cost per request, from the dashboard or a billing-scoped key
 
 Code: `1074eca`. The canvas is allowlisted and proof-only; production defaults are unchanged.
+
+## Actual billed cost (Fal billing events, 2026-10-20)
+
+Read-only billing events were matched to the proof receipts' request IDs. Endpoint `sunburst/edit`, quality low, one 1920×1080 reference board per request.
+
+| Proof | Requests | Billed total | Per request (range) | Beats per image | Per beat |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1920×1080 pages (`multizone-gala-v1`) | 13 | $0.2429 | $0.0187 ($0.0182–0.0192) | ~2.2 | ~$0.0085 |
+| 3840×2160 dense pages (`multizone-gala-dense-v1`) | 11 | $0.2881 | $0.0262 ($0.0254–0.0273) | 5.1 | ~$0.0051 |
+
+A 3840 page costs 1.40× a 1920 page and covers about 2.3× the beats, which makes it about 40% cheaper per beat.
+
+Whole-episode projection at these actual prices (coma-healer counts, scene art only):
+
+- today: 658 × $0.0176 = $11.58
+- 1920 pages: ~323 × $0.0187 ≈ $6.0
+- 3840 dense: ~172 × $0.0262 ≈ $4.5

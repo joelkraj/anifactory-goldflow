@@ -6,7 +6,7 @@ import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { PAGE_TEMPLATES, PAGE_TEMPLATE_MIN_CANVAS_WIDTH, PAGE_GEOMETRY_DETECTOR_VERSION, writePageGeometry } from './panel-page-geometry.mjs';
 import { pageFrameText, pagePanelHeadings, pagePromptFindings } from './panel-page-prompts.mjs';
-import { buildReferenceBoard, pageReferenceBoardPromptGuidance } from './openart-reference-board.mjs';
+import { buildReferenceBoard, pageReferenceBoardPromptGuidance, referenceBoardPromptGuidance } from './openart-reference-board.mjs';
 import { falPortableAssetId } from './fal-portable-bank.mjs';
 import { FAL_ENDPOINTS, FAL_PAGE_CANVAS_SIZES, uploadFalReference, submitFalImage, observeFalImage } from './fal-provider.mjs';
 
@@ -207,10 +207,12 @@ export async function observeMultizoneProof({ proofDir }) {
   const { assignments } = await loadPrepared(proofDir), rows = [];
   for (const row of assignments) {
     if (!await exists(row.submission_receipt_path)) { rows.push({ page_id: row.image_id, state: 'not_submitted' }); continue; }
+    if (row.kind === 'zone_repair' && await exists(row.result_receipt_path)) { rows.push({ page_id: row.image_id, state: 'complete', kind: 'zone_repair' }); continue; }
     if (!await exists(row.result_receipt_path)) {
       const receipt = await read(row.submission_receipt_path);
       const result = await observeFalImage({ endpoint: receipt.endpoint, requestId: receipt.request_id, outputPath: row.output_path, receiptPath: row.result_receipt_path, expectedSize: row.image_size });
       if (!result.complete) { rows.push({ page_id: row.image_id, state: 'pending' }); continue; }
+      if (row.kind === 'zone_repair') { rows.push({ page_id: row.image_id, state: 'complete', kind: 'zone_repair' }); continue; }
     }
     // Receipts are per detector version, so a policy change re-measures without overwriting evidence.
     const geometryDir = path.join(proofDir, 'geometry', PAGE_GEOMETRY_DETECTOR_VERSION, row.image_id), geometryPath = path.join(geometryDir, 'page_geometry.json');
@@ -218,4 +220,38 @@ export async function observeMultizoneProof({ proofDir }) {
     rows.push({ page_id: row.image_id, state: 'complete', geometry_status: geometry.status, findings: geometry.findings });
   }
   return { status: rows.every(row => row.state === 'complete') ? 'complete' : 'pending', pages: rows };
+}
+
+/**
+ * Prepares one reviewed single-image replacement for exactly one zone of a
+ * generated proof page (no provider call). It reuses that page's approved
+ * references and shared context; the page raster and sibling zones are kept.
+ * Dispatch goes through the same token, lock and request ceiling.
+ */
+export async function prepareMultizoneZoneRepair({ proofDir, pageId, slot, section, reason, reviewer, canvas = { width: 2560, height: 1440 } }) {
+  need(text(reason, 30) && text(reviewer) && text(section, 60), 'reviewer, substantive reason and an authored replacement section required');
+  need(FAL_PAGE_CANVAS_SIZES.some(row => row.width === canvas.width && row.height === canvas.height), 'unsupported canvas');
+  const { identity, identitySha256, assignments } = await loadPrepared(proofDir);
+  const page = assignments.find(row => row.image_id === pageId && row.kind !== 'zone_repair');
+  need(page && await exists(page.result_receipt_path), `generated page ${pageId} required`);
+  const zone = page.zones.find(row => row.slot === slot);
+  need(zone, `unknown zone ${slot} on ${pageId}`);
+  const planPath = Object.keys(identity.source_hashes).find(file => file.endsWith('authored_page_plan.json'));
+  const plan = await read(planPath), resolved = await resolveMultizoneProofPlan({ ...plan, page_ids: [pageId] });
+  const source = resolved.pages[0], authored = plan.pages.find(row => row.page_id === pageId);
+  const repairId = `${pageId}_${slot}_repair1`;
+  need(!assignments.some(row => row.image_id === repairId), `zone repair ${repairId} already prepared`);
+  const board = source.refs.length ? await buildReferenceBoard({ root: proofDir, imageId: repairId, references: source.refs }) : null;
+  const body = `One coherent 16:9 landscape anime/manhwa frame. ${authored.shared_context.trim()}\n\n${section.trim()}`;
+  const prompt = board ? `${body}\n\n${referenceBoardPromptGuidance(board)}` : body;
+  const core = {
+    proof_id: identity.proof_id, kind: 'zone_repair', image_id: repairId, page_id: pageId, slot, replaces_source_image_id: zone.source_image_id, beat_image_ids: zone.beat_image_ids,
+    reviewer, reason, endpoint: board ? FAL_ENDPOINTS.primary_edit : FAL_ENDPOINTS.primary_text, prompt, prompt_sha256: sha(prompt), run_identity_sha256: identitySha256,
+    reference_mode: board ? 'one_positional_collage' : 'text_only', reference_asset_ids: source.refs.map(ref => ref.asset_id), reference_hashes: source.refs.map(ref => ref.sha256),
+    board_path: board?.output_path ?? null, board_sha256: board?.output_sha256 ?? null, board_manifest_path: board?.manifest_path ?? null,
+    max_cost_usd: MAX_COST_PER_REQUEST_USD, image_size: { width: canvas.width, height: canvas.height },
+  };
+  const assignment = { ...core, assignment_sha256: sha(JSON.stringify(core)), ...proofPaths(proofDir, repairId) };
+  await writeNew(assignment.assignment_path, assignment);
+  return { status: 'prepared_not_dispatched', repair_id: repairId, page_id: pageId, slot, replaces: zone.source_image_id, beats: zone.beat_image_ids, provider_calls: 0 };
 }

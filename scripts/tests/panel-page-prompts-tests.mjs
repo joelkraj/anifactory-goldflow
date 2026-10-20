@@ -58,4 +58,16 @@ test('planner guidance appears only for requests containing page orders', () => 
   assert.equal(withPage.split(PAGE_PLANNER_GUIDANCE).length, 2, 'guidance appears exactly once');
 });
 
+test('dense pages size their lettering and keep small zones to one short text element', () => {
+  assert.match(pageFrameText('P4G'), /one-fifth of its panel's width/);
+  assert.doesNotMatch(pageFrameText('P2V'), /one-fifth/);
+  const dense = { asset_id: 'page_9', kind: 'page', page_template: 'P4H' };
+  const build = sections => `${pageFrameText('P4H')}\n\nA private hotel room.\n\n${pagePanelHeadings(dense).map((h, i) => `${h} ${sections[i]}`).join('\n')}`;
+  const ok = ["A large card reading exactly 'BILL ERASED', '$20 MILLION A YEAR' and 'YOUR NAME ON A WING'.", 'Richard sits. A bubble reads exactly "That was too close."', 'Joey listens.', 'Richard stares.'];
+  assert.deepEqual(pagePromptFindings({ image_id: 'x', provider_prompt: build(ok) }, dense), [], 'cards are allowed in the hero zone');
+  const card = [ok[1], ok[2], ok[3], ok[0]];
+  assert.deepEqual(pagePromptFindings({ image_id: 'x', provider_prompt: build(card) }, dense).map(row => row.code), ['page_lettering_policy']);
+  const long = [ok[1], 'A bubble reads exactly "This is far too many words for a small zone."', ok[2], ok[3]];
+  assert.match(pagePromptFindings({ image_id: 'x', provider_prompt: build(long) }, dense)[0].message, /over-long/);
+});
 process.stdout.write(`Panel page prompts: ${count} test groups passed.\n`);

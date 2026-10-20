@@ -2,6 +2,8 @@
 import path from 'node:path';
 import { episodeDirForFlags } from './lib/execution-provenance.mjs';
 import { preparePanelAssetPlan, writePanelAssetPlan, loadPanelAssetPlan, reconcilePanelAssetAliases } from './lib/panel-production-assets.mjs';
+import { authorDensePageAllocation } from './lib/panel-page-allocation-author.mjs';
+import { fileURLToPath } from 'node:url';
 
 const args = process.argv.slice(2), flags = {};
 for (let i = 0; i < args.length; i += 2) {
@@ -12,6 +14,12 @@ try {
   if (!(flags['episode-dir'] || flags.channel && flags.week && flags.episode)) throw new Error('An explicit episode directory or channel/week/episode tuple is required.');
   const episodeDir = episodeDirForFlags(flags, process.env);
   let result;
+  if (flags.action === 'author-dense') {
+    // Drafts a dense v2 candidate with the locked planner; never imports or approves it.
+    const report = await authorDensePageAllocation({ episodeDir, outputDir: flags['output-dir'] ? path.resolve(flags['output-dir']) : undefined, repoRoot: fileURLToPath(new URL('../', import.meta.url)), concurrency: Number(flags.concurrency ?? 6), limit: Number(flags.limit ?? 1000), onProgress: row => process.stderr.write(`${row.chunk_id} ${row.status} ${row.completed}/${row.total}\n`) });
+    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+    process.exit(report.status === 'candidate_ready' ? 0 : 1);
+  }
   if (flags.action === 'reconcile') result = await reconcilePanelAssetAliases({ episodeDir });
   else if (flags.action === 'validate') { const loaded = await loadPanelAssetPlan({ episodeDir }); result = { status: 'passed', plan_path: loaded.planPath }; }
   else if (flags.plan) result = await writePanelAssetPlan({ episodeDir, planPath: path.resolve(flags.plan) });

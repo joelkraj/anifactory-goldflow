@@ -23,6 +23,8 @@ export function panelAssetPlanPaths(episodeDir, episode) {
   };
 }
 
+export async function loadPanelAssetInputs(episodeDir) { return inputs(episodeDir); }
+
 async function inputs(episodeDir) {
   need(text(episodeDir), 'explicit episodeDir required');
   const dir = await fs.realpath(episodeDir), sourceHashes = {};

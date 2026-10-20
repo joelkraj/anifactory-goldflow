@@ -38,10 +38,12 @@ Return strict JSON only:
       "opening_target": "one plain sentence showing the selected hook through a concrete opening event",
       "demand_transfer": "one sentence naming the measured viewer desire transferred without copying plot skin",
       "why_it_can_win": "one sentence",
-      "complexity_risk": "low, medium, or high"
+      "complexity_risk": "low, medium, or high",
+      "genre_elements": ["three to eight plain genre elements the story must deliver"],
+      "reference_outlier": {"title": "exact external outlier title copied from the evidence whose demand this transfers", "url": "its exact URL from the evidence, or null if the evidence gives none"}
     }
   ]
 }
 
-Include exactly ten unique candidates. Preserve every selected title byte-for-byte. Rank one is the strongest recommendation, but the operator makes the final premise decision.
+Include exactly ten unique candidates. Preserve every selected title byte-for-byte. Rank one is the strongest recommendation. Goldflow automatically develops rank one by default, so rank one must be the candidate you would actually commit a full script to; an operator may still supply a different brief before writing.
 ```

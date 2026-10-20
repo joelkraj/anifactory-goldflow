@@ -540,7 +540,7 @@ ${registryCommands}
   goldflow benchmark quota          Record isolated Gemini, Flow, and Antigravity quota evidence
   goldflow benchmark planners       Compare task-specific Codex, Antigravity, Gemini, and ChatGPT planning
   goldflow source research         Produce a cited ChatGPT Web Pro research dossier for source development
-  goldflow source manufacture      Run three 5.6 Pro drafts, Medium selection, or bounded Medium/High improvement
+  goldflow source manufacture      Auto-title, one Pro draft, then a capped diagnose/revise/verify loop (revise --script for brought scripts)
   goldflow source ideate           Generate and independently rank package-first story candidates before run preflight
   goldflow source approve-package  Operator-approve one exact title/thumbnail/story package
   goldflow source blueprint        Author the package-bound dramatic engine, canon, causal movements, climax, and ending

@@ -189,7 +189,9 @@ const selection = {
 };
 assert.equal(validateManufacturingSelection(selection, { portfolio }).done, true);
 
-const currentPolicy = sourceWriterPolicy();
+assert.equal(sourceWriterPolicy().name, "single_6_sol_pro_v1");
+assert.deepEqual(sourceWriterPolicy().candidates.map((row) => row.id), ["draft_56_1"]);
+const currentPolicy = sourceWriterPolicy(null, "three_6_sol_pro_v1");
 assert.equal(currentPolicy.name, "three_6_sol_pro_v1");
 assert.deepEqual(currentPolicy.candidates.map((row) => row.id), ["draft_56_1", "draft_56_2", "draft_56_3"]);
 assert.ok(currentPolicy.candidates.every((row) => row.model === "gpt-6-sol"));

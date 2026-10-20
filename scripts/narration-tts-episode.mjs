@@ -3841,8 +3841,10 @@ async function main() {
     finalSynthesisScope.interrupted_adoption_receipt_sha256 =
       interruptedAdoption.receipt_sha256;
   }
-  if (interruptedAdoption && (finalSynthesisScope.mode
+  const completedAdoption = Boolean(interruptedAdoption?.complete_original_run);
+  if (interruptedAdoption && ((finalSynthesisScope.mode
       !== "interrupted_full_synthesis_resume_preserving_accepted_units"
+      && !(completedAdoption && finalSynthesisScope.mode === "already_complete_no_synthesis_authorized"))
       || JSON.stringify(finalSynthesisScope.preserved_unit_ids)
         !== JSON.stringify(interruptedAdoption.receipt.accepted_unit_ids)
       || JSON.stringify(finalSynthesisScope.authorized_synthesis_unit_ids)
@@ -3855,9 +3857,9 @@ async function main() {
   const alreadyComplete = finalSynthesisScope.mode
     === "already_complete_no_synthesis_authorized";
   const allowAlreadyCompleteFinalization = alreadyComplete
-    && workflowBypass
-    && boolFlag(flags["allow-full-stage-rerun"])
-    && String(flags["rerun-reason"] ?? "").trim().length > 0;
+    && (completedAdoption || (workflowBypass
+      && boolFlag(flags["allow-full-stage-rerun"])
+      && String(flags["rerun-reason"] ?? "").trim().length > 0));
   if (finalSynthesisScope.mode
     === "interrupted_full_synthesis_resume_preserving_accepted_units") {
     const previouslySubmittedIds = new Set(
@@ -4043,7 +4045,9 @@ async function main() {
       units,
       candidatePool: preservedCandidates,
       preservedForInvocation,
-      priorSynthesisRuns: priorNarrationReport?.synthesis_runs ?? [],
+      priorSynthesisRuns: completedAdoption
+        ? [interruptedAdoption.complete_original_run]
+        : priorNarrationReport?.synthesis_runs ?? [],
       policy,
     });
     candidates.push(...preservedFinalInputs.candidates);
@@ -4690,8 +4694,8 @@ async function main() {
       status: "validated_existing_candidates_no_synthesis",
       preserved_unit_ids: finalSynthesisScope.preserved_unit_ids,
       preserved_unit_count: finalSynthesisScope.preserved_unit_ids.length,
-      workflow_bypass: true,
-      rerun_reason: String(flags["rerun-reason"]).trim(),
+      workflow_bypass: workflowBypass,
+      rerun_reason: completedAdoption ? "Verified complete original runner; QA-only continuation" : String(flags["rerun-reason"]).trim(),
       model_loaded: false,
       synthesis_invoked: false,
     };

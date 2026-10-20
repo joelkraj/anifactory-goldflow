@@ -4755,7 +4755,11 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
       try {
         const planPath = path.join(episodeDir, "narration_generation_plan.json");
         const plan = await readJson(planPath, null);
-        const outputDir = path.join(episodeDir, "assets/audio/narration_tts");
+        const rawIdentity = await readJson(path.join(episodeDir, "run_identity.json"), null);
+        const migratedVoiceId = rawIdentity?.narration_identity_relock?.recovery_kind === "operator_selected_qwen_voice_migration"
+          ? rawIdentity.narration_identity_relock.narrator_voice_id : null;
+        if (migratedVoiceId && !/^[a-zA-Z0-9_-]+$/.test(migratedVoiceId)) throw new Error("Unsafe migrated voice ID");
+        const outputDir = path.join(episodeDir, "assets/audio/narration_tts", ...(migratedVoiceId ? [migratedVoiceId] : []));
         const runsDir = path.join(outputDir, "runs");
         const completedRunners = [];
         for (const name of await fs.readdir(runsDir).catch(() => [])) {

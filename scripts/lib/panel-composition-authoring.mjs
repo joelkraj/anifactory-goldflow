@@ -70,6 +70,31 @@ export async function createPanelCompositionTemplate({ timelinePath, outputDir }
 
 // Several shots per beat: at most two cuts (three shots), each shot readable.
 export const MAX_BEAT_CUTS = 2, MIN_SHOT_SEC = 1.2;
+// Impact beats: a short decaying screen shake on a held main panel, and a
+// burst window after it in which cuts may be as short as MIN_BURST_SHOT_SEC.
+export const IMPACT_LIMITS = Object.freeze({ min_duration_sec: 0.15, max_duration_sec: 0.6, min_amplitude: 0.004, max_amplitude: 0.03, default_amplitude: 0.012 });
+export const BURST_WINDOW_SEC = 1.5, MIN_BURST_SHOT_SEC = 0.35;
+const SHAKE_STEP_SEC = 1 / 24, SHAKE_PATTERN = [[1, -0.6], [-0.8, 0.7], [0.6, 1], [-1, -0.5]];
+
+function impactKeys(layer, impact, sceneId) {
+  const at = impact?.at_sec, duration = impact?.duration_sec, amplitude = impact?.amplitude ?? IMPACT_LIMITS.default_amplitude;
+  if (![at, duration, amplitude].every(Number.isFinite) || duration < IMPACT_LIMITS.min_duration_sec || duration > IMPACT_LIMITS.max_duration_sec
+    || amplitude < IMPACT_LIMITS.min_amplitude || amplitude > IMPACT_LIMITS.max_amplitude) fail(`invalid impact for ${sceneId}`);
+  const end = at + duration, keys = layer.keyframes;
+  if (at < layer.start_sec || end > layer.end_sec) fail(`impact must fall inside the main shot: ${sceneId}`);
+  // Shake only a held stretch so inserted keys cannot distort an eased move.
+  const before = keys.filter(k => k.at_sec <= at).at(-1), after = keys.find(k => k.at_sec >= end);
+  const same = (a, b) => JSON.stringify([a.rect, a.camera]) === JSON.stringify([b.rect, b.camera]);
+  if (!before || !after || !keys.filter(k => k.at_sec >= before.at_sec && k.at_sec <= after.at_sec).every(k => same(k, before))) fail(`impact needs a held panel (no camera or rect move during it): ${sceneId}`);
+  const steps = Math.max(2, Math.round(duration / SHAKE_STEP_SEC)), shake = [];
+  for (let i = 0; i <= steps; i++) {
+    const t = at + duration * i / steps, decay = 1 - i / steps, [dx, dy] = i === 0 || i === steps ? [0, 0] : SHAKE_PATTERN[(i - 1) % SHAKE_PATTERN.length];
+    shake.push({ ...key(t, { ...before.rect, x: before.rect.x + dx * amplitude * decay, y: before.rect.y + dy * amplitude * decay }, before.camera, i < steps ? 'linear' : Math.abs(after.at_sec - end) < 1e-9 ? after.easing : before.easing), opacity: before.opacity });
+  }
+  const merged = [...keys.filter(k => k.at_sec < at - 1e-9), ...shake, ...keys.filter(k => k.at_sec > end + 1e-9)];
+  if (merged.length > 32) fail(`impact adds too many keys: ${sceneId}`);
+  return merged;
+}
 
 function key(at_sec, rect, view = camera, easing = 'smooth') { return { at_sec, rect: { ...rect }, camera: { ...view }, opacity: 1, easing }; }
 
@@ -157,7 +182,13 @@ export function compilePanelComposition(timeline, recipe, { mode = 'editing_expe
       if (!Array.isArray(row.cuts) || row.cuts.length < 1 || row.cuts.length > MAX_BEAT_CUTS) fail(`1..${MAX_BEAT_CUTS} cuts allowed: ${scene.id}`);
       if (row.rect_to || row.move_start_sec != null || row.move_end_sec != null) fail(`cuts replace rect_to and move times: ${scene.id}`);
       const original = panel(row.panel_id), bounds = [start, ...row.cuts.map(cut => cut.start_sec), end];
-      for (let i = 1; i < bounds.length; i++) if (!Number.isFinite(bounds[i]) || bounds[i] - bounds[i - 1] < MIN_SHOT_SEC - 1e-9) fail(`every shot must last at least ${MIN_SHOT_SEC}s: ${scene.id}`);
+      // A shot overlapping an authored impact's burst window may be short;
+      // every other shot, and always the final one, must stay readable.
+      const burst = (from, to) => row.impact && to > row.impact.at_sec && from < row.impact.at_sec + BURST_WINDOW_SEC;
+      for (let i = 1; i < bounds.length; i++) {
+        const minimum = i < bounds.length - 1 && burst(bounds[i - 1], bounds[i]) ? MIN_BURST_SHOT_SEC : MIN_SHOT_SEC;
+        if (!Number.isFinite(bounds[i]) || bounds[i] - bounds[i - 1] < minimum - 1e-9) fail(`every shot must last at least ${MIN_SHOT_SEC}s (${MIN_BURST_SHOT_SEC}s inside an impact burst, never the last): ${scene.id}`);
+      }
       main.end_sec = bounds[1]; main.keyframes = cameraKeys(start, bounds[1], rect, row);
       row.cuts.forEach((cut, i) => {
         const c = cut.source_rect, base = original.source_rect;
@@ -169,6 +200,10 @@ export function compilePanelComposition(timeline, recipe, { mode = 'editing_expe
         const cutRect = cut.rect ?? rect;
         layers.push({ id, panel_id: id, start_sec: bounds[i + 1], end_sec: bounds[i + 2], z: 2 + i, fit: cut.fit ?? main.fit, border_px: main.border_px, keyframes: cameraKeys(bounds[i + 1], bounds[i + 2], cutRect, { scene_id: scene.id, camera_from: cut.camera_from, camera_to: cut.camera_to }) });
       });
+    }
+    if (row.impact != null) {
+      if (!['inset', 'full_frame', 'page_pan'].includes(row.layout)) fail(`impact is only supported on inset, full_frame or page_pan: ${scene.id}`);
+      main.keyframes = impactKeys(main, row.impact, scene.id);
     }
     return { id: scene.id, start_sec: start, end_sec: end, background: { panel_id: row.background_panel_id, blur_px: row.blur_px ?? 32, brightness: row.background_brightness ?? 0.32 }, layers, editorial: { layout: row.layout, reason: row.editorial_reason, author: recipe.author } };
   });

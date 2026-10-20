@@ -211,3 +211,33 @@ test('sibling zones of a shown page are offered as context, never later ones', a
     assert.deepEqual(ids(authorPromptPanels(baseline, { scenes: [b] }, null)), [b.layers[0].panel_id], 'non-siblings stay out');
   } finally { await fs.rm(f.root, { recursive: true, force: true }); }
 });
+
+test('impact adds a decaying shake on a held shot and unlocks a short cut burst, never a short last shot', async () => {
+  const { compilePanelComposition } = await import('../lib/panel-composition-authoring.mjs');
+  const f = await fixture('impact');
+  try {
+    const chunk = panelAuthorChunks(f.packet)[0], baseline = structuredClone(f.packet.baseline);
+    baseline.scenes[0].end_sec = baseline.scenes[1].start_sec = 3; baseline.scenes[1].end_sec = baseline.duration_sec = 6;
+    for (const scene of baseline.scenes) for (const layer of scene.layers) { layer.start_sec = scene.start_sec; layer.end_sec = scene.end_sec; }
+    const r = responseFor(chunk.scenes), crop = { x: 0, y: 0, width: 1, height: 1 }, still = { x: .5, y: .5, zoom: 1 };
+    const shot = start_sec => ({ start_sec, source_rect: crop, camera_from: still, camera_to: still, region_evidence: 'The fixture raster fills this crop; its edges remain visible.' });
+    r.decisions[0].impact = { at_sec: 1, duration_sec: 0.3 };
+    r.decisions[0].cuts = [shot(1.4), shot(1.8)];
+    const recipe = { schema: 'goldflow_panel_composition_recipe_v1', author: 'Fixture editor', decisions: r.decisions };
+    const compile = () => compilePanelComposition(baseline, recipe, { mode: 'production_panel_composition' });
+    const [main, burst, last] = compile().scenes[0].layers;
+    assert.deepEqual([main.end_sec, burst.end_sec - burst.start_sec, last.end_sec - last.start_sec].map(v => Math.round(v * 100) / 100), [1.4, 0.4, 1.2]);
+    const base = main.keyframes[0].rect, shaken = main.keyframes.filter(k => k.at_sec > 1 && k.at_sec < 1.3);
+    assert.ok(shaken.length >= 5 && shaken.some(k => Math.abs(k.rect.x - base.x) > 0.005), 'shake moves the panel');
+    assert.deepEqual(main.keyframes.find(k => Math.abs(k.at_sec - 1.3) < 1e-9).rect, base, 'shake settles back exactly');
+    assert.ok(Math.abs(shaken[0].rect.x - base.x) > Math.abs(shaken.at(-1).rect.x - base.x), 'shake decays');
+    r.decisions[0].cuts = [shot(1.4), shot(2.6)];
+    assert.throws(compile, /never the last/, 'a burst may not end the beat on a flash');
+    r.decisions[0].cuts = [shot(1.4), shot(1.8)]; r.decisions[0].camera_to = { x: .5, y: .5, zoom: 1.2 };
+    assert.throws(compile, /held panel/);
+    r.decisions[0].camera_to = still; r.decisions[0].impact.amplitude = 0.2;
+    assert.throws(compile, /invalid impact/);
+    delete r.decisions[0].cuts; r.decisions[0].impact = { at_sec: 2.9, duration_sec: 0.3 };
+    assert.throws(() => validatePanelAuthorResponse(r, { ...chunk, scenes: chunk.scenes.map((s, i) => ({ ...s, ...baseline.scenes[i] })) }, baseline), /impact needs/);
+  } finally { await fs.rm(f.root, { recursive: true, force: true }); }
+});

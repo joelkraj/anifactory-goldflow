@@ -2,7 +2,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { assertPanelProductionIdentity, isPanelProductionIdentity } from './panel-production-policy.mjs';
-import { PAGE_TEMPLATES } from './panel-page-geometry.mjs';
+import { PAGE_TEMPLATES, PAGE_TEMPLATE_MIN_CANVAS_WIDTH } from './panel-page-geometry.mjs';
+import { FAL_PAGE_CANVAS_SIZES } from './fal-provider.mjs';
 import { pageFrameText, pagePanelHeadings } from './panel-page-prompts.mjs';
 
 const need = (value, message) => { if (!value) throw new Error(`Panel asset plan: ${message}`); };
@@ -75,6 +76,10 @@ function validatePageOrder(order, byBeat, zoneIds, beatZones) {
   const template = PAGE_TEMPLATES[order.page_template];
   need(template, `page ${order.asset_id} needs a supported page_template`);
   need(Array.isArray(order.zones) && order.zones.length === template.length, `page ${order.asset_id} needs exactly ${template?.length} zones`);
+  // The page canvas is part of the order: dense templates need 2560/3840 so zones keep detail.
+  const canvas = order.canvas ?? { width: 1920, height: 1080 };
+  need(FAL_PAGE_CANVAS_SIZES.some(row => row.width === canvas.width && row.height === canvas.height), `page ${order.asset_id} has an unsupported canvas`);
+  need(canvas.width >= PAGE_TEMPLATE_MIN_CANVAS_WIDTH[order.page_template], `page ${order.asset_id} ${order.page_template} needs a canvas at least ${PAGE_TEMPLATE_MIN_CANVAS_WIDTH[order.page_template]} wide`);
   const slots = new Set(template.map(zone => zone.slot)), covered = [];
   for (const zone of order.zones) {
     need(safeId(zone.zone_id) && !zoneIds.has(zone.zone_id), `page ${order.asset_id} needs unique safe zone IDs`);
@@ -250,6 +255,7 @@ export function expandPanelAssetPrompts(ownerPrompts, { plan, beats, planSha256 
       panel_asset_id: order.asset_id, panel_asset_plan_sha256: planSha256,
       panel_asset_owner_image_id: ownerImageId, panel_asset_binding_reason: binding.editorial_reason,
       panel_page_template: order.kind === 'page' ? order.page_template : null, panel_zone_id: binding.zone_id ?? null,
+      ...(order.kind === 'page' && order.canvas ? { panel_page_canvas: { width: order.canvas.width, height: order.canvas.height } } : {}),
       panel_zone_slot: binding.zone_id ? order.zones.find(zone => zone.zone_id === binding.zone_id).slot : null,
       image_generation_required: true, provider_submission_required: !alias,
       image_strategy: alias ? 'reuse_prior_approved' : 'fresh',
@@ -281,7 +287,8 @@ export async function assertPanelPromptAllocation({ episodeDir, prompts, allowSu
     need(row.image_generation_required === true, `every allocated beat requires a materialized image ${row.image_id}`);
     const order = loaded.plan.asset_orders.find(value => value.asset_id === item.binding.asset_id);
     need((row.panel_page_template ?? null) === (order.kind === 'page' ? order.page_template : null) && (row.panel_zone_id ?? null) === (item.binding.zone_id ?? null)
-      && (row.panel_zone_slot ?? null) === (order.zones?.find(zone => zone.zone_id === item.binding.zone_id)?.slot ?? null), `page/zone allocation mismatch ${row.image_id}`);
+      && (row.panel_zone_slot ?? null) === (order.zones?.find(zone => zone.zone_id === item.binding.zone_id)?.slot ?? null)
+      && JSON.stringify(row.panel_page_canvas ?? null) === JSON.stringify(order.kind === 'page' && order.canvas ? { width: order.canvas.width, height: order.canvas.height } : null), `page/zone allocation mismatch ${row.image_id}`);
     need(row.start_sec === item.beat.start_sec && row.duration_sec === (item.beat.duration_sec ?? item.beat.end_sec - item.beat.start_sec), `beat timing changed ${row.image_id}`);
     need(item.alias || row.image_strategy === 'fresh' && row.editorial_reuse_approved === false && !row.reuse_source_image_id, `owner must remain a unique provider order ${row.image_id}`);
     need(row.panel_asset_owner_image_id === item.owner.image_id_hint && row.provider_submission_required === !item.alias, `provider allocation mismatch ${row.image_id}`);

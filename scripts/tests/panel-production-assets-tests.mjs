@@ -289,6 +289,16 @@ test('v2 page orders bind contiguous beat runs to template zones and reject ambi
   const reject = (change, pattern) => { const plan = page(); change(plan); assert.throws(() => validatePanelAssetPlan(plan, context), pattern); };
   reject(plan => { plan.schema = 'goldflow_panel_asset_plan_v1'; }, /unsupported kind/);
   reject(plan => { plan.asset_orders[0].page_template = 'P9'; }, /supported page_template/);
+  reject(plan => { plan.asset_orders[0].canvas = { width: 1000, height: 1000 }; }, /unsupported canvas/);
+  // Dense templates need their larger canvas.
+  const dense = page(); Object.assign(dense.asset_orders[0], { page_template: 'P3H' });
+  dense.asset_orders[0].zones[0].slot = 'hero'; dense.asset_orders[0].zones[1].slot = 'right_top';
+  dense.asset_orders[0].zones.push({ zone_id: 'page_1_z3', slot: 'right_bottom', beat_ids: ['beat_1'], visual_brief: 'Reaction.', editorial_reason: 'Reaction crop.' });
+  dense.asset_orders[0].zones[0].beat_ids = ['beat_0'];
+  dense.beat_bindings[1].zone_id = 'page_1_z3';
+  assert.throws(() => validatePanelAssetPlan(dense, context), /needs a canvas at least 2560 wide/);
+  dense.asset_orders[0].canvas = { width: 3840, height: 2160 };
+  assert.equal(validatePanelAssetPlan(dense, context).asset_orders[0].page_template, 'P3H');
   reject(plan => { plan.asset_orders[0].zones.pop(); }, /exactly 2 zones/);
   reject(plan => { plan.asset_orders[0].zones[1].slot = 'left'; }, /missing or repeated P2V slot/);
   reject(plan => { plan.asset_orders[0].zones[1].zone_id = 'page_1_z1'; }, /unique safe zone IDs/);

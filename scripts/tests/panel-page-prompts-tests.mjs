@@ -16,8 +16,10 @@ Panel 3 (right-bottom): Joey's jaw tightens; no one else is in this panel.`;
 const prompt = (overrides = {}) => ({ image_id: 'ep-cut-007', scene_id: 'scene_3', provider_prompt: authored(), reference_requirements: [{ ref_id: 'joey' }, { ref_id: 'elena' }, { ref_id: 'room' }], shot_manifest: { visible_characters: [{ name: 'Joey' }, { name: 'Elena' }] }, ...overrides });
 
 test('page frames are fixed per template and name every panel', () => {
-  for (const template of ['P2V', 'P2H', 'P3L', 'P4G']) assert.match(pageFrameText(template), /white gutters .* Keep the gutters and page edges free of any text/);
+  for (const template of ['P2V', 'P2H', 'P3L', 'P4G', 'P3H', 'P4H', 'P5L', 'P6G']) assert.match(pageFrameText(template), /white gutters .* Keep the gutters and page edges free of any text/);
   assert.match(pageFrameText('P4G'), /divided into 4 fully separate/);
+  assert.match(pageFrameText('P6G'), /divided into 6 fully separate/);
+  assert.deepEqual(pagePanelHeadings({ page_template: 'P4H' }), ['Panel 1 (hero):', 'Panel 2 (right-top):', 'Panel 3 (right-middle):', 'Panel 4 (right-bottom):']);
   assert.deepEqual(pagePanelHeadings({ page_template: 'P4G' }), ['Panel 1 (top-left):', 'Panel 2 (top-right):', 'Panel 3 (bottom-left):', 'Panel 4 (bottom-right):']);
   assert.throws(() => pageFrameText('P5'), /unknown template/);
 });
@@ -35,8 +37,8 @@ test('missing frame, sections, order, extras and caps are blocking findings', ()
   const swapped = authored().replace('Panel 2 (right-top):', '@@').replace('Panel 3 (right-bottom):', 'Panel 2 (right-top):').replace('@@', 'Panel 3 (right-bottom):');
   assert.deepEqual(codes(prompt({ provider_prompt: swapped })), [['page_panel_sections_invalid', true, 'blocker']]);
   assert.deepEqual(codes(prompt({ provider_prompt: `${authored()}\nPanel 4 (extra): a fourth view.` })), [['page_panel_sections_invalid', true, 'blocker']]);
-  assert.deepEqual(codes(prompt({ reference_requirements: ['a', 'b', 'c', 'd', 'e'].map(ref_id => ({ ref_id })) })), [['page_reference_cap', true, 'blocker']]);
-  assert.deepEqual(codes(prompt({ shot_manifest: { visible_characters: ['Joey', 'Elena', 'Marcus', 'Vanessa'] } })), [['page_visible_people_cap', true, 'blocker']]);
+  assert.deepEqual(codes(prompt({ reference_requirements: ['a', 'b', 'c', 'd', 'e', 'f', 'g'].map(ref_id => ({ ref_id })) })), [['page_reference_cap', true, 'blocker']]);
+  assert.deepEqual(codes(prompt({ shot_manifest: { visible_characters: ['Joey', 'Elena', 'Marcus', 'Vanessa', 'Richard'] } })), [['page_visible_people_cap', true, 'blocker']]);
 });
 
 test('the page board instruction replaces only the single-frame line', () => {

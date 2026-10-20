@@ -158,7 +158,8 @@ async function finalizeReferences(ctx){
   return {status:"materialized",count:byId.size,visual_reference_plan:planPath,character_state_refs:characterPath};
 }
 async function nativePromptReferences(ctx,row,approval){
-  const requirements=[...(row.reference_requirements??[])].sort((a,b)=>Number(a.slot_order??99)-Number(b.slot_order??99)).slice(0,4);
+  // Multi-zone pages may carry up to six references (one 3x2 board); single cuts keep four.
+  const requirements=[...(row.reference_requirements??[])].sort((a,b)=>Number(a.slot_order??99)-Number(b.slot_order??99)).slice(0,row.panel_page_template?6:4);
   const referencePlan=await read(path.join(ctx.root,"reference-plan.json"));
   const approvedImports=new Map(referencePlan.assignments.filter(item=>item.reference_mode==="approved_local_asset")
     .map(item=>[item.ref_id,item.reference_asset_ids[0]]));

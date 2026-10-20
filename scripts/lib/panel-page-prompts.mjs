@@ -8,8 +8,12 @@ const GEOMETRY = Object.freeze({
   P2H: 'Two full-width panels of equal height stacked vertically: a top panel and a bottom panel.',
   P3L: 'Three panels: a full-height left panel filling the left half, and on the right half a top panel above a bottom panel of equal height.',
   P4G: 'Four panels of equal size in a two-by-two grid: top-left, top-right, bottom-left and bottom-right.',
+  P3H: 'Three panels: a large full-height hero panel filling the left two-thirds, and in the right third a top panel above a bottom panel of equal height.',
+  P4H: 'Four panels: a large full-height hero panel filling the left two-thirds, and in the right third three stacked panels of equal height (top, middle, bottom).',
+  P5L: 'Five panels: a full-height left panel filling the left half, and on the right half a two-by-two grid of four equal panels (top-left, top-right, bottom-left, bottom-right of that half).',
+  P6G: 'Six panels of equal size in a three-by-two grid: top-left, top-center, top-right, bottom-left, bottom-center and bottom-right.',
 });
-export const PAGE_LIMITS = Object.freeze({ max_references: 4, max_visible_people: 3 });
+export const PAGE_LIMITS = Object.freeze({ max_references: 6, max_visible_people: 4 });
 
 const need = (value, message) => { if (!value) throw new Error(`Page prompt: ${message}`); };
 export const pageSlotLabel = slot => String(slot).replaceAll('_', '-');
@@ -27,7 +31,7 @@ export function pagePanelHeadings(order) {
 }
 
 /** Planner guidance for page owners; the order supplies its page_frame and zones. */
-export const PAGE_PLANNER_GUIDANCE = '- If panel_asset_order.kind is page, author ONE provider_prompt for the whole page: begin with its page_frame verbatim; then one shared-context paragraph (location, time, lighting, palette and who is present with identity and wardrobe anchors); then exactly one section per zone in the listed order, headed exactly as in panel_headings, drawn from that zone\'s visual_brief and bound beats. Each section names who is in that panel and who is not, and gives the panel its own drawable subject. Attach references for the whole page (at most four) and show at most three distinct people on the page. Add text or bubbles only inside the panel whose section asks for them, never in gutters; add no extra panels.';
+export const PAGE_PLANNER_GUIDANCE = '- If panel_asset_order.kind is page, author ONE provider_prompt for the whole page: begin with its page_frame verbatim; then one shared-context paragraph (location, time, lighting, palette and who is present with identity and wardrobe anchors); then exactly one section per zone in the listed order, headed exactly as in panel_headings, drawn from that zone\'s visual_brief and bound beats. Each section names who is in that panel and who is not, and gives the panel its own drawable subject. Attach references for the whole page (at most six) and show at most four distinct people on the page; give every person their identity anchor in the shared context. Add text or bubbles only inside the panel whose section asks for them, never in gutters; add no extra panels.';
 
 function visiblePeople(prompt) {
   const names = (prompt.shot_manifest?.visible_characters ?? []).map(row => String(row?.name ?? row ?? '').trim().toLowerCase()).filter(Boolean);

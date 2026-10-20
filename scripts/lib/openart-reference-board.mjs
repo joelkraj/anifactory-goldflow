@@ -32,8 +32,8 @@ function box(x, y, width, height, role, ref) {
 }
 
 export function referenceBoardLayout(references) {
-  if (!Array.isArray(references) || references.length < 1 || references.length > 4) {
-    throw new Error('Deterministic reference boards require one through four approved source references.');
+  if (!Array.isArray(references) || references.length < 1 || references.length > 6) {
+    throw new Error('Deterministic reference boards require one through six approved source references.');
   }
   const g = REFERENCE_BOARD_GUTTER;
   const w = REFERENCE_BOARD_WIDTH;
@@ -49,6 +49,15 @@ export function referenceBoardLayout(references) {
     used.add(ref); return ref;
   };
 
+  // Multi-zone pages may need five or six references: a 3x2 grid, characters
+  // first (primary, secondary, then others), then environment and props.
+  if (references.length >= 5) {
+    const ordered = [take(primary), ...(secondary ? [take(secondary)] : [])];
+    for (const ref of [...characters, environment, prop, ...references]) if (ref && !used.has(ref)) ordered.push(take(ref));
+    const cw = Math.floor((w - 2 * g) / 3), ch = Math.floor((h - g) / 2);
+    const role = (ref, i) => i === 0 ? 'primary_character' : i === 1 && ref === secondary ? 'secondary_character' : classify(ref);
+    return { layout_id: `grid_3x2_${references.length}_references`, panels: ordered.map((ref, i) => box((i % 3) * (cw + g), Math.floor(i / 3) * (ch + g), i % 3 === 2 ? w - 2 * (cw + g) : cw, i < 3 ? ch : h - ch - g, role(ref, i), ref)) };
+  }
   if (references.length === 1) {
     return { layout_id: 'single_reference_full_canvas', panels: [box(0, 0, w, h, classify(references[0]), references[0])] };
   }
@@ -83,7 +92,9 @@ function positionName(panel) {
   const cy = panel.placement.y + panel.placement.height / 2;
   if (panel.placement.width > REFERENCE_BOARD_WIDTH * 0.8) return 'full-canvas panel';
   const horizontal = cx < REFERENCE_BOARD_WIDTH * 0.38 ? 'left' : cx > REFERENCE_BOARD_WIDTH * 0.68 ? 'right' : 'center';
-  if (horizontal !== 'right' || panel.placement.height > REFERENCE_BOARD_HEIGHT * 0.8) return `${horizontal} panel`;
+  if (panel.placement.height > REFERENCE_BOARD_HEIGHT * 0.8) return `${horizontal} panel`;
+  // Grid cells (five or six references) need the row as well as the column.
+  if (horizontal !== 'right') return `${cy < REFERENCE_BOARD_HEIGHT / 2 ? 'upper' : 'lower'}-${horizontal} panel`;
   return `${cy < REFERENCE_BOARD_HEIGHT / 2 ? 'upper' : 'lower'}-right panel`;
 }
 
@@ -98,7 +109,10 @@ function roleInstruction(role) {
 }
 
 export function referenceBoardPromptGuidance(board) {
-  const mapping = board.panels.map((panel) => `Use the ${positionName(panel)} only for ${roleInstruction(panel.role)}.`).join('\n');
+  // Grid boards carry several people, so each cell also names its reference.
+  const grid = String(board.layout_id ?? '').startsWith('grid_3x2');
+  const subject = (panel) => grid && panel.asset_id ? ` (${String(panel.asset_id).split('.').at(-1).replace(/_ref$/, '').replaceAll('_', ' ')})` : '';
+  const mapping = board.panels.map((panel) => `Use the ${positionName(panel)}${subject(panel)} only for ${roleInstruction(panel.role)}.`).join('\n');
   return `${REFERENCE_BOARD_PROMPT_GUIDANCE}\n${mapping}`;
 }
 

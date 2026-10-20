@@ -4,7 +4,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { PAGE_TEMPLATES, PAGE_GEOMETRY_DETECTOR_VERSION, writePageGeometry } from './panel-page-geometry.mjs';
+import { PAGE_TEMPLATES, PAGE_TEMPLATE_MIN_CANVAS_WIDTH, PAGE_GEOMETRY_DETECTOR_VERSION, writePageGeometry } from './panel-page-geometry.mjs';
 import { pageFrameText, pagePanelHeadings, pagePromptFindings } from './panel-page-prompts.mjs';
 import { buildReferenceBoard, pageReferenceBoardPromptGuidance } from './openart-reference-board.mjs';
 import { falPortableAssetId } from './fal-portable-bank.mjs';
@@ -73,6 +73,7 @@ export async function resolveMultizoneProofPlan(plan) {
     need(/^[a-z0-9][a-z0-9_]*$/.test(page.page_id ?? '') && !pageIds.has(page.page_id), 'unique safe page ids required'); pageIds.add(page.page_id);
     const template = PAGE_TEMPLATES[page.template];
     need(template && Array.isArray(page.zones) && page.zones.length === template.length, `${page.page_id} needs exactly the ${page.template} zones`);
+    need((plan.canvas?.width ?? 1920) >= PAGE_TEMPLATE_MIN_CANVAS_WIDTH[page.template], `${page.page_id} ${page.template} needs a canvas at least ${PAGE_TEMPLATE_MIN_CANVAS_WIDTH[page.template]} wide`);
     need(text(page.shared_context, 40) && Array.isArray(page.visible_people) && Array.isArray(page.ref_ids), `${page.page_id} needs shared context, visible people and refs`);
     const zones = template.map(({ slot }) => {
       const zone = page.zones.find(row => row.slot === slot);

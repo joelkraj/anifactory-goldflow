@@ -15,7 +15,7 @@ export const PAGE_GEOMETRY_POLICY = Object.freeze({
   max_gutter_fraction: 0.05, // of the dimension being cut; wider light bands are content
   // Topology, not exact placement: the model draws the requested arrangement
   // but rarely centres its gutters (gala proof: 4 of 13 pages split 37-58%).
-  min_zone_fraction: 0.25, // each zone side, as a fraction of the page side
+  min_zone_fraction: 0.2, // each zone side, as a fraction of the page side (5-zone pages use quarter columns)
   full_span_fraction: 0.9, // a nominally full-height/width zone must span this much
   order_margin: 0.1, // nominal centres this far apart must keep their order
   safe_inset_fraction: 0.01, // of each zone dimension, per side
@@ -29,7 +29,15 @@ export const PAGE_TEMPLATES = Object.freeze({
   P2H: [{ slot: 'top', x: 0, y: 0, width: 1, height: 0.5 - g }, { slot: 'bottom', x: 0, y: 0.5 + g, width: 1, height: 0.5 - g }],
   P3L: [{ slot: 'left', x: 0, y: 0, width: 0.5 - g, height: 1 }, { slot: 'right_top', x: 0.5 + g, y: 0, width: 0.5 - g, height: 0.5 - g }, { slot: 'right_bottom', x: 0.5 + g, y: 0.5 + g, width: 0.5 - g, height: 0.5 - g }],
   P4G: [{ slot: 'top_left', x: 0, y: 0, width: 0.5 - g, height: 0.5 - g }, { slot: 'top_right', x: 0.5 + g, y: 0, width: 0.5 - g, height: 0.5 - g }, { slot: 'bottom_left', x: 0, y: 0.5 + g, width: 0.5 - g, height: 0.5 - g }, { slot: 'bottom_right', x: 0.5 + g, y: 0.5 + g, width: 0.5 - g, height: 0.5 - g }],
+  // Large-canvas templates (see PAGE_TEMPLATE_MIN_CANVAS_WIDTH).
+  P3H: [{ slot: 'hero', x: 0, y: 0, width: 2 / 3 - g, height: 1 }, { slot: 'right_top', x: 2 / 3 + g, y: 0, width: 1 / 3 - g, height: 0.5 - g }, { slot: 'right_bottom', x: 2 / 3 + g, y: 0.5 + g, width: 1 / 3 - g, height: 0.5 - g }],
+  P4H: [{ slot: 'hero', x: 0, y: 0, width: 2 / 3 - g, height: 1 }, { slot: 'right_top', x: 2 / 3 + g, y: 0, width: 1 / 3 - g, height: 1 / 3 - g }, { slot: 'right_middle', x: 2 / 3 + g, y: 1 / 3 + g, width: 1 / 3 - g, height: 1 / 3 - 2 * g }, { slot: 'right_bottom', x: 2 / 3 + g, y: 2 / 3 + g, width: 1 / 3 - g, height: 1 / 3 - g }],
+  P5L: [{ slot: 'left', x: 0, y: 0, width: 0.5 - g, height: 1 }, { slot: 'right_top_left', x: 0.5 + g, y: 0, width: 0.25 - 2 * g, height: 0.5 - g }, { slot: 'right_top_right', x: 0.75 + g, y: 0, width: 0.25 - g, height: 0.5 - g }, { slot: 'right_bottom_left', x: 0.5 + g, y: 0.5 + g, width: 0.25 - 2 * g, height: 0.5 - g }, { slot: 'right_bottom_right', x: 0.75 + g, y: 0.5 + g, width: 0.25 - g, height: 0.5 - g }],
+  P6G: [{ slot: 'top_left', x: 0, y: 0, width: 1 / 3 - g, height: 0.5 - g }, { slot: 'top_center', x: 1 / 3 + g, y: 0, width: 1 / 3 - 2 * g, height: 0.5 - g }, { slot: 'top_right', x: 2 / 3 + g, y: 0, width: 1 / 3 - g, height: 0.5 - g }, { slot: 'bottom_left', x: 0, y: 0.5 + g, width: 1 / 3 - g, height: 0.5 - g }, { slot: 'bottom_center', x: 1 / 3 + g, y: 0.5 + g, width: 1 / 3 - 2 * g, height: 0.5 - g }, { slot: 'bottom_right', x: 2 / 3 + g, y: 0.5 + g, width: 1 / 3 - g, height: 0.5 - g }],
 });
+// Hero and five/six-zone pages need a larger canvas so each zone (and a hero
+// zone's 16:9 crop) keeps at least roughly full-HD detail.
+export const PAGE_TEMPLATE_MIN_CANVAS_WIDTH = Object.freeze({ P2V: 1920, P2H: 1920, P3L: 1920, P4G: 1920, P3H: 2560, P4H: 3840, P5L: 3840, P6G: 3840 });
 
 const need = (value, message) => { if (!value) throw new Error(`Page geometry: ${message}`); };
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');

@@ -30,6 +30,10 @@ const layouts = {
   P2H: [horizontal(540)],
   P3L: [vertical(960), horizontal(540, 960 + GUTTER / 2, W - 960 - GUTTER / 2)],
   P4G: [vertical(960), horizontal(540)],
+  P3H: [vertical(1280), horizontal(540, 1280 + GUTTER / 2, W - 1280 - GUTTER / 2)],
+  P4H: [vertical(1280), horizontal(360, 1280 + GUTTER / 2, W - 1280 - GUTTER / 2), horizontal(720, 1280 + GUTTER / 2, W - 1280 - GUTTER / 2)],
+  P5L: [vertical(960), vertical(1440), horizontal(540, 960 + GUTTER / 2, W - 960 - GUTTER / 2)],
+  P6G: [vertical(640), vertical(1280), horizontal(540)],
 };
 
 await test('every template passes on an exact synthetic page', async () => {

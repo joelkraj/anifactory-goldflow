@@ -42,6 +42,18 @@ try {
   assert.match(locationStyleGuidance, /left panel only for the environment's architecture/);
   assert.match(locationStyleGuidance, /right panel only for the supernatural interface treatment/);
   assert(!locationStyleGuidance.includes("primary character's identity"));
+  // Five or six references (multi-zone pages): a 3x2 grid, characters first, every cell named.
+  const extra = [await make('marcus', '#334455', 'character'), await make('vanessa', '#225533', 'character')];
+  const grid = await buildReferenceBoard({ root, imageId: 'page.six', references: [refs[1], refs[3], ...extra, refs[0], refs[2]] });
+  assert.equal(grid.layout_id, 'grid_3x2_6_references');
+  const gridGuidance = referenceBoardPromptGuidance(grid);
+  assert.match(gridGuidance, /upper-left panel \(marcus\) only for the primary character's identity/);
+  assert.match(gridGuidance, /upper-center panel \(vanessa\) only for the secondary character's separate identity/);
+  assert.match(gridGuidance, /lower-center panel \(casino\) only for the environment/);
+  assert.match(gridGuidance, /lower-right panel \(watch\) only for the crucial prop/);
+  assert.equal(referenceBoardLayout([...refs, extra[0]]).layout_id, 'grid_3x2_5_references');
+  assert.throws(() => referenceBoardLayout([...refs, ...extra, refs[0]]), /one through six/);
+  assert(!referenceBoardPromptGuidance(first).includes('(joey)'), 'boards of up to four keep their exact guidance');
   console.log('OpenArt deterministic reference board tests passed.');
 } finally {
   await fs.rm(root, { recursive: true, force: true });

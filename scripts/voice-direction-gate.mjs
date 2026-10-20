@@ -11,6 +11,7 @@ export { hasTtsTerminalPunctuation } from "./lib/tts-text-boundaries.mjs";
 import { foreignSeriesTermSpecs, protectedIpTermSpecs, resetAndTest } from "./series-foreign-lexicon.mjs";
 import {
   QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT,
+  QWEN_DEEPMALE_PRIMARY_LOCK,
   QWEN_JOEL_PRIMARY_LOCK,
   QWEN_JOEL_DRY_DEADPAN_PRIMARY_LOCK,
   QWEN_LIAM_PRIMARY_LOCK,
@@ -79,6 +80,7 @@ const emitLegacyFishArtifacts = flags["emit-legacy-fish-artifacts"] === "true";
 const repoRoot = process.cwd();
 
 function qwenPrimaryLockForVoiceId(voiceId, referenceVariantId = null) {
+  if (voiceId === QWEN_DEEPMALE_PRIMARY_LOCK.voice_id) return QWEN_DEEPMALE_PRIMARY_LOCK;
   return voiceId === QWEN_LIAM_PRIMARY_LOCK.voice_id
     ? QWEN_LIAM_PRIMARY_LOCK
     : referenceVariantId === QWEN_JOEL_DRY_DEADPAN_PRIMARY_LOCK.reference_variant_id
@@ -424,7 +426,7 @@ async function loadDialogueContext() {
   const puckPrimaryIdentity = identityLockedTtsProvider(runIdentity) === "kokoro_local";
   const narratorVoiceId = selectedQwenNarratorVoiceId(runIdentity);
   const qwenPrimaryIdentity = identityLockedTtsProvider(runIdentity) === "qwen_local"
-    && [QWEN_JOEL_PRIMARY_LOCK.voice_id, QWEN_LIAM_PRIMARY_LOCK.voice_id].includes(narratorVoiceId);
+    && [QWEN_JOEL_PRIMARY_LOCK.voice_id, QWEN_LIAM_PRIMARY_LOCK.voice_id, QWEN_DEEPMALE_PRIMARY_LOCK.voice_id].includes(narratorVoiceId);
   const qwenPrimaryLock = qwenPrimaryLockForVoiceId(narratorVoiceId);
   const narratorVoice = await readGlobalQwenVoice(narratorVoiceId);
   const rawVoiceCastingLock = await readJsonIfExists(path.join(episodeDir, `voice_casting_lock_${episode}.json`), await readJsonIfExists(path.join(episodeDir, "voice_casting_lock_ep_01.json"), {}));
@@ -2997,7 +2999,7 @@ function providerPlanContext(runIdentity = {}, providerRouting = {}, ttsProvider
         ?? runIdentity?.tts_voice_id,
     ) ?? QWEN_JOEL_PRIMARY_LOCK.voice_id;
   const qwenPrimary = provider === "qwen_local"
-    && [QWEN_JOEL_PRIMARY_LOCK.voice_id, QWEN_LIAM_PRIMARY_LOCK.voice_id].includes(requestedQwenVoiceId);
+    && [QWEN_JOEL_PRIMARY_LOCK.voice_id, QWEN_LIAM_PRIMARY_LOCK.voice_id, QWEN_DEEPMALE_PRIMARY_LOCK.voice_id].includes(requestedQwenVoiceId);
   const requestedReferenceVariantId = cleanVoiceId(
     primary?.reference_variant_id
       ?? runIdentity?.provider_locks?.primary_reference_variant_id,

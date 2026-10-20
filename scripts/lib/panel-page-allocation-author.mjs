@@ -34,6 +34,13 @@ export function denseAllocationChunks(beats, { maxBeats = 40 } = {}) {
   return chunks;
 }
 
+/** Per-scene generation budget: pages never span scenes, so each scene gets max(1, round(beats / target)); rounding up would cap the episode near 4.2. */
+export function denseSceneBudgets(beats, target = DENSE_ALLOCATION_TARGET.beats_per_generation) {
+  const scenes = new Map();
+  for (const beat of beats) { const id = beat.scene_id ?? beat.parent_scene_id; scenes.set(id, (scenes.get(id) ?? 0) + 1); }
+  return [...scenes].map(([scene, count]) => ({ scene, beats: count, max_generations: Math.max(1, Math.round(count / target)) }));
+}
+
 export function denseAllocationPrompt(chunk, constraints) {
   const templates = Object.entries(PAGE_TEMPLATES).map(([id, zones]) => ({ id, slots: zones.map(zone => zone.slot), min_canvas_width: PAGE_TEMPLATE_MIN_CANVAS_WIDTH[id] }));
   const beats = chunk.beats.map(beat => {
@@ -42,6 +49,8 @@ export function denseAllocationPrompt(chunk, constraints) {
   });
   return `You are the allocation editor for a narrated manhwa recap. Allocate artwork for EVERY beat below. Return JSON only: {"asset_orders":[...],"beat_bindings":[...]}. Do not use tools or modify files.
 Goal: about ${DENSE_ALLOCATION_TARGET.beats_per_generation} beats per generated image overall. Each generation is either one page (several separately croppable zones) or, rarely, a single image.
+Budget: scene_budgets gives each scene's max_generations (its beats / ${DENSE_ALLOCATION_TARGET.beats_per_generation}, rounded, at least 1). Stay within it. Exceed a scene's budget only when the per-page people/reference caps make it impossible, and say so in that page's editorial_reason.
+How to fit the budget: prefer the 5- and 6-zone templates (P5L, P6G) and P4H for dialogue, reaction and investigation runs; reserve 2-3-zone templates for scenes that need a big hero moment. Let a zone serve 2-3 consecutive beats whenever the narration stays on the same moment, speaker or object (the editor makes a wide, a close-up and a detail crop from one drawing, so design that zone with several readable regions). Singles should be almost never needed.
 Rules:
 - A page holds beats from ONE scene. Pick a template from templates; zones are its slots (use every slot exactly once). Canvas is always {"width":${DENSE_ALLOCATION_TARGET.canvas.width},"height":${DENSE_ALLOCATION_TARGET.canvas.height}}.
 - A zone is one drawable artwork serving a CONTIGUOUS run of beats in source order. Let a zone serve several consecutive beats when one drawing honestly serves them (the editor will crop it differently per beat); give a new zone when the visible facts, cast, state or action change.
@@ -53,7 +62,7 @@ Shapes (ids must be unique; prefix every asset_id and zone_id with "${chunk.id}_
 page: {"asset_id","kind":"page","page_template","canvas","owner_beat_id":"<earliest beat>","beat_ids":["<all zone beats in source order>"],"visual_brief":"<shared location, time, lighting, cast>","editorial_reason","zones":[{"zone_id","slot","beat_ids":["<contiguous beats>"],"visual_brief":"<this panel's drawing>","editorial_reason"}]}
 single: {"asset_id","kind":"single","owner_beat_id","beat_ids":["<contiguous beats>"],"visual_brief","editorial_reason"}
 binding: {"beat_id","asset_id","zone_id"(pages only),"editorial_reason"} — exactly one per beat, in source order.
-${JSON.stringify({ templates, beats })}`;
+${JSON.stringify({ templates, scene_budgets: denseSceneBudgets(chunk.beats), beats })}`;
 }
 
 export async function nativeAllocation({ prompt, outputPath, repoRoot }) {
@@ -73,7 +82,9 @@ export async function authorDensePageAllocation({ episodeDir, outputDir, repoRoo
 export async function authorDenseAllocationChunks({ identity, beats, sourceHashes, referencePlan, jobRoot, validate, repoRoot, executor = nativeAllocation, concurrency = 6, limit = 1000, maxBeats = 40, onProgress = () => {} }) {
   const constraints = beatAllocationConstraints({ beats, referencePlan });
   const chunks = denseAllocationChunks(beats, { maxBeats });
-  const inputsKey = sha(JSON.stringify({ source_hashes: sourceHashes, chunks: chunks.map(chunk => chunk.beats.map(beat => beat.visual_beat_id)) }));
+  // The job is keyed by inputs AND exact prompts, so a prompt change never reuses old answers.
+  const prompts = new Map(chunks.map(chunk => [chunk.id, denseAllocationPrompt(chunk, constraints)]));
+  const inputsKey = sha(JSON.stringify({ source_hashes: sourceHashes, chunks: chunks.map(chunk => chunk.beats.map(beat => beat.visual_beat_id)), prompts: [...prompts.values()].map(sha) }));
   const job = path.resolve(jobRoot, inputsKey.slice(0, 16));
   await fs.mkdir(path.join(job, 'chunks'), { recursive: true });
   const base = { schema: 'goldflow_panel_asset_plan_v2', episode: identity.episode, author: 'Native dense page allocation author', source_hashes: sourceHashes };
@@ -81,7 +92,7 @@ export async function authorDenseAllocationChunks({ identity, beats, sourceHashe
   for (const chunk of chunks) {
     const out = path.join(job, 'chunks', `${chunk.id}.json`);
     if (await exists(out)) { rows.set(chunk.id, await read(out)); continue; }
-    pending.push({ chunk, out, raw: path.join(job, 'chunks', `${chunk.id}.raw.json`), prompt: denseAllocationPrompt(chunk, constraints) });
+    pending.push({ chunk, out, raw: path.join(job, 'chunks', `${chunk.id}.raw.json`), prompt: prompts.get(chunk.id) });
   }
   let next = 0; const selected = pending.slice(0, limit);
   await Promise.all(Array.from({ length: Math.min(concurrency, selected.length) }, async () => {
@@ -107,6 +118,9 @@ export async function authorDenseAllocationChunks({ identity, beats, sourceHashe
     validate(candidate);
     report.findings = denseAllocationFindings(candidate, constraints);
     report.density = allocationDensity(candidate, beats.length);
+    const budgets = denseSceneBudgets(beats), sceneOf = new Map(beats.map(beat => [beat.visual_beat_id, beat.scene_id ?? beat.parent_scene_id]));
+    const used = new Map(); for (const order of candidate.asset_orders) { const scene = sceneOf.get(order.beat_ids[0]); used.set(scene, (used.get(scene) ?? 0) + 1); }
+    report.scene_budget = { budget_generations: budgets.reduce((n, row) => n + row.max_generations, 0), over_budget_scenes: budgets.filter(row => (used.get(row.scene) ?? 0) > row.max_generations).map(row => ({ ...row, used: used.get(row.scene) })) };
     report.candidate_path = path.join(job, `candidate-${sha(JSON.stringify(candidate)).slice(0, 12)}.json`);
     if (!await exists(report.candidate_path)) await fs.writeFile(report.candidate_path, json(candidate), { flag: 'wx' });
     report.status = 'candidate_ready';

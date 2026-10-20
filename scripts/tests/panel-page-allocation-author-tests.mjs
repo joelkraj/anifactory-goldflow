@@ -7,7 +7,7 @@ import { createHash } from 'node:crypto';
 import { mediaWorkflowForPreflight } from '../lib/media-workflows.mjs';
 import { createPanelProductionContract } from '../lib/panel-production-policy.mjs';
 import { writePanelAssetPlan } from '../lib/panel-production-assets.mjs';
-import { authorDensePageAllocation, denseAllocationChunks, denseAllocationPrompt } from '../lib/panel-page-allocation-author.mjs';
+import { authorDensePageAllocation, denseAllocationChunks, denseAllocationPrompt, denseSceneBudgets } from '../lib/panel-page-allocation-author.mjs';
 import { beatAllocationConstraints } from '../lib/panel-page-allocation.mjs';
 
 const sha = value => createHash('sha256').update(value).digest('hex');
@@ -48,6 +48,8 @@ test('chunks keep whole scenes and the prompt carries caps, canvas and constrain
   assert.equal(denseAllocationChunks(beats, { maxBeats: 2 })[0].beats.length, 3, 'an oversized scene is never split');
   const constraints = beatAllocationConstraints({ beats, referencePlan: {} });
   const prompt = denseAllocationPrompt({ id: 'alloc_001', beats }, constraints);
+  assert.deepEqual(denseSceneBudgets(beats), [{ scene: 's1', beats: 3, max_generations: 1 }, { scene: 's2', beats: 2, max_generations: 1 }]);
+  assert.match(prompt, /"scene_budgets":\[\{"scene":"s1","beats":3,"max_generations":1\}/);
   assert.match(prompt, /"width":3840/); assert.match(prompt, /at most 4 distinct named people/); assert.match(prompt, /"P6G"/);
 });
 
@@ -56,6 +58,7 @@ test('authors a validated dense candidate the existing import accepts, never imp
   const calls = [];
   const report = await authorDensePageAllocation({ episodeDir: f.dir, maxBeats: 4, executor: async ({ prompt }) => { calls.push(prompt); return answer(prompt); } });
   assert.equal(report.status, 'candidate_ready');
+  assert.deepEqual(report.scene_budget, { budget_generations: 2, over_budget_scenes: [] });
   assert.equal(calls.length, 2); assert.equal(report.image_provider_calls, 0);
   assert.deepEqual(report.density, { generations: 2, pages: 2, singles: 0, zones: 4, beats: 6, beats_per_generation: 3, templates: { P2V: 2 } });
   await assert.rejects(fs.access(path.join(f.dir, 'panel_asset_plan.json')), 'no official plan is written');

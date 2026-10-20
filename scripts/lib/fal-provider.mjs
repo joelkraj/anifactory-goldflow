@@ -221,3 +221,115 @@ export async function falBillingForRequests({ requestIds, start, end, endpointId
   } while (cursor);
   return { endpoint_id: endpointId, events: [...found.values()], missing_request_ids: requestIds.filter(id => !found.has(id)) };
 }
+
+// ---------------------------------------------------------------------------
+// Append-only billing reconciliation (R02). Finalize records only request IDs
+// and projections; billed USD lands later through `imagegen fal --action
+// billing-reconcile`, which writes a new cost_reconciled record per run and
+// never touches finalize receipts or stage events. The billing key is optional:
+// a missing key or a 403 records billing_status "unavailable" without blocking.
+// ---------------------------------------------------------------------------
+
+/** Every Fal result receipt of the episode (request_id, endpoint, canvas, completion time). */
+export async function collectFalResultReceipts(episodeDir) {
+  const root = path.join(episodeDir, "fal");
+  const rows = [];
+  async function walk(dir) {
+    const entries = await fs.readdir(dir, { withFileTypes: true }).catch((error) => { if (error.code === "ENOENT") return []; throw error; });
+    for (const entry of entries) {
+      const file = path.join(dir, entry.name);
+      if (entry.isDirectory()) { await walk(file); continue; }
+      if (!/result-receipts$/.test(path.basename(dir)) || !entry.name.endsWith(".json")) continue;
+      const receipt = JSON.parse(await fs.readFile(file, "utf8"));
+      if (receipt.schema !== "goldflow_fal_result_receipt_v1" || typeof receipt.request_id !== "string") continue;
+      rows.push({
+        request_id: receipt.request_id, endpoint: receipt.endpoint, completed_at: receipt.completed_at,
+        image_size: { width: receipt.width ?? receipt.provider_width ?? 1920, height: receipt.height ?? 1080 },
+        result_receipt_path: file, result_receipt_sha256: await fileHash(file),
+      });
+    }
+  }
+  await walk(root);
+  return rows.sort((a, b) => String(a.completed_at).localeCompare(String(b.completed_at)) || a.request_id.localeCompare(b.request_id));
+}
+
+function billingKeySource() {
+  if (process.env.FAL_BILLING_KEY?.trim()) return "env_fal_billing_key";
+  return "private_key_path";
+}
+
+/**
+ * Reconciles this episode's Fal request IDs against billing events and appends
+ * one goldflow_fal_cost_reconciled_v1 record. `dryRun` plans the queries from
+ * receipts only (no network, no write). Request IDs already billed in earlier
+ * records are not queried again. Returns the record (and its path when written).
+ */
+export async function reconcileFalBilling({ episodeDir, fetchImpl = fetch, dryRun = false, now = new Date(), windowBeforeHours = 1, windowAfterHours = 6 } = {}) {
+  need(path.isAbsolute(episodeDir ?? ""), "Fal billing reconciliation needs an absolute episode directory.");
+  const { FAL_COST_RECONCILED_SCHEMA, FAL_BILLING_RECONCILIATION_DIR, falBilledRateState, falCanvasKey } = await import("./fal-retry-budget.mjs");
+  const receipts = await collectFalResultReceipts(episodeDir);
+  const prior = await falBilledRateState(episodeDir);
+  const pending = receipts.filter((row) => !prior.billed_by_request_id.has(row.request_id));
+  const nowIso = new Date(now).toISOString();
+  const groups = new Map();
+  for (const row of pending) {
+    if (!groups.has(row.endpoint)) groups.set(row.endpoint, []);
+    groups.get(row.endpoint).push(row);
+  }
+  const queries = [...groups].map(([endpoint, rows]) => {
+    const times = rows.map((row) => Date.parse(row.completed_at)).filter(Number.isFinite);
+    const start = new Date(Math.min(...times) - windowBeforeHours * 3_600_000).toISOString();
+    const end = new Date(Math.min(Math.max(...times) + windowAfterHours * 3_600_000, Date.parse(nowIso))).toISOString();
+    return { endpoint, request_count: rows.length, request_ids: rows.map((row) => row.request_id), start, end };
+  });
+  const base = {
+    schema: FAL_COST_RECONCILED_SCHEMA, created_at: nowIso, episode_dir: episodeDir,
+    receipt_count: receipts.length, previously_billed_count: receipts.length - pending.length, queried_count: pending.length,
+    queries: queries.map(({ request_ids, ...rest }) => rest), key_source: billingKeySource(), credentials_persisted: false,
+    dry_run: dryRun, network: !dryRun,
+  };
+  if (dryRun) {
+    return { record: { ...base, billing_status: "dry_run", billed_count: 0, total_billed_usd: 0, missing_request_ids: pending.map((row) => row.request_id), rows: [], median_usd_by_key: prior.median_usd_by_key }, path: null, queries };
+  }
+  const rows = [];
+  const missing = [];
+  let status = pending.length ? "billed" : "nothing_pending";
+  let unavailableReason = null;
+  for (const query of queries) {
+    let billing;
+    try {
+      billing = await falBillingForRequests({ requestIds: query.request_ids, start: query.start, end: query.end, endpointId: query.endpoint, fetchImpl });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (/billing permission|credential is missing|unsafe permissions|credential is malformed|HTTP 40[13]/.test(message)) {
+        status = "unavailable"; unavailableReason = message.replace(/Key [^\s]+/g, "Key [redacted]"); break;
+      }
+      throw error;
+    }
+    const byId = new Map(billing.events.map((event) => [event.request_id, event]));
+    for (const row of pending.filter((item) => item.endpoint === query.endpoint)) {
+      const event = byId.get(row.request_id);
+      if (!event || !Number.isFinite(event.cost_usd)) { missing.push(row.request_id); continue; }
+      rows.push({ request_id: row.request_id, endpoint: row.endpoint, canvas: falCanvasKey(row.image_size), image_size: row.image_size,
+        result_receipt_path: row.result_receipt_path, result_receipt_sha256: row.result_receipt_sha256,
+        cost_usd: Number(event.cost_usd), cost_basis: "billed", billed_at: event.timestamp ?? null, quantity: event.quantity ?? null });
+    }
+  }
+  if (status === "billed" && missing.length) status = rows.length ? "partial" : "none_found";
+  const record = {
+    ...base, billing_status: status, unavailable_reason: unavailableReason, billed_count: rows.length,
+    total_billed_usd: Number(rows.reduce((sum, row) => sum + row.cost_usd, 0).toFixed(6)),
+    missing_request_ids: status === "unavailable" ? pending.map((row) => row.request_id) : missing, rows,
+  };
+  const dir = path.join(episodeDir, FAL_BILLING_RECONCILIATION_DIR);
+  await fs.mkdir(dir, { recursive: true });
+  let written = null;
+  for (let attempt = 0; attempt < 5 && !written; attempt += 1) {
+    const sequence = (await fs.readdir(dir)).filter((name) => /^\d{4}_/.test(name)).length + 1;
+    const file = path.join(dir, `${String(sequence).padStart(4, "0")}_cost_reconciled.json`);
+    try { await fs.writeFile(file, jsonBytes({ ...record, sequence }), { flag: "wx" }); written = file; } catch (error) { if (error.code !== "EEXIST") throw error; }
+  }
+  need(written, "Could not allocate an append-only Fal cost reconciliation record.");
+  const after = await falBilledRateState(episodeDir);
+  return { record: { ...record, median_usd_by_key: after.median_usd_by_key }, path: written, queries };
+}

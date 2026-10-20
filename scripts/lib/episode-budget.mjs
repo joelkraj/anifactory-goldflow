@@ -1,11 +1,13 @@
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { falPaidSubmissionCount, falProjectedSpendUsd } from "./fal-retry-budget.mjs";
+import { falEpisodeSpendState } from "./fal-retry-budget.mjs";
 
 // One episode spend budget replaces per-dispatch confirmation tokens. It is a
-// cap, not a quote: Fal spend is projected from paid submission receipts at the
-// conservative observed rate; other paid providers append spend records.
+// cap, not a quote: Fal spend is billed where an append-only cost_reconciled
+// record covers the request and projected (billed median, else the measured
+// table) otherwise; other paid providers append spend records.
+export const EPISODE_BUDGET_WARNING_FRACTION = 0.7;
 export const EPISODE_BUDGET_SPEND_TOKEN = "episode_budget";
 export const EPISODE_BUDGET_AUTHORIZATION_SCHEMA = "goldflow_episode_budget_authorization_v1";
 export const EPISODE_BUDGET_SPEND_RECORD_SCHEMA = "goldflow_episode_budget_spend_v1";
@@ -103,8 +105,9 @@ function roundUsd(value) {
 /** Current projected episode spend from immutable receipts. */
 export async function episodeSpendState({ episodeDir, identity }) {
   const budget = episodeBudgetFor(identity);
-  const falSubmissions = await falPaidSubmissionCount(episodeDir);
-  const falUsd = falProjectedSpendUsd(falSubmissions);
+  const fal = await falEpisodeSpendState(episodeDir);
+  const falSubmissions = fal.paid_submissions;
+  const falUsd = fal.total_usd;
   const ledger = await listSequencedRecords(episodeDir, "episode_budget/spend");
   const otherUsd = ledger.reduce((sum, row) => {
     const usd = Number(row.record?.usd);
@@ -121,8 +124,13 @@ export async function episodeSpendState({ episodeDir, identity }) {
     remaining_usd: budget ? roundUsd(Math.max(0, budget.usd_cap - spentUsd)) : null,
     fal_paid_submissions: falSubmissions,
     fal_projected_usd: falUsd,
+    fal_billed_usd: fal.billed_usd,
+    fal_billed_count: fal.billed_count,
+    fal_cost_basis: fal.cost_basis,
     other_spend_usd: roundUsd(otherUsd),
-    estimate_only: true,
+    estimate_only: fal.billed_count < falSubmissions,
+    warning_fraction: EPISODE_BUDGET_WARNING_FRACTION,
+    warning_reached: Boolean(budget) && spentUsd >= EPISODE_BUDGET_WARNING_FRACTION * budget.usd_cap,
   };
 }
 
@@ -141,7 +149,9 @@ export async function assertEpisodeBudget({ episodeDir, identity, requestedUsd, 
   if (projectedAfter > budget.usd_cap) {
     throw new EpisodeBudgetExceededError(`$${state.spent_usd} projected + $${requested} requested for ${scope} exceeds the locked $${budget.usd_cap} episode cap.`, state);
   }
-  if (!record) return { status: "within_cap", ...state, requested_usd: requested, projected_after_usd: projectedAfter };
+  const warningAfter = projectedAfter >= EPISODE_BUDGET_WARNING_FRACTION * budget.usd_cap;
+  if (warningAfter) console.error(`Episode budget warning: $${projectedAfter} after ${scope} reaches ${Math.round(EPISODE_BUDGET_WARNING_FRACTION * 100)}% of the locked $${budget.usd_cap} cap.`);
+  if (!record) return { status: "within_cap", ...state, requested_usd: requested, projected_after_usd: projectedAfter, warning_after: warningAfter };
   const receipt = await writeSequencedRecord(episodeDir, "episode_budget/authorizations", String(scope).replace(/[^a-z0-9_]+/gi, "_").slice(0, 60), {
     schema: EPISODE_BUDGET_AUTHORIZATION_SCHEMA,
     basis,
@@ -151,18 +161,20 @@ export async function assertEpisodeBudget({ episodeDir, identity, requestedUsd, 
     requested_usd: requested,
     projected_after_usd: projectedAfter,
     run_identity_sha256: await fileSha256(path.join(episodeDir, "run_identity.json")),
-    estimate_only: true,
+    estimate_only: state.estimate_only,
+    cost_basis: state.fal_cost_basis,
+    warning_after: warningAfter,
     created_at: now,
   });
-  return { status: "authorized", ...state, requested_usd: requested, projected_after_usd: projectedAfter, receipt_path: receipt.path };
+  return { status: "authorized", ...state, requested_usd: requested, projected_after_usd: projectedAfter, warning_after: warningAfter, receipt_path: receipt.path };
 }
 
 /** Records non-Fal paid usage so it counts against the episode cap. */
-export async function recordEpisodeSpend({ episodeDir, provider, usd, scope, receipt = null, now = new Date().toISOString() }) {
+export async function recordEpisodeSpend({ episodeDir, provider, usd, scope, receipt = null, costBasis = "billed", now = new Date().toISOString() }) {
   const amount = Number(usd);
   if (!Number.isFinite(amount) || amount < 0) throw new Error("Episode spend record needs a nonnegative usd amount.");
   return writeSequencedRecord(episodeDir, "episode_budget/spend", `${provider}_${scope}`.replace(/[^a-z0-9_]+/gi, "_").slice(0, 60), {
-    schema: EPISODE_BUDGET_SPEND_RECORD_SCHEMA, provider, scope, usd: roundUsd(amount), receipt, created_at: now,
+    schema: EPISODE_BUDGET_SPEND_RECORD_SCHEMA, provider, scope, usd: roundUsd(amount), cost_basis: costBasis, receipt, created_at: now,
   });
 }
 

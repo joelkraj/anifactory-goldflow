@@ -323,6 +323,80 @@ function isImagegenExecution(event = {}) {
   return /^imagegen(?:\s|$)/i.test(String(event.command ?? ""));
 }
 
+const CALL_RECEIPT_SCHEMA = "goldflow_codex_call_metadata_v1";
+const ATTEMPT_SIDECAR = /\.attempt-\d+\.meta\.json$/;
+async function walkCallReceipts(root, current = root, out = []) {
+  const entries = await fs.readdir(current, { withFileTypes: true }).catch(() => []);
+  for (const entry of entries) {
+    if (["node_modules", ".git", "assets"].includes(entry.name)) continue;
+    const filePath = path.join(current, entry.name);
+    if (entry.isDirectory()) { await walkCallReceipts(root, filePath, out); continue; }
+    if (!entry.name.endsWith(".meta.json") || ATTEMPT_SIDECAR.test(entry.name)) continue;
+    out.push(filePath);
+  }
+  return out;
+}
+
+/**
+ * Planner/CLI call receipts written since `startedAt`: calls, attempts and
+ * transport retries per provider, token usage summed per usage key, and the
+ * billed cost field (Claude) summed. Subscription CLIs contribute tokens only
+ * (cost null); nothing here is projected.
+ */
+export async function providerCallUsageSince(episodeDir, startedAt) {
+  const since = Date.parse(startedAt);
+  const byProvider = {};
+  let costUsd = 0;
+  let callCount = 0;
+  for (const filePath of await walkCallReceipts(episodeDir)) {
+    const receipt = await fs.readFile(filePath, "utf8").then(JSON.parse).catch(() => null);
+    if (receipt?.schema !== CALL_RECEIPT_SCHEMA) continue;
+    const started = Date.parse(receipt.started_at ?? "");
+    if (!Number.isFinite(started) || started < since) continue;
+    const provider = String(receipt.provider ?? "unknown");
+    const row = byProvider[provider] ??= { calls: 0, passed: 0, failed: 0, attempts: 0, transport_retries: 0, usage_totals: {}, cost_usd: null, cost_recorded_calls: 0 };
+    row.calls += 1;
+    callCount += 1;
+    row[receipt.status === "passed" ? "passed" : "failed"] += 1;
+    const attempts = Array.isArray(receipt.attempts) && receipt.attempts.length ? receipt.attempts : [{ class: receipt.status === "passed" ? "passed" : "failure" }];
+    row.attempts += attempts.length;
+    row.transport_retries += attempts.filter((attempt) => attempt.class === "transport").length;
+    for (const [key, value] of Object.entries(receipt.provider_usage ?? {})) {
+      if (typeof value === "number" && Number.isFinite(value)) row.usage_totals[key] = (row.usage_totals[key] ?? 0) + value;
+    }
+    const cost = Number(receipt.provider_cost_usd);
+    if (receipt.provider_cost_usd != null && Number.isFinite(cost)) {
+      row.cost_usd = Number(((row.cost_usd ?? 0) + cost).toFixed(6));
+      row.cost_recorded_calls += 1;
+      costUsd += cost;
+    }
+  }
+  return { call_count: callCount, by_provider: byProvider, cost_usd: Number(costUsd.toFixed(6)), cost_basis: costUsd > 0 ? "billed" : "unrecorded" };
+}
+
+const FAL_SUBMISSION_RECEIPT = /^fal\/.*submission-receipts\/[^/]+\.json$/;
+async function falExecutionCost(episodeDir, execution, newRelativePaths) {
+  if (!/^imagegen fal(?:\s|$)/i.test(String(execution.command ?? ""))) return null;
+  const receiptPaths = newRelativePaths.filter((relativePath) => FAL_SUBMISSION_RECEIPT.test(relativePath.split(path.sep).join("/")));
+  if (!receiptPaths.length) return { new_submissions: 0, usd: 0, cost_basis: "none" };
+  const { falBilledRateState, falSubmissionCostState } = await import("./fal-retry-budget.mjs");
+  const rows = [];
+  for (const relativePath of receiptPaths) {
+    const receipt = await fs.readFile(path.join(episodeDir, relativePath), "utf8").then(JSON.parse).catch(() => null);
+    if (receipt?.schema !== "goldflow_fal_submission_receipt_v1") continue;
+    rows.push({ request_id: receipt.request_id, endpoint: receipt.endpoint ?? null, image_size: receipt.params?.image_size ?? null });
+  }
+  const state = falSubmissionCostState(rows, await falBilledRateState(episodeDir));
+  return { new_submissions: rows.length, usd: state.total_usd, cost_basis: state.cost_basis, rate_sources: state.rate_sources };
+}
+
+function combinedCostBasis(parts) {
+  const bases = new Set(parts.filter(Boolean));
+  if (!bases.size) return "none";
+  if (bases.size === 1) return [...bases][0];
+  return "mixed";
+}
+
 export async function beginStageExecution({ stage, command, flags = {}, args = [], env = process.env, repoRoot = MODULE_REPO_ROOT, codeDrift = null }) {
   const episodeDir = episodeDirForFlags(flags, env);
   const provenance = gitExecutionProvenance(repoRoot);
@@ -380,11 +454,22 @@ export async function finishStageExecution(execution, {
   if (!episodeDir || !(await fs.stat(episodeDir).catch(() => null))) return null;
   const completedAt = new Date();
   const outputSnapshot = await walkHashableFiles(episodeDir);
+  const changed = changedHashes(execution.input_hashes, outputSnapshot);
   const outputHashes = Object.fromEntries(
-    Object.entries(changedHashes(execution.input_hashes, outputSnapshot))
-      .filter(([relativePath]) => stageOutputPathMatches(execution.stage, relativePath)),
+    Object.entries(changed).filter(([relativePath]) => stageOutputPathMatches(execution.stage, relativePath)),
   );
   const cost = await costAndReuseFromOutputs(episodeDir, outputHashes);
+  // Real cost recording (R02): billed CLI cost from call receipts written during this
+  // execution plus billed-or-projected Fal cost of submissions it created. Additive fields;
+  // historical events without them are never rewritten.
+  const providerCalls = await providerCallUsageSince(episodeDir, execution.started_at);
+  const falCost = await falExecutionCost(episodeDir, execution, Object.keys(changed).filter((relativePath) => !(relativePath in execution.input_hashes)));
+  const costUsd = Number((cost.cost_usd + providerCalls.cost_usd + (falCost?.usd ?? 0)).toFixed(6));
+  const costBasis = combinedCostBasis([
+    cost.cost_usd > 0 ? "projected" : null,
+    providerCalls.cost_usd > 0 ? "billed" : null,
+    falCost && falCost.usd > 0 ? falCost.cost_basis : null,
+  ]);
   const report = {
     schema: "goldflow_stage_execution_report_v1",
     status: exitCode === 0 ? "passed" : "failed",
@@ -408,7 +493,10 @@ export async function finishStageExecution(execution, {
     stdout_tail: stdoutTail || null,
     stderr_tail: stderrTail || null,
     wall_time_sec: Number(((completedAt.getTime() - execution.started_ms) / 1000).toFixed(3)),
-    cost_usd: cost.cost_usd,
+    cost_usd: costUsd,
+    cost_basis: costBasis,
+    provider_calls: providerCalls,
+    fal_cost: falCost,
     cache_reuse_count: cost.cache_reuse_count,
     started_at: execution.started_at,
     completed_at: completedAt.toISOString(),
@@ -447,6 +535,18 @@ export async function finishStageExecution(execution, {
     ...report,
     immutable_report_path: reportPath,
   });
+  // Billed CLI cost counts against the locked episode budget through the gates'
+  // append-only spend ledger (Fal spend is read from its own receipts there).
+  if (providerCalls.cost_usd > 0) {
+    const identity = await fs.readFile(path.join(episodeDir, "run_identity.json"), "utf8").then(JSON.parse).catch(() => null);
+    const { episodeBudgetFor, recordEpisodeSpend } = await import("./episode-budget.mjs");
+    if (episodeBudgetFor(identity ?? {})) {
+      for (const [provider, row] of Object.entries(providerCalls.by_provider)) {
+        if (!(row.cost_usd > 0)) continue;
+        await recordEpisodeSpend({ episodeDir, provider, usd: row.cost_usd, scope: `${execution.stage}_${String(execution.execution_id).slice(0, 8)}`, receipt: reportPath, costBasis: "billed" });
+      }
+    }
+  }
   await materializeProductionManifest(episodeDir);
   return { ...report, immutable_report_path: reportPath };
 }
@@ -517,6 +617,8 @@ export async function materializeProductionManifest(episodeDir) {
       total_wall_time_sec: Number(completed.reduce((sum, row) => sum + Number(row.wall_time_sec ?? 0), 0).toFixed(3)),
       cumulative_cost_usd: Number((nonImagegenEventCostUsd + authoritativeImagegenCostUsd).toFixed(6)),
       event_recorded_cost_usd: Number(eventRecordedCostUsd.toFixed(6)),
+      provider_call_cost_usd: Number(completed.reduce((sum, row) => sum + Number(row.provider_calls?.cost_usd ?? 0), 0).toFixed(6)),
+      provider_call_count: completed.reduce((sum, row) => sum + Number(row.provider_calls?.call_count ?? 0), 0),
       imagegen_event_recorded_cost_usd: Number(imagegenEventRecordedCostUsd.toFixed(6)),
       imagegen_batch_cost_usd: Number(imagegenBatches.estimated_cost_usd.toFixed(6)),
       cache_reuse_count: completed.reduce((sum, row) => sum + Number(row.cache_reuse_count ?? 0), 0),

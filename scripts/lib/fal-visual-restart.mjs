@@ -7,6 +7,7 @@ import {
   nonvisualIdentityBinding, objectHash, readJson, requiredBaselineFiles, validateBaselineStages,
 } from "./openart-visual-restart.mjs";
 import { FAL_ENDPOINTS, FAL_EPISODE_BUDGET, FAL_PRIMARY_PARAMS } from "./fal-provider.mjs";
+import { buildFalPerRequestCaps } from "./fal-retry-budget.mjs";
 import { verifyFalBeatCarryforwardRepair } from "./fal-carryforward-beat-repair.mjs";
 
 export const FAL_VISUAL_FILES = Object.freeze([
@@ -25,6 +26,8 @@ export async function validateFalContract(contract) {
   need(contract.automatic_creative_retry === false && contract.automatic_failover === false, "Automatic creative retry/failover is forbidden.");
   need(contract.validation_concurrency === 8 && Number.isInteger(contract.production_concurrency) && contract.production_concurrency > 0 && contract.production_concurrency <= 20, "Fal production concurrency must be between 1 and 20; validation concurrency must remain 8.");
   need(contract.warning_budget_usd === FAL_EPISODE_BUDGET.warning_usd && contract.hard_budget_usd === FAL_EPISODE_BUDGET.hard_usd, "Fal budget ceilings differ from policy.");
+  // Per-request caps (3x measured rate) are locked with the budget; historical contracts without them read as the built-in table.
+  if (contract.per_request_caps_usd != null) need(typeof contract.per_request_caps_usd === "object" && Object.values(contract.per_request_caps_usd).every(row => Object.values(row).every(usd => Number.isFinite(usd) && usd > 0 && usd <= 1)), "Fal per-request caps must be positive USD at most $1.");
   need(path.isAbsolute(contract.reference_bank_manifest ?? "") && path.isAbsolute(contract.discovery_receipt ?? ""), "Fal contract needs absolute bank/discovery paths.");
   need(await fileSha256(contract.reference_bank_manifest) === contract.reference_bank_manifest_sha256, "Fal reference-bank binding is stale.");
   need(await fileSha256(contract.discovery_receipt) === contract.discovery_receipt_sha256, "Fal discovery binding is stale.");
@@ -37,7 +40,7 @@ export function createFalRestartIdentity({ baseline, targetDir, week, contract, 
   need(baseline?.schema === "goldflow_run_identity_v2" && baseline.run_intent === "production", "Fal restart requires a production identity.");
   need(baseline.content_profile === "manhwa_recap_v1" && baseline.media_workflow === "generated_visuals_v1", "Fal restart supports manhwa generated visuals only.");
   const next = structuredClone(baseline);
-  Object.assign(next, { week, episode_dir: targetDir, status: "fal_visual_restart_imported", created_at: createdAt, updated_at: createdAt, git, image_provider: "fal_ai", image_provider_options: { fal: structuredClone(contract) } });
+  Object.assign(next, { week, episode_dir: targetDir, status: "fal_visual_restart_imported", created_at: createdAt, updated_at: createdAt, git, image_provider: "fal_ai", image_provider_options: { fal: { ...structuredClone(contract), per_request_caps_usd: contract.per_request_caps_usd ?? buildFalPerRequestCaps(), per_request_caps_locked_at: createdAt } } });
   for (const key of Object.keys(next.provider_locks ?? {})) if (providerLock(key)) delete next.provider_locks[key];
   next.provider_locks = { ...next.provider_locks, image_provider: "fal_ai", reference_image_provider: "fal_ai", image_model: contract.endpoints.primary_edit, reference_model: contract.endpoints.primary_edit, creative_submission_attempts: 1, image_automatic_retry_policy: "transport_only_no_billable_output", image_automatic_provider_failover_policy: "none" };
   next.model_versions = { ...next.model_versions, image_model: contract.endpoints.primary_edit, reference_model: contract.endpoints.primary_edit, image_provider_models: { fal_ai: { image_model: contract.endpoints.primary_edit, reference_model: contract.endpoints.primary_edit } } };

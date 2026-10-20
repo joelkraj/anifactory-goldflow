@@ -1,4 +1,4 @@
-# Multi-zone panel pages v1 (design proposal)
+# Multi-panel webtoon strips v1 (design proposal; file name kept)
 
 Status: **design only — not implemented, not approved.** Nothing here changes current production behavior, existing run identities, or the coma-healer episode. Production behavior changes only through reviewed code, documentation and tests on the guarded artifact path (see `AGENTS.md`). No provider, planner or production command was run to prepare this document; every number below is computed from artifacts already on disk.
 
@@ -10,7 +10,7 @@ Cut generated images per episode by about half, along with the per-image review 
 
 | Change | What it removes | Coma-healer effect |
 | --- | --- | --- |
-| 1. Multi-zone pages | One Fal request yields 2–4 croppable zones instead of one artwork | 658 → ~323 scene generations (−51%) |
+| 1. Multi-panel strips | One Fal request yields a vertical webtoon strip of 2–3 croppable panels instead of one artwork | 658 → ~349 scene generations (−47%) |
 | 2. Reference trimming | Standalone refs for subjects that appear on only one or two pages | 124 → 84 generated refs (−32%) |
 | 3. Derived-reference promotion | Prompt-only subjects drifting across their 2–3 pages | No count change; it protects continuity for subjects that change 2 removes |
 
@@ -42,7 +42,7 @@ A target may be `standalone_ref` only if at least one of these holds, with the e
 
 1. **Recurs across scenes:** it is attached to owners in **≥ 3 distinct scenes**.
 2. **Identity-critical base:** it is the base facial identity of a canonical character whose states, taken together, appear in ≥ 2 scenes. Every recurring named person keeps one clean identity plate, so wardrobe and condition states can always re-anchor on it.
-3. **Recurs across pages:** after page allocation, it appears on **≥ 3 projected pages**. About 7+ owner uses at 3–4 zones per page qualifies. This keeps single-scene subjects that a long scene spreads over several pages, such as a conference room used for 13 owners.
+3. **Recurs across pages:** after page allocation, it appears on **≥ 3 projected pages**. About 7+ owner uses at 2–3 panels per strip qualifies. This keeps single-scene subjects that a long scene spreads over several pages, such as a conference room used for 13 owners.
 
 Everything else is `prompt_only`: a textual description (the existing `scene_prompt_anchor` / location contract) carried in each zone brief. Two tiers apply:
 
@@ -77,18 +77,17 @@ A pure "≥ 3 scenes" rule without bases 2–3 would drop 60 refs and remove a r
 
 The opening-montage repair `fal/bulk/review-repair-outputs/ep_01-w000037-w000041-v2.png` came from one `gpt-image-2.5/sunburst/edit` request at `quality: low`, 1920×1080, with one location ref. It produced a present-day Joey half and four separate memory panels on thin white gutters, with no lettering. Each region crops cleanly. The prompt named each panel's position, demanded "fully separate and readable as individual crops", and banned text everywhere. The same request also carried the shared board instruction "Do not reproduce the board, borders, gutters…". That line contradicts a page request, so page assignments need their own instruction block (below).
 
-### Page templates (closed set for v1)
+### Page templates: vertical webtoon strips (closed set for v1)
 
-Gutters are solid, near-white, about 1.0% of the page width (≈ 16–20 px), straight, and span the full page. Pages have no outer frame and contain no text.
+The target look is Manhwa Fresh (see **Target look** below): one tall panel at a time, centered over a blurred copy of itself. A page is therefore a **vertical webtoon strip**: one portrait generation holding 1–3 panels stacked top to bottom. Gutters are horizontal only, solid near-white, about 1.5% of the strip height, full width. The strip contains no text.
 
-| Template | Zones (nominal, normalized) | Zone px at 1920×1080 | Use |
+| Template | Panels (top to bottom) | Panel px at 1080×1920 | Use |
 | --- | --- | --- | --- |
-| `P2V` | two vertical halves | ≈ 950×1080 (0.88:1) | two characters / reaction pair, portrait insets |
-| `P2H` | two horizontal bands | ≈ 1920×530 (3.6:1) | establishing strip + detail strip, page_pan |
-| `P3L` | left half + right two stacked | 950×1080, 2 × 950×530 | hero-ish beat + two inserts |
-| `P4G` | 2×2 grid | 4 × ≈ 950×530 (≈16:9) | object inserts, UI, reactions, body-state proof |
+| `S1` | one tall panel | 1080×1920 | portrait splash: a character reveal, a full-body shot, a vertical scroll |
+| `S2` | two stacked | 2 × ≈1080×945 (≈1.14:1) | dialogue and reaction pairs, the default |
+| `S3` | three stacked, heights about 45/30/25% | ≈1080×850, 1080×560, 1080×460 | a beat plus inserts: object, hands, UI, reaction |
 
-v1 caps pages at **4 zones**. The precedent's 5-zone layout (a half plus a 2×2 inside the other half) is out of contract for v1: its zones are about 470×530 px.
+A portrait strip uses the same pixel count as today's 1920×1080 request. It is a different orientation, not a higher resolution. Shown at full frame height over the blurred background, an `S2` panel plays at about 1.14× and an `S1` strip scrolls at 1:1, so panels stay sharp. Wide 16:9 single orders remain for establishing shots and wide action (see splash singles).
 
 ### Allocation contract (`goldflow_panel_asset_plan_v2`)
 
@@ -98,16 +97,16 @@ v1 caps pages at **4 zones**. The precedent's 5-zone layout (a half plus a 2×2 
 {
   "asset_id": "page_0042",
   "kind": "page",
-  "page_template": "P3L",
+  "page_template": "S3",
   "scene_id": "scene_046",
   "owner_beat_id": "<earliest beat bound to any zone>",
   "page_brief": "<shared location, time, lighting, palette, who is present; one coherent scene>",
   "editorial_reason": "<why these beats belong on one generation>",
   "zones": [
-    { "zone_id": "page_0042_z1", "slot": "left", "beat_ids": ["..."], "visual_brief": "...",
+    { "zone_id": "page_0042_z1", "slot": "top", "beat_ids": ["..."], "visual_brief": "...",
       "editorial_reason": "...", "intended_display": "inset_large|inset|insert|reaction|establishing" },
-    { "zone_id": "page_0042_z2", "slot": "right_top", "beat_ids": ["..."], "visual_brief": "...", "editorial_reason": "...", "intended_display": "insert" },
-    { "zone_id": "page_0042_z3", "slot": "right_bottom", "beat_ids": ["..."], "visual_brief": "...", "editorial_reason": "...", "intended_display": "reaction" }
+    { "zone_id": "page_0042_z2", "slot": "middle", "beat_ids": ["..."], "visual_brief": "...", "editorial_reason": "...", "intended_display": "insert" },
+    { "zone_id": "page_0042_z3", "slot": "bottom", "beat_ids": ["..."], "visual_brief": "...", "editorial_reason": "...", "intended_display": "reaction" }
   ]
 }
 ```
@@ -126,7 +125,7 @@ The packet instructions add the following. Group onto one page only beats from t
 
 Prompt planning authors **one `provider_prompt` per page**. The prompt has three fixed sections, kept separate so hardening and QA can check each:
 
-1. **Page frame.** Generated from the template and never paraphrased: "One 16:9 landscape anime/manhwa page divided into `<N>` fully separate rectangular panels by straight solid white gutters of equal width that run edge to edge. `<slot geometry sentence>`. Nothing — no limb, hair, prop, light streak or effect — crosses a gutter. No captions, speech bubbles, sound effects, numbers, logos or lettering anywhere, including inside gutters."
+1. **Page frame.** Generated from the template and never paraphrased: "One tall portrait anime/manhwa vertical webtoon strip divided into `<N>` fully separate panels stacked top to bottom by straight solid white horizontal gutters that run edge to edge. `<panel height sentence>`. Nothing (no limb, hair, prop, light streak or effect) crosses a gutter. No captions, speech bubbles, sound effects, numbers, logos or lettering anywhere, including inside gutters."
 2. **Shared page context.** From `page_brief`: location contract, lighting, palette and the visible cast with their identity/wardrobe anchors, stated once.
 3. **Per-zone content,** in slot order: "Panel `<k>` (`<slot>`): …" from each zone's `visual_brief`, using the zone's beat entities. Each panel names who is in it and who is **not**.
 
@@ -161,22 +160,52 @@ The composer already supports panel-level crops: `panel-production-plan.mjs` cre
 Composer validator changes:
 
 - **Magnification is reported, not capped.** Effective magnification (displayed px × max zoom ÷ zone-crop source px) is written to the composition report for review. It does not block. Operator decision (2026-10-19): stretching a zone to fill the frame is acceptable; the look is a manhwa comic brought to life, not maximum sharpness. The existing camera zoom limit (1–4) and the renderer's high-quality resampling stay as they are.
-- **Disclosure across zones.** A page carries future zones. No decision, background or context panel may show any pixel of a zone before that zone's first bound beat starts. A view of the **whole page** (`page_pan`, a background, or the new `page_build` layout below) must mask every zone that is not yet disclosed. The existing rule "a later panel cannot be disclosed before its beat" is extended from panels to zones, using the zone rectangles.
+- **Disclosure across zones.** A page carries future zones. No decision, background or context panel may show any pixel of a zone before that zone's first bound beat starts. In particular, a vertical scroll (`page_pan`) across a strip, or a background drawn from it, may cover only zones that are already disclosed. The existing rule "a later panel cannot be disclosed before its beat" is extended from panels to zones, using the zone rectangles.
 
 ### Resolution and quality
 
-Locked: 1920×1080 at `quality: low`, the same request settings as today. There is no higher-resolution or higher-quality arm (operator decision, 2026-10-19). The adapter's 1920×1080 output check stays unchanged.
+The request stays at `quality: low` with the same pixel budget as today. Strips request a portrait size (about 1080×1920), while wide splash singles keep 1920×1080. This needs:
 
-### Presentation: a manhwa comic brought to life
+- confirmation that Sunburst accepts that portrait size (a no-spend read of the live schema)
+- a reviewed change to the adapter's output check, which today accepts only 1920×1080
+- operator approval of the orientation change
 
-The target look is a real manhwa page being read and animated, not a sequence of separate full-screen stills. Pages are the stage, not just a cropping source. The recommended composition policy:
+There is no higher-resolution or higher-quality arm (operator decision, 2026-10-19).
 
-1. **Page build (new layout, `page_build`).** The page is shown with its gutters, on a paper or dark backdrop. Each zone appears on its own beat: slide, pop or wipe-in, using the existing entry vocabulary. Zones not yet disclosed are masked as empty panel frames. The camera glides from the current zone to the next. This should be the main way pages appear, because it reads like a comic.
-2. **Punch-in.** For emphasis beats (a line that lands, a reaction, a reveal), one zone fills or nearly fills the frame, even when that stretches it. This uses the existing `full_frame` / `inset` layouts with the zone as the panel.
-3. **Panel-to-panel moves.** `reveal` and `reaction_pair` combine zones from the same page or an earlier one. A tall half-zone next to a reaction zone gives the side-by-side manhwa beat.
-4. **Splash singles: about 10–15% of beats.** Single full-image orders are reserved for the opening hook, establishing shots, big action and payoffs. Coma-healer used 14% (120 of 867 beats). Splashes are not eliminated; they are the contrast that makes the page sections feel deliberate.
+### Target look: Manhwa Fresh (observed 2026-10-19)
 
-The mix is authored per beat. There is no quota or fixed cycle. `page_build` needs renderer support: a page-level camera with per-zone masks and per-zone entries, bound to the zone rectangles. Everything else uses existing layouts.
+Observed on `@manhwa_fresh` (642K subscribers), recap `CSLYvUejF3w`, using a vidIQ visual walkthrough plus sampled frames:
+
+- **One panel at a time.** A tall portrait panel sits centered and fills the frame height, covering about 40–55% of the width.
+- **Blurred sides.** The pillarbox is an enlarged, blurred copy of the **same** active panel, so the color always matches.
+- **Wide panels go full screen.** Landscape panels (establishing shots, wide action) fill the 16:9 frame. Close-ups are often cropped to fill the full width.
+- **Camera motion.** Tall strips scroll slowly top to bottom. Faces get slow push-ins on reactions and revelations, and wide reveals get pull-outs. Static shots drift slightly.
+- **Hard cuts** almost everywhere. Fades and wipes are rare.
+- **Pacing.** Shots last 2–4 s (3–5 s in dialogue) and 1–2 s or less in action bursts.
+- **Impacts.** The screen shakes on hits, explosions and shocks.
+- **Text.** Most dialogue bubbles are removed. Sound-effect lettering and system/stat windows are kept and shown prominently.
+
+How this maps onto the composer:
+
+| Manhwa Fresh device | Goldflow today | Gap |
+| --- | --- | --- |
+| Centered tall panel over its own blur | `inset` with `background_panel_id` = the same panel, blur and brightness | Needs portrait artwork; layout already exists |
+| Strip scroll | `page_pan` with a vertical camera path | Exists |
+| Push-in / pull-out / drift | `camera_from` / `camera_to` zoom and position | Exists |
+| Full-width wide panels and close-ups | `full_frame` / `cover` crops | Exists |
+| Hard cuts | default beat boundaries | Exists |
+| 2–4 s shots, 1–2 s in action | one decision per beat; the coma-healer average beat is about 5.4 s | Needs either 2–3 authored shots within one beat (different crops of the same zone) or finer beats |
+| Impact shake | — | Small new camera feature: an authored shake window |
+| Kept SFX lettering | prompts ban all lettering | Editorial choice; out of scope for v1 |
+
+Composition policy:
+
+- Most beats show one strip panel centered over its own blur, with a restrained push-in or drift.
+- Tall `S1` strips scroll.
+- Wide splash singles (about 10–15% of beats) are for establishing shots, wide action and payoffs.
+- Action bursts cut quickly between crops.
+
+No quotas and no fixed cycle: every choice is authored per beat.
 
 ### Image QA: page vs zones
 
@@ -205,11 +234,11 @@ Starting from the 658 owners:
 
 | Packing limits | Pages | + hero singles | Scene generations | Change |
 | --- | ---: | ---: | ---: | ---: |
-| ≤ 3 zones, ref union ≤ 4 | 229 | 120 | 349 | −47% |
-| ≤ 4 zones, ref union ≤ 4 (**recommended v1**) | 203 | 120 | **323** | **−51%** |
-| ≤ 4 zones, ref union ≤ 6 | 170 | 120 | 290 | −56% |
+| ≤ 3 panels per strip, ref union ≤ 4 (**recommended v1**) | 229 | 120 | **349** | **−47%** |
+| ≤ 3 panels per strip, ref union ≤ 6 | 208 | 120 | 328 | −50% |
+| ≤ 4 zones, ref union ≤ 4 (landscape grids; not offered by strip templates) | 203 | 120 | 323 | −51% |
 
-Under the recommended limits, 51 pages hold a single zone (equivalent to today's singles) and 80 hold four. An editor who merges same-location singles across adjacent scenes, or who uses fewer hero singles, would push this further. Those are authored editorial choices, not automatic packing.
+Under the recommended limits, 48 strips hold a single panel (an S1 or an ordinary single), 53 hold two and 128 hold three. An editor who merges same-location singles across adjacent scenes, or who uses fewer hero singles, would push this further. Those are authored editorial choices, not automatic packing.
 
 ## 3. Derived-reference promotion
 
@@ -250,11 +279,11 @@ Unit prices from the run: ref ≈ $0.0061, scene `edit` ≈ $0.0176 at low. The 
 | | Baseline (actual) | Proposed v1 (estimate) |
 | --- | ---: | ---: |
 | Generated refs | 124 ($0.76) | 84 (≈ $0.51) |
-| Scene generations | 658 ($11.58) | 323 (≈ $5.68) |
+| Scene generations | 658 ($11.58) | 349 (≈ $6.14) |
 | Zone repair reserve | — | ≈ 54 (≈ $0.95) |
-| **Total generations** | **782** | **≈ 461 (−41%)**; ≈ 407 (−48%) with no repairs |
-| **Total cost** | **$12.35** | **≈ $7.1 (−42%)** |
-| Whole-image semantic reviews | 658 | 323 (page reviews), plus per-zone acceptance on crops |
+| **Total generations** | **782** | **≈ 487 (−38%)**; ≈ 433 (−45%) with no repairs |
+| **Total cost** | **$12.35** | **≈ $7.6 (−38%)** |
+| Whole-image semantic reviews | 658 | 349 (strip reviews), plus per-panel acceptance on crops |
 
 Request settings are unchanged (1920×1080, `quality: low`), so the per-request price is assumed to match the run's. Pages attach the union of their zones' refs, which may add a little input cost per request.
 
@@ -268,7 +297,7 @@ Request settings are unchanged (1920×1080, `quality: low`), so the per-request 
 | Identity bleed between people on one page | ≤ 3 human identities and ≤ 4 refs per page; page semantic QA checks bleed explicitly |
 | Larger repair blast radius | Siblings stay accepted; rejected zones re-bind to singles; at most one reviewed page regeneration |
 | Contradictory board instruction ("do not reproduce gutters") | Page-specific board instruction variant |
-| Pages read as a static comic scan | `page_build` reveals zones on their beats with authored camera moves; punch-ins and splash singles vary the rhythm |
+| Edit feels slower than the target | Sub-beat shots and impact shake (gaps listed under Target look); playback review against a Manhwa Fresh sample |
 | Prompt-only subjects drift across pages | Bases 2–3 keep cross-page subjects as refs; two-page subjects get one reviewed promoted crop, re-anchored |
 | Policy conflict with "no story cut as identity ref" | `state_continuity` never supplies identity; requires explicit operator approval of the amendment |
 | Editorial over-packing to hit a count | No quota; the validator checks structure only; the proof compares edits by actual playback |
@@ -296,8 +325,8 @@ The existing accepted coma-healer chapter is the A/B control.
 1. **No-spend:**
    - Author the chapter's page allocation (v2) and the trimmed ref set for these scenes; prompt-plan and harden the pages.
    - Unit-test the gutter detector on the existing precedent PNG and on synthetic rasters.
-   - Implement and test `page_build` (zone masks, per-zone entries, page camera) on the precedent PNG.
-2. **Generate pages** at locked 1920×1080 `quality: low`, using only the chapter's kept refs. Expected about 15 generations. Budget ceiling: 24 requests × $0.05 = $1.20.
+   - Read the live Sunburst schema for the portrait strip size, and review the adapter change.
+2. **Generate strips** at `quality: low` (portrait strips, plus 1920×1080 splash singles), using only the chapter's kept refs. Expected about 15 generations. Budget ceiling: 24 requests × $0.05 = $1.20.
 3. **Structural and semantic QA:** page geometry pass rate, then zone acceptance on review crops. Record per-zone findings.
 4. **Promote derived refs** (`location_continuity` / `state_continuity`) from first-page zones for two-page subjects, reviewed and re-anchored. Then generate those subjects' later pages.
 5. **Zone repairs** for rejected zones as singles: at most one per zone, within the ceiling.
@@ -329,7 +358,7 @@ Anything short of that is a triage point, not a rerun order.
 3. Fal adapter: page assignments at the existing locked request settings.
 4. A new `panel-page-geometry` module: deterministic gutter detection, the geometry receipt, and review crops.
 5. Image QA: page structural and semantic checks, zone acceptance on crops, and zone-scoped repair rebinding.
-6. `panel-production-plan.mjs` / author validator / renderer: zone `source_rect` binding, magnification reporting, zone disclosure, and the `page_build` layout.
+6. `panel-production-plan.mjs` / author validator / renderer: zone `source_rect` binding, magnification reporting, zone disclosure, sub-beat shots and an authored impact shake.
 7. Reference director contract: `selection_basis` and the validator, `prompt_only` / `derived_promotion_candidate`.
 8. `imagegen promote-zone-ref`: the guarded promotion route and the receipts, plus the policy amendment in `generated_visuals.md` once approved.
 9. Docs: a `panel_production_v1.md` section and run-status routing for the new stages.

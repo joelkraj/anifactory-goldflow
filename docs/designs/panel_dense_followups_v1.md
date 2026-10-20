@@ -12,7 +12,7 @@ This tracker lists the ten agreed follow-ups. Each item lands as a reviewed, tes
 | 4 | Snap author rects to the crop aspect deterministically (removes manual fill reconciliation) | **done** | `snapPanelAuthorRects` in the native author, with snaps recorded per chunk. All 3 gala chunks that had failed pass with it. |
 | 5 | Garbled-text detection on zone crops, routed to crop-out or zone repair | pending | |
 | 6 | Cast rule: exactly the named characters, no lookalikes; anonymous passive background population stays welcome; no unrequested text | **done** | A fixed cast sentence in every page frame, plus a blocking `page_cast_anchor_missing` check. The gala dense plan still passes (only the known offer-card lettering finding). |
-| 7 | Dense page allocation planner: templates, caps, ~5 beats per image target, full episode | in progress | |
+| 7 | Dense page allocation planner: templates, caps, ~5 beats per image target, full episode | in progress | 7a: page canvas carried from allocation to Fal (`887cbee`). 7b: allocation-time constraints and caps (`panel-page-allocation.mjs`). Only required person/location references can block a page. The proven gala plan gets only accurate warnings. 7c: planner; 7d: dry run. |
 | 8 | Smaller reference board cost test (1024×576 versus 1920×1080) | pending | |
 | 9 | Reference trimming (124 → 84) and derived-reference promotion (design §1 and §3) | pending | |
 | 10 | Review and PR the branch onto its base | pending | |

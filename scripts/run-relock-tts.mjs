@@ -166,6 +166,7 @@ export function recoveryKindForIdentityForTests(identity = {}) {
   if (provider === "qwen_local" && voiceId === "am_liam" && fallback == null) {
     return LIAM_TO_JOEL_RECOVERY_KIND;
   }
+  if (provider === "qwen_local" && voiceId === narrationPolicy.QWEN_DEEPMALE_PRIMARY_LOCK.voice_id && fallback == null) return OPERATOR_VOICE_RECOVERY_KIND;
   if (provider === "qwen_local" && voiceId === "joel_owned_narrator_clone" && fallback == null) {
     return QWEN_PLANNER_FIX_RECOVERY_KIND;
   }
@@ -257,7 +258,7 @@ function qwenLiamProviderLocks(primary, options) {
     tts_unit_target_words_max: Number(options.unit_contract.target_words_max),
     tts_unit_hard_words_max: Number(options.unit_contract.hard_words_max),
     tts_sentence_complete_units: true,
-    tts_join_silence_ms: Number(options.stitch_contract.join_silence_ms),
+    tts_join_silence_ms: options.stitch_contract.join_silence_ms == null ? null : Number(options.stitch_contract.join_silence_ms),
     tts_continuous_requests: false,
     post_tempo_processing: false,
     tts_retry_policy: options.retry_policy,
@@ -307,7 +308,10 @@ export function relockedIdentityForTests(identity, {
   reason,
   recoveryKind = recoveryKindForIdentityForTests(identity),
 } = {}) {
-  const options = requireCanonicalQwenLiamOptions(voiceProviderOptions);
+  const validatedOptions = requireCanonicalQwenLiamOptions(voiceProviderOptions);
+  const options = identity.narration_quality_contract
+    ? narrationPolicy.defaultNarrationVoiceProviderOptions({voiceId: validatedOptions.primary.voice_id, narrationQualityContract: identity.narration_quality_contract})
+    : validatedOptions;
   const primary = options.primary;
   const previousSynthesisContract =
     narrationPolicy.narrationTtsPolicyForIdentity(identity).synthesis_contract
@@ -374,7 +378,7 @@ export function relockedIdentityForTests(identity, {
     fallback_must_clone_primary_voice_identity: false,
     sentence_complete_tts_units_required: true,
     tts_unit_hard_words_max: Number(options.unit_contract.hard_words_max),
-    tts_join_silence_ms: Number(options.stitch_contract.join_silence_ms),
+    tts_join_silence_ms: options.stitch_contract.join_silence_ms == null ? null : Number(options.stitch_contract.join_silence_ms),
     continuous_longform_tts_requests_forbidden: true,
     deterministic_length_matched_tts_batching_required: true,
     tts_nominal_batch_size: Number(
@@ -399,7 +403,7 @@ export function relockedIdentityForTests(identity, {
   ];
   migrated.narration_identity_relock = {
     schema: "goldflow_narration_identity_relock_v1",
-    profile: QWEN_LIAM_PROFILE_ID,
+    profile: migrated.tts_profile,
     recovery_kind: recoveryKind,
     identity_changed: identityChanged,
     voice_identity_changed: voiceIdentityChanged,
@@ -962,7 +966,7 @@ async function main() {
       migrated.narration_identity_relock.synthesis_contract_changed,
     disposition: recoveryDisposition(recoveryKind),
     evidence_reviewed: evidenceReviewed,
-    tts_profile: QWEN_LIAM_PROFILE_ID,
+    tts_profile: migrated.tts_profile,
     run_identity_before_sha256: beforeHash,
     run_identity_after_sha256: afterHash,
     previous_git_commit: identity.git?.commit ?? null,
@@ -1017,7 +1021,7 @@ async function main() {
     synthesis_contract_changed:
       migrated.narration_identity_relock.synthesis_contract_changed,
     disposition: recoveryDisposition(recoveryKind),
-    tts_profile: QWEN_LIAM_PROFILE_ID,
+    tts_profile: migrated.tts_profile,
     run_identity_before_sha256: beforeHash,
     run_identity_after_sha256: afterHash,
     previous_git_commit: identity.git?.commit ?? null,
@@ -1046,7 +1050,7 @@ async function main() {
   console.log(JSON.stringify({
     status: "passed",
     episode_dir: episodeDir,
-    tts_profile: QWEN_LIAM_PROFILE_ID,
+    tts_profile: migrated.tts_profile,
     recovery_kind: recoveryKind,
     operator_approved_batch4_promotion:
       migrated.narration_identity_relock.synthesis_contract_changed,

@@ -8,13 +8,19 @@ import { clearLoginMarker, markLoginVerified } from "./browser-login.mjs";
 import { chatGptEffortSliderIndex } from "../lib/chatgpt-ui-contract.mjs";
 
 const CHATGPT_URL = "https://chatgpt.com/";
+// The current chatgpt.com composer is a ProseMirror contenteditable (role=textbox, aria-label
+// "Ask ChatGPT", placeholder paragraph data-placeholder="Ask ChatGPT"); read 2026-10-20. The
+// older textarea/Lexical shapes stay as cheap fallbacks.
 const COMPOSER_SELECTOR = [
-  'textarea[aria-label="Chat with ChatGPT"]',
-  'textarea[placeholder*="Ask ChatGPT"]',
-  '[data-testid="prompt-textarea"]',
   "#prompt-textarea",
+  '[data-testid="prompt-textarea"]',
+  '[role="textbox"][contenteditable="true"][aria-label="Ask ChatGPT"]',
+  '[contenteditable="true"]:has(> [data-placeholder="Ask ChatGPT"])',
+  '[contenteditable="true"].ProseMirror',
   '[contenteditable="true"][data-placeholder]',
   '[contenteditable="true"][data-lexical-editor="true"]',
+  'textarea[aria-label="Chat with ChatGPT"]',
+  'textarea[placeholder*="Ask ChatGPT"]',
 ].join(", ");
 const ASSISTANT_SELECTOR = [
   '[data-testid^="conversation-turn-"][data-turn="assistant"]',
@@ -273,6 +279,22 @@ async function dismissHistoryRateLimitModal(page) {
   return !await modal.isVisible().catch(() => false);
 }
 
+const PLAN_TIER_PATTERN = /\b(?:Pro|Plus|Team|Business|Enterprise)\b/i;
+
+async function readProfileMenuText(page, profileControl) {
+  const controlledId = await profileControl.getAttribute("aria-controls").catch(() => null);
+  const overlays = controlledId
+    ? page.locator(`[id="${controlledId.replace(/"/g, "")}"], [role="menu"], [role="dialog"]`)
+    : page.locator('[role="menu"], [role="dialog"], [data-radix-menu-content], [data-state="open"]');
+  const parts = [];
+  for (let index = 0; index < await overlays.count(); index += 1) {
+    const overlay = overlays.nth(index);
+    if (!await overlay.isVisible().catch(() => false)) continue;
+    parts.push(await overlay.innerText().catch(() => ""));
+  }
+  return parts.filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+}
+
 function escapedPattern(value) {
   return new RegExp(`\\b${String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i");
 }
@@ -291,36 +313,158 @@ export function chatGptModelControlMatches(actualText, expectedLabel) {
   return Boolean(expected) && actual.includes(expected);
 }
 
-async function openChatGptPowerMenu(page, powerButton) {
-  if (await powerButton.getAttribute("aria-expanded") !== "true") {
-    try {
-      await powerButton.click();
-    } catch (error) {
-      if (!await dismissHistoryRateLimitModal(page)) throw error;
-      await powerButton.click();
-    }
-  }
-  return waitForVisible(page.locator('[role="menu"]:has([role="slider"]), [role="group"]:has([role="slider"])'), { timeoutMs: 10_000 });
+// Composer control that opens the combined model/effort menu. Read from chatgpt.com in the
+// Studio profile on 2026-10-20 (docs/proofs/chatgpt_web_picker_probe_2026-10-20.json). The
+// legacy class-based trigger is kept only as a cheap last fallback.
+const MODEL_MENU_TRIGGER_SELECTOR = [
+  'button[aria-label="Select ChatGPT model"]',
+  'button[aria-haspopup="menu"][data-codex-intelligence-trigger="true"]',
+  'button[aria-haspopup="menu"]:has(.uFxlGa_SliderTriggerChatSelectionLabel)',
+].join(", ");
+const MODEL_MENU_SELECTOR = [
+  '[role="menu"]:has([role="menuitem"][aria-label="Select model"])',
+  '[role="menu"]:has([role="slider"])',
+  '[role="group"]:has([role="slider"])',
+].join(", ");
+const MODEL_CHOICE_SELECTOR = '[role="menuitemradio"]';
+const EFFORT_KEYBOARD_CONTROL_SELECTOR = '[role="menuitem"][aria-label="Power"], [role="menuitem"][data-reasoning-slider="true"]';
+const EFFORT_SLIDER_SELECTOR = '[role="slider"]';
+const EFFORT_POSITIONS = 5;
+
+function collapseWhitespace(value) {
+  return String(value ?? "").replace(/\s+/g, " ").trim();
 }
 
-async function expandChatGptAdvancedOptions(menu) {
-  for (let attempt = 0; attempt < 4; attempt += 1) {
-    const control = await visibleLocator(menu.getByRole("menuitem", { name: /advanced/i }));
-    if (!control || await control.getAttribute("aria-expanded") === "true") return;
+export function chatGptEffortAnnouncement(effortLabel) {
+  return `${effortLabel}, ${chatGptEffortSliderIndex(effortLabel) + 1} of ${EFFORT_POSITIONS}`;
+}
+
+export function chatGptEffortTextMatches(menuText, effortLabel) {
+  const text = collapseWhitespace(menuText);
+  return text.includes(chatGptEffortAnnouncement(effortLabel)) || text.includes(`Effort ${effortLabel}`);
+}
+
+async function openChatGptModelMenu(page, trigger) {
+  if (await trigger.getAttribute("aria-expanded") !== "true") {
     try {
-      // ChatGPT re-renders this animated row before Playwright's stability wait
-      // completes. A DOM activation avoids the animation race; the next loop
-      // reacquires the row and verifies the expanded state.
-      await control.evaluate((node) => node.click());
-    } catch {
-      await control.press("Enter", { timeout: 5_000 })
-        .catch(() => control.click({ timeout: 5_000, force: true }));
+      await trigger.click();
+    } catch (error) {
+      if (!await dismissHistoryRateLimitModal(page)) throw error;
+      await trigger.click();
     }
-    await sleep(250);
   }
-  const control = await visibleLocator(menu.getByRole("menuitem", { name: /advanced/i }));
-  if (control && await control.getAttribute("aria-expanded") !== "true") {
-    throw codedError("ui_contract_mismatch", "ChatGPT Advanced options remained collapsed after bounded activation.");
+  return waitForVisible(page.locator(MODEL_MENU_SELECTOR), { timeoutMs: 10_000 });
+}
+
+async function closeChatGptModelMenu(page, trigger) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    if (await trigger.getAttribute("aria-expanded").catch(() => null) !== "true") return;
+    await page.keyboard.press("Escape").catch(() => {});
+    await sleep(200);
+  }
+}
+
+async function readChatGptModelChoices(menu) {
+  const radios = menu.locator(MODEL_CHOICE_SELECTOR);
+  const choices = [];
+  for (let index = 0; index < await radios.count(); index += 1) {
+    const radio = radios.nth(index);
+    choices.push({
+      label: collapseWhitespace(await radio.innerText().catch(() => "")),
+      checked: await radio.getAttribute("aria-checked").catch(() => null) === "true",
+    });
+  }
+  return choices;
+}
+
+async function readChatGptEffortState(menu, trigger) {
+  const slider = menu.locator(EFFORT_SLIDER_SELECTOR).first();
+  const rawValue = await slider.count() ? await slider.getAttribute("aria-valuenow").catch(() => null) : null;
+  return {
+    menu_text: collapseWhitespace(await menu.innerText().catch(() => "")),
+    slider_value: rawValue == null || rawValue === "" ? null : Number(rawValue),
+    selected_reasoning_effort_attribute: await trigger.getAttribute("data-selected-reasoning-effort").catch(() => null),
+  };
+}
+
+function effortStateMatches(state, effortLabel) {
+  const expectedIndex = chatGptEffortSliderIndex(effortLabel);
+  if (state.slider_value != null && state.slider_value !== expectedIndex) return false;
+  return chatGptEffortTextMatches(state.menu_text, effortLabel);
+}
+
+async function selectChatGptModelChoice(page, menu, modelLabel) {
+  let radio = await visibleLocator(menu.getByRole("menuitemradio", { name: modelLabel, exact: true }));
+  if (!radio) {
+    const viewToggle = await visibleLocator(menu.getByRole("menuitem", { name: "Select model", exact: true }));
+    if (!viewToggle) throw codedError("ui_contract_mismatch", "ChatGPT model menu did not expose its Select model view.");
+    // The view toggle is an animated row; a DOM activation avoids Playwright's stability race.
+    await viewToggle.evaluate((node) => node.click()).catch(() => viewToggle.click({ force: true }));
+    radio = await waitForVisible(menu.getByRole("menuitemradio", { name: modelLabel, exact: true }), { timeoutMs: 10_000 });
+  }
+  if (!radio) throw codedError("ui_contract_mismatch", `ChatGPT Select model view did not expose model ${modelLabel}.`);
+  if (await radio.getAttribute("aria-checked") === "true") return;
+  await radio.click().catch(() => radio.press("Enter"));
+  await sleep(250);
+}
+
+async function adjustChatGptEffort(menu, effortLabel) {
+  const expectedIndex = chatGptEffortSliderIndex(effortLabel);
+  const control = await visibleLocator(menu.locator(EFFORT_KEYBOARD_CONTROL_SELECTOR));
+  const slider = menu.locator(EFFORT_SLIDER_SELECTOR).first();
+  if (!control && !await slider.count()) throw codedError("ui_contract_mismatch", "ChatGPT model menu did not expose its Power control.");
+  if (control && await control.getAttribute("aria-disabled") === "true") {
+    throw codedError("ui_contract_mismatch", "ChatGPT Power control is disabled in the current menu view.");
+  }
+  // The visible Power row owns ArrowLeft/ArrowRight; the slider itself is aria-hidden. Walk to the
+  // leftmost stop, then right to the wanted position, so the result does not depend on the start.
+  const target = control ?? slider;
+  await target.focus().catch(() => {});
+  for (let index = 0; index < EFFORT_POSITIONS - 1; index += 1) await target.press("ArrowLeft");
+  for (let index = 0; index < expectedIndex; index += 1) await target.press("ArrowRight");
+  await sleep(250);
+}
+
+/**
+ * Selects the contract's model by visible identity and its effort through the Power slider,
+ * verifying both from the menu's own state. Never types into or submits the composer.
+ */
+export async function selectChatGptModelAndEffort(page, contract) {
+  const trigger = await waitForVisible(page.locator(MODEL_MENU_TRIGGER_SELECTOR), { timeoutMs: 30_000 });
+  if (!trigger) throw codedError("ui_contract_mismatch", "Expected the ChatGPT model and effort control (Select ChatGPT model).");
+  let menu = await openChatGptModelMenu(page, trigger);
+  if (!menu) throw codedError("ui_contract_mismatch", "ChatGPT did not expose its model and effort menu.");
+  try {
+    let choices = await readChatGptModelChoices(menu);
+    if (!choices.length) throw codedError("ui_contract_mismatch", "ChatGPT model menu exposed no model choices.");
+    const describeChoices = () => choices.map((choice) => `${choice.label}${choice.checked ? " (selected)" : ""}`).join(", ");
+    const wanted = () => choices.find((choice) => choice.label === contract.model_label);
+    if (!wanted()) throw codedError("ui_contract_mismatch", `ChatGPT did not expose model ${contract.model_label}; visible choices were ${describeChoices()}.`);
+    if (!wanted().checked) {
+      await selectChatGptModelChoice(page, menu, contract.model_label);
+      await closeChatGptModelMenu(page, trigger);
+      menu = await openChatGptModelMenu(page, trigger);
+      if (!menu) throw codedError("ui_contract_mismatch", "ChatGPT model selection closed the menu and it did not reopen.");
+      choices = await readChatGptModelChoices(menu);
+      if (!wanted()?.checked) throw codedError("ui_contract_mismatch", `ChatGPT did not select model ${contract.model_label}; visible choices were ${describeChoices()}.`);
+    }
+
+    let effort = await readChatGptEffortState(menu, trigger);
+    if (!effortStateMatches(effort, contract.effort_label)) {
+      await adjustChatGptEffort(menu, contract.effort_label);
+      effort = await readChatGptEffortState(menu, trigger);
+    }
+    if (!effortStateMatches(effort, contract.effort_label)) {
+      throw codedError("ui_contract_mismatch", `Expected effort ${contract.effort_label} (${chatGptEffortAnnouncement(contract.effort_label)}); visible control was ${effort.menu_text.slice(0, 300)}.`);
+    }
+    return {
+      model_choices: choices.map((choice) => choice.label),
+      effort_slider_value: effort.slider_value,
+      effort_announcement: chatGptEffortAnnouncement(contract.effort_label),
+      selected_reasoning_effort_attribute: effort.selected_reasoning_effort_attribute,
+    };
+  } finally {
+    await closeChatGptModelMenu(page, trigger);
   }
 }
 
@@ -450,24 +594,24 @@ export class ChatGptBrowser {
     const closedText = `${await profileControl.getAttribute("aria-label").catch(() => "") ?? ""} ${await profileControl.innerText().catch(() => "")}`;
     // ChatGPT now exposes the account tier directly in the closed profile control.
     // Avoid opening the sidebar menu when that is already enough to verify the plan.
-    if (/\b(?:Pro|Plus|Team|Business|Enterprise)\b/i.test(closedText)) return closedText.trim();
-    await profileControl.click({ timeout: 10_000 }).catch(async () => {
-      await profileControl.click({ timeout: 10_000, force: true });
-    });
+    if (PLAN_TIER_PATTERN.test(closedText)) return closedText.trim();
+    let openedText = "";
     try {
-      const overlays = page.locator('[role="menu"], [role="dialog"], [data-radix-menu-content], [data-state="open"]');
-      const deadline = Date.now() + 5_000;
-      let openedText = "";
-      while (Date.now() < deadline) {
-        const parts = [];
-        for (let index = 0; index < await overlays.count(); index += 1) {
-          const overlay = overlays.nth(index);
-          if (!await overlay.isVisible().catch(() => false)) continue;
-          parts.push(await overlay.innerText().catch(() => ""));
+      // The menu renders after the click; an unrelated [data-state="open"] element can
+      // carry text first, so keep reading until a plan tier appears, re-clicking once if
+      // the control never reports itself expanded.
+      for (let attempt = 0; attempt < 2 && !PLAN_TIER_PATTERN.test(openedText); attempt += 1) {
+        if (await profileControl.getAttribute("aria-expanded").catch(() => null) !== "true") {
+          await profileControl.click({ timeout: 10_000 }).catch(async () => {
+            await profileControl.click({ timeout: 10_000, force: true });
+          });
         }
-        openedText = parts.filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
-        if (openedText) break;
-        await sleep(150);
+        const deadline = Date.now() + 5_000;
+        while (Date.now() < deadline) {
+          openedText = await readProfileMenuText(page, profileControl);
+          if (PLAN_TIER_PATTERN.test(openedText)) break;
+          await sleep(150);
+        }
       }
       return `${closedText} ${openedText}`.trim();
     } finally {
@@ -513,77 +657,13 @@ export class ChatGptBrowser {
       if (!escapedPattern(contract.account_plan).test(profileText)) {
         throw codedError("account_mismatch", `Expected a signed-in ${contract.account_plan} ChatGPT account.`);
       }
-
-      const powerButton = await waitForVisible(page.locator('button[aria-haspopup="menu"]:has(.uFxlGa_SliderTriggerChatSelectionLabel)'), { timeoutMs: 30_000 });
-      if (!powerButton) throw codedError("ui_contract_mismatch", "Expected the ChatGPT model and effort control.");
-      let menu = await openChatGptPowerMenu(page, powerButton);
-      if (!menu) throw codedError("ui_contract_mismatch", "ChatGPT did not expose its effort menu.");
-
-      await expandChatGptAdvancedOptions(menu);
-      let modelControl = await visibleLocator(menu.getByRole("menuitem", { name: /^model\b/i }));
-      if (!modelControl) throw codedError("ui_contract_mismatch", "ChatGPT Advanced options did not expose its model selector.");
-      if (!chatGptModelControlMatches(await modelControl.innerText(), contract.model_label)) {
-        await modelControl.click();
-        const wantedModel = await waitForVisible(page.getByRole("menuitemradio", { name: contract.model_label, exact: true }), { timeoutMs: 10_000 });
-        if (!wantedModel) throw codedError("ui_contract_mismatch", `ChatGPT did not expose model ${contract.model_label}.`);
-        await wantedModel.press("Enter");
-        await sleep(250);
-        await page.keyboard.press("Escape").catch(() => {});
-        if (await powerButton.getAttribute("aria-expanded") !== "true") {
-          menu = await openChatGptPowerMenu(page, powerButton);
-        } else {
-          menu = await waitForVisible(page.locator('[role="menu"]:has([role="slider"]), [role="group"]:has([role="slider"])'), { timeoutMs: 10_000 });
-        }
-        if (!menu) throw codedError("ui_contract_mismatch", "ChatGPT model selection closed the effort menu unexpectedly.");
-        await expandChatGptAdvancedOptions(menu);
-        modelControl = await visibleLocator(menu.getByRole("menuitem", { name: /^model\b/i }));
-      }
-
-      const slider = menu.locator('[role="slider"]').first();
-      let menuText = (await menu.innerText()).replace(/\s+/g, " ").trim();
-      if (!menuText.includes(`Effort ${contract.effort_label}`)) {
-        await slider.focus();
-        const effortIndex = chatGptEffortSliderIndex(contract.effort_label);
-        await slider.press("Home");
-        for (let index = 0; index < effortIndex; index += 1) await slider.press("ArrowRight");
-        await sleep(250);
-        menuText = (await menu.innerText()).replace(/\s+/g, " ").trim();
-      }
-      if (!menuText.includes(`Effort ${contract.effort_label}`)) {
-        const effortControl = await visibleLocator(menu.getByRole("menuitem", { name: /^effort\b/i }));
-        if (effortControl) {
-          await effortControl.click();
-          const effortMenus = page.locator('[role="menu"]');
-          const wantedEffort = await waitForVisible(
-            effortMenus.getByRole("menuitemradio", { name: contract.effort_label, exact: true }),
-            { timeoutMs: 10_000 },
-          ) ?? await waitForVisible(
-            effortMenus.getByText(contract.effort_label, { exact: true }),
-            { timeoutMs: 2_000 },
-          );
-          if (!wantedEffort) {
-            throw codedError("ui_contract_mismatch", `ChatGPT did not expose effort ${contract.effort_label}.`);
-          }
-          await wantedEffort.press("Enter").catch(() => wantedEffort.click());
-          await sleep(250);
-          await page.keyboard.press("Escape").catch(() => {});
-          menu = await openChatGptPowerMenu(page, powerButton);
-          if (!menu) throw codedError("ui_contract_mismatch", "ChatGPT effort selection closed the power menu unexpectedly.");
-          await expandChatGptAdvancedOptions(menu);
-          modelControl = await visibleLocator(menu.getByRole("menuitem", { name: /^model\b/i }));
-          menuText = (await menu.innerText()).replace(/\s+/g, " ").trim();
-        }
-      }
-      if (!modelControl || !chatGptModelControlMatches(await modelControl.innerText(), contract.model_label)) {
-        throw codedError("ui_contract_mismatch", `Expected model ${contract.model_label}; visible control was ${menuText.slice(0, 300)}.`);
-      }
-      if (!menuText.includes(`Effort ${contract.effort_label}`)) throw codedError("ui_contract_mismatch", `Expected effort ${contract.effort_label}; visible control was ${menuText.slice(0, 300)}.`);
-      await page.keyboard.press("Escape");
+      const selection = await selectChatGptModelAndEffort(page, contract);
       return {
         account_plan: contract.account_plan,
         model_label: contract.model_label,
         effort_label: contract.effort_label,
         verified_at: new Date().toISOString(),
+        ...selection,
       };
     } catch (caught) {
       const error = caught instanceof Error ? caught : new Error(String(caught));
@@ -940,4 +1020,4 @@ export class ChatGptBrowser {
   }
 }
 
-export { CHATGPT_URL, COMPOSER_SELECTOR, SIGNED_OUT_SELECTOR };
+export { CHATGPT_URL, COMPOSER_SELECTOR, MODEL_MENU_TRIGGER_SELECTOR, SIGNED_OUT_SELECTOR };

@@ -1222,6 +1222,10 @@ async function testDesktopHostContract() {
   assert.doesNotMatch(loginSource, /playwright|remote-debugging|enable-automation/i, "manual login must not attach browser automation");
   assert.match(browserSource, /profilePlanText/, "desktop host must verify the plan from the opened account menu when the closed profile button omits it");
   assert.match(browserSource, /_ui-contract-diagnostics/, "desktop host must preserve local diagnostics for ChatGPT UI contract drift");
+  assert.match(browserSource, /button\[aria-label="Select ChatGPT model"\]/, "model/effort verification must open the current composer control (live DOM 2026-10-20)");
+  assert.match(browserSource, /getByRole\("menuitem", \{ name: "Select model", exact: true \}\)/, "model selection must go through the Select model view by visible identity");
+  assert.match(browserSource, /data-selected-reasoning-effort/, "the trigger's reasoning-effort attribute must be recorded in the verification receipt");
+  assert.doesNotMatch(browserSource, /expandChatGptAdvancedOptions|name: \/\^model\\b\/i/, "the removed Advanced/Model rows must not be reintroduced");
   assert.match(browserSource, /setInputFiles/, "desktop host must upload ordered reference bytes outside the ChatGPT origin");
   assert.ok(
     browserSource.indexOf("const composerReceipt = await stabilizeChatGptComposerPrompt")

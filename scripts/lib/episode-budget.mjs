@@ -23,7 +23,7 @@ function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
 }
 
-async function fileSha256(filePath) {
+export async function fileSha256(filePath) {
   try {
     return sha256(await fs.readFile(filePath));
   } catch (error) {
@@ -62,7 +62,7 @@ export function episodeBudgetFor(identity = {}) {
 }
 
 /** Writes an append-only, exclusively created JSON record under episodeDir/<subdir>. */
-async function writeSequencedRecord(episodeDir, subdir, stem, record) {
+export async function writeSequencedRecord(episodeDir, subdir, stem, record) {
   const dir = path.join(episodeDir, subdir);
   await fs.mkdir(dir, { recursive: true });
   for (let attempt = 0; attempt < 5; attempt += 1) {
@@ -78,7 +78,7 @@ async function writeSequencedRecord(episodeDir, subdir, stem, record) {
   throw new Error(`Could not allocate an append-only record in ${subdir}.`);
 }
 
-async function listSequencedRecords(episodeDir, subdir) {
+export async function listSequencedRecords(episodeDir, subdir) {
   const dir = path.join(episodeDir, subdir);
   const names = await fs.readdir(dir).catch((error) => (error.code === "ENOENT" ? [] : Promise.reject(error)));
   const rows = [];

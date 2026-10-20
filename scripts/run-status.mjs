@@ -117,6 +117,8 @@ import {
   youtubeUploadPackagingComplete,
   youtubeUploadReceiptComplete,
 } from "./lib/youtube-publish-contract.mjs";
+import { autopilotEnabled } from "./lib/autopilot-policy.mjs";
+import { autopilotPublishStatus, finalWatchStatus } from "./lib/autopilot-publish.mjs";
 import {
   GENERATED_MOTION_PROVIDER_LTX,
   GENERATED_MOTION_REPORT_SCHEMA,
@@ -6540,6 +6542,8 @@ async function main() {
     production_profile_config: runIdentity.production_profile_config ?? null,
     run_identity_schema: runIdentity.schema ?? "missing",
     stage_registry_version: runIdentity.stage_registry_version ?? runIdentity.workflow_contract?.stage_registry_version ?? null,
+    episode_budget: runIdentity.episode_budget ?? null,
+    autopilot_policy: runIdentity.autopilot_policy ?? null,
   };
   const effectiveImageRoute = await effectiveImageIdentityForEpisode(episodeDir, runIdentityPath, identity);
   Object.assign(identity, effectiveImageRoute.identity);
@@ -6845,7 +6849,10 @@ async function main() {
     youtube_studio_upload: youtubeContractCurrent
       ? youtubeUploadReceipt
       : { state: "skipped_with_waiver", evidence: "run predates browser-assisted YouTube upload receipt" },
-    youtube_pinned_comment: youtubeContractCurrent
+    final_watch: await finalWatchStatus({ episodeDir, episode, identity: runIdentity }),
+    youtube_pinned_comment: autopilotEnabled(runIdentity)
+      ? await autopilotPublishStatus({ episodeDir, episode })
+      : youtubeContractCurrent
       ? youtubePinnedCommentReceipt
       : { state: "skipped_with_waiver", evidence: "run predates pinned-comment receipt contract" },
   };
@@ -6953,6 +6960,8 @@ async function main() {
     next_output_artifact: next?.output_artifact ?? null,
     operator_approval_required: next?.operator_approval_required ?? false,
     next_command_shape: next?.next_command_shape ?? null,
+    ...(next?.stage === "final_watch" && validationByStage.final_watch?.final_watch_video_path
+      ? { final_watch_video_path: validationByStage.final_watch.final_watch_video_path } : {}),
     manual_blocker_triage_policy: MANUAL_BLOCKER_TRIAGE_POLICY,
     execution_telemetry: productionManifest?.telemetry ?? null,
     production_manifest_path: productionManifest ? path.join(episodeDir, "production_manifest.json") : null,

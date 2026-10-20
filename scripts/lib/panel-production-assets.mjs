@@ -4,7 +4,7 @@ import path from 'node:path';
 import { assertPanelProductionIdentity, isPanelProductionIdentity } from './panel-production-policy.mjs';
 import { PAGE_TEMPLATES, PAGE_TEMPLATE_MIN_CANVAS_WIDTH } from './panel-page-geometry.mjs';
 import { FAL_PAGE_CANVAS_SIZES } from './fal-provider.mjs';
-import { pageFrameText, pagePanelHeadings } from './panel-page-prompts.mjs';
+import { pageFrameText, pagePanelHeadings, PAGE_LIMITS } from './panel-page-prompts.mjs';
 
 const need = (value, message) => { if (!value) throw new Error(`Panel asset plan: ${message}`); };
 const sha = value => createHash('sha256').update(value).digest('hex');
@@ -69,7 +69,7 @@ async function inputs(episodeDir) {
 }
 
 /**
- * A page order is one generation holding 2-4 separately croppable zones from
+ * A page order is one generation holding 2-6 separately croppable zones from
  * one scene. Each zone serves a contiguous run of beats; the page owner is the
  * earliest of them. Zone rectangles are measured after generation; this
  * validator checks the authored structure only.
@@ -153,9 +153,10 @@ export async function preparePanelAssetPlan({ episodeDir }) {
       'Describe one coherent drawable composition that supports all bound beats. Reuse only when the same visible facts, characters, state and image-native text remain accurate; choose fresh artwork when the story needs it. Explain useful crop or reaction opportunities in the brief.',
       'Do not change narration or beat timing. Native artwork remains 16:9; the later panel composer authors crops, holds and overlays. The planner will author one prompt per unique order and aliases will retain exact source provenance.',
       'This packet/template is not a passed plan. Fill the candidate and import it using visual panel-assets --plan <candidate>.',
-      'Optional page orders (set schema goldflow_panel_asset_plan_v2): one generation holding 2-4 separately croppable zones from ONE scene, using a template from page_templates. Each zone gets its own drawable subject, a contiguous run of beats, a visual_brief and editorial_reason; every bound beat names its zone_id. Group only beats whose cast, wardrobe, location and state are simultaneously true, at most three people per page. Keep single orders for beats that need a large full-frame wide shot, action payoff or reveal. Pages are a generation efficiency only: each zone is later cropped into the ordinary panel layouts, and no viewer sees the page itself.'
+      `Optional page orders (set schema goldflow_panel_asset_plan_v2): one generation holding 2-6 separately croppable zones from ONE scene, using a template from page_templates with a canvas at least its page_template_min_canvas_width (dense pages use 3840x2160). Each zone gets its own drawable subject, a contiguous run of beats, a visual_brief and editorial_reason; every bound beat names its zone_id. Group only beats whose cast, wardrobe, location and state are simultaneously true: at most ${PAGE_LIMITS.max_visible_people} named people and ${PAGE_LIMITS.max_references} references per page. Put establishing shots, payoffs and reveals in a hero or left zone. Pages are a generation efficiency only: each zone is later cropped into the ordinary panel layouts, and no viewer sees the page itself. visual panel-assets --action author-dense drafts such a candidate.`
     ],
     page_templates: Object.fromEntries(Object.entries(PAGE_TEMPLATES).map(([id, zones]) => [id, zones.map(zone => zone.slot)])),
+    page_template_min_canvas_width: { ...PAGE_TEMPLATE_MIN_CANVAS_WIDTH },
     candidate_shape: { asset_orders: [{ asset_id: 'asset_001', owner_beat_id: '<first beat ID>', beat_ids: ['<beat IDs>'], visual_brief: '<authored composition>', editorial_reason: '<why this image serves these beats>' }], beat_bindings: [{ beat_id: '<beat ID>', asset_id: 'asset_001', editorial_reason: '<how narration uses this art>' }] },
     page_candidate_shape: { schema: 'goldflow_panel_asset_plan_v2', asset_orders: [{ asset_id: 'page_001', kind: 'page', page_template: 'P3L', owner_beat_id: '<earliest beat ID>', beat_ids: ['<all zone beats in source order>'], visual_brief: '<shared location, time, lighting, cast>', editorial_reason: '<why these beats share one generation>', zones: [{ zone_id: 'page_001_z1', slot: 'left', beat_ids: ['<contiguous beat IDs>'], visual_brief: '<this panel>', editorial_reason: '<why>' }] }], beat_bindings: [{ beat_id: '<beat ID>', asset_id: 'page_001', zone_id: 'page_001_z1', editorial_reason: '<how narration uses this zone>' }] },
     created_at: new Date().toISOString(),

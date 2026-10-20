@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { assertPanelPromptAllocation, expandPanelAssetPrompts } from "./lib/panel-production-assets.mjs";
+import { pagePromptFindings } from "./lib/panel-page-prompts.mjs";
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
@@ -1632,6 +1633,8 @@ async function main() {
     const result = sanitizePrompt(prompt, panelArtworkBeats.length ? { ...indexes, panelArtworkBeats } : indexes);
     prompts.push(result.prompt);
     findings.push(...result.findings);
+    // A page must keep its fixed frame and panel sections or its zones cannot be measured and cropped.
+    findings.push(...pagePromptFindings(result.prompt, order));
   }
   if (panelAllocation && promptPlan.prompts.length === panelAllocation.beats.length) prompts = expandPanelAssetPrompts(prompts, panelAllocation);
   findings.push(...promptIdentityFindings(prompts));

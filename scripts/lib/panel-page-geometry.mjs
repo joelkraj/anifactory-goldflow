@@ -124,10 +124,12 @@ export async function measurePageGeometry(bytes, template, policy = PAGE_GEOMETR
   };
 }
 
-/** Official location of a page's geometry receipt inside an episode. */
-export function panelPageGeometryDir(episodeDir, assetId) {
-  need(path.isAbsolute(episodeDir ?? '') && /^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(assetId ?? ''), 'absolute episode dir and safe asset ID required');
-  return path.join(episodeDir, 'panel_page_geometry', assetId);
+/** Official location of a page raster's geometry receipt inside an episode. */
+// Keyed by the measured raster, so an exact owner repair gets a new receipt
+// and earlier receipts stay immutable.
+export function panelPageGeometryDir(episodeDir, assetId, rasterSha256) {
+  need(path.isAbsolute(episodeDir ?? '') && /^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(assetId ?? '') && /^[a-f0-9]{64}$/.test(rasterSha256 ?? ''), 'absolute episode dir, safe asset ID and raster SHA-256 required');
+  return path.join(episodeDir, 'panel_page_geometry', assetId, rasterSha256.slice(0, 16));
 }
 
 /**

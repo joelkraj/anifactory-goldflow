@@ -3,6 +3,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { assertPanelProductionIdentity, isPanelProductionIdentity } from './panel-production-policy.mjs';
 import { PAGE_TEMPLATES } from './panel-page-geometry.mjs';
+import { pageFrameText, pagePanelHeadings } from './panel-page-prompts.mjs';
 
 const need = (value, message) => { if (!value) throw new Error(`Panel asset plan: ${message}`); };
 const sha = value => createHash('sha256').update(value).digest('hex');
@@ -207,7 +208,7 @@ export function panelAssetOrderForPrompt(order) {
     asset_id: order.asset_id, owner_beat_id: order.owner_beat_id,
     beat_ids: order.beat_ids, visual_brief: order.visual_brief,
     editorial_reason: order.editorial_reason,
-    ...(order.kind === 'page' ? { kind: 'page', page_template: order.page_template, zones: order.zones.map(({ zone_id, slot, beat_ids, visual_brief, editorial_reason }) => ({ zone_id, slot, beat_ids, visual_brief, editorial_reason })) } : {}),
+    ...(order.kind === 'page' ? { kind: 'page', page_template: order.page_template, page_frame: pageFrameText(order.page_template), panel_headings: pagePanelHeadings(order), zones: order.zones.map(({ zone_id, slot, beat_ids, visual_brief, editorial_reason }) => ({ zone_id, slot, beat_ids, visual_brief, editorial_reason })) } : {}),
     bound_beats: (order.bound_beats ?? []).map(beat => Object.fromEntries(
       fields.filter(field => beat[field] !== undefined).map(field => [field, beat[field]]),
     )),
@@ -245,6 +246,7 @@ export function expandPanelAssetPrompts(ownerPrompts, { plan, beats, planSha256 
       mentioned_only_entity_ids: beat.mentioned_only_entity_ids ?? [],
       panel_asset_id: order.asset_id, panel_asset_plan_sha256: planSha256,
       panel_asset_owner_image_id: ownerImageId, panel_asset_binding_reason: binding.editorial_reason,
+      panel_page_template: order.kind === 'page' ? order.page_template : null, panel_zone_id: binding.zone_id ?? null,
       image_generation_required: true, provider_submission_required: !alias,
       image_strategy: alias ? 'reuse_prior_approved' : 'fresh',
       editorial_reuse_approved: alias, reuse_source_image_id: alias ? ownerImageId : null,
@@ -273,6 +275,8 @@ export async function assertPanelPromptAllocation({ episodeDir, prompts, allowSu
     need(item && !seen.has(row.image_id), `unexpected or duplicate prompt ${row.image_id}`); seen.add(row.image_id);
     need(row.visual_beat_id === item.binding.beat_id && row.panel_asset_id === item.binding.asset_id && row.panel_asset_plan_sha256 === loaded.planSha256, `stale prompt allocation ${row.image_id}`);
     need(row.image_generation_required === true, `every allocated beat requires a materialized image ${row.image_id}`);
+    const order = loaded.plan.asset_orders.find(value => value.asset_id === item.binding.asset_id);
+    need((row.panel_page_template ?? null) === (order.kind === 'page' ? order.page_template : null) && (row.panel_zone_id ?? null) === (item.binding.zone_id ?? null), `page/zone allocation mismatch ${row.image_id}`);
     need(row.start_sec === item.beat.start_sec && row.duration_sec === (item.beat.duration_sec ?? item.beat.end_sec - item.beat.start_sec), `beat timing changed ${row.image_id}`);
     need(item.alias || row.image_strategy === 'fresh' && row.editorial_reuse_approved === false && !row.reuse_source_image_id, `owner must remain a unique provider order ${row.image_id}`);
     need(row.panel_asset_owner_image_id === item.owner.image_id_hint && row.provider_submission_required === !item.alias, `provider allocation mismatch ${row.image_id}`);

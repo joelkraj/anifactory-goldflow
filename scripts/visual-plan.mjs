@@ -56,6 +56,7 @@ import { isChatGptWebRateLimitError } from "./lib/chatgpt-web-throttle-state.mjs
 import { parseJsonObjectFromPlannerOutput } from "./lib/json-output-repair.mjs";
 import { isPanelProductionIdentity } from "./lib/panel-production-policy.mjs";
 import { loadPanelAssetPlan, panelAssetOwnerRows, panelAssetOrderForPrompt, expandPanelAssetPrompts, assertPanelPromptAllocation } from "./lib/panel-production-assets.mjs";
+import { PAGE_PLANNER_GUIDANCE } from "./lib/panel-page-prompts.mjs";
 import { noLtxOverrideStatus } from "./lib/operator-motion-route-override.mjs";
 import { planningRuntimeFromProcessContext } from "./lib/planning-runtime-policy.mjs";
 import {
@@ -762,6 +763,8 @@ export function buildCompactAuthorPromptForTests({ compactTimedPlan, compactSema
     ? shotJobs.join("|")
     : "environment_establishing|body_state_proof|object_insert|interaction|physical_action|emotional_reaction|consequence|ui_reveal|transition";
   const narrativeOverlayRules = narrativeOverlayAuthoringRules();
+  // Page guidance appears only when this request contains page orders, so other prompts stay byte-identical.
+  const pageGuidance = (compactTimedPlan.scenes ?? []).some(row => row.panel_asset_order?.kind === "page") ? `\n${PAGE_PLANNER_GUIDANCE}` : "";
   return `Author one production image prompt for every ${unitLabel} below.
 
 ${providerPromptGuidance(activeProvider, activeProviderOptions)}
@@ -770,7 +773,7 @@ CONTENT PROFILE: ${contentProfile?.id ?? "manhwa_recap_v1"}
 ${plannerDirective || "- Preserve the exact local story truth and author one decisive visual moment per cut."}
 
 Core contract:
-- If a unit includes panel_asset_order, the explicit allocation is binding: author ONE image for its visual_brief and all bound_beats. Read their exact narrative evidence, retain truthful shared state and any described crop/reaction opportunities, and keep image_strategy fresh for this owner. The pipeline materializes the authored bindings without further image generation. Do not regroup, add owners, apply a reuse quota, or invent content. If the requested image cannot honestly serve its bound beats, report that contradiction rather than quietly changing the allocation.
+- If a unit includes panel_asset_order, the explicit allocation is binding: author ONE image for its visual_brief and all bound_beats. Read their exact narrative evidence, retain truthful shared state and any described crop/reaction opportunities, and keep image_strategy fresh for this owner. The pipeline materializes the authored bindings without further image generation. Do not regroup, add owners, apply a reuse quota, or invent content. If the requested image cannot honestly serve its bound beats, report that contradiction rather than quietly changing the allocation.${pageGuidance}
 - You are the creative visual editor. The exact local visual_beat_script_excerpt, visual_beat_action, timing, visual_job, local location, and current-scene candidate refs are the source of truth.
 - Ask what the viewer needs to see now to understand, feel, and keep watching. Depict one present-tense moment, not a parent-scene summary or generic hero portrait.
 - Author shot_manifest first, then prose that obeys it. Preserve target_image_id, scene_id, visual_beat_id, start_sec, and duration_sec exactly.

@@ -1,7 +1,9 @@
 import fs from 'node:fs/promises';
+import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { sha256File } from './file-hash.mjs';
 import { assertPanelPromptAllocation, materializePanelAssetAliases } from './panel-production-assets.mjs';
+import { writePageGeometry, panelPageGeometryDir } from './panel-page-geometry.mjs';
 
 const need = (value, message) => { if (!value) throw new Error(`Fal panel artwork: ${message}`); };
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -48,6 +50,18 @@ export async function completeFalPanelArtwork({ episodeDir, prompts, results, cu
     result.image_sha256 = cut.image_sha256;
     Object.assign(cut, { image_provider: 'fal_ai', panel_asset_id: prompt.panel_asset_id, panel_asset_plan_sha256: allocation.planSha256, authored_prompt_hash: authoredHash(prompt), image_qa_status: 'pending' });
   }
+  // Measure every accepted page owner once per raster. The receipt is evidence
+  // for image QA and composition; a failed measurement is recorded, not hidden.
+  const pageGeometry = [], realEpisodeDir = await fs.realpath(episodeDir);
+  for (const prompt of owners.filter(row => row.panel_page_template)) {
+    const result = byResult.get(prompt.image_id), cut = byCut.get(prompt.image_id);
+    const outputDir = panelPageGeometryDir(realEpisodeDir, prompt.panel_asset_id, cut.image_sha256), receiptPath = path.join(outputDir, 'page_geometry.json');
+    let receipt = await fs.readFile(receiptPath, 'utf8').then(JSON.parse).catch(error => { if (error.code === 'ENOENT') return null; throw error; });
+    if (receipt) need(receipt.raster_sha256 === cut.image_sha256 && receipt.template === prompt.panel_page_template, `existing page geometry differs: ${prompt.image_id}`);
+    else receipt = await writePageGeometry({ imagePath: path.resolve(result.image_path), template: prompt.panel_page_template, outputDir });
+    cut.page_geometry = { path: receiptPath, sha256: await sha256File(receiptPath), status: receipt.status, findings: receipt.findings };
+    pageGeometry.push({ image_id: prompt.image_id, panel_asset_id: prompt.panel_asset_id, ...cut.page_geometry });
+  }
   const expanded = await materializePanelAssetAliases({ episodeDir, prompts, results, ownerImageIds });
   need(expanded.length === prompts.length, 'all authored panel bindings must materialize');
   for (const result of expanded.filter(row => row.status === 'editorial_reuse' && (!ownerImageIds || ownerImageIds.includes(row.generated?.reuse_source_image_id)))) {
@@ -56,5 +70,5 @@ export async function completeFalPanelArtwork({ episodeDir, prompts, results, cu
     need(owner, `alias owner ledger missing: ${result.image_id}`);
     byCut.set(result.image_id, { ...owner, image_id: result.image_id, scene_id: prompt.scene_id, visual_beat_id: prompt.visual_beat_id, start_sec: prompt.start_sec, duration_sec: prompt.duration_sec, image_path: result.image_path, image_sha256: result.image_sha256, provider: 'editorial_reuse', image_provider: 'editorial_reuse', generation_status: 'editorial_reuse', editorial_reuse_approved: true, reuse_source_image_id: prompt.reuse_source_image_id, panel_asset_id: prompt.panel_asset_id, panel_asset_plan_sha256: allocation.planSha256, authored_prompt_hash: authoredHash(prompt), submitted_prompt_hash: result.prompt_hash, image_qa_status: 'pending' });
   }
-  return { results: expanded, cuts: prompts.map(row => byCut.get(row.image_id)) };
+  return { results: expanded, cuts: prompts.map(row => byCut.get(row.image_id)), page_geometry: pageGeometry };
 }

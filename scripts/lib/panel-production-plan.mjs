@@ -136,8 +136,9 @@ export async function readPanelProductionInputs({ episodeDir }) {
     if (!binding?.zone_id) return { source_rect: { ...full }, metadata: {} };
     const order = orderById.get(binding.asset_id), zone = order?.zones?.find(row => row.zone_id === binding.zone_id);
     need(order?.kind === 'page' && zone, `page zone binding is invalid for ${beat.visual_beat_id}`);
-    if (!geometryByPage.has(order.asset_id)) geometryByPage.set(order.asset_id, await artifact(path.join(panelPageGeometryDir(dir, order.asset_id), 'page_geometry.json')));
-    const geometry = geometryByPage.get(order.asset_id);
+    const key = `${order.asset_id}:${acceptedHash}`;
+    if (!geometryByPage.has(key)) geometryByPage.set(key, await artifact(path.join(panelPageGeometryDir(dir, order.asset_id, acceptedHash), 'page_geometry.json')));
+    const geometry = geometryByPage.get(key);
     need(geometry.value.schema === 'goldflow_panel_page_geometry_v1' && geometry.value.status === 'passed' && geometry.value.template === order.page_template, `passed ${order.page_template} page geometry required for ${order.asset_id}`);
     need(geometry.value.raster_sha256 === acceptedHash, `page geometry does not measure the accepted raster for ${beat.image_id_hint}`);
     const measured = geometry.value.zones?.find(row => row.slot === zone.slot);

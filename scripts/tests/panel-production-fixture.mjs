@@ -73,6 +73,6 @@ export async function panelProductionFixture(dir, { prerollSec = 0, pages = fals
   const focalHash = await writeJson(p('image_focal_analysis_ep_01.json'), { status: 'passed', prompt_plan_sha256: promptHash, imagegen_report_sha256: imageHash, analyses: [] });
   await writeJson(p('image_output_qa_ep_01.json'), { status: 'passed', unresolved_blocker_count: 0, imagegen_report_sha256: imageHash, prompt_plan_sha256: promptHash, review_decisions_path: p('image_output_review_decisions_ep_01.json'), review_decisions_sha256: decisionsHash, focal_analysis_sha256: focalHash, accepted_image_hashes: accepted, critical_rejected_image_ids: [], not_inspected_image_ids: [] });
   await writeJson(p('cut_execution_ledger.json'), { cuts });
-  const geometry = pages ? await writePageGeometry({ imagePath: p(`${beats[0].image_id_hint}.png`), template: 'P2V', outputDir: panelPageGeometryDir(dir, 'page_0') }) : null;
+  const geometry = pages ? await writePageGeometry({ imagePath: p(`${beats[0].image_id_hint}.png`), template: 'P2V', outputDir: panelPageGeometryDir(dir, 'page_0', accepted[beats[0].image_id_hint]) }) : null;
   return { geometry, episodeDir: dir, p, identity, beats, source, words, accepted, audioHash, allocation };
 }

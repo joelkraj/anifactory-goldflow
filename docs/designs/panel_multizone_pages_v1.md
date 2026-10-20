@@ -333,10 +333,16 @@ Anything short of that is a triage point, not a rerun order.
   - Zone binding in `readPanelProductionInputs`: a zone-bound beat's panel `source_rect` is the measured safe rectangle from `panel_page_geometry/<asset_id>/page_geometry.json`, which must be passed, match the template and match the accepted raster hash, and is hash-bound into composition provenance.
   - The allocation packet does not offer page orders yet.
   - No current stage writes geometry receipts, so a v2 page plan fails closed at composition until Phase 1/2 wire generation and QA.
+- **Done in Phase 1 (branch only):**
+  - `panel-page-prompts.mjs`: fixed page frames, `Panel k (slot):` headings, planner guidance, and blocking hardening checks (`page_frame_missing`, `page_panel_sections_invalid`, `page_reference_cap`, `page_visible_people_cap`).
+  - The planner gets the page guidance only when a request contains page orders, so other prompts are unchanged.
+  - Expanded prompt rows carry `panel_page_template` / `panel_zone_id`, and allocation checks enforce them.
+  - Fal validation, bulk and review-repair use `pageReferenceBoardPromptGuidance` for page owners. It replaces only the single-frame "do not reproduce gutters" line, and the assignments record `panel_page_template`.
+  - Fal finalization writes a raster-keyed geometry receipt (`panel_page_geometry/<asset_id>/<sha16>/`) for every page owner. It records the status on the owner's and aliases' ledger rows; a failed measurement is kept, not hidden or retried.
 - **Not yet done:**
-  - Page prompts, hardening and Fal dispatch (Phase 1).
-  - Per-zone image QA on review crops and zone-scoped repair (Phase 2).
-  - The ref-union, ≤ 3-person and same-location checks at prompt time. The allocation validator checks only same-scene grouping, because refs are not known at allocation.
+  - The allocation packet still does not offer page orders.
+  - Per-zone image QA on review crops, using the recorded geometry, and zone-scoped repair (Phase 2).
+  - Pre-existing failures, which also fail on the base branch: `fal-repair-failure-tests.mjs` (one case) and `goldflow-fixture-tests.mjs` (`render_profile` of null).
 
 ## Implementation outline (after approval; each a small, tested change)
 

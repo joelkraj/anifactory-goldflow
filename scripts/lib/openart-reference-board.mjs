@@ -102,6 +102,17 @@ export function referenceBoardPromptGuidance(board) {
   return `${REFERENCE_BOARD_PROMPT_GUIDANCE}\n${mapping}`;
 }
 
+// A multi-zone page asks for gutters, so the single-frame line ("do not
+// reproduce ... gutters") is replaced. Everything else, including the
+// identity-separation rules and the positional mapping, is unchanged.
+const SINGLE_FRAME_LINE = 'Create one coherent cinematic manhwa frame. Do not reproduce the board, borders, gutters, reference-sheet layout, or multiple copies of a character. Do not add labels, captions, watermarks, or unintended text.';
+export const PAGE_FRAME_BOARD_LINE = 'Create the multi-panel page described above, with exactly its requested panels and white gutters. Do not reproduce this reference board, its gray gutters, its layout, labels, or reference-sheet poses. Within each panel, do not add copies of a character. Do not add labels, captions, watermarks, or unintended text.';
+export function pageReferenceBoardPromptGuidance(board) {
+  const guidance = referenceBoardPromptGuidance(board);
+  if (!guidance.includes(SINGLE_FRAME_LINE)) throw new Error('Reference board guidance changed; page variant must be reviewed.');
+  return guidance.replace(SINGLE_FRAME_LINE, PAGE_FRAME_BOARD_LINE);
+}
+
 export async function buildReferenceBoard({ root, imageId, references }) {
   const layout = referenceBoardLayout(references);
   const source = layout.panels.map((panel) => ({ asset_id: panel.ref.asset_id, sha256: panel.ref.sha256, role: panel.role, placement: { x: panel.x, y: panel.y, width: panel.width, height: panel.height } }));

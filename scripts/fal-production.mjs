@@ -2,7 +2,10 @@
 import { createHash } from "node:crypto";
 import { promises as fs, constants as fsConstants } from "node:fs";
 import path from "node:path";
-import { buildReferenceBoard, referenceBoardPromptGuidance } from "./lib/openart-reference-board.mjs";
+import { buildReferenceBoard, referenceBoardPromptGuidance, pageReferenceBoardPromptGuidance } from "./lib/openart-reference-board.mjs";
+// Page owners carry their template on the prompt row (and later on the assignment, for repairs).
+const boardGuidance=(pageTemplate,board)=>pageTemplate?pageReferenceBoardPromptGuidance(board):referenceBoardPromptGuidance(board);
+const pageField=pageTemplate=>pageTemplate?{panel_page_template:pageTemplate}:{};
 import { falFileSha256, falObjectSha256, uploadFalReference, submitFalImage, observeFalImage, FAL_ENDPOINTS } from "./lib/fal-provider.mjs";
 import { falPortableAssetId, promoteApprovedFalReferences } from "./lib/fal-portable-bank.mjs";
 import { assertFalRetryBudget, assertFalSpendProjectionBudget, falAmbiguousSubmissionAttempts, falSpendProjectionState, falProjectedSpendUsd } from "./lib/fal-retry-budget.mjs";
@@ -191,8 +194,8 @@ async function prepare(ctx,{revision=1}={}){
       const refs=await nativePromptReferences(ctx,row,approval);
       const board=refs.length?await buildReferenceBoard({root:validationRoot,imageId:row.image_id,references:refs}):null;
       const basePrompt=row.provider_prompt??row.image_prompt;need(basePrompt,`Fal validation prompt missing: ${row.image_id}`);
-      const prompt=board?`${basePrompt}\n\n${referenceBoardPromptGuidance(board)}`:basePrompt;
-      const core={image_id:row.image_id,validation_category:category,validation_category_matched:category_matched,endpoint:board?FAL_ENDPOINTS.primary_edit:FAL_ENDPOINTS.primary_text,prompt,prompt_sha256:digest(prompt),run_identity_sha256:ctx.identityHash,reference_mode:board?"one_positional_collage":"text_only",reference_asset_ids:refs.map(r=>r.asset_id),reference_hashes:refs.map(r=>r.sha256),board_path:board?.output_path??null,board_sha256:board?.output_sha256??null,board_manifest_path:board?.manifest_path??null,max_cost_usd:1.0};
+      const prompt=board?`${basePrompt}\n\n${boardGuidance(row.panel_page_template,board)}`:basePrompt;
+      const core={...pageField(row.panel_page_template),image_id:row.image_id,validation_category:category,validation_category_matched:category_matched,endpoint:board?FAL_ENDPOINTS.primary_edit:FAL_ENDPOINTS.primary_text,prompt,prompt_sha256:digest(prompt),run_identity_sha256:ctx.identityHash,reference_mode:board?"one_positional_collage":"text_only",reference_asset_ids:refs.map(r=>r.asset_id),reference_hashes:refs.map(r=>r.sha256),board_path:board?.output_path??null,board_sha256:board?.output_sha256??null,board_manifest_path:board?.manifest_path??null,max_cost_usd:1.0};
       const assignment={...core,assignment_sha256:falObjectSha256(JSON.stringify(core)),submission_receipt_path:path.join(validationRoot,"submission-receipts",`${row.image_id}.json`),result_receipt_path:path.join(validationRoot,"result-receipts",`${row.image_id}.json`),output_path:path.join(validationRoot,"validation-results",`${row.image_id}.png`),upload_receipt_path:path.join(validationRoot,"upload-receipts",`${row.image_id}.json`),checks:["identity consistency","hands","prop fidelity","composition","unwanted text"]};
       const assignmentPath=path.join(validationRoot,"validation-assignments",`${row.image_id}.json`);await write(assignmentPath,assignment);assignments.push({...assignment,assignment_path:assignmentPath});
     }
@@ -236,8 +239,8 @@ async function prepareBulk(ctx,f){
     const board=refs.length?await buildReferenceBoard({root:path.join(ctx.root,"bulk"),imageId:row.image_id,references:refs}):null;
     const basePrompt=prebulkCorrection?.effectivePrompts.get(row.image_id)
       ??row.provider_prompt??row.image_prompt??row.canonical_prompt; need(basePrompt,`Prompt missing for ${row.image_id}.`);
-    const prompt=board?`${basePrompt}\n\n${referenceBoardPromptGuidance(board)}`:basePrompt;
-    const core={image_id:row.image_id,endpoint:board?FAL_ENDPOINTS.primary_edit:FAL_ENDPOINTS.primary_text,prompt,prompt_sha256:digest(prompt),run_identity_sha256:ctx.identityHash,reference_mode:board?"one_positional_collage":"text_only",reference_asset_ids:refs.map(r=>r.asset_id),reference_hashes:refs.map(r=>r.sha256),board_path:board?.output_path??null,board_sha256:board?.output_sha256??null,board_manifest_path:board?.manifest_path??null,max_cost_usd:0.05,start_sec:row.start_sec,duration_sec:row.duration_sec,
+    const prompt=board?`${basePrompt}\n\n${boardGuidance(row.panel_page_template,board)}`:basePrompt;
+    const core={...pageField(row.panel_page_template),image_id:row.image_id,endpoint:board?FAL_ENDPOINTS.primary_edit:FAL_ENDPOINTS.primary_text,prompt,prompt_sha256:digest(prompt),run_identity_sha256:ctx.identityHash,reference_mode:board?"one_positional_collage":"text_only",reference_asset_ids:refs.map(r=>r.asset_id),reference_hashes:refs.map(r=>r.sha256),board_path:board?.output_path??null,board_sha256:board?.output_sha256??null,board_manifest_path:board?.manifest_path??null,max_cost_usd:0.05,start_sec:row.start_sec,duration_sec:row.duration_sec,
       ...(prebulkCorrection?.effectivePrompts.has(row.image_id)?{prebulk_prompt_correction_receipt_sha256:await falFileSha256(prebulkCorrection.paths.receipt)}:{})};
     const acceptedValidation=correction?.expected.rejected_ids.includes(row.image_id)
       ?recovery.plan.assignments.find(item=>item.image_id===row.image_id&&recovery.review.approved_ids.includes(item.image_id))
@@ -852,9 +855,9 @@ async function main(){
      }
      const round=rounds.get(directive.image_id);
      const board=refs.length?await buildReferenceBoard({root:path.join(ctx.root,"bulk","review-repair"),imageId:round.stem,references:refs}):null;
-     const prompt=board?`${directive.replacement_prompt}\n\n${referenceBoardPromptGuidance(board)}`:directive.replacement_prompt;
+     const prompt=board?`${directive.replacement_prompt}\n\n${boardGuidance(original.panel_page_template,board)}`:directive.replacement_prompt;
      need(digest(prompt)!==original.prompt_sha256,`Visual repair prompt unchanged: ${directive.image_id}`);
-     const core={image_id:directive.image_id,endpoint:board?FAL_ENDPOINTS.primary_edit:FAL_ENDPOINTS.primary_text,prompt,prompt_sha256:digest(prompt),run_identity_sha256:ctx.identityHash,reference_mode:board?"one_positional_collage":"text_only",reference_asset_ids:refs.map(ref=>ref.asset_id),reference_hashes:refs.map(ref=>ref.sha256),board_path:board?.output_path??null,board_sha256:board?.output_sha256??null,board_manifest_path:board?.manifest_path??null,max_cost_usd:0.05,start_sec:original.start_sec,duration_sec:original.duration_sec,previous_assignment_sha256:original.assignment_sha256,rejected_image_sha256:directive.rejected_image_sha256,repair_reason:directive.finding,qa_report_sha256:directives.qa_report_sha256};
+     const core={...pageField(original.panel_page_template),image_id:directive.image_id,endpoint:board?FAL_ENDPOINTS.primary_edit:FAL_ENDPOINTS.primary_text,prompt,prompt_sha256:digest(prompt),run_identity_sha256:ctx.identityHash,reference_mode:board?"one_positional_collage":"text_only",reference_asset_ids:refs.map(ref=>ref.asset_id),reference_hashes:refs.map(ref=>ref.sha256),board_path:board?.output_path??null,board_sha256:board?.output_sha256??null,board_manifest_path:board?.manifest_path??null,max_cost_usd:0.05,start_sec:original.start_sec,duration_sec:original.duration_sec,previous_assignment_sha256:original.assignment_sha256,rejected_image_sha256:directive.rejected_image_sha256,repair_reason:directive.finding,qa_report_sha256:directives.qa_report_sha256};
      if(directive.character_reference_additions){
        Object.assign(core,{reviewed_character_reference_additions:directive.character_reference_additions,
          reference_review_directives_sha256:await falFileSha256(f.directives),

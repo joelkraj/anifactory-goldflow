@@ -15,11 +15,13 @@ import { imageReportComplete } from '../run-status.mjs';
 import { plannerRecoveryPlaceholderForTests } from '../visual-plan.mjs';
 import { mergeScopedPromptReplacements } from '../lib/visual-resolution-utils.mjs';
 import { createCodexWorkManifest } from '../lib/codex-image-work-contract.mjs';
+import { fixturePageRaster } from './panel-production-fixture.mjs';
+import { panelPageGeometryDir } from '../lib/panel-page-geometry.mjs';
 
 const sha = value => createHash('sha256').update(value).digest('hex');
 const json = async (file, value) => { const bytes = JSON.stringify(value); await fs.writeFile(file, bytes); return sha(bytes); };
 const exec = promisify(execFile);
-async function fixture(t, imageProvider = 'codex_imagegen') {
+async function fixture(t, imageProvider = 'codex_imagegen', { pages = false } = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'panel-allocation-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const dir = path.join(root, 'channels', 'test', 'weekly_runs', 'test', 'episodes', 'ep_01');
@@ -37,7 +39,13 @@ async function fixture(t, imageProvider = 'codex_imagegen') {
   const hash = await json(p('visual_beat_plan.json'), { status: 'passed', source_script_hash: sha(script), beats, editorial_director: { grouping_lock_sha256: 'b'.repeat(64) } });
   await json(p('visual_beat_approval.json'), { status: 'approved', visual_beat_plan_sha256: hash, grouping_lock_sha256: 'b'.repeat(64) });
   const prepared = await preparePanelAssetPlan({ episodeDir: dir });
-  const candidate = { ...prepared.candidate, author: 'Fixture editor', asset_orders: [
+  const candidate = pages ? { ...prepared.candidate, schema: 'goldflow_panel_asset_plan_v2', author: 'Fixture editor', asset_orders: [
+    { asset_id: 'page_1', kind: 'page', page_template: 'P2V', owner_beat_id: 'beat_0', beat_ids: ['beat_0', 'beat_1', 'beat_2'], visual_brief: 'Letter and reaction on the left, the doorway on the right.', editorial_reason: 'One moment in one room.',
+      zones: [
+        { zone_id: 'page_1_z1', slot: 'left', beat_ids: ['beat_0', 'beat_1'], visual_brief: 'Character reads the letter; signature and face both visible.', editorial_reason: 'Detail then reaction crops.' },
+        { zone_id: 'page_1_z2', slot: 'right', beat_ids: ['beat_2'], visual_brief: 'Character turns toward the open doorway.', editorial_reason: 'New orientation.' },
+      ] },
+  ], beat_bindings: [['beat_0', 'page_1_z1'], ['beat_1', 'page_1_z1'], ['beat_2', 'page_1_z2']].map(([beat_id, zone_id]) => ({ beat_id, asset_id: 'page_1', zone_id, editorial_reason: 'Exact zone binding.' })) } : { ...prepared.candidate, author: 'Fixture editor', asset_orders: [
     { asset_id: 'letter_reaction', owner_beat_id: 'beat_0', beat_ids: ['beat_0', 'beat_1'], visual_brief: 'Character holds an open letter with the signature and attentive face both visible, allowing separate detail and reaction crops.', editorial_reason: 'These two beats observe the same held letter and facial reaction.' },
     { asset_id: 'doorway', owner_beat_id: 'beat_2', beat_ids: ['beat_2'], visual_brief: 'Character faces an open doorway.', editorial_reason: 'The changed orientation requires a new illustration.' },
   ], beat_bindings: beats.map((beat, i) => ({ beat_id: beat.visual_beat_id, asset_id: i < 2 ? 'letter_reaction' : 'doorway', editorial_reason: i < 2 ? 'Show the letter then the face from one coherent image.' : 'Show the changed orientation.' })) };
@@ -297,4 +305,37 @@ test('v2 page orders bind contiguous beat runs to template zones and reject ambi
   assert.equal(projected.kind, 'page');
   const { panelAssetOrderForPrompt } = await import('../lib/panel-production-assets.mjs');
   assert.deepEqual(panelAssetOrderForPrompt(projected).zones.map(zone => [zone.slot, zone.beat_ids]), [['left', ['beat_0', 'beat_1']], ['right', ['beat_2']]]);
+});
+
+test('Fal page owners carry their template and get a raster-keyed geometry receipt at finalization', async t => {
+  const f = await fixture(t, 'fal_ai', { pages: true });
+  const owners = await falArtworkOrders({ episodeDir: f.dir, prompts: f.prompts });
+  assert.deepEqual(owners.map(row => [row.image_id, row.panel_page_template]), [['ep_01-cut-001', 'P2V']]);
+  assert.deepEqual(f.prompts.map(row => row.panel_zone_id), ['page_1_z1', 'page_1_z1', 'page_1_z2']);
+  const stale = structuredClone(f.prompts); stale[2].panel_zone_id = 'page_1_z1';
+  await assert.rejects(falArtworkOrders({ episodeDir: f.dir, prompts: stale }), /page\/zone allocation mismatch/);
+  const owner = async (folder, bytes) => {
+    await fs.mkdir(f.p(folder), { recursive: true });
+    const output = f.p(`${folder}/ep_01-cut-001.png`), receiptPath = `${output}.receipt.json`;
+    await fs.writeFile(output, bytes);
+    const hash = sha(bytes), receipt = { output_path: output, output_sha256: hash, request_id: `${folder}-page` };
+    const receiptHash = await json(receiptPath, receipt);
+    return { results: [{ image_id: 'ep_01-cut-001', status: 'generated', image_path: output, generated: { ...receipt, provider: 'fal_ai', result_receipt_path: receiptPath, result_receipt_sha256: receiptHash } }], cuts: [{ image_id: 'ep_01-cut-001', image_path: output, image_sha256: hash, provider: 'fal_ai' }], hash };
+  };
+  const good = await owner('page', await fixturePageRaster());
+  const completed = await completeFalPanelArtwork({ episodeDir: f.dir, prompts: f.prompts, results: good.results, cuts: good.cuts });
+  assert.equal(completed.page_geometry.length, 1);
+  const receiptPath = path.join(panelPageGeometryDir(await fs.realpath(f.dir), 'page_1', good.hash), 'page_geometry.json');
+  assert.equal(completed.page_geometry[0].path, receiptPath);
+  assert.equal(completed.cuts[0].page_geometry.status, 'passed');
+  assert.deepEqual(completed.cuts.map(row => row.page_geometry?.sha256), Array(3).fill(completed.page_geometry[0].sha256), 'aliases carry their page evidence');
+  const receiptBytes = await fs.readFile(receiptPath);
+  const again = await completeFalPanelArtwork({ episodeDir: f.dir, prompts: f.prompts, results: good.results, cuts: good.cuts.map(({ page_geometry, ...row }) => row) });
+  assert.equal(again.page_geometry[0].sha256, completed.page_geometry[0].sha256);
+  assert.ok(receiptBytes.equals(await fs.readFile(receiptPath)), 'an existing receipt is reused, never rewritten');
+  // A page without its gutter is recorded as failed geometry; nothing is retried or guessed.
+  const bad = await owner('page-bad', await sharp({ create: { width: 640, height: 360, channels: 3, background: '#335577' } }).png().toBuffer());
+  const failed = await completeFalPanelArtwork({ episodeDir: f.dir, prompts: f.prompts, results: bad.results, cuts: bad.cuts });
+  assert.equal(failed.cuts[0].page_geometry.status, 'failed');
+  assert.equal(failed.cuts[0].page_geometry.findings[0].code, 'zone_count_mismatch');
 });

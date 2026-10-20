@@ -7,6 +7,13 @@ import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { runCodexCli, readCodexCallMetadata } from "./lib/codex-cli-runner.mjs";
+import { CLAUDE_CODE_PROVIDER, runClaudeCodePrint } from "./lib/claude-code-print-runner.mjs";
+import {
+  MANUFACTURING_MODEL_LOCK_SCHEMA,
+  modelLockConflicts,
+  requestedModelLock,
+  validateModelLock,
+} from "./lib/source-model-lock.mjs";
 import { sourceWriterPolicy, improvementEfforts } from "./lib/source-writer-policy.mjs";
 import { recoverBrowserDraft } from "./lib/source-browser-draft-recovery.mjs";
 import { parseJsonObjectFromPlannerOutput } from "./lib/json-output-repair.mjs";
@@ -59,7 +66,6 @@ const FAST_IMPROVEMENT_EDITOR_PROMPT_PATH = path.join(REPO_ROOT, "docs/prompts/m
 const REVISION_DIAGNOSE_PROMPT_PATH = path.join(REPO_ROOT, "docs/prompts/manhwa_recap_revision_diagnose_v1.md");
 const REVISION_REWRITE_PROMPT_PATH = path.join(REPO_ROOT, "docs/prompts/manhwa_recap_revision_rewrite_v1.md");
 const REVISION_VERIFY_PROMPT_PATH = path.join(REPO_ROOT, "docs/prompts/manhwa_recap_revision_verify_v1.md");
-const REVISION_MODEL = "gpt-6-sol";
 const SOURCE_EVIDENCE_SNAPSHOT_PATH = path.join(REPO_ROOT, "docs/channel_formulas/53rebirth_source_evidence_snapshot_v1.json");
 const DEFAULT_QWEN_PYTHON = "/Users/joel/AniFactoryData/voice_bank/bakeoff/.venv-kokoro-mlx-audio-0.4.6/bin/python";
 
@@ -345,10 +351,14 @@ async function reusableResponse({ outputPath, prompt, provider, model, effort, s
 
 // Tests inject a no-network executor with runCodexCli's contract: write the output file and its
 // passed .meta.json receipt, then return { content, ...metadata }.
-let modelExecutor = runCodexCli;
+function providerExecutor(options) {
+  return options.provider === CLAUDE_CODE_PROVIDER ? runClaudeCodePrint(options) : runCodexCli(options);
+}
+
+let modelExecutor = providerExecutor;
 
 export function setModelExecutorForTests(executor) {
-  modelExecutor = executor ?? runCodexCli;
+  modelExecutor = executor ?? providerExecutor;
 }
 
 async function modelCall({ outputPath, prompt, provider, model, effort, stageName, timeoutMs }) {
@@ -455,6 +465,38 @@ async function prepare(directory, flags) {
   return { brief, filled, finalPath, manifestPath, manifest };
 }
 
+// The per-run model lock. Written once; later stages and resumes must agree with it. A folder
+// whose portfolio predates the lock keeps the writer recorded in that portfolio.
+async function loadModelLock(directory, flags) {
+  const lockPath = path.join(directory, "manufacturing_model_lock.json");
+  if (await exists(lockPath)) {
+    const document = JSON.parse(await fs.readFile(lockPath, "utf8"));
+    assertValid("manufacturing model lock", validateModelLock(document));
+    const conflicts = modelLockConflicts(document, flags);
+    if (conflicts.length) throw new Error(`Model flags conflict with the locked run choice (${conflicts.join(", ")}); see ${lockPath}.`);
+    return { document, path: lockPath, sha256: await fileSha256(lockPath) };
+  }
+  const roles = requestedModelLock(flags);
+  const portfolioExists = await exists(path.join(directory, "manufacturing_portfolio.json"));
+  const document = {
+    schema: MANUFACTURING_MODEL_LOCK_SCHEMA,
+    roles: portfolioExists ? { ...roles, writer: null } : roles,
+    writer_recorded_in_portfolio: portfolioExists,
+    locked_at: new Date().toISOString(),
+  };
+  assertValid("manufacturing model lock", validateModelLock(document));
+  await writeJsonExclusive(lockPath, document);
+  return { document, path: lockPath, sha256: await fileSha256(lockPath) };
+}
+
+// Only the single-draft policy takes its writer from the lock; multi-draft policies keep their
+// fixed historical contracts.
+function lockedWriterCandidates(policy, lock) {
+  const writer = lock?.document?.roles?.writer;
+  if (policy.candidates.length !== 1 || !writer) return policy.candidates;
+  return policy.candidates.map((row) => ({ ...row, model: writer.model, provider: writer.provider }));
+}
+
 async function writeCandidates(directory, flags) {
   const prepared = await prepare(directory, flags);
   const briefPolicy = prepared.brief.document.writer_policy;
@@ -465,12 +507,16 @@ async function writeCandidates(directory, flags) {
   const portfolioPath = path.join(directory, "manufacturing_portfolio.json");
   if (await exists(portfolioPath)) {
     const document = JSON.parse(await fs.readFile(portfolioPath, "utf8"));
-    assertValid("manufacturing portfolio", validateManufacturingPortfolio(document, { promptSha256: prepared.manifest.filled_prompt_sha256, expectedCandidates: sourceWriterPolicy(document, requestedPolicy).candidates }));
+    const recordedPolicy = sourceWriterPolicy(document, requestedPolicy);
+    const recordedLock = document.model_lock_sha256 ? await loadModelLock(directory, flags) : null;
+    assertValid("manufacturing portfolio", validateManufacturingPortfolio(document, { promptSha256: prepared.manifest.filled_prompt_sha256, expectedCandidates: lockedWriterCandidates(recordedPolicy, recordedLock) }));
     return { prepared, document, portfolioPath };
   }
   const outputDirectory = path.join(directory, "manufactured_drafts");
   const policy = sourceWriterPolicy(null, requestedPolicy);
-  const candidates = policy.candidates;
+  if (policy.candidates.length > 1 && flags["writer-model"]) throw new Error("--writer-model applies only to the single-draft writer policy.");
+  const lock = policy.candidates.length === 1 ? await loadModelLock(directory, flags) : null;
+  const candidates = lockedWriterCandidates(policy, lock);
   const recovery = flags["recover-browser-jobs"] ? JSON.parse(await fs.readFile(path.resolve(flags["recover-browser-jobs"]), "utf8")) : {};
   if (Object.keys(recovery).some((id) => !candidates.some((row) => row.id === id))) throw new Error("Recovery map contains a candidate outside the active writer policy.");
   await fs.mkdir(outputDirectory, { recursive: true });
@@ -496,6 +542,7 @@ async function writeCandidates(directory, flags) {
       const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
       await fs.rename(receiptPath, path.join(archiveDirectory, `${spec.id}.${timestamp}.meta.json`));
     }
+    if (recovery[spec.id] && spec.provider !== "chatgpt_web") throw new Error("Browser job recovery applies only to ChatGPT Web drafts.");
     if (recovery[spec.id] && !await exists(outputPath)) {
       await recoverBrowserDraft({ manifestPath: path.resolve(recovery[spec.id]), outputPath,
         prompt: candidatePrompt, model: spec.model, effort: "max", stageName,
@@ -556,6 +603,8 @@ async function writeCandidates(directory, flags) {
     filled_prompt_sha256: prepared.manifest.filled_prompt_sha256,
     candidate_count: completed.length,
     writer_policy: policy.name,
+    model_lock_path: lock?.path ?? null,
+    model_lock_sha256: lock?.sha256 ?? null,
     writer_concurrency: writerConcurrency,
     writer_stagger_ms: writerStaggerMs,
     candidates: completed,
@@ -1545,12 +1594,6 @@ async function improveCandidate(directory, flags) {
   return { report, reportPath };
 }
 
-function revisionEffort(value, fallback, label) {
-  const effort = String(value ?? fallback).trim();
-  if (!["medium", "high"].includes(effort)) throw new Error(`${label} supports only medium or high; Pro is reserved for drafts.`);
-  return effort;
-}
-
 async function resolveRevisionIncumbent(directory, flags) {
   if (flags.script) {
     const scriptPath = path.resolve(flags.script);
@@ -1602,7 +1645,7 @@ function parseModelJson(content, label) {
   }
 }
 
-async function runRevisionRound({ loopDirectory, roundNumber, incumbent, brief, priorVerdict, efforts, maxRounds, flags }) {
+async function runRevisionRound({ loopDirectory, roundNumber, incumbent, brief, priorVerdict, roles, maxRounds, flags }) {
   const pad = String(roundNumber).padStart(2, "0");
   const roundDirectory = path.join(loopDirectory, `round_${pad}`);
   await fs.mkdir(roundDirectory, { recursive: true });
@@ -1624,9 +1667,9 @@ async function runRevisionRound({ loopDirectory, roundNumber, incumbent, brief, 
   const diagnoseResponse = await modelCall({
     outputPath: diagnoseResponsePath,
     prompt: diagnosePrompt,
-    provider: "chatgpt_web",
-    model: REVISION_MODEL,
-    effort: efforts.diagnose,
+    provider: roles.diagnose.provider,
+    model: roles.diagnose.model,
+    effort: roles.diagnose.reasoning_effort,
     stageName: `winner_source_script_revision_diagnose_r${pad}`,
     timeoutMs: Number(flags["diagnose-timeout-ms"] ?? 1_800_000),
   });
@@ -1639,8 +1682,7 @@ async function runRevisionRound({ loopDirectory, roundNumber, incumbent, brief, 
     schema: REVISION_DECISION_SCHEMA,
     round: roundNumber,
     policy: REVISION_POLICY,
-    model: REVISION_MODEL,
-    efforts,
+    roles,
     incumbent: { path: roundIncumbentPath, sha256: incumbent.sha256, word_count: incumbent.word_count },
     notes: { path: notesPath, sha256: await fileSha256(notesPath), anchors: notesValidation.anchors, material_note_count: notesValidation.material_note_count },
     diagnose_response: await receiptFor(diagnoseResponsePath),
@@ -1656,9 +1698,9 @@ async function runRevisionRound({ loopDirectory, roundNumber, incumbent, brief, 
   const reviseResponse = await modelCall({
     outputPath: reviseResponsePath,
     prompt: revisePrompt,
-    provider: "chatgpt_web",
-    model: REVISION_MODEL,
-    effort: efforts.revise,
+    provider: roles.revise.provider,
+    model: roles.revise.model,
+    effort: roles.revise.reasoning_effort,
     stageName: `winner_source_script_revision_rewrite_r${pad}`,
     timeoutMs: Number(flags["revise-timeout-ms"] ?? 2_400_000),
   });
@@ -1682,9 +1724,9 @@ async function runRevisionRound({ loopDirectory, roundNumber, incumbent, brief, 
   const verifyResponse = await modelCall({
     outputPath: verifyResponsePath,
     prompt: verifyPrompt,
-    provider: "chatgpt_web",
-    model: REVISION_MODEL,
-    effort: efforts.verify,
+    provider: roles.verify.provider,
+    model: roles.verify.model,
+    effort: roles.verify.reasoning_effort,
     stageName: `winner_source_script_revision_verify_r${pad}`,
     timeoutMs: Number(flags["verify-timeout-ms"] ?? 1_800_000),
   });
@@ -1712,6 +1754,8 @@ async function callTiming(responsePath) {
   const completed = Date.parse(metadata.studio_timing?.completed_at ?? metadata.completed_at);
   return {
     stage_name: metadata.stage_name,
+    provider: metadata.provider,
+    model: metadata.model,
     reasoning_effort: metadata.reasoning_effort,
     started_at: Number.isFinite(started) ? new Date(started).toISOString() : null,
     completed_at: Number.isFinite(completed) ? new Date(completed).toISOString() : null,
@@ -1721,11 +1765,6 @@ async function callTiming(responsePath) {
 
 async function reviseScript(directory, flags) {
   const maxRounds = Math.max(1, Math.min(REVISION_MAX_ROUNDS, Number(flags["max-rounds"] ?? REVISION_MAX_ROUNDS) || REVISION_MAX_ROUNDS));
-  const efforts = {
-    diagnose: revisionEffort(flags["diagnose-effort"], "high", "Revision diagnose"),
-    revise: revisionEffort(flags["revise-effort"], "high", "Revision rewrite"),
-    verify: revisionEffort(flags["verify-effort"], "medium", "Revision verify"),
-  };
   const loopDirectory = path.join(directory, "revision_loop");
   const v00Path = path.join(loopDirectory, "v00_incumbent.txt");
   await fs.mkdir(loopDirectory, { recursive: true });
@@ -1735,6 +1774,8 @@ async function reviseScript(directory, flags) {
   const v00Sha256 = await fileSha256(v00Path);
   if (v00Sha256 !== sha256Text(initialBytes.toString("utf8"))) throw new Error("Existing revision incumbent differs from the requested script; use a new --development-dir.");
   const brief = await optionalBrief(directory, flags);
+  const lock = await loadModelLock(directory, flags);
+  const roles = { diagnose: lock.document.roles.diagnose, revise: lock.document.roles.revise, verify: lock.document.roles.verify };
 
   let current = { path: v00Path, text: initialBytes.toString("utf8"), sha256: v00Sha256, word_count: words(initialBytes.toString("utf8")) };
   let priorVerdict = null;
@@ -1746,7 +1787,7 @@ async function reviseScript(directory, flags) {
       decision = JSON.parse(await fs.readFile(decisionPath, "utf8"));
       if (decision.incumbent?.sha256 !== current.sha256) throw new Error(`Revision round ${roundNumber} decision is bound to a different incumbent.`);
     } else {
-      decision = await runRevisionRound({ loopDirectory, roundNumber, incumbent: current, brief, priorVerdict, efforts, maxRounds, flags });
+      decision = await runRevisionRound({ loopDirectory, roundNumber, incumbent: current, brief, priorVerdict, roles, maxRounds, flags });
       await writeJsonExclusive(decisionPath, decision);
     }
     decisions.push({ ...decision, decision_path: decisionPath });
@@ -1785,7 +1826,9 @@ async function reviseScript(directory, flags) {
     status: "completed",
     policy: REVISION_POLICY,
     max_rounds: maxRounds,
-    efforts,
+    roles,
+    model_lock_path: lock.path,
+    model_lock_sha256: lock.sha256,
     initial_source: initial.source,
     initial_source_path: initial.path,
     brief_sha256: brief?.sha256 ?? null,
@@ -1972,7 +2015,7 @@ async function main() {
     }, null, 2));
     return;
   }
-  console.log(`Usage: goldflow source manufacture <run|ideate|prepare|write|revise|select|compare-prompts|improve|audition|promote|learn> --development-slug <slug> [--evidence <txt>] [--brief <json>] [--target-word-count 10000] [--max-rounds 2] [--diagnose-effort high] [--revise-effort high] [--verify-effort medium]
+  console.log(`Usage: goldflow source manufacture <run|ideate|prepare|write|revise|select|compare-prompts|improve|audition|promote|learn> --development-slug <slug> [--evidence <txt>] [--brief <json>] [--target-word-count 10000] [--writer-model gpt-6-sol|claude-fable-5-1|claude-opus-5-5] [--revision-model <model>] [--max-rounds 2] [--diagnose-effort high] [--revise-effort high] [--verify-effort medium]
        goldflow source manufacture revise --script <brought-script.txt> [--development-dir <dir>] [--brief <json>]
        Legacy multi-draft flags: [--writer-prompt <operator-approved.txt>] [--script <incumbent.txt>] [--max-rounds 1] [--minimum-apv-delta 0.5] [--writer-concurrency 3] [--writer-stagger-ms 15000] [--legacy-manifest <recovered-drafts-manifest.json>] [--audition-candidate-count 3] [--candidate-id draft_56_2 --approved-by <name> --reason <text>] [--template <complete-template.txt>]`);
 }

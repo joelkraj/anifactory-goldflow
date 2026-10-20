@@ -69,6 +69,13 @@ Without `--development-dir` the loop writes to a sibling `<script-name>_revision
 
 **Model calls per ideation run.** Old default: 2 ideation + 1 prepare + 3 Pro drafts + 1 selector + 4-8 improvement calls (one editor plus three blind judges per round) = 11-15 calls, plus an operator title approval and exact-script review. New default: 2 + 1 + 1 Pro draft + 3-6 revision calls = 7-10 calls, no operator stop.
 
+**Per-run model choice.** The first `write` (or `revise`) writes `manufacturing_model_lock.json` once: provider, model and effort for the `writer`, `diagnose`, `revise` and `verify` roles. Every later stage and resume uses it; a flag that disagrees with it stops the command. Choose with `--writer-model`, `--revision-model` (all three revision roles), or per role with `--diagnose-model`, `--revise-model`, `--verify-model`. Supported models:
+
+- `chatgpt_web`: `gpt-6-sol` (default for every role; the writer runs at visible Pro).
+- `claude_cli`: `claude-fable-5-1`, `claude-opus-5-5`, run through Claude Code headless print mode (`claude -p --output-format json --model <model> --effort <level>`) with the prompt on stdin. Built-in tools, MCP servers, slash commands and hooks are disabled and no session is persisted, so the call is read-only. It has a timeout, no automatic retry, and writes the same raw output and `.meta.json` receipt (provider, transport, model, effort, CLI version, hashes) as the ChatGPT Web path. `ANIFACTORY_CLAUDE_CLI_PATH` overrides the executable.
+
+Ideation, shortlist and template filling keep their existing ChatGPT Web contract. A portfolio written before the lock existed keeps the writer recorded in the portfolio. GPT-6.1 Sol is not yet selectable: the ChatGPT Web picker contract (`apps/goldflow-studio/lib/chatgpt-ui-contract.mjs`) has no verified visible label for it, and `gpt-6.1-sol` is only a confirmed Codex CLI slug. Add it to that contract and to `SUPPORTED_SOURCE_MODELS` in `scripts/lib/source-model-lock.mjs` once the picker label is verified. A side-by-side such as `--writer-model claude-fable-5-1` on one premise uses a separate development folder per writer.
+
 **Separate commands** remain for checkpoints and recovery: `ideate`, `prepare`, `write`, `revise`. Existing multi-draft portfolios keep `select`, `improve`, `compare-prompts`, `audition` and `promote`, and `run` on such a folder keeps its historical select/improve behavior.
 
 Code may validate completeness, hashes, receipts, anchors and lineage and slice exact word windows, but every creative word (titles, premises, notes, revisions) comes from a model call.
@@ -158,7 +165,7 @@ node bin/goldflow.mjs source manufacture revise --development-slug <slug> [--max
 node bin/goldflow.mjs source manufacture revise --script /absolute/path/to/script.txt
 ```
 
-Revision efforts default to `--diagnose-effort high --revise-effort high --verify-effort medium`; each accepts only `medium` or `high`. `--target-word-count` (default 10000) sets the auto-selected brief's advisory length.
+Revision efforts default to `--diagnose-effort high --revise-effort high --verify-effort medium`; each accepts only `medium` or `high`. Models default to `gpt-6-sol`; `--writer-model claude-fable-5-1` or `--revision-model claude-opus-5-5` selects the Claude Code CLI provider and is locked for the folder. `--target-word-count` (default 10000) sets the auto-selected brief's advisory length.
 
 The room commands below are the optional First-Class Story Room and legacy retention room.
 

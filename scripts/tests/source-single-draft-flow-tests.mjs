@@ -4,7 +4,7 @@
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, readFile, writeFile, readdir, rm } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, writeFile, readdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -396,6 +396,121 @@ function fullRunResponder(rounds) {
   assert.equal(timing.writer_policy, "single_6_sol_pro_v1");
   assert.equal(timing.stages.revision.call_count, 3);
   assert.equal(timing.stages.selection, undefined);
+}
+
+// --- per-run model lock ---------------------------------------------------------------
+{
+  const directory = await newDirectory("model-lock-default");
+  const evidencePath = path.join(directory, "evidence.md");
+  await writeFile(evidencePath, evidenceText);
+  responder = fullRunResponder([{ revision: REVISION_1, verify: ["keep_revision", []] }]);
+  calls = [];
+  await manufacturer.runSingleDraftFlow(directory, { evidence: evidencePath });
+  const lock = JSON.parse(await readFile(path.join(directory, "manufacturing_model_lock.json"), "utf8"));
+  assert.deepEqual(lock.roles.writer, { provider: "chatgpt_web", model: "gpt-6-sol", reasoning_effort: "max" });
+  assert.deepEqual(Object.fromEntries(["diagnose", "revise", "verify"].map((role) => [role, lock.roles[role].reasoning_effort])), { diagnose: "high", revise: "high", verify: "medium" });
+  const portfolio = JSON.parse(await readFile(path.join(directory, "manufacturing_portfolio.json"), "utf8"));
+  assert.equal(portfolio.model_lock_sha256, sha(await readFile(path.join(directory, "manufacturing_model_lock.json"))));
+  const receipt = JSON.parse(await readFile(path.join(directory, "revision_loop", "round_01", "verify_response.txt.meta.json"), "utf8"));
+  assert.deepEqual([receipt.provider, receipt.model, receipt.reasoning_effort], ["chatgpt_web", "gpt-6-sol", "medium"]);
+  await assert.rejects(manufacturer.writeCandidates(directory, { "writer-model": "claude-fable-5-1" }), /conflict with the locked run choice/);
+  await assert.rejects(manufacturer.reviseScript(directory, { "verify-effort": "high" }), /verify_effort/);
+}
+{
+  const directory = await newDirectory("model-lock-claude-writer");
+  const evidencePath = path.join(directory, "evidence.md");
+  await writeFile(evidencePath, evidenceText);
+  responder = fullRunResponder([{ revision: REVISION_1, verify: ["keep_revision", []] }]);
+  calls = [];
+  const flags = { evidence: evidencePath, "writer-model": "claude-fable-5-1", "revision-model": "claude-opus-5-5" };
+  await manufacturer.runSingleDraftFlow(directory, flags);
+  const writer = calls.find((call) => call.stageName === "winner_source_script_v3_draft_56_1");
+  assert.deepEqual([writer.provider, writer.model, writer.effort], ["claude_cli", "claude-fable-5-1", "max"]);
+  const revisionCalls = calls.filter((call) => call.stageName.startsWith("winner_source_script_revision_"));
+  assert.ok(revisionCalls.every((call) => call.provider === "claude_cli" && call.model === "claude-opus-5-5"));
+  assert.equal(calls.find((call) => call.stageName === "winner_source_script_manufacturing_prompt").provider, "chatgpt_web", "ideation and filler stay on their existing contract");
+  const portfolio = JSON.parse(await readFile(path.join(directory, "manufacturing_portfolio.json"), "utf8"));
+  assert.deepEqual([portfolio.candidates[0].provider, portfolio.candidates[0].model], ["claude_cli", "claude-fable-5-1"]);
+  calls = [];
+  await manufacturer.writeCandidates(directory, {});
+  assert.equal(calls.length, 0, "a locked Claude-written portfolio reloads under its recorded contract");
+}
+{
+  const { requestedModelLock } = await import("../lib/source-model-lock.mjs");
+  assert.throws(() => requestedModelLock({ "writer-model": "gpt-6.1-sol" }), /Unsupported source model/, "unconfirmed slugs are refused, not guessed");
+  assert.throws(() => requestedModelLock({ "verify-effort": "max" }), /only medium or high/);
+  const directory = await newDirectory("model-lock-historical");
+  await seedSingleDraft(directory);
+  responder = loopResponder([{ revision: REVISION_1, verify: ["revert", []] }]);
+  await manufacturer.reviseScript(directory, {});
+  const lock = JSON.parse(await readFile(path.join(directory, "manufacturing_model_lock.json"), "utf8"));
+  assert.equal(lock.roles.writer, null, "a pre-lock portfolio keeps its recorded writer");
+  assert.equal(lock.writer_recorded_in_portfolio, true);
+}
+
+// --- Claude Code print provider through a fake executable (no real CLI call) -------------
+{
+  const { claudeCodePrintArgs, runClaudeCodePrint } = await import("../lib/claude-code-print-runner.mjs");
+  const fakeDirectory = path.join(tmpRoot, "fake-claude");
+  await mkdir(fakeDirectory, { recursive: true });
+  const fakePath = path.join(fakeDirectory, "claude");
+  const logPath = path.join(fakeDirectory, "calls.jsonl");
+  await writeFile(fakePath, `#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+if (args[0] === "--version") { console.log("0.0.0 (fake Claude Code)"); process.exit(0); }
+let stdin = "";
+process.stdin.on("data", (chunk) => { stdin += chunk; });
+process.stdin.on("end", () => {
+  fs.appendFileSync(${JSON.stringify(logPath)}, JSON.stringify({ args, stdin }) + "\\n");
+  const mode = process.env.FAKE_CLAUDE_MODE || "loop";
+  if (mode === "error") { console.log(JSON.stringify({ type: "result", subtype: "error_during_execution", is_error: true, result: "boom" })); return; }
+  if (mode === "hang") { setTimeout(() => {}, 60000); return; }
+  const dir = ${JSON.stringify(fakeDirectory)};
+  const kind = stdin.includes("REVISION (") ? "verify" : stdin.includes("EXACT INCUMBENT NARRATION") ? "rewrite" : "diagnose";
+  const result = fs.readFileSync(dir + "/" + kind + ".txt", "utf8");
+  console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, result, duration_ms: 1500, total_cost_usd: 0 }));
+});
+`);
+  await chmod(fakePath, 0o755);
+  await writeFile(path.join(fakeDirectory, "diagnose.txt"), notesFor(DRAFT));
+  await writeFile(path.join(fakeDirectory, "rewrite.txt"), REVISION_1);
+  await writeFile(path.join(fakeDirectory, "verify.txt"), verdict("keep_revision", []));
+  const previousPath = process.env.ANIFACTORY_CLAUDE_CLI_PATH;
+  process.env.ANIFACTORY_CLAUDE_CLI_PATH = fakePath;
+  try {
+    const args = claudeCodePrintArgs({ model: "claude-fable-5-1", effort: "high" });
+    assert.deepEqual(args.slice(0, 7), ["-p", "--output-format", "json", "--model", "claude-fable-5-1", "--effort", "high"]);
+    assert.equal(args[args.indexOf("--tools") + 1], "", "all built-in tools are disabled");
+    for (const flag of ["--no-session-persistence", "--disallowedTools", "--strict-mcp-config", "--disable-slash-commands", "--settings"]) assert.ok(args.includes(flag), flag);
+    assert.throws(() => claudeCodePrintArgs({ model: "", effort: "high" }), /explicit --model/);
+
+    // Real dispatch path (no injected executor) routes claude_cli roles to the print runner.
+    manufacturer.setModelExecutorForTests(null);
+    const directory = await newDirectory("claude-dispatch");
+    await seedSingleDraft(directory);
+    const { report } = await manufacturer.reviseScript(directory, { "revision-model": "claude-fable-5-1" });
+    const logged = (await readFile(logPath, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    assert.equal(logged.length, 3, "one CLI process per call, no retries");
+    assert.ok(logged[0].stdin.includes("EXACT NARRATION"), "the prompt is sent on stdin");
+    assert.ok(logged.every((row) => row.args.includes("claude-fable-5-1")));
+    const receipt = JSON.parse(await readFile(path.join(directory, "revision_loop", "round_01", "diagnose_response.txt.meta.json"), "utf8"));
+    assert.deepEqual([receipt.status, receipt.provider, receipt.transport, receipt.model, receipt.reasoning_effort, receipt.claude_cli_version], ["passed", "claude_cli", "claude_code_headless_print", "claude-fable-5-1", "high", "0.0.0 (fake Claude Code)"]);
+    assert.equal(receipt.output_sha256, sha(await readFile(path.join(directory, "revision_loop", "round_01", "diagnose_response.txt"), "utf8")));
+    assert.equal(await readFile(report.final_script_path, "utf8"), `${REVISION_1}\n`);
+
+    process.env.FAKE_CLAUDE_MODE = "error";
+    const errorOutput = path.join(fakeDirectory, "error_case.txt");
+    await assert.rejects(runClaudeCodePrint({ prompt: "x", stageName: "fixture", outputPath: errorOutput, model: "claude-fable-5-1", reasoningEffort: "medium" }), /boom/);
+    assert.equal(JSON.parse(await readFile(`${errorOutput}.meta.json`, "utf8")).status, "failed");
+    await assert.rejects(readFile(errorOutput, "utf8"), /ENOENT/, "a failed call leaves no output");
+    process.env.FAKE_CLAUDE_MODE = "hang";
+    await assert.rejects(runClaudeCodePrint({ prompt: "x", stageName: "fixture", outputPath: path.join(fakeDirectory, "hang_case.txt"), model: "claude-fable-5-1", reasoningEffort: "medium", timeoutMs: 500 }), /timed out/);
+  } finally {
+    delete process.env.FAKE_CLAUDE_MODE;
+    if (previousPath == null) delete process.env.ANIFACTORY_CLAUDE_CLI_PATH;
+    else process.env.ANIFACTORY_CLAUDE_CLI_PATH = previousPath;
+  }
 }
 
 await rm(tmpRoot, { recursive: true, force: true });

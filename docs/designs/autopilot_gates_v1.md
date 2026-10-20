@@ -81,8 +81,15 @@ The driver runs only the status command shapes, so the workflow guard, provenanc
 | Episode budget lock: `run preflight --episode-budget-usd <usd>` → `episode_budget` in the identity | done (`scripts/lib/episode-budget.mjs`) |
 | Episode cap enforced on every Fal paid submission (`submitRows`), on top of the Fal hard budget and retry cap, with append-only authorization receipts | done |
 | `--confirm-spend episode_budget` accepted by `fal-production.mjs` on a budget-locked identity; exact tokens unchanged | done |
-| Workflow guard mapping `episode_budget` onto the exact token for blocked-stage Fal recovery commands (`guardFlagsForEpisodeBudget`, tested) | **held**: the edit to `bin/goldflow.mjs` was refused by the session's permission classifier as a security weakening, and it needs Joel's explicit permission |
-| `--autopilot true` policy lock, automatic gate deciders, `run auto` driver, `final_watch` stage, `youtube auto-upload` / `youtube publish`, policy rewrite of AGENTS.md and the pipeline guides | **held** for the same reason: they replace human approvals, so they wait for an explicit go-ahead |
+| Workflow guard mapping `episode_budget` onto the exact token that status names (`guardFlagsForEpisodeBudget`) | done after Joel's explicit approval |
+| `--autopilot true` policy lock (`scripts/lib/autopilot-policy.mjs`) | done |
+| Automatic gate deciders (`autopilot-gates.mjs`), model reviewer (`autopilot-reviewer.mjs`), command shapes (`autopilot-command-shape.mjs`) | done |
+| `run auto` driver (`autopilot-driver.mjs`, `scripts/run-auto.mjs`) | done |
+| `final_watch` stage, `run final-watch`, `youtube auto-upload`, `youtube publish`, `youtube author-packaging` (`autopilot-publish.mjs`, `autopilot-packaging.mjs`) | done |
+| Policy: AGENTS.md, generated-visuals and manhwa guides | done |
+| Tests: `npm run test:autopilot` (no network; injected executors) | done |
+
+**Not exercised yet:** a real episode end to end, the live Data API publish script (`scripts/youtube-data-api-publish.py`, which needs a one-time `youtube.force-ssl` consent), and real model-reviewer prompts against production artifacts. The first autopilot episode should be watched closely.
 
 ## What could not be safely automated
 

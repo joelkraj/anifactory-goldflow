@@ -6,10 +6,20 @@ import { createPanelProductionContract } from '../lib/panel-production-policy.mj
 import { mediaWorkflowForPreflight } from '../lib/media-workflows.mjs';
 import { masterNarrationTwoPass } from '../lib/narration-mastering.mjs';
 import { preparePanelAssetPlan, writePanelAssetPlan, expandPanelAssetPrompts } from '../lib/panel-production-assets.mjs';
+import { writePageGeometry, panelPageGeometryDir } from '../lib/panel-page-geometry.mjs';
+
+// A 640x360 P2V page: deterministic mid-tone noise split by one white gutter.
+export async function fixturePageRaster({ gutterX = 320 } = {}) {
+  const width = 640, height = 360, pixels = Buffer.alloc(width * height * 3);
+  let seed = 11;
+  for (let i = 0; i < pixels.length; i++) { seed = (seed * 1103515245 + 12345) & 0x7fffffff; pixels[i] = 30 + (seed % 140); }
+  for (let y = 0; y < height; y++) for (let x = gutterX - 4; x < gutterX + 4; x++) pixels.fill(250, (y * width + x) * 3, (y * width + x) * 3 + 3);
+  return sharp(pixels, { raw: { width, height, channels: 3 } }).png().toBuffer();
+}
 
 export const digest = value => createHash('sha256').update(value).digest('hex');
 export async function writeJson(file, value) { const bytes = `${JSON.stringify(value, null, 2)}\n`; await fs.writeFile(file, bytes); return digest(bytes); }
-export async function panelProductionFixture(dir, { prerollSec = 0 } = {}) {
+export async function panelProductionFixture(dir, { prerollSec = 0, pages = false } = {}) {
   await fs.mkdir(dir, { recursive: true }); const p = name => path.join(dir, name);
   const identity = { schema: 'goldflow_run_identity_v2', channel: 'fixture', series_slug: 'panel-fixture', week: 'fixture', episode: 'ep_01', run_intent: 'production', content_profile: 'manhwa_recap_v1', ...mediaWorkflowForPreflight({ contentProfile: 'manhwa_recap_v1', mediaWorkflow: 'generated_visuals_v1' }), render_profile: 'panel_composition_v1', panel_composition_contract: createPanelProductionContract(), audio_target: 'narrator_only', generated_motion_policy: 'disabled', parallax_policy: 'disabled', tts_provider: 'qwen_local', narration_quality_contract: { contract_sha256: 'c'.repeat(64), subjective_review: { hash_bound_sampling_manifest_required: false } } };
   const identityHash = await writeJson(p('run_identity.json'), identity);
@@ -38,7 +48,11 @@ export async function panelProductionFixture(dir, { prerollSec = 0 } = {}) {
   const beatHash = await writeJson(p('visual_beat_plan.json'), beatPlan);
   await writeJson(p('visual_beat_approval.json'), { status: 'approved', visual_beat_plan_sha256: beatHash, grouping_lock_sha256: 'b'.repeat(64) });
   const prepared = await preparePanelAssetPlan({ episodeDir: dir });
-  const candidate = { ...prepared.candidate, author: 'Fixture editor', asset_orders: beats.map((beat, i) => ({ asset_id: `art_${i}`, owner_beat_id: beat.visual_beat_id, beat_ids: [beat.visual_beat_id], visual_brief: `Fixture illustration ${i}`, editorial_reason: 'Separate fixture colors make image boundaries measurable.' })), beat_bindings: beats.map((beat, i) => ({ beat_id: beat.visual_beat_id, asset_id: `art_${i}`, editorial_reason: 'Exact fixture beat binding.' })) };
+  const candidate = pages ? { ...prepared.candidate, schema: 'goldflow_panel_asset_plan_v2', author: 'Fixture editor', asset_orders: [{
+    asset_id: 'page_0', kind: 'page', page_template: 'P2V', owner_beat_id: beats[0].visual_beat_id, beat_ids: beats.map(beat => beat.visual_beat_id),
+    visual_brief: 'One page: the payment on the left, the price on the right.', editorial_reason: 'Both beats share one moment and location.',
+    zones: beats.map((beat, i) => ({ zone_id: `page_0_z${i + 1}`, slot: i ? 'right' : 'left', beat_ids: [beat.visual_beat_id], visual_brief: `Fixture zone ${i}`, editorial_reason: 'One zone per beat.' })),
+  }], beat_bindings: beats.map((beat, i) => ({ beat_id: beat.visual_beat_id, asset_id: 'page_0', zone_id: `page_0_z${i + 1}`, editorial_reason: 'Exact fixture zone binding.' })) } : { ...prepared.candidate, author: 'Fixture editor', asset_orders: beats.map((beat, i) => ({ asset_id: `art_${i}`, owner_beat_id: beat.visual_beat_id, beat_ids: [beat.visual_beat_id], visual_brief: `Fixture illustration ${i}`, editorial_reason: 'Separate fixture colors make image boundaries measurable.' })), beat_bindings: beats.map((beat, i) => ({ beat_id: beat.visual_beat_id, asset_id: `art_${i}`, editorial_reason: 'Exact fixture beat binding.' })) };
   await writeJson(prepared.candidatePath, candidate);
   const allocation = await writePanelAssetPlan({ episodeDir: dir, planPath: prepared.candidatePath });
   const prompts = expandPanelAssetPrompts(beats.map(beat => ({ ...beat, image_id: beat.image_id_hint, image_prompt: 'Fixture plain image', shot_manifest: {}, reference_requirements: [] })), { plan: allocation.plan, beats, planSha256: allocation.planSha256 });
@@ -46,7 +60,9 @@ export async function panelProductionFixture(dir, { prerollSec = 0 } = {}) {
   const accepted = {}, results = [], cuts = [];
   for (const [index, beat] of beats.entries()) {
     const imagePath = p(`${beat.image_id_hint}.png`);
-    await sharp({ create: { width: 320, height: 180, channels: 3, background: index ? '#064080' : '#e04020' } }).png().toFile(imagePath);
+    // Page aliases are byte-identical copies of the one generated page.
+    if (pages) await fs.writeFile(imagePath, await fixturePageRaster());
+    else await sharp({ create: { width: 320, height: 180, channels: 3, background: index ? '#064080' : '#e04020' } }).png().toFile(imagePath);
     const hash = digest(await fs.readFile(imagePath)); accepted[beat.image_id_hint] = hash;
     results.push({ image_id: beat.image_id_hint, image_path: imagePath, status: 'generated', generated: { output_sha256: hash } });
     const prompt = prompts[index];
@@ -57,5 +73,6 @@ export async function panelProductionFixture(dir, { prerollSec = 0 } = {}) {
   const focalHash = await writeJson(p('image_focal_analysis_ep_01.json'), { status: 'passed', prompt_plan_sha256: promptHash, imagegen_report_sha256: imageHash, analyses: [] });
   await writeJson(p('image_output_qa_ep_01.json'), { status: 'passed', unresolved_blocker_count: 0, imagegen_report_sha256: imageHash, prompt_plan_sha256: promptHash, review_decisions_path: p('image_output_review_decisions_ep_01.json'), review_decisions_sha256: decisionsHash, focal_analysis_sha256: focalHash, accepted_image_hashes: accepted, critical_rejected_image_ids: [], not_inspected_image_ids: [] });
   await writeJson(p('cut_execution_ledger.json'), { cuts });
-  return { episodeDir: dir, p, identity, beats, source, words, accepted, audioHash, allocation };
+  const geometry = pages ? await writePageGeometry({ imagePath: p(`${beats[0].image_id_hint}.png`), template: 'P2V', outputDir: panelPageGeometryDir(dir, 'page_0') }) : null;
+  return { geometry, episodeDir: dir, p, identity, beats, source, words, accepted, audioHash, allocation };
 }

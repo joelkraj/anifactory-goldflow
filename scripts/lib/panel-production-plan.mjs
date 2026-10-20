@@ -12,6 +12,7 @@ import { loadPanelAssetPlan, assertPanelPromptAllocation } from './panel-product
 import { compilePanelComposition } from './panel-composition-authoring.mjs';
 import { validatePanelTimeline } from './panel-layout-validation.mjs';
 import { loadPanelAudioRevision } from './panel-audio-revision.mjs';
+import { panelPageGeometryDir } from './panel-page-geometry.mjs';
 
 const exec = promisify(execFile);
 const fail = message => { throw new Error(`Panel production plan: ${message}`); };
@@ -125,6 +126,24 @@ export async function readPanelProductionInputs({ episodeDir }) {
     priorStart = word.start_sec;
   }
   const assets = [], panels = [], scenes = [], beatRows = beats.value.beats;
+  // A beat bound to a page zone gets a panel cropped to that zone's measured
+  // safe rectangle, so no layout, crop or background can reach a sibling zone.
+  const bindingByBeat = new Map(allocationPlan.beat_bindings.map(row => [row.beat_id, row]));
+  const orderById = new Map(allocationPlan.asset_orders.map(row => [row.asset_id, row]));
+  const geometryByPage = new Map();
+  const zoneSource = async (beat, acceptedHash) => {
+    const binding = bindingByBeat.get(beat.visual_beat_id);
+    if (!binding?.zone_id) return { source_rect: { ...full }, metadata: {} };
+    const order = orderById.get(binding.asset_id), zone = order?.zones?.find(row => row.zone_id === binding.zone_id);
+    need(order?.kind === 'page' && zone, `page zone binding is invalid for ${beat.visual_beat_id}`);
+    if (!geometryByPage.has(order.asset_id)) geometryByPage.set(order.asset_id, await artifact(path.join(panelPageGeometryDir(dir, order.asset_id), 'page_geometry.json')));
+    const geometry = geometryByPage.get(order.asset_id);
+    need(geometry.value.schema === 'goldflow_panel_page_geometry_v1' && geometry.value.status === 'passed' && geometry.value.template === order.page_template, `passed ${order.page_template} page geometry required for ${order.asset_id}`);
+    need(geometry.value.raster_sha256 === acceptedHash, `page geometry does not measure the accepted raster for ${beat.image_id_hint}`);
+    const measured = geometry.value.zones?.find(row => row.slot === zone.slot);
+    need(measured?.safe_rect, `measured ${zone.slot} zone missing for ${order.asset_id}`);
+    return { source_rect: { ...measured.safe_rect }, metadata: { page_asset_id: order.asset_id, zone_id: zone.zone_id, zone_slot: zone.slot, page_geometry_sha256: geometry.ref.sha256 } };
+  };
   need(Array.isArray(beatRows) && beatRows.length > 0, 'visual beat list is empty');
   let priorEnd = beatRows[0].start_sec, nextWord = 0;
   need(Number.isFinite(priorEnd) && priorEnd >= 0 && priorEnd <= words[0].start_sec + 1e-5, 'invalid opening narration preroll');
@@ -148,8 +167,8 @@ export async function readPanelProductionInputs({ episodeDir }) {
     const metadata = await sharp(raster.path, { limitInputPixels: 100_000_000 }).metadata();
     need(['png', 'jpeg', 'webp'].includes(metadata.format) && (!metadata.pages || metadata.pages === 1), `static raster required for ${imageId}`);
     assets.push({ id: imageId, ...raster, width: metadata.width, height: metadata.height, origin: 'original_generated', provenance: `Accepted production cut ${imageId}; QA ${qa.ref.sha256}` });
-    const panelId = `panel_${beat.visual_beat_id}`;
-    panels.push({ id: panelId, asset_id: imageId, source_rect: { ...full }, metadata: { source_beat_id: beat.visual_beat_id, source_start_sec: beat.start_sec, source_end_sec: beat.end_sec, source_word_start_index: beat.source_word_start_index, source_word_end_index: beat.source_word_end_index, narration_excerpt: beat.visual_beat_script_excerpt ?? '', source_image_id: imageId } });
+    const panelId = `panel_${beat.visual_beat_id}`, zone = await zoneSource(beat, acceptedHash);
+    panels.push({ id: panelId, asset_id: imageId, source_rect: zone.source_rect, metadata: { ...zone.metadata, source_beat_id: beat.visual_beat_id, source_start_sec: beat.start_sec, source_end_sec: beat.end_sec, source_word_start_index: beat.source_word_start_index, source_word_end_index: beat.source_word_end_index, narration_excerpt: beat.visual_beat_script_excerpt ?? '', source_image_id: imageId } });
     // Only the final authored hold may extend over final master padding. All
     // internal beat boundaries remain absolute and unchanged.
     const end = index === beatRows.length - 1 ? duration : beat.end_sec;

@@ -98,5 +98,38 @@ try {
     const bed = await read(g.p('longform_audio_bed_report_ep_01.json')); bed.mix.render_input_path = g.p('different-master.wav'); await writeJson(g.p('longform_audio_bed_report_ep_01.json'), bed);
     await assert.rejects(readPanelProductionInputs(g), /final master and render input disagree/);
   });
+  await test('page zones become panels cropped to their measured safe rectangles', async () => {
+    const f = await panelProductionFixture(path.join(root, 'pages'), { pages: true });
+    assert.equal(f.geometry.status, 'passed');
+    const loaded = await readPanelProductionInputs(f);
+    const [left, right] = f.geometry.zones;
+    assert.deepEqual(loaded.timeline.panels.map(panel => panel.source_rect), [left.safe_rect, right.safe_rect]);
+    assert.ok(left.safe_rect.x + left.safe_rect.width < right.safe_rect.x, 'zones never overlap the gutter or each other');
+    assert.deepEqual(loaded.timeline.panels.map(panel => [panel.metadata.page_asset_id, panel.metadata.zone_id, panel.metadata.zone_slot]), [['page_0', 'page_0_z1', 'left'], ['page_0', 'page_0_z2', 'right']]);
+    const receipt = await fs.realpath(f.geometry.receipt_path);
+    assert.equal(loaded.inputHashes[receipt], loaded.timeline.panels[0].metadata.page_geometry_sha256);
+    const a = await authored(f), compiled = await compilePanelProductionPlan({ ...f, recipePath: a.recipePath });
+    const timeline = await read(compiled.timeline.path);
+    for (const scene of timeline.scenes) {
+      const crop = timeline.panels.find(panel => panel.id === scene.layers[0].panel_id).source_rect;
+      const zone = loaded.timeline.panels.find(panel => panel.metadata.source_beat_id === scene.id).source_rect;
+      assert.ok(crop.x >= zone.x - 1e-9 && crop.x + crop.width <= zone.x + zone.width + 1e-9, 'authored crops stay inside their zone');
+    }
+    assert.equal(compiled.source_hashes[receipt], loaded.inputHashes[receipt]);
+  });
+  await test('page zones fail closed without a current passed geometry for the accepted raster', async () => {
+    const f = await panelProductionFixture(path.join(root, 'pages-missing'), { pages: true });
+    await fs.rename(f.geometry.receipt_path, `${f.geometry.receipt_path}.moved`);
+    await assert.rejects(readPanelProductionInputs(f), /ENOENT/);
+    const tamper = async (name, change, pattern) => {
+      const g = await panelProductionFixture(path.join(root, name), { pages: true });
+      const geometry = await read(g.geometry.receipt_path); change(geometry); await writeJson(g.geometry.receipt_path, geometry);
+      await assert.rejects(readPanelProductionInputs(g), pattern);
+    };
+    await tamper('pages-failed', row => { row.status = 'failed'; }, /passed P2V page geometry required/);
+    await tamper('pages-template', row => { row.template = 'P2H'; }, /passed P2V page geometry required/);
+    await tamper('pages-raster', row => { row.raster_sha256 = 'f'.repeat(64); }, /does not measure the accepted raster/);
+    await tamper('pages-slot', row => { row.zones = row.zones.filter(zone => zone.slot !== 'right'); }, /measured right zone missing/);
+  });
   console.log(`Panel production plan: ${count} test groups passed.`);
 } finally { await fs.rm(root, { recursive: true, force: true }); }

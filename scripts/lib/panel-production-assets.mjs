@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { assertPanelProductionIdentity, isPanelProductionIdentity } from './panel-production-policy.mjs';
+import { PAGE_TEMPLATES } from './panel-page-geometry.mjs';
 
 const need = (value, message) => { if (!value) throw new Error(`Panel asset plan: ${message}`); };
 const sha = value => createHash('sha256').update(value).digest('hex');
@@ -63,17 +64,45 @@ async function inputs(episodeDir) {
   return { episodeDir: dir, identity, beats, sourceHashes, ...panelAssetPlanPaths(dir, identity.episode) };
 }
 
+/**
+ * A page order is one generation holding 2-4 separately croppable zones from
+ * one scene. Each zone serves a contiguous run of beats; the page owner is the
+ * earliest of them. Zone rectangles are measured after generation; this
+ * validator checks the authored structure only.
+ */
+function validatePageOrder(order, byBeat, zoneIds, beatZones) {
+  const template = PAGE_TEMPLATES[order.page_template];
+  need(template, `page ${order.asset_id} needs a supported page_template`);
+  need(Array.isArray(order.zones) && order.zones.length === template.length, `page ${order.asset_id} needs exactly ${template?.length} zones`);
+  const slots = new Set(template.map(zone => zone.slot)), covered = [];
+  for (const zone of order.zones) {
+    need(safeId(zone.zone_id) && !zoneIds.has(zone.zone_id), `page ${order.asset_id} needs unique safe zone IDs`);
+    zoneIds.add(zone.zone_id);
+    need(slots.delete(zone.slot), `page ${order.asset_id} zone ${zone.zone_id} has a missing or repeated ${order.page_template} slot`);
+    need(text(zone.visual_brief) && text(zone.editorial_reason), `zone ${zone.zone_id} needs an authored visual brief and editorial reason`);
+    need(Array.isArray(zone.beat_ids) && zone.beat_ids.length > 0 && zone.beat_ids.every(id => byBeat.has(id)), `zone ${zone.zone_id} needs known beats`);
+    const indices = zone.beat_ids.map(id => byBeat.get(id).i);
+    need(indices.every((index, i) => i === 0 || index === indices[i - 1] + 1), `zone ${zone.zone_id} beats must be contiguous in source order`);
+    for (const id of zone.beat_ids) { need(!beatZones.has(id), `beat ${id} is in more than one zone`); beatZones.set(id, zone.zone_id); covered.push(id); }
+  }
+  covered.sort((a, b) => byBeat.get(a).i - byBeat.get(b).i);
+  need(JSON.stringify(covered) === JSON.stringify(order.beat_ids), `page ${order.asset_id} beat_ids must equal its zones' beats`);
+  const scenes = new Set(order.beat_ids.map(id => byBeat.get(id).beat.scene_id));
+  need(scenes.size === 1 && [...scenes][0], `page ${order.asset_id} zones must come from one scene`);
+}
+
 /** Structural validation only. Editorial decisions must be authored, never inferred. */
 export function validatePanelAssetPlan(plan, { beats, identity, sourceHashes }) {
   assertPanelProductionIdentity(identity);
-  need(plan?.schema === 'goldflow_panel_asset_plan_v1', 'unsupported schema');
+  need(['goldflow_panel_asset_plan_v1', 'goldflow_panel_asset_plan_v2'].includes(plan?.schema), 'unsupported schema');
+  const pagesAllowed = plan.schema === 'goldflow_panel_asset_plan_v2';
   need(plan.episode === identity.episode, 'episode does not match identity');
   need(text(plan.author), 'author is required');
   need(stable(plan.source_hashes) === stable(sourceHashes), 'source hashes are missing or stale');
   need(Array.isArray(plan.asset_orders) && plan.asset_orders.length > 0, 'authored asset orders required');
   need(Array.isArray(plan.beat_bindings) && plan.beat_bindings.length === beats.length, 'exactly one binding for every beat required');
   const byBeat = new Map(beats.map((beat, i) => [beat.visual_beat_id, { beat, i }]));
-  const orders = new Map();
+  const orders = new Map(), zoneIds = new Set(), beatZones = new Map();
   for (const order of plan.asset_orders) {
     need(safeId(order.asset_id) && !orders.has(order.asset_id), 'unique safe asset IDs required');
     need(text(order.visual_brief) && text(order.editorial_reason), `asset ${order.asset_id} needs an authored visual brief and editorial reason`);
@@ -81,6 +110,9 @@ export function validatePanelAssetPlan(plan, { beats, identity, sourceHashes }) 
     need(order.beat_ids.every(id => byBeat.has(id)), `asset ${order.asset_id} references an unknown beat`);
     const sorted = [...order.beat_ids].sort((a, b) => byBeat.get(a).i - byBeat.get(b).i);
     need(JSON.stringify(sorted) === JSON.stringify(order.beat_ids) && order.owner_beat_id === sorted[0], `asset ${order.asset_id} owner must be its first bound beat in source order`);
+    need([undefined, 'single', 'page'].includes(order.kind) && (order.kind !== 'page' || pagesAllowed), `asset ${order.asset_id} has an unsupported kind`);
+    if (order.kind === 'page') validatePageOrder(order, byBeat, zoneIds, beatZones);
+    else need(order.zones === undefined && order.page_template === undefined, `asset ${order.asset_id} declares zones without kind page`);
     orders.set(order.asset_id, order);
   }
   const bound = new Map();
@@ -89,6 +121,8 @@ export function validatePanelAssetPlan(plan, { beats, identity, sourceHashes }) 
     need(binding.beat_id === beats[i].visual_beat_id && !bound.has(binding.beat_id), 'bindings must cover every beat exactly once in source order');
     need(orders.has(binding.asset_id) && text(binding.editorial_reason), `binding ${binding.beat_id} needs an existing asset and editorial reason`);
     need(orders.get(binding.asset_id).beat_ids.includes(binding.beat_id), `binding/order disagree for ${binding.beat_id}`);
+    const zone = beatZones.get(binding.beat_id);
+    need(zone ? binding.zone_id === zone : binding.zone_id === undefined, `binding ${binding.beat_id} must name ${zone ? `its page zone ${zone}` : 'no zone'}`);
     bound.set(binding.beat_id, binding);
   }
   for (const order of orders.values()) for (const id of order.beat_ids) need(bound.get(id)?.asset_id === order.asset_id, `asset ${order.asset_id} lists a conflicting beat`);
@@ -173,6 +207,7 @@ export function panelAssetOrderForPrompt(order) {
     asset_id: order.asset_id, owner_beat_id: order.owner_beat_id,
     beat_ids: order.beat_ids, visual_brief: order.visual_brief,
     editorial_reason: order.editorial_reason,
+    ...(order.kind === 'page' ? { kind: 'page', page_template: order.page_template, zones: order.zones.map(({ zone_id, slot, beat_ids, visual_brief, editorial_reason }) => ({ zone_id, slot, beat_ids, visual_brief, editorial_reason })) } : {}),
     bound_beats: (order.bound_beats ?? []).map(beat => Object.fromEntries(
       fields.filter(field => beat[field] !== undefined).map(field => [field, beat[field]]),
     )),

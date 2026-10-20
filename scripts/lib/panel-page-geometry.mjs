@@ -124,6 +124,12 @@ export async function measurePageGeometry(bytes, template, policy = PAGE_GEOMETR
   };
 }
 
+/** Official location of a page's geometry receipt inside an episode. */
+export function panelPageGeometryDir(episodeDir, assetId) {
+  need(path.isAbsolute(episodeDir ?? '') && /^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(assetId ?? ''), 'absolute episode dir and safe asset ID required');
+  return path.join(episodeDir, 'panel_page_geometry', assetId);
+}
+
 /**
  * Writes an immutable geometry receipt plus lossless review crops of each
  * passed zone's safe rectangle. Crops are for image QA review only; the

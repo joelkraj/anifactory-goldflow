@@ -325,6 +325,19 @@ The existing accepted coma-healer chapter is the A/B control.
 
 Anything short of that is a triage point, not a rerun order.
 
+## Implementation status
+
+- **Done, branch only, not production-enabled:**
+  - Page geometry detector (`panel-page-geometry.mjs`).
+  - Asset plan v2 page orders in `panel-production-assets.mjs`. These are opt-in via `schema: goldflow_panel_asset_plan_v2`; v1 plans are unchanged.
+  - Zone binding in `readPanelProductionInputs`: a zone-bound beat's panel `source_rect` is the measured safe rectangle from `panel_page_geometry/<asset_id>/page_geometry.json`, which must be passed, match the template and match the accepted raster hash, and is hash-bound into composition provenance.
+  - The allocation packet does not offer page orders yet.
+  - No current stage writes geometry receipts, so a v2 page plan fails closed at composition until Phase 1/2 wire generation and QA.
+- **Not yet done:**
+  - Page prompts, hardening and Fal dispatch (Phase 1).
+  - Per-zone image QA on review crops and zone-scoped repair (Phase 2).
+  - The ref-union, ≤ 3-person and same-location checks at prompt time. The allocation validator checks only same-scene grouping, because refs are not known at allocation.
+
 ## Implementation outline (after approval; each a small, tested change)
 
 1. `panel-production-assets.mjs`: the `goldflow_panel_asset_plan_v2` page form and structural validator; v1 plans stay valid.

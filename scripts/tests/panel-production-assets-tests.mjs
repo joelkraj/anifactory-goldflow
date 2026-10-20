@@ -263,3 +263,38 @@ test('reviewed Fal artwork repair refreshes only its dependent panels and retain
   assert.equal(await fs.readFile(`${updated.results[2].image_path}.metadata.json`, 'utf8'), preservedMetadata);
   await assert.rejects(completeFalPanelArtwork({ episodeDir: f.dir, prompts: f.prompts, results: updated.results, cuts: updated.cuts, ownerImageIds: ['ep_01-cut-002'] }), /owners/);
 });
+
+test('v2 page orders bind contiguous beat runs to template zones and reject ambiguous structure', async t => {
+  const f = await fixture(t);
+  const identity = JSON.parse(await fs.readFile(f.p('run_identity.json'), 'utf8'));
+  const context = { beats: f.beats, identity, sourceHashes: f.allocation.plan.source_hashes };
+  const page = () => ({
+    schema: 'goldflow_panel_asset_plan_v2', episode: 'ep_01', author: 'Fixture editor', source_hashes: f.allocation.plan.source_hashes,
+    asset_orders: [{ asset_id: 'page_1', kind: 'page', page_template: 'P2V', owner_beat_id: 'beat_0', beat_ids: ['beat_0', 'beat_1', 'beat_2'], visual_brief: 'Letter and reaction on the left, the doorway on the right.', editorial_reason: 'One moment in one room.',
+      zones: [
+        { zone_id: 'page_1_z1', slot: 'left', beat_ids: ['beat_0', 'beat_1'], visual_brief: 'Character reads the letter; signature and face both visible.', editorial_reason: 'Detail then reaction crops.' },
+        { zone_id: 'page_1_z2', slot: 'right', beat_ids: ['beat_2'], visual_brief: 'Character turns toward the open doorway.', editorial_reason: 'New orientation.' },
+      ] }],
+    beat_bindings: [['beat_0', 'page_1_z1'], ['beat_1', 'page_1_z1'], ['beat_2', 'page_1_z2']].map(([beat_id, zone_id]) => ({ beat_id, asset_id: 'page_1', zone_id, editorial_reason: 'Exact zone binding.' })),
+  });
+  assert.equal(validatePanelAssetPlan(page(), context).asset_orders[0].zones.length, 2);
+  const reject = (change, pattern) => { const plan = page(); change(plan); assert.throws(() => validatePanelAssetPlan(plan, context), pattern); };
+  reject(plan => { plan.schema = 'goldflow_panel_asset_plan_v1'; }, /unsupported kind/);
+  reject(plan => { plan.asset_orders[0].page_template = 'P9'; }, /supported page_template/);
+  reject(plan => { plan.asset_orders[0].zones.pop(); }, /exactly 2 zones/);
+  reject(plan => { plan.asset_orders[0].zones[1].slot = 'left'; }, /missing or repeated P2V slot/);
+  reject(plan => { plan.asset_orders[0].zones[1].zone_id = 'page_1_z1'; }, /unique safe zone IDs/);
+  reject(plan => { const [a, b] = plan.asset_orders[0].zones; a.beat_ids = ['beat_0', 'beat_2']; b.beat_ids = ['beat_1']; }, /contiguous/);
+  reject(plan => { plan.asset_orders[0].zones[1].beat_ids = ['beat_1', 'beat_2']; }, /more than one zone/);
+  reject(plan => { plan.asset_orders[0].zones[1].visual_brief = ' '; }, /authored visual brief/);
+  reject(plan => { delete plan.beat_bindings[2].zone_id; }, /must name its page zone page_1_z2/);
+  reject(plan => { plan.beat_bindings[2].zone_id = 'page_1_z1'; }, /must name its page zone page_1_z2/);
+  reject(plan => { plan.asset_orders[0].zones = undefined; plan.asset_orders[0].kind = undefined; }, /declares zones without kind page|must name no zone/);
+  const otherScene = page(); const beats = structuredClone(f.beats); beats[2].scene_id = 'scene_2';
+  assert.throws(() => validatePanelAssetPlan(otherScene, { ...context, beats }), /one scene/);
+  // Prompt planning receives the authored page structure with its zones.
+  const projected = panelAssetOwnerRows(f.beats, page())[0].panel_asset_order;
+  assert.equal(projected.kind, 'page');
+  const { panelAssetOrderForPrompt } = await import('../lib/panel-production-assets.mjs');
+  assert.deepEqual(panelAssetOrderForPrompt(projected).zones.map(zone => [zone.slot, zone.beat_ids]), [['left', ['beat_0', 'beat_1']], ['right', ['beat_2']]]);
+});

@@ -568,6 +568,7 @@ ${registryCommands}
   goldflow analytics propose-learning Create a hash-bound, non-applying analytics improvement packet
   goldflow analytics approve-learning Approve selected improvements for a controlled test only
   goldflow analytics notify-approval Send one deduplicated local iMessage approval alert
+  goldflow analytics export-evidence Export measured own-channel + injected outlier evidence as --evidence markdown
   goldflow benchmark quota          Record isolated Gemini, Flow, and Antigravity quota evidence
   goldflow benchmark planners       Compare task-specific Codex, Antigravity, Gemini, and ChatGPT planning
   goldflow source research         Produce a cited ChatGPT Web Pro research dossier for source development
@@ -1020,6 +1021,8 @@ if (command === "crime-proof" && !helpRequested) {
   run("analytics-learning-proposal.mjs", ["approve", ...flags]);
 } else if (command === "analytics" && subcommand === "notify-approval") {
   run("analytics-imessage-notify.mjs", flags);
+} else if (command === "analytics" && subcommand === "export-evidence") {
+  run("analytics-export-evidence.mjs", flags);
 } else if (command === "benchmark" && subcommand === "quota") {
   run("provider-quota-proof.mjs", flags);
 } else if (command === "benchmark" && subcommand === "planners") {

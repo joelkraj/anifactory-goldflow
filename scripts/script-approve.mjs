@@ -127,6 +127,7 @@ async function main() {
     ...(powerSystemEditorialException ? { power_system_editorial_exception: powerSystemEditorialException } : {}),
     approved: true,
     operator_approved: true,
+    approved_by: String(flags["approved-by"] ?? "operator").trim() || "operator",
     status: "approved",
     updated_at: approvedAt,
   };

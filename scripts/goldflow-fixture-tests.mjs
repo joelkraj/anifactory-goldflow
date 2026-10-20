@@ -388,7 +388,7 @@ function sha256(value) {
 function testAuthoritativeStageRegistry() {
   const ids = PIPELINE_STAGE_REGISTRY.map((stage) => stage.id);
   assert.equal(new Set(ids).size, ids.length);
-  assert.deepEqual(ids.slice(-14), [
+  assert.deepEqual(ids.slice(-15), [
     "image_focal_analysis",
     "image_output_qa",
     "animation_direction_plan",
@@ -402,6 +402,7 @@ function testAuthoritativeStageRegistry() {
     "upload_packaging",
     "youtube_publish_readiness",
     "youtube_studio_upload",
+    "final_watch",
     "youtube_pinned_comment",
   ]);
   assert.equal(ids.includes("visual_prompt_plan_review_harden"), false);

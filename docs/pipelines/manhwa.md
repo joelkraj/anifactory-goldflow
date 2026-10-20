@@ -104,6 +104,6 @@ node bin/goldflow.mjs run preflight --content-profile manhwa_recap_v1 --media-wo
 node bin/goldflow.mjs ingest source --channel 53rebirth --series reincarnated-simp-world --week 2026-W25-reincarnated-simp-world-v1 --episode ep_02 --source /Users/joel/AniFactoryData/source_ingests/reincarnated_simp_world_part_2.md
 ```
 
-After ingest, stop for script hash review and operator approval before running semantic planning, TTS, audio, visual, imagegen, render, or packaging.
+After ingest, stop for script hash review and operator approval before running semantic planning, TTS, audio, visual, imagegen, render, or packaging. On an autopilot identity (`--autopilot true --episode-budget-usd <usd>`), `run auto` records that approval as `automated:deterministic_script_checks`. It does so only once ingest and the deterministic script checks pass, and it continues to the final watch. See [autopilot gates](../designs/autopilot_gates_v1.md).
 
 This example was formerly the root “next run” instruction. It is retained as a manhwa sequel example, not current task context or a global default.

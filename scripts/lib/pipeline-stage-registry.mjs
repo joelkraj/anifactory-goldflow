@@ -11,6 +11,7 @@ import {
   localWhisperContractForIdentity,
 } from "./local-whisper-policy.mjs";
 import { generatedMotionEnabled } from "./generated-motion-contract.mjs";
+import { autopilotEnabled } from "./autopilot-policy.mjs";
 import { isBrowserPoolImageProvider } from "./image-provider-policy.mjs";
 import {
   plannerConcurrencyForIdentity,
@@ -405,7 +406,7 @@ const stages = [
     output_artifact: "upload_packaging_<episode>.md + youtube_packaging_spec_<episode>.json + final thumbnail",
     approval: "operator",
     validator: "approved_ctr_packaging_and_thumbnail_contract",
-    commands: ["youtube approve-packaging"],
+    commands: ["youtube approve-packaging", "youtube author-packaging"],
   },
   {
     id: "youtube_publish_readiness",
@@ -423,16 +424,30 @@ const stages = [
     output_artifact: "youtube_upload_receipt_<episode>.json + optional required youtube_native_ab_receipt_<episode>.json",
     approval: "operator",
     validator: "youtube_upload_receipt_and_field_verification",
-    commands: ["youtube record-upload", "youtube record-ab-test"],
+    commands: ["youtube record-upload", "youtube record-ab-test", "youtube auto-upload"],
   },
   {
+    // Autopilot human step 1. Manual runs review before upload and waive it.
+    id: "final_watch",
+    title: "Final watch",
+    required_input: "final MP4 + private upload receipt",
+    output_artifact: "final_watch_<episode>.json",
+    approval: "operator",
+    validator: "final_watch_human_decision_video_hash",
+    depends_on: ["youtube_studio_upload"],
+    commands: ["run final-watch"],
+  },
+  {
+    // Autopilot human step 2 (publish approval) on autopilot identities.
     id: "youtube_pinned_comment",
     title: "YouTube pinned comment",
     required_input: "passed upload receipt + explicit comment approval",
     output_artifact: "youtube_pinned_comment_receipt_<episode>.json",
     approval: "operator",
     validator: "youtube_pinned_comment_receipt_hash",
-    commands: ["youtube record-schedule", "youtube record-comment"],
+    // A waived final watch must not make publishing ready before the upload.
+    depends_on: ["youtube_studio_upload", "final_watch"],
+    commands: ["youtube record-schedule", "youtube record-comment", "youtube publish"],
   },
 ];
 
@@ -527,6 +542,8 @@ export function stageChecklistFor(identity = {}) {
       : ["animation_direction_plan", "generated_video_motion", "generated_video_motion_approval"].includes(entry.id) && ltxDisabled
         ? "skipped_with_waiver"
       : ["parallax_asset_generation", "parallax_asset_approval"].includes(entry.id) && parallaxDisabled
+        ? "skipped_with_waiver"
+      : entry.id === "final_watch" && !autopilotEnabled(identity)
         ? "skipped_with_waiver"
         : "missing",
     approval_policy: entry.approval,
@@ -782,6 +799,15 @@ export function buildStageCommand(stageId, identity = {}, options = {}) {
     youtube_studio_upload: `Use the youtube-studio-publish browser skill, upload privately first, verify every field, then run node bin/goldflow.mjs youtube record-upload ${base} --video-id <id> --watch-url <url> --visibility <private|unlisted|public|scheduled> --channel-verified true --initial-private-verified true --title-verified true --description-verified true --thumbnail-verified true --audience-verified true --monetization-verified true --mid-rolls-verified true --comments-verified true --checks-complete true --recorded-by <name>`,
     youtube_pinned_comment: `For an explicitly approved scheduled release, verify Studio and run node bin/goldflow.mjs youtube record-schedule ${base} --video-id <id> --schedule-at <ISO-timestamp> --time-zone <zone> --publish-approved true --publish-approved-by <name> --channel-verified true --schedule-verified true --existing-fields-verified true --checks-complete true --recorded-by <name>; after explicit comment approval, pin the exact manifest comment and run node bin/goldflow.mjs youtube record-comment ${base} --comment-id <id> --text-verified true --post-approved true --post-approved-by <name> --pinned-verified true --recorded-by <name>`,
   };
+  if (autopilotEnabled(identity)) {
+    const dir = identity.episode_dir ? `--episode-dir ${identity.episode_dir}` : base;
+    Object.assign(commands, {
+      upload_packaging: `node bin/goldflow.mjs youtube author-packaging ${dir}`,
+      youtube_studio_upload: `node bin/goldflow.mjs youtube auto-upload ${dir}`,
+      final_watch: `Watch the final MP4, then run node bin/goldflow.mjs run final-watch ${dir} --decision accept --reviewer <name> --note "<watch notes>"`,
+      youtube_pinned_comment: `node bin/goldflow.mjs youtube publish ${dir} --visibility <public|scheduled> --approved-by <name> --studio-settings-verified true`,
+    });
+  }
   if (identity.image_provider === "openart_cli") {
     const lockedOpenArtConcurrency = Number(identity.image_provider_options?.openart?.concurrency ?? identity.openart_contract?.concurrency ?? 1);
     const referenceWorkers = Number.isInteger(lockedOpenArtConcurrency) && lockedOpenArtConcurrency > 0 ? Math.min(4, lockedOpenArtConcurrency) : 1;

@@ -8,6 +8,7 @@ const boardGuidance=(pageTemplate,board)=>pageTemplate?pageReferenceBoardPromptG
 const pageField=(pageTemplate,canvas)=>pageTemplate?{panel_page_template:pageTemplate,...(canvas?{image_size:{width:canvas.width,height:canvas.height}}:{})}:{};
 import { falFileSha256, falObjectSha256, uploadFalReference, submitFalImage, observeFalImage, FAL_ENDPOINTS } from "./lib/fal-provider.mjs";
 import { falPortableAssetId, promoteApprovedFalReferences } from "./lib/fal-portable-bank.mjs";
+import { assertEpisodeBudget, spendAuthorization } from "./lib/episode-budget.mjs";
 import { assertFalRetryBudget, assertFalSpendProjectionBudget, falAmbiguousSubmissionAttempts, falSpendProjectionState, falProjectedSpendUsd } from "./lib/fal-retry-budget.mjs";
 import { chooseNativeValidationRows } from "./lib/fal-validation-selector.mjs";
 import { falAdjudicationPath, validateFalNoJobAdjudication } from "./lib/fal-ambiguous-adjudication.mjs";
@@ -29,6 +30,9 @@ import { prepareZoneRepair, applyZoneRepair, validateZoneRepairRequest, buildZon
 const digest = value => createHash("sha256").update(value).digest("hex");
 const bytes = value => `${JSON.stringify(value, null, 2)}\n`;
 function need(value, message) { if (!value) throw new Error(message); }
+// An exact token authorizes one manual dispatch; on a budget-locked identity the
+// single episode_budget token authorizes any dispatch within the locked cap.
+function spendOk(ctx,f,token){const auth=spendAuthorization({identity:ctx.identity,flags:f,token});if(auth.authorized)ctx.spendBasis=auth.basis;return auth.authorized;}
 function flags(argv) { const out={}; for(let i=0;i<argv.length;i+=2){need(argv[i]?.startsWith("--")&&argv[i+1]!==undefined,"Every Fal production flag requires a value.");out[argv[i].slice(2)]=argv[i+1];} return out; }
 async function read(file){return JSON.parse(await fs.readFile(file,"utf8"));}
 async function absent(file){try{await fs.lstat(file);throw new Error(`Refusing to overwrite ${file}`);}catch(error){if(error.code!=="ENOENT")throw error;}}
@@ -313,6 +317,7 @@ async function submitRows(ctx,rows,limit){
     const spend=await assertFalSpendProjectionBudget({episodeDir:ctx.episodeDir,assignments:pending,
       warningBudgetUsd:ctx.contract.warning_budget_usd,hardBudgetUsd:ctx.contract.hard_budget_usd});
     if(spend.warning_after_batch)console.error(`Fal projected spend warning: $${spend.projected_spend_after_batch_usd} against locked $${spend.warning_budget_usd}; estimate only, verify actual Fal balance.`);
+    await assertEpisodeBudget({episodeDir:ctx.episodeDir,identity:ctx.identity,requestedUsd:falProjectedSpendUsd(pending.length),scope:`fal_${ctx.action??"dispatch"}`,basis:ctx.spendBasis??"exact_token"});
     return await mapLimit(pending,limit,async row=>{
       if(!row.board_path)return submitFalImage({assignment:row,referenceUrls:[],receiptPath:row.submission_receipt_path});
       const upload=await uploadFalReference({localPath:row.board_path,expectedSha256:row.board_sha256,receiptPath:row.upload_receipt_path});
@@ -332,16 +337,17 @@ async function preflightPaidRepair(ctx,receiptDir,imageIds,fileStemForId=id=>id)
   await assertFalRetryBudget({episodeDir:ctx.episodeDir,assignments:pending});
   await assertFalSpendProjectionBudget({episodeDir:ctx.episodeDir,assignments:pending,
     warningBudgetUsd:ctx.contract.warning_budget_usd,hardBudgetUsd:ctx.contract.hard_budget_usd});
+  await assertEpisodeBudget({episodeDir:ctx.episodeDir,identity:ctx.identity,requestedUsd:falProjectedSpendUsd(pending.length),scope:`fal_${ctx.action??"repair"}`,basis:ctx.spendBasis??"exact_token",record:false});
 }
 async function observeRows(ctx,rows,limit){return mapLimit(rows,limit,async row=>{const receipt=await read(row.submission_receipt_path);try{return await observeFalImage({endpoint:receipt.endpoint,requestId:receipt.request_id,outputPath:row.output_path,receiptPath:row.result_receipt_path,expectedSize:row.image_size});}catch(error){const timedOut=error?.name==="TimeoutError"||/aborted due to timeout/i.test(error?.message??"");const stale=Date.now()-Date.parse(receipt.submitted_at)>15*60_000;if(timedOut&&!stale)return {complete:false,transient_observation_timeout:true,request_id:receipt.request_id};if(timedOut||Number(error?.status)>=500||/Gateway Timeout|Internal Server Error/i.test(error?.message??"")){const resultDir=path.basename(path.dirname(row.result_receipt_path));const holdName=resultDir==="review-repair-result-receipts"?path.basename(row.result_receipt_path):resultDir==="review-repair-transport-recovery-result-receipts"||resultDir==="transport-recovery-result-receipts"?`${path.basename(row.result_receipt_path,".json")}-recovery.json`:`${row.image_id}.json`;const holdPath=path.join(path.dirname(path.dirname(row.result_receipt_path)),"transport-holds",holdName);if(!await fs.access(holdPath).then(()=>true,()=>false))await write(holdPath,{schema:"goldflow_fal_transport_hold_v1",created_at:new Date().toISOString(),image_id:row.image_id,endpoint:receipt.endpoint,request_id:receipt.request_id,assignment_sha256:row.assignment_sha256,provider_queue_status:"unknown_or_completed",reason:timedOut?"stale_observation_timeout":"provider_5xx_during_observation",billable_request_resubmitted:false});return {complete:false,transport_pending:true,request_id:receipt.request_id,hold_path:holdPath};}if(error?.status!==422)throw error;const failurePath=await recordFalFailure(row,receipt,error);return {complete:false,failed:true,failure_path:failurePath};}});}
 async function main(){
- const f=flags(process.argv.slice(2)); const ctx=await context(f); const action=f.action;
+ const f=flags(process.argv.slice(2)); const ctx=await context(f); const action=f.action; ctx.action=action;
  if (["prepare-reference-probe-repair", "dispatch-reference-probe-repair", "observe-reference-probe-repair", "review-reference-probe-repair"].includes(action)) {
    const state=await inspectReferenceProbeReview(ctx.episodeDir);
    need(state,"Exact reference-probe visual rejection is required.");
    if(action==="prepare-reference-probe-repair") return console.log(JSON.stringify({status:"prepared",image_id:(await prepareReferenceProbeReview(ctx.episodeDir,state)).image_id}));
    if(action==="dispatch-reference-probe-repair") {
-     need(state.state==="dispatch"&&f["confirm-spend"]==="exact_fal_reference_probe_repair","Only the prepared exact probe repair may be submitted once.");
+     need(state.state==="dispatch"&&spendOk(ctx,f,"exact_fal_reference_probe_repair"),"Only the prepared exact probe repair may be submitted once.");
      await preflightPaidRepair(ctx,"reference/review-repair-submission-receipts",[state.repair.image_id]);
      return console.log(JSON.stringify({status:"submitted",count:(await submitRows(ctx,[state.repair],1)).length}));
    }
@@ -393,7 +399,7 @@ async function main(){
        output_path:original.output_path,
        upload_receipt_path:path.join(root,"ambiguous-retry-upload-receipts",`${original.image_id}.json`)};
      if(action==="dispatch-adjudicated"){
-       need(f["confirm-spend"]==="exact_fal_ambiguous_retry","Adjudicated retry requires exact spend token.");
+       need(spendOk(ctx,f,"exact_fal_ambiguous_retry"),"Adjudicated retry requires exact spend token.");
        need(!await fs.access(row.output_path).then(()=>true,()=>false),`Accepted Fal output already exists: ${original.image_id}`);
        await write(path.join(root,"ambiguous-retry-assignments",`${original.image_id}.json`),row);
        rows.push(row);
@@ -416,7 +422,7 @@ async function main(){
    need(recovery.status==="second_pending","Only a pending, explicitly reviewed second validation repair is eligible.");
    const second=recovery.second;
    if(action==="dispatch-validation-second") {
-     need(second.state==="submit"&&f["confirm-spend"]==="exact_fal_validation_second","Second repair requires exact pending scope and spend token.");
+     need(second.state==="submit"&&spendOk(ctx,f,"exact_fal_validation_second"),"Second repair requires exact pending scope and spend token.");
      await preflightPaidRepair(ctx,"validation-recovery-second/submission-receipts",second.assignments.map(r=>r.image_id));
      for(const row of second.assignments) await write(path.join(second.dir,"assignments",`${row.image_id}.json`),row);
      return console.log(JSON.stringify({status:"submitted",count:(await submitRows(ctx,second.assignments,1)).length},null,2));
@@ -475,7 +481,7 @@ async function main(){
    }
    need(recovery.plan,"Exact validation recovery plan is missing.");
    if(action==="dispatch-validation-recovery"){
-     need(f["confirm-spend"]==="exact_fal_validation_recovery","Exact validation recovery requires its spend token.");
+     need(spendOk(ctx,f,"exact_fal_validation_recovery"),"Exact validation recovery requires its spend token.");
      need(recovery.status==="pending"&&!recovery.submissions.some(Boolean),"Validation recovery submission is not the next exact step.");
      const result=await submitRows(ctx,recovery.plan.assignments,Math.min(2,ctx.contract.production_concurrency));
      return console.log(JSON.stringify({status:"submitted",count:result.length,image_ids:recovery.plan.assignments.map(row=>row.image_id)},null,2));
@@ -508,14 +514,14 @@ async function main(){
  if(action==="billing-submit-reference"||action==="billing-observe-reference"){
    const plan=await read(path.join(ctx.root,"reference-plan.json"));const row=plan.assignments.find(item=>item.image_id===f["image-id"]);need(row,`Unknown exact Fal reference probe: ${f["image-id"]}`);
    if(action==="billing-submit-reference"){
-     need(f["confirm-spend"]==="exact_fal_reference_probe","Paid Fal reference probe requires exact confirmation token.");
+     need(spendOk(ctx,f,"exact_fal_reference_probe"),"Paid Fal reference probe requires exact confirmation token.");
      need(!await fs.access(row.submission_receipt_path).then(()=>true,()=>false),"Fal reference probe is already submitted.");
      const result=await submitRows(ctx,[row],1);return console.log(JSON.stringify({status:"submitted",image_id:row.image_id,request_id:result[0].request_id},null,2));
    }
    const result=await observeRows(ctx,[row],1);return console.log(JSON.stringify({status:result[0].complete?"complete":"pending",image_id:row.image_id,result:result[0]},null,2));
  }
  if(action==="dispatch-references"){
-   need(f["confirm-spend"]==="exact_fal_reference_batch","Paid reference dispatch requires exact confirmation token.");const plan=await read(path.join(ctx.root,"reference-plan.json"));const limit=Math.min(Number(f.limit??100),100);need(Number.isInteger(limit)&&limit>0,"Reference limit must be 1..100.");const rows=[];for(const row of plan.assignments)if(row.reference_mode!=="approved_local_asset"&&!await fs.access(row.submission_receipt_path).then(()=>true,()=>false)){rows.push(row);if(rows.length===limit)break;}const result=await submitRows(ctx,rows,ctx.contract.production_concurrency);return console.log(JSON.stringify({status:"submitted",count:result.length},null,2));
+   need(spendOk(ctx,f,"exact_fal_reference_batch"),"Paid reference dispatch requires exact confirmation token.");const plan=await read(path.join(ctx.root,"reference-plan.json"));const limit=Math.min(Number(f.limit??100),100);need(Number.isInteger(limit)&&limit>0,"Reference limit must be 1..100.");const rows=[];for(const row of plan.assignments)if(row.reference_mode!=="approved_local_asset"&&!await fs.access(row.submission_receipt_path).then(()=>true,()=>false)){rows.push(row);if(rows.length===limit)break;}const result=await submitRows(ctx,rows,ctx.contract.production_concurrency);return console.log(JSON.stringify({status:"submitted",count:result.length},null,2));
  }
  if(action==="observe-references"){
    const plan=await read(path.join(ctx.root,"reference-plan.json"));const rows=[];for(const row of plan.assignments){
@@ -534,7 +540,7 @@ async function main(){
    return console.log(JSON.stringify(result,null,2));
  }
  if(action==="recover-reference-holds"){
-   need(f["confirm-spend"]==="exact_fal_reference_transport_recovery",
+   need(spendOk(ctx,f,"exact_fal_reference_transport_recovery"),
      "Paid reference transport recovery requires the exact confirmation token.");
    need(path.isAbsolute(f.directives??""),"Reference transport recovery needs absolute reviewed directives.");
    const plan=await read(path.join(ctx.root,"reference-plan.json"));
@@ -606,7 +612,7 @@ async function main(){
      pending:result.filter(row=>!row.complete&&!row.failed&&!row.transport_pending).length},null,2));
  }
  if(action==="repair-reference-failures"){
-   need(f["confirm-spend"]==="exact_fal_reference_repair","Paid reference repair requires exact confirmation token.");
+   need(spendOk(ctx,f,"exact_fal_reference_repair"),"Paid reference repair requires exact confirmation token.");
    need(path.isAbsolute(f.directives??""),"Reference repair requires an absolute --directives file.");
    const plan=await read(path.join(ctx.root,"reference-plan.json"));const directives=await read(f.directives);
    need(directives?.schema==="goldflow_fal_reference_repair_directives_v1"&&Array.isArray(directives.repairs)&&directives.repairs.length,
@@ -644,7 +650,7 @@ async function main(){
      complete:result.filter(row=>row.complete).length,pending:result.filter(row=>!row.complete).length},null,2));
  }
  if(action==="repair-reviewed-references"){
-   need(f["confirm-spend"]==="exact_fal_reviewed_reference_repair","Paid visual reference repair requires exact confirmation token.");
+   need(spendOk(ctx,f,"exact_fal_reviewed_reference_repair"),"Paid visual reference repair requires exact confirmation token.");
    const reviewPath=path.join(ctx.root,"reference","review-rejections.json");
    const review=await read(reviewPath);need(review?.schema==="goldflow_fal_reference_visual_review_v1"
      &&Array.isArray(review.rejections)&&review.rejections.length,"Exact visual review rejection receipt is required.");
@@ -710,7 +716,7 @@ async function main(){
      failed:result.filter(row=>row.failed).length},null,2));
  }
  if(action==="repair-failed-reviewed-reference"){
-   need(f["confirm-spend"]==="exact_fal_reviewed_reference_v3","Second reviewed-reference repair requires exact spend token.");
+   need(spendOk(ctx,f,"exact_fal_reviewed_reference_v3"),"Second reviewed-reference repair requires exact spend token.");
    need(path.isAbsolute(f.directives??""),"Second reviewed-reference repair requires an absolute directive file.");
    const id=String(f["image-id"]??"");
    need(/^[a-z0-9][a-z0-9_-]{1,100}$/.test(id),"Exact reviewed-reference ID is required.");
@@ -750,7 +756,7 @@ async function main(){
    return console.log(JSON.stringify({status:"reviewed_reference_v3_submitted",image_id:id,count:result.length},null,2));
  }
  if(action==="repair-successful-reviewed-references"){
-   need(f["confirm-spend"]==="exact_fal_reviewed_reference_success_v3",
+   need(spendOk(ctx,f,"exact_fal_reviewed_reference_success_v3"),
      "Successful reviewed-reference repair requires exact spend token.");
    const directivesPath=String(f.directives??"");
    need(path.isAbsolute(directivesPath),"Successful reviewed-reference repair requires an absolute directive file.");
@@ -809,7 +815,7 @@ async function main(){
  if(action==="prepare-validation-revision") return console.log(JSON.stringify(await prepare(ctx,{revision:2}),null,2));
  if(action==="prepare-bulk") return console.log(JSON.stringify(await prepareBulk(ctx,f),null,2));
  if(action==="repair-reviewed-bulk"){
-   need(f["confirm-spend"]==="exact_fal_reviewed_bulk_repair","Paid visual repair requires exact confirmation token.");
+   need(spendOk(ctx,f,"exact_fal_reviewed_bulk_repair"),"Paid visual repair requires exact confirmation token.");
    need(path.isAbsolute(f.directives??""),"Visual repair requires absolute directives.");
    const qaPath=path.join(ctx.episodeDir,`image_output_qa_${ctx.identity.episode}.json`);
    const qa=await read(qaPath),directives=await read(f.directives),bulk=await readEffectiveBulk(ctx);
@@ -886,7 +892,7 @@ async function main(){
    return console.log(JSON.stringify({status:"reviewed_bulk_repair_submitted",count:result.length,image_ids:repairs.map(row=>row.image_id)},null,2));
  }
  if(action==="recover-reviewed-bulk-hold"){
-   need(f["confirm-spend"]==="exact_fal_reviewed_bulk_hold_recovery","Paid reviewed hold recovery requires its exact confirmation token.");
+   need(spendOk(ctx,f,"exact_fal_reviewed_bulk_hold_recovery"),"Paid reviewed hold recovery requires its exact confirmation token.");
    const id=String(f["image-id"]??"");
    need(/^[a-z0-9][a-z0-9_-]{1,100}$/.test(id),"One exact reviewed Fal image ID is required.");
    const qaPath=path.join(ctx.episodeDir,`image_output_qa_${ctx.identity.episode}.json`);
@@ -1024,7 +1030,7 @@ async function main(){
    if(board)need(await falFileSha256(original.board_path)===original.board_sha256,`Page owner reference board changed: ${original.image_id}.`);
    const row=buildZoneRepairAssignment({falRoot:ctx.root,spec,specSha256,original,boardGuidance:board?referenceBoardPromptGuidance(board):null,identityHash:ctx.identityHash,objectSha256:falObjectSha256});
    if(action==="dispatch-zone-repair"){
-     need(f["confirm-spend"]==="exact_fal_zone_repair","Paid zone repair requires the exact confirmation token.");
+     need(spendOk(ctx,f,"exact_fal_zone_repair"),"Paid zone repair requires the exact confirmation token.");
      await write(row.assignment_path,row);
      await preflightPaidRepair(ctx,ZONE_REPAIR_RECEIPT_DIR,[row.image_id],()=>row.stem);
      const result=await submitRows(ctx,[row],1);return console.log(JSON.stringify({status:"zone_repair_submitted",count:result.length,stem:row.stem,image_ids:spec.image_ids},null,2));
@@ -1040,10 +1046,10 @@ async function main(){
    return console.log(JSON.stringify(applied,null,2));
  }
  if(action==="dispatch-bulk"){
-   need(f["confirm-spend"]==="exact_fal_bulk_batch","Paid bulk dispatch requires exact confirmation token.");const bulk=await readEffectiveBulk(ctx);const limit=Math.min(Number(f.limit??100),100);need(Number.isInteger(limit)&&limit>0,"Bulk limit must be 1..100.");const rows=[];for(const row of bulk.assignments)if(!await fs.access(row.submission_receipt_path).then(()=>true,()=>false)&&!await fs.access(falAdjudicationPath(ctx.episodeDir,row.image_id)).then(()=>true,()=>false)){rows.push(row);if(rows.length===limit)break;}const result=await submitRows(ctx,rows,ctx.contract.production_concurrency);return console.log(JSON.stringify({status:"submitted",count:result.length,remaining:bulk.assignments.length-(await Promise.all(bulk.assignments.map(row=>fs.access(row.submission_receipt_path).then(()=>1,()=>0)))).reduce((a,b)=>a+b,0)},null,2));
+   need(spendOk(ctx,f,"exact_fal_bulk_batch"),"Paid bulk dispatch requires exact confirmation token.");const bulk=await readEffectiveBulk(ctx);const limit=Math.min(Number(f.limit??100),100);need(Number.isInteger(limit)&&limit>0,"Bulk limit must be 1..100.");const rows=[];for(const row of bulk.assignments)if(!await fs.access(row.submission_receipt_path).then(()=>true,()=>false)&&!await fs.access(falAdjudicationPath(ctx.episodeDir,row.image_id)).then(()=>true,()=>false)){rows.push(row);if(rows.length===limit)break;}const result=await submitRows(ctx,rows,ctx.contract.production_concurrency);return console.log(JSON.stringify({status:"submitted",count:result.length,remaining:bulk.assignments.length-(await Promise.all(bulk.assignments.map(row=>fs.access(row.submission_receipt_path).then(()=>1,()=>0)))).reduce((a,b)=>a+b,0)},null,2));
  }
  if(action==="repair-failures"){
-   need(f["confirm-spend"]==="exact_fal_repair_batch","Paid repair dispatch requires exact confirmation token.");need(path.isAbsolute(f.directives??""),"Repair dispatch requires an absolute --directives file.");
+   need(spendOk(ctx,f,"exact_fal_repair_batch"),"Paid repair dispatch requires exact confirmation token.");need(path.isAbsolute(f.directives??""),"Repair dispatch requires an absolute --directives file.");
    const bulk=await readEffectiveBulk(ctx);const directives=await read(f.directives);need(directives?.schema==="goldflow_fal_repair_directives_v1"&&Array.isArray(directives.repairs)&&directives.repairs.length,"Exact repair directives are required.");await preflightPaidRepair(ctx,"bulk/repair-submission-receipts",directives.repairs.map(row=>row.image_id));const repairs=[];
    for(const directive of directives.repairs){const original=bulk.assignments.find(row=>row.image_id===directive.image_id);need(original&&directive.original_assignment_sha256===original.assignment_sha256,`Repair binding changed for ${directive.image_id}.`);const failurePath=path.join(ctx.root,"bulk","failure-receipts",`${directive.image_id}.json`);need(await fs.access(failurePath).then(()=>true,()=>false),`No exact failure exists for ${directive.image_id}.`);need(typeof directive.replacement_prompt==="string"&&directive.replacement_prompt.length>40,"Repair prompt is missing.");const core={...original,prompt:directive.replacement_prompt,prompt_sha256:digest(directive.replacement_prompt),previous_assignment_sha256:original.assignment_sha256,repair_reason:directive.repair_reason};for(const key of ["assignment_sha256","assignment_path","submission_receipt_path","result_receipt_path","output_path","upload_receipt_path"])delete core[key];const repair={...core,assignment_sha256:falObjectSha256(JSON.stringify(core)),submission_receipt_path:path.join(ctx.root,"bulk","repair-submission-receipts",`${directive.image_id}.json`),result_receipt_path:path.join(ctx.root,"bulk","repair-result-receipts",`${directive.image_id}.json`),output_path:original.output_path,upload_receipt_path:path.join(ctx.root,"bulk","repair-upload-receipts",`${directive.image_id}.json`)};const assignmentPath=path.join(ctx.root,"bulk","repair-assignments",`${directive.image_id}.json`);await write(assignmentPath,repair);repairs.push(repair);}
    const result=await submitRows(ctx,repairs,Math.min(ctx.contract.production_concurrency,repairs.length));return console.log(JSON.stringify({status:"repair_submitted",count:result.length,image_ids:repairs.map(r=>r.image_id)},null,2));
@@ -1061,7 +1067,7 @@ async function main(){
      directive_schema:"goldflow_fal_failed_repair_directive_v1",directive_required_fields:["image_id","failed_repair_assignment_sha256","failed_repair_request_id","replacement_prompt","repair_reason","reviewer","note"]},null,2));
  }
  if(action==="repair-failed-repair"){
-   need(f["confirm-spend"]==="exact_fal_repair_v2","Paid second repair requires exact confirmation token.");
+   need(spendOk(ctx,f,"exact_fal_repair_v2"),"Paid second repair requires exact confirmation token.");
    need(path.isAbsolute(f.directives??""),"Second repair requires an absolute reviewed directive.");
    const id=String(f["image-id"]??"");need(/^[a-z0-9][a-z0-9_-]{1,100}$/.test(id),"One exact Fal image ID is required.");
    need(f.directives===path.join(ctx.root,"bulk","repair-v2-directives",`${id}.json`),"Second repair requires the exact reviewed directive path reported by status.");
@@ -1107,7 +1113,7 @@ async function main(){
    const bulk=await readEffectiveBulk(ctx);const rows=[];for(const row of bulk.assignments){const held=await fs.access(path.join(ctx.root,"bulk","transport-holds",`${row.image_id}.json`)).then(()=>true,()=>false),done=await fs.access(row.result_receipt_path).then(()=>true,()=>false),recovered=await fs.access(path.join(ctx.root,"bulk","transport-recovery-result-receipts",`${row.image_id}.json`)).then(()=>true,()=>false);if(held&&!done&&!recovered)rows.push(row);}const result=await observeRows(ctx,rows,ctx.contract.production_concurrency);for(let i=0;i<rows.length;i++){const row=rows[i],observed=result[i];await write(path.join(ctx.root,"bulk","hold-observation-receipts",`${row.image_id}.json`),{schema:"goldflow_fal_hold_observation_v1",observed_at:new Date().toISOString(),image_id:row.image_id,original_assignment_sha256:row.assignment_sha256,original_request_id:(await read(row.submission_receipt_path)).request_id,complete:observed.complete===true,transport_pending:observed.transport_pending===true,transient_observation_timeout:observed.transient_observation_timeout===true});}return console.log(JSON.stringify({status:result.every(r=>r.complete)?"complete":"pending",checked:result.length,complete:result.filter(r=>r.complete).length,pending:result.filter(r=>!r.complete).length},null,2));
  }
  if(action==="recover-holds"){
-   need(f["confirm-spend"]==="exact_fal_transport_recovery","Paid transport recovery requires exact confirmation token.");need(path.isAbsolute(f.directives??""),"Transport recovery requires an absolute --directives file.");
+   need(spendOk(ctx,f,"exact_fal_transport_recovery"),"Paid transport recovery requires exact confirmation token.");need(path.isAbsolute(f.directives??""),"Transport recovery requires an absolute --directives file.");
    const bulk=await readEffectiveBulk(ctx);const directives=await read(f.directives);need(directives?.schema==="goldflow_fal_transport_recovery_directives_v1"&&Array.isArray(directives.recoveries)&&directives.recoveries.length,"Exact transport recovery directives are required.");await preflightPaidRepair(ctx,"bulk/transport-recovery-submission-receipts",directives.recoveries.map(row=>row.image_id));const recoveries=[];
    for(const directive of directives.recoveries){const original=bulk.assignments.find(row=>row.image_id===directive.image_id);need(original&&directive.original_assignment_sha256===original.assignment_sha256,`Transport recovery binding changed for ${directive.image_id}.`);const hold=await read(path.join(ctx.root,"bulk","transport-holds",`${directive.image_id}.json`));need(hold.request_id===directive.original_request_id,`Transport recovery request ID changed for ${directive.image_id}.`);const core={...original,previous_request_id:hold.request_id,transport_recovery_reason:directive.recovery_reason};for(const key of ["assignment_sha256","assignment_path","submission_receipt_path","result_receipt_path","output_path","upload_receipt_path"])delete core[key];const recovery={...core,assignment_sha256:falObjectSha256(JSON.stringify(core)),submission_receipt_path:path.join(ctx.root,"bulk","transport-recovery-submission-receipts",`${directive.image_id}.json`),result_receipt_path:path.join(ctx.root,"bulk","transport-recovery-result-receipts",`${directive.image_id}.json`),output_path:original.output_path,upload_receipt_path:path.join(ctx.root,"bulk","transport-recovery-upload-receipts",`${directive.image_id}.json`)};const assignmentPath=path.join(ctx.root,"bulk","transport-recovery-assignments",`${directive.image_id}.json`);await write(assignmentPath,recovery);recoveries.push(recovery);}
    const result=await submitRows(ctx,recoveries,Math.min(ctx.contract.production_concurrency,recoveries.length));return console.log(JSON.stringify({status:"transport_recovery_submitted",count:result.length,image_ids:recoveries.map(r=>r.image_id)},null,2));
@@ -1125,9 +1131,9 @@ async function main(){
    need(results.length===bulk.assignments.length&&results.length===(await falArtworkOrders({episodeDir:ctx.episodeDir,prompts:plan.prompts})).length,"Fal final owner count does not match the locked artwork allocation."); ({results,cuts}=await completeFalPanelArtwork({episodeDir:ctx.episodeDir,prompts:plan.prompts,results,cuts}));const updatedAt=new Date().toISOString();const report={schema:"goldflow_imagegen_report_v1",status:"passed",image_provider:"fal_ai",prompt_plan_path:planPath,prompt_plan_hash:promptHash,expected_image_count:results.length,unique_generated_image_count:bulk.assignments.length,image_count:results.length,missing_image_count:0,results,updated_at:updatedAt,...(bulk.postplan_prompt_correction_receipt_sha256?{postplan_prompt_correction_receipt_sha256:bulk.postplan_prompt_correction_receipt_sha256}:{})};const ledger={schema:"goldflow_cut_execution_ledger_v1",prompt_plan_path:planPath,prompt_plan_hash:promptHash,cuts,updated_at:updatedAt,...(bulk.postplan_prompt_correction_receipt_sha256?{postplan_prompt_correction_receipt_sha256:bulk.postplan_prompt_correction_receipt_sha256}:{})};const immutableReportPath=path.join(ctx.root,"bulk","image-reports",`${Date.now()}-${digest(JSON.stringify(report)).slice(0,12)}.json`);await write(immutableReportPath,report);await write(path.join(ctx.episodeDir,`imagegen_report_${ctx.identity.episode}.json`),report);await write(path.join(ctx.episodeDir,"cut_execution_ledger.json"),ledger);return console.log(JSON.stringify({status:"passed",image_count:results.length,imagegen_report:path.join(ctx.episodeDir,`imagegen_report_${ctx.identity.episode}.json`),cut_execution_ledger:path.join(ctx.episodeDir,"cut_execution_ledger.json"),immutable_report:immutableReportPath},null,2));
  }
  const plan=await read(await validationPlanPath(ctx));
- if(action==="billing-submit"){need(f["confirm-spend"]==="exact_fal_validation_probe","Paid probe requires exact confirmation token.");return console.log(JSON.stringify({status:"submitted",count:(await submitRows(ctx,[plan.assignments[0]],1)).length},null,2));}
+ if(action==="billing-submit"){need(spendOk(ctx,f,"exact_fal_validation_probe"),"Paid probe requires exact confirmation token.");return console.log(JSON.stringify({status:"submitted",count:(await submitRows(ctx,[plan.assignments[0]],1)).length},null,2));}
  if(action==="billing-observe"){const result=await observeRows(ctx,[plan.assignments[0]],1);return console.log(JSON.stringify({status:result[0].complete?"complete":"pending",result},null,2));}
- if(action==="dispatch-validation"){need(f["confirm-spend"]==="exact_fal_validation_set","Paid validation requires exact confirmation token.");const rows=[];for(const row of plan.assignments.slice(1))if(!await fs.access(row.submission_receipt_path).then(()=>true,()=>false))rows.push(row);return console.log(JSON.stringify({status:"submitted",count:(await submitRows(ctx,rows,8)).length},null,2));}
+ if(action==="dispatch-validation"){need(spendOk(ctx,f,"exact_fal_validation_set"),"Paid validation requires exact confirmation token.");const rows=[];for(const row of plan.assignments.slice(1))if(!await fs.access(row.submission_receipt_path).then(()=>true,()=>false))rows.push(row);return console.log(JSON.stringify({status:"submitted",count:(await submitRows(ctx,rows,8)).length},null,2));}
  if(action==="observe-validation"){const rows=[];for(const row of plan.assignments)if(!await fs.access(row.result_receipt_path).then(()=>true,()=>false))rows.push(row);const result=await observeRows(ctx,rows,8);return console.log(JSON.stringify({status:result.every(r=>r.complete)?"complete":"pending",complete:result.filter(r=>r.complete).length,pending:result.filter(r=>!r.complete).length},null,2));}
  if(action==="review-validation"){const approved=String(f["approve-ids"]??"").split(",").filter(Boolean),rejected=String(f["reject-ids"]??"").split(",").filter(Boolean);need(f.reviewer&&f.note,"Review requires reviewer and note.");need(approved.length+rejected.length===8&&new Set([...approved,...rejected]).size===8,"Review must disposition all eight exact IDs.");const nativeFal=ctx.identity.visual_restart?.fork_at==="visual_reference_plan";const critical=nativeFal?[plan.assignments[0].image_id]:[plan.assignments[0].image_id,"openart-validation-four-person-roulette-v1","openart-validation-wide-grand-salon-v1"];const status=approved.length>=7&&critical.every(id=>approved.includes(id))?"passed":"failed";const review={schema:"goldflow_fal_validation_review_v1",created_at:new Date().toISOString(),reviewer:f.reviewer,note:f.note,status,approved_ids:approved,rejected_ids:rejected,criteria:nativeFal?["identity consistency","hands","prop fidelity","environment detail","composition","unwanted text"]:["identity consistency","hands","prop fidelity","casino detail","composition","unwanted text"],minor_cosmetic_differences_accepted:true};await write(await validationReviewPath(ctx),review);return console.log(JSON.stringify(review,null,2));}
  throw new Error(`Unsupported Fal action: ${action}`);

@@ -51,7 +51,7 @@ try {
   const absent = async (target) => assert.equal(await fs.stat(target).then(() => false, (error) => error.code === "ENOENT"), true);
 
   assert.equal(resolveMediaWorkflow({}).id, "generated_visuals_v1");
-  assert.equal(stageRegistryFor({}).length, 37);
+  assert.equal(stageRegistryFor({}).length, 38);
   assert.throws(() => mediaWorkflowForPreflight({ contentProfile: "manhwa_recap_v1", mediaWorkflow: "avatar_footage_pilot_v1" }), /together|paired|requires/i);
   assert.throws(() => mediaWorkflowForPreflight({ contentProfile: "mcu_what_if_pilot_v1", mediaWorkflow: "generated_visuals_v1" }), /together|paired|requires/i);
   assert.throws(() => mediaWorkflowForPreflight({ contentProfile: "mcu_what_if_pilot_v1", mediaWorkflow: "unknown_workflow" }), /Unknown/);

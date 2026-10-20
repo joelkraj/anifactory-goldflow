@@ -44,6 +44,7 @@ import { narrationManualReviewAdmission } from "../scripts/lib/narration-manual-
 import { pronunciationGuardAdmission } from "../scripts/lib/narration-pronunciation-repair.mjs";
 import { contractionGuardAdmission } from "../scripts/lib/narration-contraction-repair.mjs";
 import { appendOnlyTailGuardAdmission } from "../scripts/lib/narration-append-only-tail.mjs";
+import { guardFlagsForEpisodeBudget } from "../scripts/lib/episode-budget.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
@@ -93,7 +94,7 @@ function statusArgsFor(parsedFlags) {
 }
 
 function enforceWorkflowGuard(commandName, subcommandName, scriptArgs, episodeDir) {
-  const parsedFlags = parseFlags(scriptArgs);
+  let parsedFlags = parseFlags(scriptArgs);
   if (isTrue(parsedFlags["workflow-bypass"]) || isTrue(process.env.GOLDFLOW_WORKFLOW_BYPASS)) return;
   const expectedStage = commandStage(commandName, subcommandName, parsedFlags, episodeDir);
   if (!expectedStage) return;
@@ -119,6 +120,9 @@ function enforceWorkflowGuard(commandName, subcommandName, scriptArgs, episodeDi
     console.error("Workflow guard could not parse run status JSON.");
     process.exit(1);
   }
+  // A budget-locked identity admits the single episode_budget token wherever
+  // status names an exact per-dispatch token; the episode cap is enforced at submission.
+  parsedFlags = guardFlagsForEpisodeBudget(result, parsedFlags);
   const currentStage = result.current_stage;
   const allowedStages = Array.isArray(result.allowed_command_stages)
     ? result.allowed_command_stages
@@ -491,6 +495,7 @@ Commands:
 ${registryCommands}
   goldflow run codex-doctor        Inspect the identity-locked Web/Codex planning runtime
   goldflow run status              Print the artifact-backed stage ledger
+  goldflow run auto                Drive an autopilot episode to its final watch or publish approval
   goldflow run media-ready         Prepare and verify persistent Flow/Gemini image lanes
   goldflow run advance             Advance automatic stages continuously using the locked production profile
   goldflow run director            Show, advance, or persistently babysit the eight-phase production view
@@ -781,6 +786,8 @@ if (command === "crime-proof" && !helpRequested) {
   run("winner-source.mjs", [subcommand, ...flags]);
 } else if (command === "ingest" && subcommand === "source") {
   run("source-ingest.mjs", flags);
+} else if (command === "script" && subcommand === "power-audit") {
+  run("power-system-comprehension-audit.mjs", flags);
 } else if (command === "script" && subcommand === "approve") {
   run("script-approve.mjs", flags);
 } else if (command === "script" && subcommand === "pace-check") {
@@ -943,6 +950,12 @@ if (command === "crime-proof" && !helpRequested) {
   run("render-report-finalize.mjs", flags);
 } else if (command === "final" && subcommand === "qa") {
   run("final-qa.mjs", flags);
+} else if (command === "youtube" && ["auto-upload", "publish", "author-packaging"].includes(subcommand)) {
+  run("youtube-autopilot.mjs", [subcommand, ...flags]);
+} else if (command === "run" && subcommand === "final-watch") {
+  run("run-final-watch.mjs", flags);
+} else if (command === "run" && subcommand === "auto") {
+  run("run-auto.mjs", flags);
 } else if (command === "youtube" && subcommand === "approve-packaging") {
   run("youtube-publish.mjs", ["approve-packaging", ...flags]);
 } else if (command === "youtube" && subcommand === "approve-ab-test") {

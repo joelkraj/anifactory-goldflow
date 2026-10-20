@@ -35,6 +35,9 @@ export const YOUTUBE_THUMBNAIL_GENERATION_CONTRACT = Object.freeze({
   locally_composited_arrows: false,
 });
 
+// Studio settings that the YouTube Data API v3 cannot read back.
+export const YOUTUBE_API_UNVERIFIABLE_FIELDS = Object.freeze(["monetization", "mid_rolls", "comments"]);
+
 export const LEGACY_YOUTUBE_PACKAGING_ADAPTER_WARNING =
   "legacy_packaging_spec_v1_thumbnail_generation_provenance_unverified";
 export const YOUTUBE_THUMBNAIL_UPDATE_RECEIPT_SCHEMA = "goldflow_youtube_thumbnail_update_receipt_v1";
@@ -621,6 +624,14 @@ export function validateYoutubeUploadReceipt(receipt, options = {}) {
   const verification = receipt?.field_verification ?? {};
   const requiredVerifications = [...REQUIRED_UPLOAD_FIELD_VERIFICATIONS];
   if (clean(manifest?.publish_settings?.mid_roll_mode) === "manual") requiredVerifications.push("mid_rolls");
+  // An automated private Data API upload cannot read Studio-only settings; it
+  // defers exactly those to the human publish approval.
+  const apiDeferred = receipt?.verification_method === "youtube_data_api_v3"
+    && /^automated:[a-z][a-z0-9_]{2,63}$/.test(clean(receipt?.recorded_by)) && visibility === "private"
+    ? (receipt?.deferred_field_verification ?? []).filter((field) => YOUTUBE_API_UNVERIFIABLE_FIELDS.includes(field))
+    : [];
+  push(blockers, (receipt?.deferred_field_verification ?? []).some((field) => !apiDeferred.includes(field)), "youtube_upload_receipt_deferral_invalid");
+  const verifiedNow = requiredVerifications.filter((field) => !apiDeferred.includes(field));
   push(blockers, receipt?.schema !== YOUTUBE_UPLOAD_RECEIPT_SCHEMA, "youtube_upload_receipt_schema_invalid");
   push(blockers, clean(receipt?.status) !== "passed", "youtube_upload_receipt_not_passed");
   push(blockers, !manifest || receipt?.manifest_sha256 !== manifestHash, "youtube_upload_receipt_manifest_hash_stale");
@@ -653,7 +664,7 @@ export function validateYoutubeUploadReceipt(receipt, options = {}) {
   }
   push(
     blockers,
-    requiredVerifications.some((field) => verification[field] !== true),
+    verifiedNow.some((field) => verification[field] !== true),
     "youtube_upload_receipt_fields_not_all_verified",
   );
   return { status: blockers.length ? "blocked" : "passed", blockers: uniqueStrings(blockers) };

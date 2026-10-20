@@ -1757,7 +1757,7 @@ function transcriptInputText(value) {
     : String(value ?? "");
 }
 
-export const TRANSCRIPT_QA_COMPARISON_VERSION = "unicode_words_exact_im_numeric_currency_cents_half_scale_v10";
+export const TRANSCRIPT_QA_COMPARISON_VERSION = "unicode_words_exact_grouped_numbers_honorific_spelling_v11";
 
 const TRANSCRIPT_PUNCTUATION = new Set([".", ",", ";", ":", "!", "?", "…"]);
 
@@ -1772,6 +1772,9 @@ function rawTranscriptTokens(value) {
     // Do not expand ambiguous 's/'d forms or an unpunctuated name such as Im.
     .replace(/(?<![\p{L}\p{M}])I['’]m(?![\p{L}\p{M}])/giu, "I am")
     .replace(/\b(thousand|million|billion)fold\b/gi, "$1 fold")
+    .replace(/\bDr\.(?=\s|$)/g, "doctor")
+    .replace(/\bMr\.(?=\s|$)/g, "mister")
+    .replace(/\bcancelled\b/gi, "canceled")
     .replace(/([\p{L}\p{M}])[-‐‑‒–—]([\p{L}\p{M}])/gu, "$1 $2")
     .match(/[+-]?\d+(?:,\d{3})*(?:\.\d+)?(?:st|nd|rd|th|%|[xXsS])?|\bSt\.|[\p{L}\p{M}]+(?:['’][\p{L}\p{M}]+)?|[/$%.,;:!?…]/giu) ?? [])
     .map((raw) => {
@@ -1953,6 +1956,9 @@ function canonicalTranscriptTokensWithoutAliases(value, preserveBoundaries = fal
     } else if (base[index] === "wi" && base[index + 1] === "fi") {
       compounds.push("wifi");
       index += 1;
+    } else if (base[index] === "every" && base[index + 1] === "one") {
+      compounds.push("everyone");
+      index += 1;
     } else if (base[index] === "every" && base[index + 1] === "body") {
       compounds.push("everybody");
       index += 1;
@@ -2073,6 +2079,42 @@ function transcriptTokens(value, equivalentPhrases = [], preserveBoundaries = fa
   }).sort((left, right) => right.pattern.length - left.pattern.length);
   for (const { pattern, alias } of aliases) tokens = replaceTokenSequence(tokens, pattern, alias);
   return tokens;
+}
+
+// Pairwise notation reconciliation only. Adjacent spoken number groups can be
+// written as one identifier/clock string by ASR. Punctuation, currencies, changed
+// digits, intervening words, and ordinary hundred/scale arithmetic remain distinct.
+function alignGroupedNumberNotation(leftTokens, rightTokens, leftText, rightText, aliases) {
+  const left = [...leftTokens], right = [...rightTokens];
+  const collapse = (tokens, other, text) => {
+    const marked = transcriptTokens(text, aliases, true);
+    const boundaries = new Set();
+    let cursor = 0;
+    for (const token of marked) {
+      if (token === "transcript_boundary") boundaries.add(cursor);
+      else cursor += 1;
+    }
+    if (cursor !== tokens.length) return;
+    const groups = [];
+    for (let i = 0; i < tokens.length; i += 1) {
+      if (!/^num:[1-9]\d?$/.test(tokens[i])) continue;
+      let digits = tokens[i].slice(4);
+      for (let end = i + 1; end <= Math.min(i + 2, tokens.length - 1); end += 1) {
+        if (boundaries.has(end)) break;
+        const part = tokens[end] === "oh" ? "0" : /^num:\d{1,2}$/.test(tokens[end]) ? tokens[end].slice(4) : null;
+        if (part === null) break;
+        digits += part;
+        if (tokens[end] === "oh") continue;
+        const matches = [...new Set(other.filter((t) => /^num:\d{3,4}$/.test(t) && t.slice(4) === digits
+          || /^num:\d{1,2}\.\d{2}$/.test(t) && t.slice(4).replace(".", "") === digits))];
+        if (matches.length === 1) { groups.push({ start: i, count: end - i + 1, token: matches[0] }); i = end; break; }
+      }
+    }
+    for (const group of groups.reverse()) tokens.splice(group.start, group.count, group.token);
+  };
+  collapse(left, right, leftText);
+  collapse(right, left, rightText);
+  return { left, right };
 }
 
 function alignTranscriptNotation(intendedTokens, recognizedTokens) {
@@ -2310,9 +2352,11 @@ function transcriptQa(intendedText, recognizedText, {
   const wordsOnly = (tokens) => tokens.filter((token) => !TRANSCRIPT_PUNCTUATION.has(token) && token !== "$");
   const intendedRaw = wordsOnly(rawTranscriptTokens(intendedText));
   const recognizedRaw = wordsOnly(rawTranscriptTokens(recognizedText));
-  const { intended, recognized } = alignTranscriptNotation(
+  const grouped = alignGroupedNumberNotation(
     transcriptTokens(intendedText, equivalentPhrases), transcriptTokens(recognizedText, equivalentPhrases),
+    intendedText, recognizedText, equivalentPhrases,
   );
+  const { intended, recognized } = alignTranscriptNotation(grouped.left, grouped.right);
   const operations = transcriptAlignment(intended, recognized);
   const phoneticSpellingEquivalences = alignContractionRecognition(
     operations, intended, recognized, intendedText, recognizedText, equivalentPhrases,

@@ -45,4 +45,8 @@ test('only required person and location references can block a page', () => {
   assert.deepEqual(denseAllocationFindings({ asset_orders: [page(['b1'])] }, c).map(row => row.code), ['page_required_references_over_cap'], 'seven distinct people need seven references');
   assert.deepEqual(c.get('b2').required_ref_groups, ['location:room', 'person:a'], 'alternate outfits and props are optional');
 });
+test('typed visible entities count persons only, never groups', () => {
+  const beat = { visual_beat_id: 'g1', visible_characters: ['Joey Carter', 'Crestwood security personnel'], visible_entities: [{ entity_id: 'joey_carter', display_name: 'Joey Carter', kind: 'person' }, { entity_id: 'crestwood_security', display_name: 'Crestwood security personnel', kind: 'group' }] };
+  assert.deepEqual(beatAllocationConstraints({ beats: [beat], referencePlan: {} }).get('g1').people, ['Joey Carter']);
+});
 console.log(`Panel page allocation: ${count} test groups passed.`);

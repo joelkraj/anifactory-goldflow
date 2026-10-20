@@ -11,6 +11,16 @@ export const DENSE_ALLOCATION_TARGET = Object.freeze({ beats_per_generation: 5, 
 const named = value => String(value?.name ?? value ?? '').trim();
 const anonymous = name => /^(anonymous|unnamed|gala guests|attending|local news|crowd|guests|attendees)/i.test(name);
 
+// Individual people only: typed visible entities of kind person when the beat
+// plan has them (groups such as security staff or a crowd never count);
+// otherwise display names minus known anonymous labels.
+function beatPeople(beat) {
+  const typed = Array.isArray(beat.visible_entities) && beat.visible_entities.length
+    ? beat.visible_entities.filter(entity => entity?.kind === 'person').map(entity => named(entity.display_name ?? entity.entity_id))
+    : (beat.visible_characters ?? []).map(named).filter(name => !anonymous(name));
+  return [...new Set(typed.filter(Boolean))].sort();
+}
+
 /** Per-beat references (generated targets only), named people, location and scene. */
 export function beatAllocationConstraints({ beats, referencePlan }) {
   const refsByBeat = new Map(), groupsByBeat = new Map();
@@ -32,7 +42,7 @@ export function beatAllocationConstraints({ beats, referencePlan }) {
     location_id: beat.location_id ?? null,
     refs: [...(refsByBeat.get(beat.visual_beat_id) ?? [])].sort(),
     required_ref_groups: [...(groupsByBeat.get(beat.visual_beat_id) ?? [])].sort(),
-    people: [...new Set((beat.visible_characters ?? []).map(named).filter(name => name && !anonymous(name)))].sort(),
+    people: beatPeople(beat),
     duration_sec: Number(beat.duration_sec ?? (beat.end_sec - beat.start_sec)) || 0,
   }]));
 }

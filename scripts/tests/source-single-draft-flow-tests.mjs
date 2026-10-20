@@ -478,7 +478,7 @@ function fullRunResponder(rounds) {
 
 // --- Codex exec provider through a fake executable (no real CLI call) ---------------------
 {
-  const { codexExecArgs, runCodexExec } = await import("../lib/codex-exec-runner.mjs");
+  const { codexExecArgs, runCodexExec } = await import("../lib/codex-cli-runner.mjs");
   const fakeDirectory = path.join(tmpRoot, "fake-codex");
   await mkdir(fakeDirectory, { recursive: true });
   const fakePath = path.join(fakeDirectory, "codex");
@@ -540,7 +540,7 @@ process.stdin.on("end", () => {
 
 // --- Claude Code print provider through a fake executable (no real CLI call) -------------
 {
-  const { claudeCodePrintArgs, runClaudeCodePrint } = await import("../lib/claude-code-print-runner.mjs");
+  const { claudeCodePrintArgs, runClaudeCodePrint } = await import("../lib/codex-cli-runner.mjs");
   const fakeDirectory = path.join(tmpRoot, "fake-claude");
   await mkdir(fakeDirectory, { recursive: true });
   const fakePath = path.join(fakeDirectory, "claude");

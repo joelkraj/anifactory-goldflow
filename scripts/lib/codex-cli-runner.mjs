@@ -2,6 +2,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { request as httpRequest } from "node:http";
+import os from "node:os";
 import path from "node:path";
 import { runChatGptWebPlanner } from "../chatgpt-web-planner-helper.mjs";
 import { acquireFederatedPlannerSlot } from "./planner-capacity-pool.mjs";
@@ -223,6 +224,76 @@ function localStudioRequestError(providerLabel, response) {
 async function writeMetadata(outputPath, metadata) {
   await fs.mkdir(path.dirname(outputPath), { recursive: true });
   await fs.writeFile(codexCallMetadataPath(outputPath), `${JSON.stringify(metadata, null, 2)}\n`, "utf8");
+}
+
+// One receipt schema for every CLI/web call this module makes. Every transport
+// records the same core fields; provider-specific extras are additive. Receipts
+// written by the folded source-manufacture runners (codex-exec-runner.mjs and
+// claude-code-print-runner.mjs) carry the same schema id and remain readable
+// under their recorded transport names, listed in RECEIPT_TRANSPORT_ALIASES.
+export const CODEX_CALL_METADATA_SCHEMA = "goldflow_codex_call_metadata_v1";
+export const RECEIPT_TRANSPORT_ALIASES = Object.freeze({
+  codex_cli: Object.freeze({ provider: "codex_cli", runner: "codex-cli-runner.mjs", role: "planner" }),
+  codex_exec_cli: Object.freeze({ provider: "codex_cli", runner: "codex-exec-runner.mjs (folded into codex-cli-runner.mjs)", role: "source_manufacture" }),
+  claude_code_headless_cli: Object.freeze({ provider: "claude_cli", runner: "codex-cli-runner.mjs", role: "planner" }),
+  claude_code_headless_print: Object.freeze({ provider: "claude_cli", runner: "claude-code-print-runner.mjs (folded into codex-cli-runner.mjs)", role: "source_manufacture" }),
+  antigravity_cli: Object.freeze({ provider: "antigravity_cli", runner: "codex-cli-runner.mjs", role: "planner" }),
+  goldflow_studio_local_api: Object.freeze({ provider: "chatgpt_web|gemini_web", runner: "codex-cli-runner.mjs", role: "planner" }),
+  goldflow_authenticated_browser_jobs: Object.freeze({ provider: "chatgpt_web", runner: "codex-cli-runner.mjs", role: "planner" }),
+});
+
+export function receiptTransportAlias(transport) {
+  return RECEIPT_TRANSPORT_ALIASES[String(transport ?? "")] ?? null;
+}
+
+// Cost/usage fields shared by every receipt. Subscription CLIs record null
+// (unrecorded), never 0; Claude's print envelope fills them when present.
+function usageFields(envelope = null) {
+  return {
+    provider_duration_seconds: Number(envelope?.duration_ms ?? NaN) / 1000 || null,
+    provider_usage: envelope?.usage ?? null,
+    provider_model_usage: envelope?.modelUsage ?? null,
+    provider_cost_usd: envelope?.total_cost_usd ?? null,
+  };
+}
+
+// The single child-process call layer: spawn a CLI, feed the prompt on stdin,
+// collect stdout/stderr, enforce one timeout, no automatic retry.
+function spawnCliWithPrompt({ executable, args, cwd, prompt, timeoutMs, label, detached = false, killGrace = true }) {
+  let stdout = "";
+  let stderr = "";
+  const done = new Promise((resolve, reject) => {
+    const child = spawn(executable, args, {
+      cwd,
+      env: { ...process.env, NO_COLOR: "1" },
+      stdio: ["pipe", "pipe", "pipe"],
+      detached,
+    });
+    const signalChild = (signal) => {
+      try {
+        if (detached && child.pid) process.kill(-child.pid, signal);
+        else child.kill(signal);
+      } catch {
+        try { child.kill(signal); } catch {}
+      }
+    };
+    const timer = setTimeout(() => {
+      signalChild("SIGTERM");
+      if (killGrace) setTimeout(() => signalChild("SIGKILL"), 5_000).unref();
+      reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    timer.unref();
+    child.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
+    child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+    child.on("error", (error) => { clearTimeout(timer); reject(error); });
+    child.stdin.on("error", (error) => { clearTimeout(timer); child.kill("SIGTERM"); reject(error); });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      code === 0 ? resolve() : reject(new Error(`${label} exited ${code}: ${compactProviderError(stderr || stdout)}`));
+    });
+    child.stdin.end(String(prompt ?? ""));
+  });
+  return { done, output: () => ({ stdout, stderr }) };
 }
 
 async function postLocalJson(url, token, body, timeoutMs) {
@@ -762,7 +833,7 @@ async function runClaudeCompletion({
   const executable = String(process.env.ANIFACTORY_CLAUDE_CLI_PATH ?? "claude").trim();
   const args = claudeNativeArgsForTests({ model: resolvedModel, effort: resolvedEffort });
   const common = {
-    schema: "goldflow_codex_call_metadata_v1",
+    schema: CODEX_CALL_METADATA_SCHEMA,
     stage_name: stageName,
     provider: "claude_cli",
     transport: "claude_code_headless_cli",
@@ -777,37 +848,19 @@ async function runClaudeCompletion({
     output_path: outputPath,
     started_at: startedAt,
   };
-  let stdout = "";
-  let stderr = "";
   try {
-    await new Promise((resolve, reject) => {
-      const child = spawn(executable, args, { cwd, env: { ...process.env, NO_COLOR: "1" }, stdio: ["pipe", "pipe", "pipe"] });
-      const timer = setTimeout(() => {
-        child.kill("SIGTERM");
-        reject(new Error(`Claude ${stageName} timed out after ${timeoutMs}ms`));
-      }, timeoutMs);
-      timer.unref();
-      child.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
-      child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
-      child.on("error", (error) => { clearTimeout(timer); reject(error); });
-      child.stdin.on("error", (error) => { clearTimeout(timer); child.kill("SIGTERM"); reject(error); });
-      child.on("close", (code) => {
-        clearTimeout(timer);
-        code === 0 ? resolve() : reject(new Error(`Claude ${stageName} exited ${code}: ${compactProviderError(stderr || stdout)}`));
-      });
-      child.stdin.end(String(prompt ?? ""));
-    });
-    const parsed = claudeContentFromStdoutForTests(stdout);
+    const call = spawnCliWithPrompt({ executable, args, cwd, prompt, timeoutMs, label: `Claude ${stageName}`, killGrace: false });
+    await call.done;
+    const parsed = claudeContentFromStdoutForTests(call.output().stdout);
     if (!String(parsed.content).trim()) throw new Error(`Claude ${stageName} returned no output.`);
     await fs.writeFile(outputPath, parsed.content, "utf8");
+    const version = claudeCliVersion(executable);
     const metadata = {
       ...common,
       status: "passed",
-      claude_cli_version: claudeCliVersion(executable),
-      provider_duration_seconds: Number(parsed.envelope?.duration_ms ?? NaN) / 1000 || null,
-      provider_usage: parsed.envelope?.usage ?? null,
-      provider_model_usage: parsed.envelope?.modelUsage ?? null,
-      provider_cost_usd: parsed.envelope?.total_cost_usd ?? null,
+      claude_cli_version: version,
+      cli_version: version,
+      ...usageFields(parsed.envelope),
       provider_conversation_id: parsed.envelope?.session_id ?? null,
       output_sha256: createHash("sha256").update(parsed.content).digest("hex"),
       completed_at: new Date().toISOString(),
@@ -821,6 +874,195 @@ async function runClaudeCompletion({
       failed_at: new Date().toISOString(),
       error: error instanceof Error ? error.message : String(error),
     }).catch(() => {});
+    throw error;
+  }
+}
+
+
+// ---------------------------------------------------------------------------
+// Source-manufacture transports (folded from scripts/lib/codex-exec-runner.mjs
+// and scripts/lib/claude-code-print-runner.mjs). These take an explicit model
+// and effort from the per-run manufacturing model lock and never consult the
+// planning-room routing above. Same receipt schema, same single call layer.
+// ---------------------------------------------------------------------------
+
+export const CODEX_EXEC_PROVIDER = "codex_cli";
+export const CODEX_EXEC_TRANSPORT = "codex_exec_cli";
+export const CODEX_EXEC_EFFORTS = Object.freeze(["low", "medium", "high", "xhigh", "max"]);
+export const CLAUDE_CODE_PROVIDER = "claude_cli";
+export const CLAUDE_CODE_TRANSPORT = "claude_code_headless_print";
+export const CLAUDE_CODE_EFFORTS = CODEX_EXEC_EFFORTS;
+
+function sha256Text(value) {
+  return createHash("sha256").update(String(value ?? "")).digest("hex");
+}
+
+async function refuseExistingOutput(outputPath) {
+  // A passed output is immutable; refuse before spending a call rather than after.
+  if (await fs.stat(outputPath).then(() => true, () => false)) {
+    throw new Error(`EEXIST: ${outputPath} already exists; resume reuses it instead of submitting again.`);
+  }
+}
+
+function failedReceipt(common, error) {
+  return {
+    ...common,
+    status: "failed",
+    failed_at: new Date().toISOString(),
+    error: error instanceof Error ? error.message : String(error),
+  };
+}
+
+// `codex exec` in a read-only sandbox inside an empty scratch directory, ignoring the user's
+// config.toml (auth still comes from CODEX_HOME), no session, one timeout, no retry. Flags were
+// checked against `codex exec --help` (codex-cli 0.163.0).
+export function codexExecExecutable() {
+  const explicit = String(process.env.ANIFACTORY_CODEX_CLI_PATH ?? process.env.CODEX_CLI_PATH ?? "").trim();
+  if (explicit) return explicit;
+  const found = spawnSync("/usr/bin/which", ["codex"], { encoding: "utf8", timeout: 5_000 });
+  return found.status === 0 && found.stdout.trim() ? found.stdout.trim() : "codex";
+}
+
+export function codexExecArgs({ model, effort, workdir, lastMessagePath }) {
+  const value = String(model ?? "").trim();
+  if (!value) throw new Error("Codex exec calls need an explicit model.");
+  const level = String(effort ?? "").trim().toLowerCase();
+  if (!CODEX_EXEC_EFFORTS.includes(level)) throw new Error(`Unsupported Codex reasoning effort: ${effort}`);
+  return [
+    "exec",
+    "--ephemeral",
+    "--skip-git-repo-check",
+    "--ignore-user-config",
+    "--sandbox", "read-only",
+    "--color", "never",
+    "-C", workdir,
+    "-m", value,
+    "-c", `model_reasoning_effort="${level}"`,
+    "-o", lastMessagePath,
+    "-",
+  ];
+}
+
+// Writes the raw output once and its .meta.json receipt, and returns { content, ...metadata }.
+export async function runCodexExec({ prompt, stageName, outputPath, model, reasoningEffort, timeoutMs = 2_400_000 }) {
+  await refuseExistingOutput(outputPath);
+  const executable = codexExecExecutable();
+  const startedAt = new Date().toISOString();
+  const workdir = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-codex-exec-"));
+  const lastMessagePath = path.join(workdir, "last_message.txt");
+  const args = codexExecArgs({ model, effort: reasoningEffort, workdir, lastMessagePath });
+  const version = executableVersion(executable);
+  const common = {
+    schema: CODEX_CALL_METADATA_SCHEMA,
+    stage_name: stageName,
+    provider: CODEX_EXEC_PROVIDER,
+    transport: CODEX_EXEC_TRANSPORT,
+    model: String(model).trim(),
+    reasoning_effort: String(reasoningEffort).trim().toLowerCase(),
+    sandbox: "read-only",
+    codex_cli_path: executable,
+    codex_cli_version: version?.version ?? null,
+    cli_version: version?.version ?? null,
+    prompt_sha256: sha256Text(prompt),
+    output_path: outputPath,
+    timeout_ms: timeoutMs,
+    started_at: startedAt,
+  };
+  await fs.mkdir(path.dirname(outputPath), { recursive: true });
+  try {
+    // The configured per-model floor (config/planner-models.json) is the first CLI release
+    // whose bundled catalog lists the model; refuse an older CLI before any submission.
+    const minimum = minimumCodexVersionForModel(model);
+    if (minimum && minimum.version !== "0.0.0" && (!version || compareCodexVersions(version, minimum) < 0)) {
+      throw new Error(`Codex CLI ${version?.version ?? "unknown"} at ${executable} is older than ${minimum.version}, the first release listing ${model}.`);
+    }
+    await spawnCliWithPrompt({ executable, args, cwd: workdir, prompt, timeoutMs, label: `Codex ${stageName}` }).done;
+    const content = await fs.readFile(lastMessagePath, "utf8").catch(() => "");
+    if (!content.trim()) throw new Error(`Codex ${stageName} returned no final message.`);
+    await fs.writeFile(outputPath, content, { encoding: "utf8", flag: "wx" });
+    const metadata = { ...common, status: "passed", ...usageFields(null), output_sha256: sha256Text(content), completed_at: new Date().toISOString() };
+    await writeMetadata(outputPath, metadata);
+    return { content, outputPath, ...metadata };
+  } catch (error) {
+    await writeMetadata(outputPath, failedReceipt(common, error)).catch(() => {});
+    throw error;
+  } finally {
+    await fs.rm(workdir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+// Claude Code headless print mode (`claude -p`), not the Anthropic API. Read-only: built-in
+// tools, MCP servers, slash commands/skills and hooks are disabled, no session is persisted,
+// no retry. Flags were checked against `claude --help` (Claude Code 2.1.302).
+export function claudeCodeExecutable() {
+  return String(process.env.ANIFACTORY_CLAUDE_CLI_PATH ?? "claude").trim();
+}
+
+export function claudeCodePrintArgs({ model, effort }) {
+  const value = String(model ?? "").trim();
+  if (!value) throw new Error("Claude Code calls need an explicit --model.");
+  const level = String(effort ?? "").trim().toLowerCase();
+  if (!CLAUDE_CODE_EFFORTS.includes(level)) throw new Error(`Unsupported Claude Code effort: ${effort}`);
+  return [
+    "-p",
+    "--output-format", "json",
+    "--model", value,
+    "--effort", level,
+    "--no-session-persistence",
+    "--tools", "",
+    "--disallowedTools", "*",
+    "--strict-mcp-config",
+    "--mcp-config", "{\"mcpServers\":{}}",
+    "--disable-slash-commands",
+    "--settings", "{\"disableAllHooks\":true}",
+  ];
+}
+
+// One Claude print-envelope parser for both Claude transports.
+export const claudeCodeResultFromStdout = claudeContentFromStdoutForTests;
+
+// Same contract as runCodexCli: writes the raw output once and its .meta.json receipt and
+// returns { content, ...metadata }. The receipt records provider, model and effort for resume checks.
+export async function runClaudeCodePrint({ prompt, stageName, outputPath, model, reasoningEffort, timeoutMs = 2_400_000, cwd = process.cwd() }) {
+  const executable = claudeCodeExecutable();
+  const args = claudeCodePrintArgs({ model, effort: reasoningEffort });
+  const startedAt = new Date().toISOString();
+  const common = {
+    schema: CODEX_CALL_METADATA_SCHEMA,
+    stage_name: stageName,
+    provider: CLAUDE_CODE_PROVIDER,
+    transport: CLAUDE_CODE_TRANSPORT,
+    model: String(model).trim(),
+    reasoning_effort: String(reasoningEffort).trim().toLowerCase(),
+    executable,
+    args,
+    prompt_sha256: sha256Text(prompt),
+    output_path: outputPath,
+    timeout_ms: timeoutMs,
+    started_at: startedAt,
+  };
+  await fs.mkdir(path.dirname(outputPath), { recursive: true });
+  await refuseExistingOutput(outputPath);
+  try {
+    const call = spawnCliWithPrompt({ executable, args, cwd, prompt, timeoutMs, label: `Claude Code ${stageName}`, killGrace: false });
+    await call.done;
+    const parsed = claudeCodeResultFromStdout(call.output().stdout);
+    await fs.writeFile(outputPath, parsed.content, { encoding: "utf8", flag: "wx" });
+    const version = claudeCliVersion(executable);
+    const metadata = {
+      ...common,
+      status: "passed",
+      claude_cli_version: version,
+      cli_version: version,
+      ...usageFields(parsed.envelope),
+      provider_conversation_id: parsed.envelope?.session_id ?? null,
+      output_sha256: sha256Text(parsed.content),
+      completed_at: new Date().toISOString(),
+    };
+    await writeMetadata(outputPath, metadata);
+    return { content: parsed.content, outputPath, ...metadata };
+  } catch (error) {
+    await writeMetadata(outputPath, failedReceipt(common, error)).catch(() => {});
     throw error;
   }
 }
@@ -908,48 +1150,14 @@ async function runCodexCliWithResolvedProvider({
     "-o",
     outputPath,
   ];
-  let stdout = "";
-  let stderr = "";
   try {
-    await new Promise((resolve, reject) => {
-      const child = spawn(runtime.executable, args, {
-        cwd,
-        env: { ...process.env, NO_COLOR: "1" },
-        stdio: ["pipe", "pipe", "pipe"],
-        detached,
-      });
-      const timer = setTimeout(() => {
-        try {
-          if (detached && child.pid) process.kill(-child.pid, "SIGTERM");
-          else child.kill("SIGTERM");
-        } catch {
-          child.kill("SIGTERM");
-        }
-        setTimeout(() => {
-          try {
-            if (detached && child.pid) process.kill(-child.pid, "SIGKILL");
-            else child.kill("SIGKILL");
-          } catch {}
-        }, 5_000).unref();
-        reject(new Error(`Codex ${stageName} timed out after ${timeoutMs}ms`));
-      }, timeoutMs);
-      timer.unref();
-      child.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
-      child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
-      child.on("error", (error) => {
-        clearTimeout(timer);
-        reject(error);
-      });
-      child.on("exit", (code) => {
-        clearTimeout(timer);
-        code === 0 ? resolve() : reject(new Error(`Codex ${stageName} exited ${code}: ${compactProviderError(stderr || stdout)}`));
-      });
-      child.stdin.end(prompt);
-    });
+    const call = spawnCliWithPrompt({ executable: runtime.executable, args, cwd, prompt, timeoutMs, label: `Codex ${stageName}`, detached });
+    await call.done;
+    const { stdout, stderr } = call.output();
     const content = await fs.readFile(outputPath, "utf8").catch(() => stdout || stderr);
     const outputSha256 = createHash("sha256").update(content).digest("hex");
     const metadata = {
-      schema: "goldflow_codex_call_metadata_v1",
+      schema: CODEX_CALL_METADATA_SCHEMA,
       status: "passed",
       stage_name: stageName,
       provider: "codex_cli",
@@ -969,6 +1177,8 @@ async function runCodexCliWithResolvedProvider({
       verbosity,
       codex_cli_path: runtime.executable,
       codex_cli_version: runtime.version,
+      cli_version: runtime.version,
+      ...usageFields(null),
       prompt_sha256: promptHash,
       output_sha256: outputSha256,
       output_path: outputPath,

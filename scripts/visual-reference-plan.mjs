@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { createHash } from "node:crypto";
+import { PANEL_REFERENCE_SELECTION_GUIDANCE, referenceSelectionBasisFindings, referenceSelectionSummary } from "./lib/reference-selection-basis.mjs";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -33,6 +34,8 @@ const series = flags.series ?? flags.seriesSlug ?? "series";
 const week = flags.week ?? "current";
 const episode = flags.episode ?? "ep_01";
 let activeContentProfile = contentProfileForIdentity({});
+// Panel-composition runs record a reference selection basis (follow-up 9).
+let activePanelSelection = false;
 const weekDir = path.join(dataRoot, "channels", channel, "weekly_runs", week);
 const episodeDir = path.join(weekDir, "episodes", episode);
 const runIdentityPath = path.join(episodeDir, "run_identity.json");
@@ -2209,7 +2212,7 @@ Rules:
 - candidate_ids may merge only proposals for the same reusable concept. Omit low-value candidates by leaving them out of the selection manifest.
 - Do not reconstruct or repeat the full production reference schema, scene_ids, planned_beat_ids, evidence IDs, prompt anchors, or rationale prose. The local catalog already retains every complete authored object and unions the exact scope of candidate_ids you select.
 - It is valid and expected for many input candidates to be omitted. The response should be only a few thousand tokens.
-
+${guidance.panelSelection ?? activePanelSelection ? `${PANEL_REFERENCE_SELECTION_GUIDANCE}\n  Report the basis in the selection row's last two columns.\n` : ""}
 VISUAL BIBLES AND OPERATOR DIRECTION:
 ${visualMergeGuidanceBlock(guidance)}
 
@@ -2228,9 +2231,9 @@ ${compactPromptJsonForTests(candidateCardPayload)}
 Return:
 {
   "selection_contract": "goldflow_reference_director_selection_rows_v2",
-  "reference_selection_fields": ["ref_id", "candidate_ids", "priority", "generation_mode", "required_before_imagegen_1_or_0"],
+  "reference_selection_fields": ${guidance.panelSelection ?? activePanelSelection ? '["ref_id", "candidate_ids", "priority", "generation_mode", "required_before_imagegen_1_or_0", "selection_basis", "selection_exception_reason_or_null"]' : '["ref_id", "candidate_ids", "priority", "generation_mode", "required_before_imagegen_1_or_0"]'},
   "reference_selection_rows": [
-    ["stable_snake_case_id", ["rt_0001", "rt_0042"], "required", "standalone_ref", 1]
+    ${guidance.panelSelection ?? activePanelSelection ? '["stable_snake_case_id", ["rt_0001", "rt_0042"], "required", "standalone_ref", 1, "cross_use", null]' : '["stable_snake_case_id", ["rt_0001", "rt_0042"], "required", "standalone_ref", 1]'}
   ],
   "character_state_selection_fields": ["state_ref_id", "candidate_ids", "source_ref_id", "identity_usage", "base_identity_ref_id_or_null"],
   "character_state_selection_rows": [
@@ -2298,7 +2301,7 @@ export function materializeReferenceDirectorSelectionForTests(parsed, candidateC
       selection_contract: "goldflow_reference_director_selection_v1",
       reference_selections: (Array.isArray(parsed.reference_selection_rows) ? parsed.reference_selection_rows : []).map((row) => {
         if (!Array.isArray(row) || row.length < 5) throw new Error("global director returned a malformed reference selection row");
-        const [refId, candidateIds, priority, generationMode, requiredBeforeImagegen] = row;
+        const [refId, candidateIds, priority, generationMode, requiredBeforeImagegen, selectionBasis, selectionExceptionReason] = row;
         const override = referenceOverrides?.[refId] ?? {};
         return {
           ref_id: refId,
@@ -2306,6 +2309,8 @@ export function materializeReferenceDirectorSelectionForTests(parsed, candidateC
           priority,
           generation_mode: generationMode,
           required_before_imagegen: requiredBeforeImagegen === true || requiredBeforeImagegen === 1,
+          ...(selectionBasis != null ? { selection_basis: String(selectionBasis) } : {}),
+          ...(selectionExceptionReason != null ? { selection_exception_reason: String(selectionExceptionReason) } : {}),
           ...override,
         };
       }),
@@ -2355,6 +2360,8 @@ export function materializeReferenceDirectorSelectionForTests(parsed, candidateC
       priority: selection.priority ?? primary.priority,
       generation_mode: selection.generation_mode ?? primary.generation_mode,
       required_before_imagegen: selection.required_before_imagegen ?? primary.required_before_imagegen,
+      ...(selection.selection_basis != null ? { selection_basis: selection.selection_basis } : {}),
+      ...(selection.selection_exception_reason != null ? { selection_exception_reason: selection.selection_exception_reason } : {}),
       appearance_count: Math.max(
         targetNumber(primary.appearance_count),
         ...candidates.map((candidate) => targetNumber(candidate?.appearance_count)),
@@ -2647,6 +2654,8 @@ function normalizeTarget(target, index) {
     estimated_use_count: Number(target.estimated_use_count ?? target.appearance_count ?? 0),
     reference_value_reason: target.reference_value_reason ?? null,
     why_text_is_insufficient: target.why_text_is_insufficient ?? null,
+    ...(target.selection_basis != null ? { selection_basis: String(target.selection_basis) } : {}),
+    ...(target.selection_exception_reason != null ? { selection_exception_reason: String(target.selection_exception_reason) } : {}),
     clean_plate_contract: target.clean_plate_contract ?? null,
     conditioning_subject_count: Number(target.conditioning_subject_count ?? 0),
     conditioning_asset_role: target.conditioning_asset_role ?? null,
@@ -4655,6 +4664,8 @@ function bindingRecurringEvidenceAsset(asset) {
   const kind = normalizeKind(asset?.kind);
   const beats = Number(asset?.beat_count ?? asset?.beat_ids?.length ?? 0);
   const scenes = Number(asset?.distinct_scene_count ?? asset?.scene_ids?.length ?? 0);
+  // Panel runs bind coverage at the selection-basis threshold (3 uses); page prompts carry rarer assets.
+  if (activePanelSelection) return ["character_state", "location", "prop", "ui"].includes(kind) && beats >= 3;
   if (kind === "character_state") return beats >= 2 || scenes >= 2;
   if (["location", "prop", "ui"].includes(kind)) return beats >= 3 || scenes >= 2;
   return false;
@@ -5023,6 +5034,7 @@ async function main() {
   ]);
   if (semanticPlan?.status !== "passed" || !Array.isArray(semanticPlan.scenes) || !semanticPlan.scenes.length) throw new Error(`Missing passed semantic scene plan: ${semanticPlanPath}`);
   activeContentProfile = contentProfileForIdentity(runIdentity ?? {});
+  activePanelSelection = runIdentity?.render_profile === "panel_composition_v1";
   const semanticWithBeats = semanticPlanWithVisualBeats(semanticPlan, visualBeatPlan);
   const { plan: scopedSemantic, scope } = scopedSemanticPlan(semanticWithBeats);
   if (!Array.isArray(scopedSemantic.scenes) || !scopedSemantic.scenes.length) throw new Error("Visual reference planner scope selected zero semantic scenes.");
@@ -5161,6 +5173,8 @@ async function main() {
   });
   const recurringCoverageFindings = recurringReferenceCoverageFindings(referenceEvidenceLedger, referenceTargets, { legacyRevalidation });
   const openingIdentityFindings = openingSelectedIdentityFindings(referenceTargets, visualBeatPlan);
+  // Panel runs: the director's recorded selection basis must hold against the beat plan.
+  const selectionBasisFindings = activePanelSelection && !legacyRevalidation ? referenceSelectionBasisFindings(referenceTargets, visualBeatPlan?.beats ?? []) : [];
   const characterStateFindings = characterStateDirectorFindings(characterStateRefs, referenceTargets, { legacyRevalidation });
   const nonhumanSelectionFindings = unselectedDistinctNonhumanActorFindingsForTests(referenceEvidenceLedger, referenceTargets);
   const selectionFidelityFindings = fullSelectionContract
@@ -5172,7 +5186,7 @@ async function main() {
     : [];
   const coverageFindings = locationContractLedger.findings ?? [];
   const styleFindings = shouldDropStyleRefs ? [] : styleReferenceContaminationFindings(referenceTargets);
-  const findings = [...coverageFindings, ...locationContractScope.findings, ...unknownSceneScopeDrop.findings, ...styleFindings, ...directorSelectionFindings, ...recurringCoverageFindings, ...openingIdentityFindings, ...characterStateFindings, ...nonhumanSelectionFindings, ...selectionFidelityFindings];
+  const findings = [...coverageFindings, ...locationContractScope.findings, ...unknownSceneScopeDrop.findings, ...styleFindings, ...directorSelectionFindings, ...recurringCoverageFindings, ...openingIdentityFindings, ...selectionBasisFindings, ...characterStateFindings, ...nonhumanSelectionFindings, ...selectionFidelityFindings];
   const status = findings.some((finding) => finding.severity === "blocker") ? "blocked" : "passed";
   const referenceInventoryLedger = buildSelectedReferenceInventory(referenceTargets, {
     sourceScriptHash: semanticPlan.source_script_hash,
@@ -5207,6 +5221,7 @@ async function main() {
     series_slug: series,
     week,
     episode,
+    ...(activePanelSelection ? { reference_selection_basis: referenceSelectionSummary(referenceTargets, visualBeatPlan?.beats ?? []) } : {}),
     content_profile: {
       id: activeContentProfile.id,
       version: activeContentProfile.version,

@@ -323,7 +323,8 @@ export function relockedIdentityForTests(identity, {
   const voiceIdentityChanged = recoveryKind !== QWEN_PLANNER_FIX_RECOVERY_KIND;
   const identityChanged = voiceIdentityChanged || synthesisContractChanged;
   const migrated = structuredClone(identity);
-  migrated.stage_registry_version = PIPELINE_STAGE_REGISTRY_VERSION;
+  // The recorded registry version is identity-locked: a relock never migrates an episode to
+  // a newer row set (its workflow_contract would no longer agree with it).
   migrated.tts_profile = primary.voice_id === narrationPolicy.QWEN_DEEPMALE_PRIMARY_LOCK.voice_id ? DEEPMALE_PROFILE_ID : QWEN_LIAM_PROFILE_ID;
   migrated.tts_provider = primary.provider;
   migrated.tts_fallback_provider = null;

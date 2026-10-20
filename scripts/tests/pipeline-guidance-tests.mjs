@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync, existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { PIPELINE_STAGE_REGISTRY, PIPELINE_STAGE_REGISTRY_VERSION } from "../lib/pipeline-stage-registry.mjs";
+import { PIPELINE_STAGE_REGISTRY_CURRENT, PIPELINE_STAGE_REGISTRY_HISTORICAL_VERSION, PIPELINE_STAGE_REGISTRY_VERSION } from "../lib/pipeline-stage-registry.mjs";
 import { mediaWorkflowForPreflight } from "../lib/media-workflows.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
@@ -42,7 +42,9 @@ for (const file of ["docs/pipelines/generated_visuals.md", "docs/workflows/video
   assert.ok(block, `${file}: missing generated stage table`);
   assert.ok(block.includes(PIPELINE_STAGE_REGISTRY_VERSION));
   const ids = [...block.matchAll(/^\| \d+ \| `([^`]+)`/gm)].map((match) => match[1]);
-  assert.deepEqual(ids, PIPELINE_STAGE_REGISTRY.map((row) => row.id));
+  // The generated table documents the current chain and names the retained historical version.
+  assert.deepEqual(ids, PIPELINE_STAGE_REGISTRY_CURRENT.map((row) => row.id));
+  assert.ok(block.includes(PIPELINE_STAGE_REGISTRY_HISTORICAL_VERSION));
 }
 
 assert.match(manhwa, /Joey/);

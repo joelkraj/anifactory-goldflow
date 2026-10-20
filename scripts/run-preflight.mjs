@@ -139,13 +139,19 @@ import {
   CHATGPT_WEB_PROJECT_CLEANUP_POLICY,
   normalizeChatGptWebProjectUrl,
 } from "./lib/chatgpt-web-project.mjs";
+import { assertSourceMatchesHandoff, expandPreflightFlags } from "./lib/channel-preset.mjs";
 
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DEFAULT_QWEN_NARRATOR_VOICE_ID = "joel_owned_narrator_clone";
 const DEFAULT_QWEN_NARRATOR_VOICE_POLICY = "default_joel_owned_narrator_clone";
 const invokedAsCommand = path.resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url);
-const flags = parseFlags(process.argv.slice(2));
+const cliFlags = parseFlags(process.argv.slice(2));
+// `--channel-preset` supplies operational flags from an explicit, hash-recorded operator file;
+// `--source-handoff` supplies --title/--source from the manufacturer. Neither may decide the
+// content profile, media workflow or run intent, which stay explicit flags.
+const sourceBridge = expandPreflightFlags(cliFlags);
+const flags = sourceBridge.flags;
 const channel = flags.channel;
 const series = flags.series ?? flags.seriesSlug;
 const week = flags.week;
@@ -1245,6 +1251,8 @@ async function main() {
         bakeoffManifestPath: flags["narration-provider-bakeoff-manifest"],
       })
     : null;
+  const sourceSha256 = sourcePath ? sha256(await fs.readFile(sourcePath)) : null;
+  assertSourceMatchesHandoff(sourceBridge.source_handoff, sourceSha256);
   const git = await gitSnapshot();
   validateDirtyWorktreePolicy({ dirty: git.dirty, intent: runIntent, allowDirty: allowDirtyWorktree, reason: dirtyReason });
   const episodeDir = path.join(dataRoot, "channels", channel, "weekly_runs", week, "episodes", episode);
@@ -1578,7 +1586,9 @@ async function main() {
     },
     model_versions: lockedModelVersions(),
     source_path: sourcePath,
-    source_sha256: sourcePath ? sha256(await fs.readFile(sourcePath)) : null,
+    source_sha256: sourceSha256,
+    source_handoff: sourceBridge.source_handoff,
+    channel_preset: sourceBridge.channel_preset,
     winner_source_release: winnerSourceRelease,
     episode_identity_policy: {
       episode_number_lives_in: "--episode",

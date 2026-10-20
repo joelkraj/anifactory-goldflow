@@ -5,6 +5,11 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { scanScriptMetaContamination } from "./lib/script-meta-contamination-scan.mjs";
 import { validatePowerSystemComprehensionAudit } from "./lib/power-system-comprehension-contract.mjs";
+import { PIPELINE_STAGE_REGISTRY_VERSION, generatedRegistryVersionFor } from "./lib/pipeline-stage-registry.mjs";
+import { buildScriptPaceReport } from "./lib/script-pace-diagnostics.mjs";
+import { buildTargetedSpeakabilityArtifacts } from "./lib/script-speakability-targeted.mjs";
+
+export const SCRIPT_LOCK_V2_SCHEMA = "goldflow_script_lock_v2";
 
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const flags = parseFlags(process.argv.slice(2));
@@ -131,11 +136,18 @@ async function main() {
     status: "approved",
     updated_at: approvedAt,
   };
+  const reviewSummary = flags.summary ?? "Operator confirmed script_clean.md is approved for production.";
+  const identity = await readJson(path.join(episodeDir, "run_identity.json"));
+  if (identity && generatedRegistryVersionFor(identity) === PIPELINE_STAGE_REGISTRY_VERSION) {
+    const written = await writeFoldedScriptLock({ identity, script, scriptHash, base, reviewSummary, approvedAt });
+    console.log(JSON.stringify({ status: "approved", lock_schema: SCRIPT_LOCK_V2_SCHEMA, script_clean_hash: scriptHash, power_system_comprehension_audit_hash: powerAuditHash, ...(powerSystemEditorialException ? { power_system_editorial_exception: powerSystemEditorialException } : {}), folded_validators: written.lock.folded_validators, files_written: written.files }, null, 2));
+    return;
+  }
   const manualReview = {
     schema: "goldflow_manual_agent_script_review_v1",
     ...base,
     manual_agent_script_review: true,
-    review_summary: flags.summary ?? "Operator confirmed script_clean.md is approved for production.",
+    review_summary: reviewSummary,
   };
   const operatorApproval = {
     schema: "goldflow_operator_script_approval_v1",
@@ -152,6 +164,134 @@ async function main() {
   await writeJson(path.join(episodeDir, "operator_script_approval.json"), operatorApproval);
   await writeJson(path.join(episodeDir, "script_lock.json"), scriptLock);
   console.log(JSON.stringify({ status: "approved", script_clean_hash: scriptHash, power_system_comprehension_audit_hash: powerAuditHash, ...(powerSystemEditorialException ? { power_system_editorial_exception: powerSystemEditorialException } : {}), files_written: ["script_meta_contamination_report.json", "manual_agent_script_review.json", "operator_script_approval.json", "script_lock.json"] }, null, 2));
+}
+
+async function readJson(filePath) {
+  try {
+    return JSON.parse(await fs.readFile(filePath, "utf8"));
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+// A previous lock for a different script is archived, never overwritten in place.
+async function archiveStaleLock(lockPath, scriptHash) {
+  const existing = await readJson(lockPath);
+  if (!existing || existing.script_clean_hash === scriptHash) return null;
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const archivePath = path.join(episodeDir, "_archived_script_locks", `${stamp}-script_lock.json`);
+  await fs.mkdir(path.dirname(archivePath), { recursive: true });
+  await fs.copyFile(lockPath, archivePath);
+  return archivePath;
+}
+
+// Registry ≥ 2026-10-20.1: one lock artifact (goldflow_script_lock_v2) carries the approval
+// and the folded pace + targeted-speakability validators. The files those historical stages
+// emitted (script_pace_report.json, script_speakability_report.json,
+// tts_spoken_overrides.json, script_speakability_problem_areas_report.json) and the two
+// approval files legacy readers load are written from the same lock as derived views.
+async function writeFoldedScriptLock({ identity, script, scriptHash, base, reviewSummary, approvedAt }) {
+  const identityChannel = identity.channel ?? channel;
+  const identitySeries = identity.series_slug ?? series;
+  const identityWeek = identity.week ?? week;
+  const identityEpisode = identity.episode ?? episode;
+  const paceReport = await buildScriptPaceReport({
+    script,
+    scriptPath,
+    sourceScriptHash: scriptHash,
+    channel: identityChannel,
+    series: identitySeries,
+    week: identityWeek,
+    episode: identityEpisode,
+    targetMinWpm: Number(identity.target_wpm_min ?? 180),
+    targetMaxWpm: Number(identity.target_wpm_max ?? 195),
+    requestedPacePolicy: identity.pace_policy ?? "diagnostic",
+    allowHookWarnings: true,
+    hookMilestonesPath: null,
+    sourceHashes: { [scriptPath]: scriptHash },
+    updatedAt: approvedAt,
+  });
+  const speakability = buildTargetedSpeakabilityArtifacts({
+    script,
+    scriptPath,
+    scriptHash,
+    channel: identityChannel,
+    series: identitySeries,
+    week: identityWeek,
+    episode: identityEpisode,
+    updatedAt: approvedAt,
+  });
+  const lockPath = path.join(episodeDir, "script_lock.json");
+  const archivedLockPath = await archiveStaleLock(lockPath, scriptHash);
+  const derived = {
+    "script_pace_report.json": paceReport,
+    "script_speakability_report.json": speakability.report,
+    "tts_spoken_overrides.json": speakability.overrides,
+    "script_speakability_problem_areas_report.json": speakability.problemReport,
+  };
+  const derivedHashes = Object.fromEntries(Object.entries(derived).map(([name, value]) => [name, sha256(`${JSON.stringify(value, null, 2)}\n`)]));
+  const lock = {
+    schema: SCRIPT_LOCK_V2_SCHEMA,
+    ...base,
+    status: "script_locked",
+    approval_status: "operator_approved",
+    approval_scope: "exact_script_hash",
+    manual_agent_script_review: true,
+    review_summary: reviewSummary,
+    stage_registry_version: PIPELINE_STAGE_REGISTRY_VERSION,
+    folded_validators: {
+      policy: "script_pace_check and targeted_speakability run inside the script lock; their reports are derived from this lock and bound to the same script hash.",
+      script_pace_check: {
+        status: paceReport.status,
+        validator: "script_pace_hash_and_policy",
+        pace_policy: paceReport.pace_policy,
+        pace_gate_enforced: paceReport.pace_gate_enforced,
+        script_word_count: paceReport.script_word_count,
+        estimated_runtime_at_target_mid_sec: paceReport.estimated_runtime_at_target_mid_sec,
+        report_path: path.join(episodeDir, "script_pace_report.json"),
+        report_sha256: derivedHashes["script_pace_report.json"],
+      },
+      targeted_speakability: {
+        status: speakability.report.status,
+        validator: "speakability_hashes",
+        ruleset: speakability.report.ruleset,
+        finding_count: speakability.findings.length,
+        replacement_count: speakability.replacements.length,
+        report_path: path.join(episodeDir, "script_speakability_report.json"),
+        report_sha256: derivedHashes["script_speakability_report.json"],
+        overrides_path: path.join(episodeDir, "tts_spoken_overrides.json"),
+        overrides_sha256: derivedHashes["tts_spoken_overrides.json"],
+      },
+    },
+    derived_views: {
+      "operator_script_approval.json": "goldflow_operator_script_approval_v1",
+      "manual_agent_script_review.json": "goldflow_manual_agent_script_review_v1",
+      ...Object.fromEntries(Object.entries(derived).map(([name, value]) => [name, value.schema])),
+    },
+    archived_previous_lock_path: archivedLockPath,
+  };
+  const operatorApproval = {
+    schema: "goldflow_operator_script_approval_v1",
+    ...base,
+    approval_status: "operator_approved",
+    approval_scope: "exact_script_hash",
+    derived_from: "script_lock.json",
+    lock_schema: SCRIPT_LOCK_V2_SCHEMA,
+  };
+  const manualReview = {
+    schema: "goldflow_manual_agent_script_review_v1",
+    ...base,
+    manual_agent_script_review: true,
+    review_summary: reviewSummary,
+    derived_from: "script_lock.json",
+    lock_schema: SCRIPT_LOCK_V2_SCHEMA,
+  };
+  await writeJson(lockPath, lock);
+  for (const [name, value] of Object.entries(derived)) await writeJson(path.join(episodeDir, name), value);
+  await writeJson(path.join(episodeDir, "operator_script_approval.json"), operatorApproval);
+  await writeJson(path.join(episodeDir, "manual_agent_script_review.json"), manualReview);
+  return { lock, files: ["script_meta_contamination_report.json", "script_lock.json", ...Object.keys(derived), "operator_script_approval.json", "manual_agent_script_review.json"] };
 }
 
 main().catch((error) => {

@@ -7762,13 +7762,17 @@ async function testHybridOpeningWindowPersistsInRunIdentity() {
     "--episode-dir", mixedRefsEpisodeDir,
   ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: mixedRefsDataRoot } });
   const mixedStatus = JSON.parse(mixedStatusResult.stdout);
-  const mixedScriptPaceStage = mixedStatus.stage_ledger.find((row) => row.stage === "script_pace_check");
+  // A new identity (registry 2026-10-20.1) folds the pace diagnostics into the script lock
+  // and registers the comprehension audit before approval; the historical rows are absent.
+  const mixedAuditStage = mixedStatus.stage_ledger.find((row) => row.stage === "script_comprehension_audit");
   const mixedReferenceStage = mixedStatus.stage_ledger.find((row) => row.stage === "reference_generation");
   const mixedImageStage = mixedStatus.stage_ledger.find((row) => row.stage === "image_generation");
   const mixedAudioPaceStage = mixedStatus.stage_ledger.find((row) => row.stage === "audio_pace_check");
   const mixedRenderStage = mixedStatus.stage_ledger.find((row) => row.stage === "premium_render");
-  assert.match(mixedScriptPaceStage.next_command_shape, /--pace-policy diagnostic/);
-  assert.match(mixedScriptPaceStage.next_command_shape, /--allow-hook-warnings true/);
+  assert.equal(mixedStatus.stage_ledger.find((row) => row.stage === "script_pace_check"), undefined);
+  assert.equal(mixedStatus.stage_ledger.find((row) => row.stage === "targeted_speakability"), undefined);
+  assert.match(mixedAuditStage.next_command_shape, /script power-audit .*--author planner/);
+  assert.equal(mixedStatus.stage_ledger.findIndex((row) => row.stage === "script_comprehension_audit") + 1, mixedStatus.stage_ledger.findIndex((row) => row.stage === "script_approval"));
   assert.match(mixedReferenceStage.next_command_shape, /imagegen start/);
   assert.match(mixedReferenceStage.next_command_shape, /--image-provider hybrid_modelslab_refs_codex_opening_modelslab_rest/);
   assert.match(mixedReferenceStage.next_command_shape, /--references-only true/);

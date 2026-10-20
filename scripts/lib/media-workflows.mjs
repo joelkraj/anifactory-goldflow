@@ -2,9 +2,18 @@ import { createHash } from "node:crypto";
 
 // Kept here so workflow identity and the generated-visuals registry share one version.
 // Do not import the registry or content-profile helpers: both consume this contract.
-export const GENERATED_VISUALS_STAGE_REGISTRY_VERSION = "2026-08-22.1";
+export const GENERATED_VISUALS_STAGE_REGISTRY_VERSION = "2026-10-20.1";
 export const MEDIA_WORKFLOW_CONTRACT_SCHEMA = "goldflow_media_workflow_v1";
-export const GENERATED_VISUALS_WORKFLOW_VERSION = "2026-09-06.1";
+export const GENERATED_VISUALS_WORKFLOW_VERSION = "2026-10-20.1";
+// Historical generated-visuals contracts stay resolvable exactly as recorded. An identity
+// locked to one keeps its row set (script_pace_check + targeted_speakability as separate
+// stages, no script_comprehension_audit); nothing migrates it to the current version.
+export const GENERATED_VISUALS_HISTORICAL_CONTRACTS = Object.freeze([
+  Object.freeze({ version: "2026-09-06.1", stage_registry_version: "2026-08-22.1" }),
+]);
+export const GENERATED_VISUALS_HISTORICAL_STAGE_REGISTRY_VERSIONS = Object.freeze(
+  GENERATED_VISUALS_HISTORICAL_CONTRACTS.map((row) => row.stage_registry_version),
+);
 export const AVATAR_PILOT_WORKFLOW_ID = "avatar_footage_pilot_v1";
 export const AVATAR_PILOT_PROFILE_ID = "mcu_what_if_pilot_v1";
 export const AVATAR_PILOT_VERSION = "2026-09-06.1";
@@ -44,18 +53,25 @@ function assertWorkflowId(id) {
   }
 }
 
-function currentContract(id = GENERATED_WORKFLOW_ID) {
+function currentContract(id = GENERATED_WORKFLOW_ID, versions = null) {
   // Fixed key order is the canonical serialization; sha256 is never part of its payload.
   const payload = {
     schema: MEDIA_WORKFLOW_CONTRACT_SCHEMA,
     id,
-    version: id === TRUE_CRIME_PROOF_WORKFLOW_ID ? TRUE_CRIME_PROOF_VERSION : id === AVATAR_PILOT_WORKFLOW_ID ? AVATAR_PILOT_VERSION : GENERATED_VISUALS_WORKFLOW_VERSION,
-    stage_registry_version: id === TRUE_CRIME_PROOF_WORKFLOW_ID ? TRUE_CRIME_PROOF_VERSION : id === AVATAR_PILOT_WORKFLOW_ID ? AVATAR_PILOT_VERSION : GENERATED_VISUALS_STAGE_REGISTRY_VERSION,
+    version: versions?.version ?? (id === TRUE_CRIME_PROOF_WORKFLOW_ID ? TRUE_CRIME_PROOF_VERSION : id === AVATAR_PILOT_WORKFLOW_ID ? AVATAR_PILOT_VERSION : GENERATED_VISUALS_WORKFLOW_VERSION),
+    stage_registry_version: versions?.stage_registry_version ?? (id === TRUE_CRIME_PROOF_WORKFLOW_ID ? TRUE_CRIME_PROOF_VERSION : id === AVATAR_PILOT_WORKFLOW_ID ? AVATAR_PILOT_VERSION : GENERATED_VISUALS_STAGE_REGISTRY_VERSION),
   };
   return {
     ...payload,
     sha256: createHash("sha256").update(JSON.stringify(payload)).digest("hex"),
   };
+}
+
+function historicalGeneratedContract(contract) {
+  if (!isRecord(contract) || contract.id !== GENERATED_WORKFLOW_ID) return null;
+  const row = GENERATED_VISUALS_HISTORICAL_CONTRACTS.find((entry) => entry.version === contract.version
+    && entry.stage_registry_version === contract.stage_registry_version);
+  return row ? currentContract(GENERATED_WORKFLOW_ID, row) : null;
 }
 
 function assertExplicitProfileConsistency(identity) {
@@ -113,7 +129,8 @@ export function resolveMediaWorkflow(identity = {}) {
   if (contract.id !== identity.media_workflow) {
     throw new Error("Workflow identity media_workflow conflicts with workflow_contract.id.");
   }
-  const expected = currentContract(identity.media_workflow);
+  const historical = historicalGeneratedContract(contract);
+  const expected = historical ?? currentContract(identity.media_workflow);
   for (const key of contractKeys.filter((key) => key !== "sha256")) {
     if (contract[key] !== expected[key]) {
       throw new Error(`Unsupported or stale workflow_contract ${key}; expected ${expected[key]}. Existing identities must not be migrated implicitly.`);
@@ -135,7 +152,7 @@ export function resolveMediaWorkflow(identity = {}) {
   if ((identity.media_workflow === TRUE_CRIME_PROOF_WORKFLOW_ID) !== (profile === TRUE_CRIME_PROOF_PROFILE_ID)) {
     throw new Error("True-crime proof workflow and true_crime_proof_v1 must be selected together.");
   }
-  return { ...expected, legacy: false, available: true };
+  return { ...expected, legacy: false, available: true, ...(historical ? { historical: true } : {}) };
 }
 
 export function assertAvailableMediaWorkflow(identity = {}) {

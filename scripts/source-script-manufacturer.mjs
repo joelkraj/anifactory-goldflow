@@ -30,6 +30,8 @@ import {
   validateManufacturingTemplate,
   validateManufacturingTopicPool,
   validateManufacturingTopicShortlist,
+  buildSourceHandoff,
+  validateSourceHandoff,
   sha256Text,
 } from "./lib/source-manufacturer-contract.mjs";
 import {
@@ -530,8 +532,33 @@ function lockedWriterCandidates(policy, lock) {
   return policy.candidates.map((row) => ({ ...row, model: writer.model, provider: writer.provider }));
 }
 
+// Non-gate notice: the auto-selected rank-one brief is about to be drafted. The file (and
+// one stderr line) lets Joel see the premise before the writer spend without stopping it.
+export const BRIEF_NOTICE_SCHEMA = "goldflow_manhwa_rank_one_brief_notice_v1";
+async function writeBriefNotice(directory, brief) {
+  if (brief?.document?.status !== "auto_selected") return null;
+  const noticePath = path.join(directory, "rank_one_brief_notice.json");
+  if (await exists(noticePath)) return noticePath;
+  const notice = {
+    schema: BRIEF_NOTICE_SCHEMA,
+    kind: "notice",
+    gate: false,
+    message: "Auto-selected rank-one brief is proceeding to one draft call. No approval is requested; supply --brief <json> in a new development folder to choose a different premise.",
+    title: brief.document.title,
+    core_premise: brief.document.core_premise,
+    brief_path: brief.path,
+    brief_sha256: brief.sha256,
+    selection_basis: brief.document.selection_basis ?? null,
+    written_at: new Date().toISOString(),
+  };
+  await writeJsonExclusive(noticePath, notice);
+  console.error(`[notice] rank-one brief proceeding to draft: ${JSON.stringify(brief.document.title)} (${noticePath})`);
+  return noticePath;
+}
+
 async function writeCandidates(directory, flags) {
   const prepared = await prepare(directory, flags);
+  await writeBriefNotice(directory, prepared.brief);
   const briefPolicy = prepared.brief.document.writer_policy;
   if (briefPolicy && flags["writer-policy"] && briefPolicy !== flags["writer-policy"]) {
     throw new Error("Writer policy override conflicts with the approved manufacturing brief.");
@@ -1888,7 +1915,39 @@ async function reviseScript(directory, flags) {
   };
   const reportPath = path.join(loopDirectory, "revision_loop_report.json");
   await writeJsonAtomic(reportPath, report);
-  return { report, reportPath };
+  const handoff = await writeSourceHandoff(directory, { flags, loopDirectory, report, reportPath, brief, lock, current });
+  return { report, reportPath, handoff };
+}
+
+// The hand-off binds the retained script, its brief, model lock and evidence by hash for
+// `run preflight --source-handoff`. It never carries the content profile, media workflow or
+// run intent: those stay explicit operator flags. Rewritten only when the retained script
+// changed; an existing hand-off for the same script hash is kept byte-for-byte.
+async function writeSourceHandoff(directory, { flags, loopDirectory, report, reportPath, brief, lock, current }) {
+  const handoffPath = path.join(loopDirectory, "source_handoff.json");
+  if (await exists(handoffPath)) {
+    const existing = JSON.parse(await fs.readFile(handoffPath, "utf8"));
+    if (existing.sha256 === current.sha256 && existing.final_script_path === report.final_script_path) {
+      return { path: handoffPath, document: existing, sha256: await fileSha256(handoffPath), created: false };
+    }
+  }
+  const document = buildSourceHandoff({
+    title: brief?.document?.title ?? null,
+    finalScriptPath: report.final_script_path,
+    sha256: current.sha256,
+    briefSha256: brief?.sha256 ?? null,
+    modelLockSha256: lock.sha256,
+    evidenceSha256: brief?.document?.selection_basis?.evidence_sha256 ?? null,
+    channel: channelFor(directory, flags),
+    developmentDir: directory,
+    incumbentSource: report.initial_source,
+    wordCount: current.word_count,
+    revisionReportPath: reportPath,
+    revisionReportSha256: await fileSha256(reportPath),
+  });
+  assertValid("source hand-off", validateSourceHandoff(document));
+  await writeJsonAtomic(handoffPath, document);
+  return { path: handoffPath, document, sha256: await fileSha256(handoffPath), created: true };
 }
 
 function revisionSummary(result, timing) {
@@ -1904,7 +1963,9 @@ function revisionSummary(result, timing) {
     report_path: result.reportPath,
     revision_timing_report_path: result.report.timing_report_path,
     timing_report_path: timing.outputPath,
-    next_action: "goldflow run preflight --content-profile manhwa_recap_v1 --media-workflow generated_visuals_v1 ... --source <final_script_path>",
+    source_handoff_path: result.handoff.path,
+    source_handoff_sha256: result.handoff.sha256,
+    next_action: `goldflow run preflight --content-profile manhwa_recap_v1 --media-workflow generated_visuals_v1 --run-intent production --source-handoff ${JSON.stringify(result.handoff.path)} --channel-preset <channels/${result.handoff.document.channel ?? "<channel>"}/channel_preset.json> --channel <channel> --series <series> --week <run-slug> --episode <ep_NN>${result.handoff.document.title ? "" : " --title <title>"}`,
   };
 }
 

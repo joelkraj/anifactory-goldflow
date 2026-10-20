@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { promises as fs, constants as fsConstants } from "node:fs";
 import path from "node:path";
 import { buildReferenceBoard, referenceBoardPromptGuidance, pageReferenceBoardPromptGuidance, pageBoardOutputSize } from "./lib/openart-reference-board.mjs";
+import { falAssignmentBoardSize, falProjectedAssignmentsUsd, falProjectedRequestUsd } from "./lib/fal-request-projection.mjs";
 // Page owners carry their template on the prompt row (and later on the assignment, for repairs).
 const boardGuidance=(pageTemplate,board)=>pageTemplate?pageReferenceBoardPromptGuidance(board):referenceBoardPromptGuidance(board);
 const pageField=(pageTemplate,canvas)=>pageTemplate?{panel_page_template:pageTemplate,...(canvas?{image_size:{width:canvas.width,height:canvas.height}}:{})}:{};
@@ -282,19 +283,27 @@ async function prepareBulk(ctx,f){
       continue;
     }
     const assignment={...core,assignment_sha256:falObjectSha256(JSON.stringify(core)),submission_receipt_path:path.join(ctx.root,"bulk","submission-receipts",`${row.image_id}.json`),result_receipt_path:path.join(ctx.root,"bulk","result-receipts",`${row.image_id}.json`),output_path:path.join(ctx.root,"bulk","outputs",`${row.image_id}.png`),upload_receipt_path:path.join(ctx.root,"bulk","upload-receipts",`${row.image_id}.json`)};
+    // Outside `core` on purpose: the projection never changes assignment_sha256.
+    assignment.projected_request_usd=falProjectedRequestUsd({imageSize:core.image_size??{width:1920,height:1080},boardSize:falAssignmentBoardSize(core)}).usd;
     const assignmentPath=path.join(ctx.root,"bulk","assignments",`${row.image_id}.json`);await write(assignmentPath,assignment);assignments.push({...assignment,assignment_path:assignmentPath});
   }
-  const projectedBase=Number((assignments.filter(row=>!row.reused_validation_shot).length*0.00441).toFixed(4));
+  const pendingAssignments=assignments.filter(row=>!row.reused_validation_shot);
+  const projectedBase=Number((pendingAssignments.length*0.00441).toFixed(4));
   const spend=await falSpendProjectionState({episodeDir:ctx.episodeDir,
     warningBudgetUsd:ctx.contract.warning_budget_usd,hardBudgetUsd:ctx.contract.hard_budget_usd});
-  const pendingAssignments=assignments.filter(row=>!row.reused_validation_shot);
   const bulkBilledState=await falBilledRateState(ctx.episodeDir);
-  const projectedEpisode=Number((spend.projected_spend_usd+pendingAssignments.reduce((sum,row)=>sum+falProjectedRateUsd({endpoint:row.endpoint,imageSize:row.image_size,billedState:bulkBilledState}).rate_usd,0)).toFixed(4));
+  const billedRateProjection=Number(pendingAssignments.reduce((sum,row)=>sum+falProjectedRateUsd({endpoint:row.endpoint,imageSize:row.image_size,billedState:bulkBilledState}).rate_usd,0).toFixed(4));
+  // Two projections: the reconciled billed-rate median per endpoint/canvas (R02) and the per
+  // canvas + board proof projection (R10). The hard-budget check takes the higher one, so a
+  // dense 3840 page is never estimated below its measured price.
+  const requestProjection=falProjectedAssignmentsUsd(pendingAssignments);
+  const projectedEpisode=Number((spend.projected_spend_usd+Math.max(billedRateProjection,requestProjection.projected_usd)).toFixed(4));
   need(projectedEpisode<ctx.contract.hard_budget_usd,
     "Projected Fal episode spend reaches the locked hard budget; estimate only, verify actual account spend.");
   if(projectedEpisode>=ctx.contract.warning_budget_usd)
     console.error(`Fal projected episode spend $${projectedEpisode} reaches the locked warning threshold; estimate only, verify actual account spend.`);
-  const plan={schema:"goldflow_fal_bulk_plan_v1",created_at:new Date().toISOString(),run_identity_sha256:ctx.identityHash,model:FAL_ENDPOINTS.primary_edit,quality:"low",width:1920,height:1080,format:"png",reference_mode:"one_positional_collage",concurrency:ctx.contract.production_concurrency,assignment_count:assignments.length,projected_base_cost_usd:projectedBase,projected_observed_rate_episode_cost_usd:projectedEpisode,pricing_note:"$0.00441 is base-output only. The episode spend projection uses the measured billed rate per endpoint/canvas (1920 edit $0.0176) or this episode's reconciled billed median; billed USD lands only through billing-reconcile records.",cost_basis:spend.cost_basis==="none"?"projected":spend.cost_basis,
+  const canvases=[...new Set(pendingAssignments.map(row=>row.image_size?`${row.image_size.width}x${row.image_size.height}`:"1920x1080"))].sort();
+  const plan={schema:"goldflow_fal_bulk_plan_v1",created_at:new Date().toISOString(),run_identity_sha256:ctx.identityHash,model:FAL_ENDPOINTS.primary_edit,quality:"low",width:1920,height:1080,height_width_note:"default canvas for assignments without image_size; page assignments carry their own image_size",canvases,format:"png",reference_mode:"one_positional_collage",concurrency:ctx.contract.production_concurrency,assignment_count:assignments.length,projected_base_cost_usd:projectedBase,projected_request_costs:{...requestProjection,rows:undefined},projected_scene_art_cost_usd:requestProjection.projected_usd,projected_billed_rate_cost_usd:billedRateProjection,projected_observed_rate_episode_cost_usd:projectedEpisode,pricing_note:"$0.00441 is base-output only. projected_scene_art_cost_usd is a projection per canvas and board size from billed proofs (fal-request-projection.mjs); projected_billed_rate_cost_usd uses the measured billed rate per endpoint/canvas or this episode's reconciled billed median. The episode spend figure adds the recorded cost of already-paid requests and takes the higher of the two projections for this batch. Estimates only; billed USD lands only through billing-reconcile records.",cost_basis:spend.cost_basis==="none"?"projected":spend.cost_basis,
     ...(prebulkCorrection?{prebulk_prompt_correction_receipt_sha256:await falFileSha256(prebulkCorrection.paths.receipt),prebulk_corrected_image_ids:[...prebulkCorrection.effectivePrompts.keys()]}:{}),
     ...(correction?{validation_review_correction_sha256:await falFileSha256(correction.paths.correction),validation_recovery_review_sha256:await falFileSha256(correction.paths.review)}:{}),
     ...(recovery?.second?{validation_second_review_sha256:await falFileSha256(recovery.second.reviewPath)}:{}),assignments};

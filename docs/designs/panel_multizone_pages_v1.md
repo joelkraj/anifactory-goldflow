@@ -362,6 +362,7 @@ Anything short of that is a triage point, not a rerun order.
   - Dispatch reuses the page owner's accepted reference board with the single-frame guidance, and goes through the shared paid-dispatch lock, retry cap, spend projection and ambiguous-attempt checks.
   - Receipts live in `fal/zone-repair/submission-receipts`, which the retry accounting now scans; failures are recorded per zone-repair stem.
   - Run status holds image QA at the exact next zone-repair step. When it finds a blocked page zone, it routes to `prepare-zone-repair`. A failed or ambiguous submission becomes a triage hold, never a resubmission.
+- **Done (R10, host):** dense pages are the locked default allocation route of new panel identities (`allocation_route` in `panel_composition_contract`); autopilot authors, repairs one failed chunk once and imports under strict conditions with an append-only receipt; imported plans record real planner calls; the Fal bulk plan projects per canvas and board; the ad hoc span path is refused. See `docs/designs/panel_dense_followups_v1.md` row 10.
 - **Not yet done:**
   - Focal analysis still runs on the page raster; it is advisory only.
   - A full Fal re-finalization rebuilds the report from page owners and supersedes applied zone repairs, which must then be re-applied.

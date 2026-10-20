@@ -4,15 +4,23 @@ import { spawnSync } from "node:child_process";
 import { autopilotEnabled, automatedReviewer, isAutomatedReviewer } from "./autopilot-policy.mjs";
 import { fileSha256 } from "./episode-budget.mjs";
 import {
-  YOUTUBE_API_UNVERIFIABLE_FIELDS, YOUTUBE_PINNED_COMMENT_RECEIPT_SCHEMA, YOUTUBE_PUBLISH_MANIFEST_SCHEMA,
-  YOUTUBE_SCHEDULE_RECEIPT_SCHEMA, YOUTUBE_UPLOAD_RECEIPT_SCHEMA, listYoutubeScheduleReceipts,
-  validateYoutubePinnedCommentReceipt, validateYoutubeScheduleReceipt, validateYoutubeUploadReceipt, youtubeTextSha256,
+  YOUTUBE_API_UNVERIFIABLE_FIELDS, YOUTUBE_PINNED_COMMENT_RECEIPT_SCHEMA, YOUTUBE_PIN_FOLLOWUP_METHOD, YOUTUBE_PUBLISH_MANIFEST_SCHEMA,
+  YOUTUBE_SCHEDULE_RECEIPT_SCHEMA, YOUTUBE_UPLOAD_RECEIPT_SCHEMA, listYoutubeScheduleReceipts, validateYoutubeApiCompliance,
+  validateYoutubePinnedCommentReceipt, validateYoutubeScheduleReceipt, validateYoutubeUploadReceipt, youtubeApiComplianceRefusal, youtubeTextSha256,
 } from "./youtube-publish-contract.mjs";
 
 export const FINAL_WATCH_SCHEMA = "goldflow_final_watch_v1";
 export const YOUTUBE_PUBLISH_RECEIPT_SCHEMA = "goldflow_youtube_publish_receipt_v1";
-export const PIN_FOLLOWUP_METHOD = "manual_studio_followup";
+export const PIN_FOLLOWUP_METHOD = YOUTUBE_PIN_FOLLOWUP_METHOD;
+export const PUBLISH_PATH_DATA_API = "data_api_publish";
+export const PUBLISH_PATH_PRIVATE_REVIEW_ONLY = "private_review_only";
 const UPLOAD_METHOD = "youtube_data_api";
+
+/** The compliance record bound into receipts: status, verification and the config hash. */
+function complianceRecord(compliance) {
+  need(compliance && validateYoutubeApiCompliance(compliance).status === "passed", "A valid config/youtube_api_compliance.json record is required (loadYoutubeApiCompliance).");
+  return { audited: compliance.audited, verified_at: compliance.verified_at ?? null, verified_by: compliance.verified_by ?? null, config_path: compliance.config_path ?? null, config_sha256: compliance.config_sha256 ?? null };
+}
 
 function need(value, message) {
   if (!value) throw new Error(message);
@@ -101,16 +109,30 @@ export function defaultYoutubeUploader({ manifestPath, repoRoot, python = proces
   return JSON.parse(lines.slice(lines.lastIndexOf("\n{") + 1));
 }
 
-export async function autoPrivateUpload({ episodeDir, episode, uploader, now = new Date().toISOString() }) {
+/**
+ * Unsupported-publish-path gate (R11): an unaudited OAuth project uploads
+ * locked-private, which would force a Studio re-upload after the hash-bound
+ * final watch. Without a passed audit the upload stops here unless the run is
+ * explicitly declared private-review-only; the decision is bound into the receipt.
+ */
+export function publishPathFor({ compliance, privateReviewOnly = false }) {
+  const record = complianceRecord(compliance);
+  if (record.audited === true) return { publish_path: PUBLISH_PATH_DATA_API, api_compliance: record };
+  need(privateReviewOnly === true, `${youtubeApiComplianceRefusal(compliance, "publish this upload later")} Unsupported publish path: stop before any upload, or declare the run private-review-only with --private-review-only true (the final watch still happens; the release is then a Studio action).`);
+  return { publish_path: PUBLISH_PATH_PRIVATE_REVIEW_ONLY, api_compliance: record };
+}
+
+export async function autoPrivateUpload({ episodeDir, episode, uploader, compliance, privateReviewOnly = false, now = new Date().toISOString() }) {
   const p = paths(episodeDir, episode);
   const manifest = await passedManifest(p);
   need(manifest.publish_settings?.initial_visibility === "private", "Automatic upload requires initial_visibility=private.");
   const existing = await readJson(p.upload);
   need(!existing, `Upload receipt already exists; never upload twice: ${p.upload}`);
+  const publishPath = publishPathFor({ compliance, privateReviewOnly });
   const manifestSha256 = await fileSha256(p.manifest);
   const api = await uploader({ manifestPath: p.manifest });
   need(api?.status === "uploaded_private" && clean(api.video_id), "Uploader did not report a private upload.");
-  const receipt = automatedUploadReceipt({ manifest, manifestPath: p.manifest, manifestSha256, api, episode, now });
+  const receipt = { ...automatedUploadReceipt({ manifest, manifestPath: p.manifest, manifestSha256, api, episode, now }), ...publishPath };
   const validation = validateYoutubeUploadReceipt(receipt, { manifest, manifestHash: manifestSha256 });
   receipt.blockers = validation.blockers;
   if (validation.status !== "passed") receipt.status = "blocked";
@@ -156,7 +178,9 @@ export async function finalWatchStatus({ episodeDir, episode, identity }) {
   try { video = await finalVideo(p); } catch (error) { return { done: false, state: "missing", evidence: error.message }; }
   const upload = await readJson(p.upload);
   const record = await readJson(p.finalWatch);
-  const command = `Watch ${video.path}${upload?.watch_url ? ` (private: ${upload.watch_url})` : ""}, then run node bin/goldflow.mjs run final-watch --episode-dir ${episodeDir} --decision accept --reviewer <name> --note "<watch notes>"`;
+  // The upload starts right after final QA and packaging, so YouTube processing overlaps the watch; the local MP4 is watchable at once.
+  const processing = upload?.api_result?.processing_status ? ` YouTube processing: ${upload.api_result.processing_status}; the local MP4 needs no wait.` : "";
+  const command = `Watch ${video.path}${upload?.watch_url ? ` (private: ${upload.watch_url})` : ""}, then run node bin/goldflow.mjs run final-watch --episode-dir ${episodeDir} --decision accept --reviewer <name> --note "<watch notes>"${processing}`;
   if (!record) return { done: false, state: "missing", evidence: `final watch pending for ${video.path}`, final_watch_video_path: video.path, next_command_shape: command };
   if (record.schema !== FINAL_WATCH_SCHEMA || record.video_sha256 !== video.sha256 || isAutomatedReviewer(record.reviewer)) {
     return { done: false, state: "stale", evidence: "final watch does not bind the current master", final_watch_video_path: video.path, next_command_shape: command };
@@ -179,17 +203,25 @@ export function defaultYoutubePublisher({ repoRoot, python = process.env.GOLDFLO
   };
 }
 
-export async function publishApproval({ episodeDir, episode, visibility, scheduleAt = null, timeZone = null, approvedBy, studioSettingsVerified, publisher, now = new Date().toISOString() }) {
+export async function publishApproval({ episodeDir, episode, visibility, scheduleAt = null, timeZone = null, approvedBy, studioSettingsVerified, publisher, compliance, channelDefaults = null, now = new Date().toISOString() }) {
   need(["public", "scheduled"].includes(visibility), "--visibility must be public or scheduled.");
   need(clean(approvedBy) && !isAutomatedReviewer(approvedBy), "Publish approval is a human step: --approved-by must name a person.");
+  // Q54: without a passed compliance audit the Data API never flips visibility; Studio keeps that step.
+  const apiCompliance = complianceRecord(compliance);
+  need(apiCompliance.audited === true, youtubeApiComplianceRefusal(compliance));
   const p = paths(episodeDir, episode);
   const manifest = await passedManifest(p);
   const upload = await readJson(p.upload);
   const uploadSha256 = await fileSha256(p.upload);
   need(upload && validateYoutubeUploadReceipt(upload, { manifest, manifestHash: await fileSha256(p.manifest) }).status === "passed" && upload.visibility === "private",
     "A passed private upload receipt is required before publishing.");
-  if ((upload.deferred_field_verification ?? []).length) {
-    need(studioSettingsVerified === true, `Confirm the Studio-only settings (${upload.deferred_field_verification.join(", ")}) and pass --studio-settings-verified true.`);
+  need(upload.publish_path !== PUBLISH_PATH_PRIVATE_REVIEW_ONLY, "This upload was declared private-review-only at upload time; its release is a Studio action (record-schedule / record-comment), not youtube publish.");
+  const deferred = upload.deferred_field_verification ?? [];
+  // Channel defaults only pre-fill what the approver confirms; the flag is the per-publish human attestation.
+  const prefilled = channelDefaults ? Object.fromEntries(deferred.map((field) => [field, channelDefaults.values?.[field === "mid_rolls" ? "mid_roll_mode" : field] ?? null])) : null;
+  if (deferred.length) {
+    const expected = prefilled ? ` Expected per ${channelDefaults.path}: ${deferred.map((field) => `${field}=${prefilled[field] ?? "unset"}`).join(", ")}.` : "";
+    need(studioSettingsVerified === true, `Confirm the Studio-only settings (${deferred.join(", ")}) in YouTube Studio for this video and pass --studio-settings-verified true.${expected} Channel defaults never satisfy this flag.`);
   }
   const watch = await readJson(p.finalWatch);
   need(watch?.status === "accepted" && watch.video_sha256 === (await readJson(p.finalQa))?.final_video_sha256, "An accepted final watch of the current master is required.");
@@ -211,7 +243,9 @@ export async function publishApproval({ episodeDir, episode, visibility, schedul
     visibility, schedule_at: visibility === "scheduled" ? scheduleAt : null, time_zone: timeZone,
     api_privacy_status: api.privacy_status ?? null, api_publish_at: api.publish_at ?? null,
     publish_approval: { approved: true, approved_by: clean(approvedBy), approved_at: now },
-    studio_settings: { deferred_fields: upload.deferred_field_verification ?? [], verified_by_publisher: studioSettingsVerified === true },
+    studio_settings: { deferred_fields: deferred, verified_by_publisher: studioSettingsVerified === true, verification_basis: "confirmed_by_approver",
+      prefilled_from_defaults: channelDefaults ? { path: channelDefaults.path, sha256: channelDefaults.sha256, values: prefilled } : null },
+    api_compliance: apiCompliance,
     final_watch_sha256: await fileSha256(p.finalWatch), recorded_by: recordedBy, recorded_at: now,
   };
   await writeExclusive(p.publish, publishReceipt);
@@ -261,9 +295,8 @@ export async function autopilotPublishStatus({ episodeDir, episode }) {
     const validation = validateYoutubeScheduleReceipt(schedule, { manifest, uploadReceipt: upload, uploadReceiptSha256: uploadReceiptHash });
     if (validation.status !== "passed") return { done: false, state: "blocked", evidence: validation.blockers.join(", ") };
   }
-  const validation = validateYoutubePinnedCommentReceipt(receipt, { manifest, uploadReceipt: upload, uploadReceiptHash });
-  const pinFollowup = receipt.pin_method === PIN_FOLLOWUP_METHOD && receipt.pinned === false;
-  const blockers = validation.blockers.filter((code) => !(pinFollowup && code === "youtube_comment_not_verified_pinned"));
-  if (blockers.length) return { done: false, state: "blocked", evidence: blockers.join(", ") };
-  return { done: true, evidence: `published ${publish.visibility} by ${publish.publish_approval.approved_by}; comment posted${pinFollowup ? " — pin it in Studio (no Data API pin endpoint)" : " and pinned"}` };
+  // The contract itself accepts pinned:false + pin_method on autopilot identities (R11).
+  const validation = validateYoutubePinnedCommentReceipt(receipt, { manifest, uploadReceipt: upload, uploadReceiptHash, pinFollowupAllowed: true });
+  if (validation.blockers.length) return { done: false, state: "blocked", evidence: validation.blockers.join(", ") };
+  return { done: true, evidence: `published ${publish.visibility} by ${publish.publish_approval.approved_by}; comment posted${validation.pin_followup ? " — pin it in Studio (no Data API pin endpoint)" : " and pinned"}` };
 }

@@ -5,7 +5,7 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { createPanelProductionContract, assertPanelProductionIdentity, assertPanelProductionPreflightFlags } from '../lib/panel-production-policy.mjs';
+import { createPanelProductionContract, createLegacyPanelProductionContract, assertPanelProductionIdentity, assertPanelProductionPreflightFlags, panelAllocationRoute } from '../lib/panel-production-policy.mjs';
 import { mediaWorkflowForPreflight, GENERATED_VISUALS_STAGE_REGISTRY_VERSION } from '../lib/media-workflows.mjs';
 import { stageRegistryFor, PIPELINE_STAGE_REGISTRY, PIPELINE_STAGE_REGISTRY_CURRENT, PIPELINE_STAGE_REGISTRY_VERSION, stageChecklistFor, stageDefinition, commandStageFor, buildStageCommand } from '../lib/pipeline-stage-registry.mjs';
 import { assertCommandWorkflowRoute, assertEpisodeWorkflowFlags } from '../lib/episode-workflow-routing.mjs';
@@ -55,6 +55,14 @@ try {
     assert.equal(createPanelProductionContract().canvas.fps, 30);
     for (const change of [{ workflow_contract: null }, { run_intent: 'proof' }, { content_profile: 'asset_afterlife_v1' }, { schema: 'goldflow_run_identity_v1' }, { audio_target: 'score' }, { generated_motion_policy: 'selective_generated_video' }, { parallax_policy: 'selective_inspected' }, { panel_composition_contract: mutable }]) assert.throws(() => assertPanelProductionIdentity({ ...panel, ...change }));
     assert.throws(() => stageRegistryFor({ ...base, panel_composition_contract: createPanelProductionContract() }));
+    // New identities lock the dense-page route; a historical contract without it stays valid and is read as legacy.
+    assert.equal(createPanelProductionContract().allocation_route.id, 'dense_pages_v1');
+    assert.equal(panelAllocationRoute(panel), 'dense_pages_v1');
+    const legacy = createLegacyPanelProductionContract();
+    assert.equal(legacy.allocation_route, undefined); assert.equal(legacy.version, '2026-10-17.1');
+    assert.deepEqual(assertPanelProductionIdentity({ ...panel, panel_composition_contract: legacy }), legacy);
+    assert.equal(panelAllocationRoute({ ...panel, panel_composition_contract: legacy }), 'legacy_authored_v1');
+    assert.throws(() => assertPanelProductionIdentity({ ...panel, panel_composition_contract: { ...legacy, allocation_route: createPanelProductionContract().allocation_route } }));
   });
   await test('explicit incompatible requests fail before defaults suppress them', () => {
     const route = { contentProfile: 'manhwa_recap_v1', mediaWorkflow: 'generated_visuals_v1' };

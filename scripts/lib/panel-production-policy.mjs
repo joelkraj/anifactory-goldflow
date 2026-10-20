@@ -9,11 +9,27 @@ function canonical(value) {
   return value;
 }
 
-export function createPanelProductionContract() {
-  const body = {
+// Scene-art allocation route locked into the contract of NEW panel identities
+// (R10). Dense multi-zone pages are the production default; a historical
+// identity whose contract carries no allocation_route keeps its recorded
+// legacy authored route and is never rewritten.
+export const PANEL_ALLOCATION_ROUTE_DENSE = "dense_pages_v1";
+export const PANEL_ALLOCATION_ROUTE_LEGACY = "legacy_authored_v1";
+export const DENSE_PAGES_ALLOCATION_ROUTE = Object.freeze({
+  id: PANEL_ALLOCATION_ROUTE_DENSE,
+  plan_schema: "goldflow_panel_asset_plan_v2",
+  beats_per_generation: 5,
+  page_canvas: Object.freeze({ width: 3840, height: 2160 }),
+  page_reference_board: Object.freeze({ width: 1024, height: 576 }),
+  author_command: "visual panel-assets --action author-dense",
+  import_approver: "automated:allocation_validator",
+});
+
+function contractBody({ allocationRoute }) {
+  return {
     schema: "goldflow_panel_production_contract_v1",
     id: PANEL_PRODUCTION_RENDER_PROFILE,
-    version: "2026-10-17.1",
+    version: allocationRoute ? "2026-10-20.1" : "2026-10-17.1",
     content_profile: "manhwa_recap_v1",
     media_workflow: "generated_visuals_v1",
     asset_policy: "authored_reuse_before_generation",
@@ -22,8 +38,22 @@ export function createPanelProductionContract() {
     audio_target: "narrator_only",
     generated_motion_policy: "disabled",
     parallax_policy: "disabled",
+    ...(allocationRoute ? { allocation_route: structuredClone(allocationRoute) } : {}),
   };
+}
+function sealed(body) {
   return { ...body, sha256: createHash("sha256").update(JSON.stringify(canonical(body))).digest("hex") };
+}
+
+/** New identities lock the dense-page route; pass { allocationRoute: null } only to reproduce the legacy contract. */
+export function createPanelProductionContract({ allocationRoute = DENSE_PAGES_ALLOCATION_ROUTE } = {}) {
+  return sealed(contractBody({ allocationRoute }));
+}
+export const createLegacyPanelProductionContract = () => createPanelProductionContract({ allocationRoute: null });
+
+/** The locked allocation route of a panel identity: dense_pages_v1, or legacy_authored_v1 for historical contracts. */
+export function panelAllocationRoute(identity = {}) {
+  return identity?.panel_composition_contract?.allocation_route?.id === PANEL_ALLOCATION_ROUTE_DENSE ? PANEL_ALLOCATION_ROUTE_DENSE : PANEL_ALLOCATION_ROUTE_LEGACY;
 }
 
 export function isPanelProductionIdentity(identity = {}) {
@@ -38,10 +68,9 @@ export function assertPanelProductionIdentity(identity = {}) {
     throw new Error("Panel composition requires a production v2 manhwa_recap_v1 + generated_visuals_v1 identity; existing identities cannot be migrated.");
   }
   assertAvailableMediaWorkflow(identity);
-  const expected = createPanelProductionContract();
-  if (JSON.stringify(canonical(identity.panel_composition_contract)) !== JSON.stringify(canonical(expected))) {
-    throw new Error("Panel composition contract is missing, unsupported, or has a stale hash.");
-  }
+  const recorded = JSON.stringify(canonical(identity.panel_composition_contract));
+  const expected = [createPanelProductionContract(), createLegacyPanelProductionContract()].find((contract) => JSON.stringify(canonical(contract)) === recorded);
+  if (!expected) throw new Error("Panel composition contract is missing, unsupported, or has a stale hash.");
   if (identity.audio_target !== "narrator_only" || identity.generated_motion_policy !== "disabled"
     || identity.parallax_policy !== "disabled"
     || [identity.animation_policy, identity.ltx_video_policy].some((value) => value != null && value !== "disabled")

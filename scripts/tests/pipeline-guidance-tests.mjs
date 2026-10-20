@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { PIPELINE_STAGE_REGISTRY_CURRENT, PIPELINE_STAGE_REGISTRY_HISTORICAL_VERSION, PIPELINE_STAGE_REGISTRY_VERSION } from "../lib/pipeline-stage-registry.mjs";
@@ -93,5 +93,22 @@ assert.match(sentryBrief, /Void/);
 assert.match(sentryBrief, /changed assumption/);
 assert.match(sentryBrief, /Earlier permissions for other titles are not inherited/);
 assert.throws(() => mediaWorkflowForPreflight({ contentProfile: "movie_tv_commentary_v1", mediaWorkflow: "source_footage_v1" }), /reserved|unavailable/);
+
+// R12: policy sentences land with their code (docs/designs/policy_text_tracker_v1.md), never ahead of it.
+assert.match(root, /dense 3840×2160 multi-zone pages with 1024×576 boards are the locked production scene-art route/);
+assert.match(root, /Exactly two human steps remain/);
+assert.match(root, /`youtube publish` refuses the public or scheduled flip while `config\/youtube_api_compliance\.json`/);
+assert.match(root, /The executing git HEAD is recorded in every new execution event/);
+assert.doesNotMatch(root, /tail re-seed|re-seed/);
+assert.doesNotMatch(root, /90 days|90-day/);
+assert.match(manhwa, /config\/planner-models\.json/);
+assert.match(generated, /unsupported-publish-path gate/);
+// approve-listen may remain only in legacy/analysis/planning documents until R05 marks the listen routes legacy-only.
+const approveListenAllowlist = [/^docs\/designs\/autopilot_gates_v1\.md$/, /^docs\/designs\/pipeline_map_v1\//, /^docs\/designs\/stabilization_roadmap_v1\.md$/, /^docs\/designs\/policy_text_tracker_v1\.md$/, /^docs\/workflows\/narration_quality_v2\.md$/, /^docs\/proofs\//, /^docs\/workflows\/(avatar_pilot|crime_|true_crime)/];
+const walk = (dir) => readdirSync(path.join(repoRoot, dir), { withFileTypes: true }).flatMap((entry) => (entry.isDirectory() ? walk(path.join(dir, entry.name)) : entry.name.endsWith(".md") ? [path.join(dir, entry.name)] : []));
+for (const file of [...walk("docs"), "AGENTS.md"]) {
+  if (!read(file).includes("approve-listen")) continue;
+  assert.ok(approveListenAllowlist.some((pattern) => pattern.test(file)), `${file}: approve-listen outside the legacy/analysis allowlist`);
+}
 
 console.log("Pipeline guidance routing, preservation anchors, links, and stage-table checks passed.");

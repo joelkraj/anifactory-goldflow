@@ -8,19 +8,20 @@ import sharp from "sharp";
 import { autopilotEnabled, autopilotIdentityFields, isAutomatedReviewer } from "../lib/autopilot-policy.mjs";
 import { buildEpisodeBudget } from "../lib/episode-budget.mjs";
 import { goldflowArgv, placeholdersIn, repairScope, tokenizeShape, useEpisodeBudgetToken } from "../lib/autopilot-command-shape.mjs";
-import { classifyRiskCut, decideNext } from "../lib/autopilot-gates.mjs";
+import { allocationImportBlockers, classifyRiskCut, decideNext } from "../lib/autopilot-gates.mjs";
+import { createLegacyPanelProductionContract, createPanelProductionContract } from "../lib/panel-production-policy.mjs";
 import { createModelReviewer } from "../lib/autopilot-reviewer.mjs";
 import {
   AUTOPILOT_STOP_REASONS, STAGE_WALL_BUDGETS, codeDriftByAncestry, falObserveArgvFor, interruptedChildFrom, paidDispatchKey, planAutopilot, runAutopilot, wallBudgetSecFor,
 } from "../lib/autopilot-driver.mjs";
 import {
-  autoPrivateUpload, autopilotPublishStatus, automatedUploadReceipt, finalWatchStatus, publishApproval, recordFinalWatch,
+  autoPrivateUpload, autopilotPublishStatus, automatedUploadReceipt, finalWatchStatus, publishApproval, publishPathFor, recordFinalWatch,
 } from "../lib/autopilot-publish.mjs";
 import { authorAutomatedPackaging, loadPackagingConfig } from "../lib/autopilot-packaging.mjs";
 import { mediaWorkflowForPreflight } from "../lib/media-workflows.mjs";
 import { materializePowerSystemComprehensionAudit } from "../lib/power-system-comprehension-contract.mjs";
 import { PIPELINE_STAGE_REGISTRY, buildStageCommand, readyStageIds, stageChecklistFor } from "../lib/pipeline-stage-registry.mjs";
-import { validateYoutubePackagingSpec, validateYoutubeUploadReceipt } from "../lib/youtube-publish-contract.mjs";
+import { loadChannelUploadDefaults, loadYoutubeApiCompliance, validateChannelUploadDefaults, validateYoutubeApiCompliance, validateYoutubePackagingSpec, validateYoutubePinnedCommentReceipt, validateYoutubeUploadReceipt } from "../lib/youtube-publish-contract.mjs";
 
 const lockedAt = "2026-10-20T00:00:00.000Z";
 const sha = (value) => createHash("sha256").update(value).digest("hex");
@@ -339,6 +340,61 @@ test("automatic gate decisions leave a hash-bound decision receipt", async () =>
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
+/* ---------- dense allocation import ---------- */
+
+const allocationShape = "node bin/goldflow.mjs visual panel-assets --channel chan --series s --week w --episode ep_01 --plan <authored-panel-asset-candidate.json>";
+const readyReport = (dir, extra = {}) => ({ schema: "goldflow_dense_allocation_report_v1", status: "candidate_ready", candidate_path: path.join(dir, "candidate-abc.json"), job_provider_calls: 26,
+  findings: [{ severity: "warning", code: "page_needs_reference_selection", message: "page p1 has 7 candidate refs" }], density: { beats_per_image: 4.84 }, scene_budget: { budget_generations: 176, over_budget_scenes: [] }, failed_chunk_ids: [], ...extra });
+
+test("allocation import conditions are checked separately: blockers, over-budget scenes and failed chunks each refuse", () => {
+  const ready = readyReport("/j");
+  assert.deepEqual(allocationImportBlockers(ready), []);
+  assert.match(allocationImportBlockers({ ...ready, status: "partial" }).join(";"), /not candidate_ready/);
+  assert.match(allocationImportBlockers({ ...ready, findings: [{ severity: "blocker", message: "page p3 lacks a location reference" }] }).join(";"), /blocker finding: page p3/);
+  assert.match(allocationImportBlockers({ ...ready, scene_budget: { budget_generations: 176, over_budget_scenes: [{ scene: "046", max_generations: 3, used: 4 }] } }).join(";"), /over-budget scenes: 046 \(4\/3\)/);
+  assert.match(allocationImportBlockers({ ...ready, failed_chunk_ids: ["alloc_002"] }).join(";"), /failed chunks: alloc_002/);
+  assert.match(allocationImportBlockers({ ...ready, scene_budget: {} }).join(";"), /over_budget_scenes is missing/);
+});
+
+test("dense candidates import automatically only under the strict conditions, with an append-only receipt", async () => {
+  const dense = autopilotIdentity({ render_profile: "panel_composition_v1", panel_composition_contract: createPanelProductionContract() });
+  const dir = await episodeDir(dense);
+  const denseStatus = (extra = {}) => ({ ...status("visual_prompt_plan", allocationShape), identity: dense, ...extra });
+  try {
+    // No report yet: author with the locked planner.
+    const author = await decideNext({ status: denseStatus(), episodeDir: dir, deps: { reviewer: neverReviewer, repairLedger: new Set() } });
+    assert.deepEqual(author.argv, ["visual", "panel-assets", "--episode-dir", dir, "--action", "author-dense"]);
+    const job = path.join(dir, "reports", "panel_assets", "dense-author", "0123456789abcdef");
+    // A failed chunk gets exactly one exact-chunk repair; the repair key lets the ledger hold a second one.
+    await json(path.join(job, "report-1000.json"), readyReport(job, { status: "needs_exact_repair", failed_chunk_ids: ["alloc_002", "alloc_005"], candidate_path: undefined }));
+    const repair = await decideNext({ status: denseStatus(), episodeDir: dir, deps: { reviewer: neverReviewer, repairLedger: new Set() } });
+    assert.deepEqual(repair.argv.slice(-2), ["--repair-chunk-ids", "alloc_002,alloc_005"]);
+    assert.deepEqual(repair.receipt.repairKey, ["dense_repair:0123456789abcdef:alloc_002", "dense_repair:0123456789abcdef:alloc_005"]);
+    // Over budget: triage, never an import.
+    await json(path.join(job, "report-2000.json"), readyReport(job, { scene_budget: { budget_generations: 176, over_budget_scenes: [{ scene: "046", max_generations: 3, used: 4 }] } }));
+    const held = await decideNext({ status: denseStatus(), episodeDir: dir, deps: { reviewer: neverReviewer, repairLedger: new Set() } });
+    assert.equal(held.kind, "triage"); assert.match(held.findings.join(";"), /over-budget/);
+    assert.equal((await readdir(path.join(dir, "autopilot")).catch(() => [])).includes("allocation_imports"), false);
+    // Clean candidate: import with the receipt.
+    await writeFile(path.join(job, "candidate-abc.json"), JSON.stringify({ schema: "goldflow_panel_asset_plan_v2" }));
+    await json(path.join(job, "report-3000.json"), readyReport(job));
+    const imported = await decideNext({ status: denseStatus(), episodeDir: dir, deps: { reviewer: neverReviewer, repairLedger: new Set() } });
+    assert.equal(imported.kind, "run");
+    assert.deepEqual(imported.argv.slice(-2), ["--plan", path.join(job, "candidate-abc.json")]);
+    assert.equal(imported.receipt.decision, "approve");
+    const [name] = await readdir(path.join(dir, "autopilot", "allocation_imports"));
+    const receipt = JSON.parse(await readFile(path.join(dir, "autopilot", "allocation_imports", name), "utf8"));
+    assert.equal(receipt.schema, "goldflow_autopilot_allocation_import_v1");
+    assert.equal(receipt.approver, "automated:allocation_validator");
+    assert.equal(receipt.candidate_sha256, sha(JSON.stringify({ schema: "goldflow_panel_asset_plan_v2" })));
+    assert.deepEqual([receipt.density, receipt.scene_budget.over_budget_scenes, receipt.findings.length, receipt.provider_calls], [{ beats_per_image: 4.84 }, [], 1, 26]);
+    // A historical identity without the dense lock keeps its hand-imported route.
+    const legacy = { ...dense, panel_composition_contract: createLegacyPanelProductionContract() };
+    const hand = await decideNext({ status: denseStatus({ identity: legacy }), episodeDir: dir, deps: { reviewer: neverReviewer, repairLedger: new Set() } });
+    assert.equal(hand.kind, "triage"); assert.match(hand.reason, /does not lock the dense-page allocation route/);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
 /* ---------- private upload, final watch, publish approval ---------- */
 
 async function publishFixture() {
@@ -352,7 +408,9 @@ async function publishFixture() {
   return { dir, video, manifest };
 }
 const apiUpload = { status: "uploaded_private", channel: { id: "UC1" }, video_id: "vid1", watch_url: "https://www.youtube.com/watch?v=vid1",
-  title: "T", description: "D", privacy_status: "private", self_declared_made_for_kids: false, thumbnail_uploaded: true };
+  title: "T", description: "D", privacy_status: "private", self_declared_made_for_kids: false, thumbnail_uploaded: true, processing_status: "processing" };
+const audited = { schema: "goldflow_youtube_api_compliance_v1", audited: true, verified_at: lockedAt, verified_by: "joel", config_path: "/cfg.json", config_sha256: "c".repeat(64) };
+const unaudited = { ...audited, audited: "unknown", verified_at: null, verified_by: null };
 
 test("automatic private upload verifies API-readable fields and defers only Studio-only settings", async () => {
   const { dir, manifest } = await publishFixture();
@@ -365,9 +423,12 @@ test("automatic private upload verifies API-readable fields and defers only Stud
     const mismatch = automatedUploadReceipt({ manifest, manifestPath: "/m", manifestSha256: "h", api: { ...apiUpload, title: "Other" }, episode: "ep_01", now: lockedAt });
     assert.equal(validateYoutubeUploadReceipt(mismatch, { manifest, manifestHash: "h" }).status, "blocked");
     let uploads = 0;
-    const result = await autoPrivateUpload({ episodeDir: dir, episode: "ep_01", uploader: async () => { uploads += 1; return apiUpload; }, now: lockedAt });
+    const result = await autoPrivateUpload({ episodeDir: dir, episode: "ep_01", compliance: audited, uploader: async () => { uploads += 1; return apiUpload; }, now: lockedAt });
     assert.equal(result.status, "passed");
-    await assert.rejects(autoPrivateUpload({ episodeDir: dir, episode: "ep_01", uploader: async () => { uploads += 1; return apiUpload; } }), /never upload twice/);
+    const written = JSON.parse(await readFile(result.receipt_path, "utf8"));
+    assert.equal(written.publish_path, "data_api_publish");
+    assert.deepEqual(written.api_compliance, { audited: true, verified_at: lockedAt, verified_by: "joel", config_path: "/cfg.json", config_sha256: "c".repeat(64) });
+    await assert.rejects(autoPrivateUpload({ episodeDir: dir, episode: "ep_01", compliance: audited, uploader: async () => { uploads += 1; return apiUpload; } }), /never upload twice/);
     assert.equal(uploads, 1);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
@@ -376,25 +437,103 @@ test("final watch and publish approval are human steps bound to the exact master
   const { dir } = await publishFixture();
   try {
     const identity = autopilotIdentity();
-    await autoPrivateUpload({ episodeDir: dir, episode: "ep_01", uploader: async () => apiUpload, now: lockedAt });
+    await autoPrivateUpload({ episodeDir: dir, episode: "ep_01", compliance: audited, uploader: async () => apiUpload, now: lockedAt });
     const pending = await finalWatchStatus({ episodeDir: dir, episode: "ep_01", identity });
     assert.equal(pending.state, "missing");
     assert.match(pending.next_command_shape, /run final-watch/);
+    assert.match(pending.next_command_shape, /YouTube processing: processing; the local MP4 needs no wait/);
     assert.equal((await finalWatchStatus({ episodeDir: dir, episode: "ep_01", identity: {} })).state, "skipped_with_waiver");
     await assert.rejects(recordFinalWatch({ episodeDir: dir, episode: "ep_01", decision: "accept", reviewer: "automated:model_reviewer", note: "watched it all" }), /human step/);
     await recordFinalWatch({ episodeDir: dir, episode: "ep_01", decision: "accept", reviewer: "joel", note: "Watched end to end; pacing good." });
     assert.equal((await finalWatchStatus({ episodeDir: dir, episode: "ep_01", identity })).done, true);
     assert.equal((await autopilotPublishStatus({ episodeDir: dir, episode: "ep_01" })).state, "missing");
     const publisher = async ({ videoId, visibility, commentText }) => ({ video_id: videoId, privacy_status: visibility === "public" ? "public" : "private", comment_id: "c1", comment_text: commentText });
-    await assert.rejects(publishApproval({ episodeDir: dir, episode: "ep_01", visibility: "public", approvedBy: "joel", studioSettingsVerified: false, publisher }), /studio-settings-verified/);
-    await assert.rejects(publishApproval({ episodeDir: dir, episode: "ep_01", visibility: "public", approvedBy: "automated:x_y", studioSettingsVerified: true, publisher }), /human step/);
-    const published = await publishApproval({ episodeDir: dir, episode: "ep_01", visibility: "public", approvedBy: "joel", studioSettingsVerified: true, publisher, now: lockedAt });
+    await assert.rejects(publishApproval({ episodeDir: dir, episode: "ep_01", visibility: "public", approvedBy: "joel", studioSettingsVerified: false, publisher, compliance: audited }), /studio-settings-verified/);
+    await assert.rejects(publishApproval({ episodeDir: dir, episode: "ep_01", visibility: "public", approvedBy: "automated:x_y", studioSettingsVerified: true, publisher, compliance: audited }), /human step/);
+    // Q54: no audit on record means no Data API visibility flip; the publisher is never called.
+    let flips = 0;
+    const countingPublisher = async (args) => { flips += 1; return publisher(args); };
+    await assert.rejects(publishApproval({ episodeDir: dir, episode: "ep_01", visibility: "public", approvedBy: "joel", studioSettingsVerified: true, publisher: countingPublisher, compliance: unaudited }), /not recorded as passed \(audited="unknown"[\s\S]*stays a YouTube Studio step/);
+    await assert.rejects(publishApproval({ episodeDir: dir, episode: "ep_01", visibility: "scheduled", scheduleAt: "2099-01-01T00:00:00.000Z", timeZone: "UTC", approvedBy: "joel", studioSettingsVerified: true, publisher: countingPublisher, compliance: { ...audited, audited: false } }), /audited=false/);
+    await assert.rejects(publishApproval({ episodeDir: dir, episode: "ep_01", visibility: "public", approvedBy: "joel", studioSettingsVerified: true, publisher: countingPublisher }), /compliance\.json record is required/);
+    assert.equal(flips, 0);
+    // Channel defaults pre-fill the values the approver confirms and never replace the flag.
+    const defaults = { path: "/ch/channel_upload_defaults.json", sha256: "d".repeat(64), values: { monetization: "on", comments: "on", mid_roll_mode: "automatic" } };
+    await assert.rejects(publishApproval({ episodeDir: dir, episode: "ep_01", visibility: "public", approvedBy: "joel", studioSettingsVerified: false, publisher, compliance: audited, channelDefaults: defaults }), /Expected per \/ch\/channel_upload_defaults\.json: monetization=on, comments=on[\s\S]*never satisfy/);
+    const published = await publishApproval({ episodeDir: dir, episode: "ep_01", visibility: "public", approvedBy: "joel", studioSettingsVerified: true, publisher, compliance: audited, channelDefaults: defaults, now: lockedAt });
     assert.equal(published.status, "published");
+    const publishReceipt = JSON.parse(await readFile(published.publish_receipt_path, "utf8"));
+    assert.deepEqual(publishReceipt.studio_settings, { deferred_fields: ["monetization", "comments"], verified_by_publisher: true, verification_basis: "confirmed_by_approver",
+      prefilled_from_defaults: { path: defaults.path, sha256: defaults.sha256, values: { monetization: "on", comments: "on" } } });
+    assert.equal(publishReceipt.api_compliance.audited, true);
+    const comment = JSON.parse(await readFile(published.comment_receipt_path, "utf8"));
+    const manifest = JSON.parse(await readFile(path.join(dir, "youtube_publish_manifest_ep_01.json"), "utf8"));
+    const upload = JSON.parse(await readFile(path.join(dir, "youtube_upload_receipt_ep_01.json"), "utf8"));
+    const uploadReceiptHash = sha(await readFile(path.join(dir, "youtube_upload_receipt_ep_01.json")));
+    // The contract accepts pinned:false + pin_method only when the caller allows the autopilot follow-up.
+    assert.deepEqual(validateYoutubePinnedCommentReceipt(comment, { manifest, uploadReceipt: upload, uploadReceiptHash }).blockers, ["youtube_comment_not_verified_pinned"]);
+    const allowed = validateYoutubePinnedCommentReceipt(comment, { manifest, uploadReceipt: upload, uploadReceiptHash, pinFollowupAllowed: true });
+    assert.deepEqual([allowed.status, allowed.pin_followup], ["passed", true]);
+    assert.equal(validateYoutubePinnedCommentReceipt({ ...comment, pin_method: "other" }, { manifest, uploadReceipt: upload, uploadReceiptHash, pinFollowupAllowed: true }).status, "blocked");
+    assert.equal(validateYoutubePinnedCommentReceipt({ ...comment, recorded_by: "joel" }, { manifest, uploadReceipt: upload, uploadReceiptHash, pinFollowupAllowed: true }).status, "blocked");
     const done = await autopilotPublishStatus({ episodeDir: dir, episode: "ep_01" });
     assert.equal(done.done, true);
     assert.match(done.evidence, /pin it in Studio/);
-    await assert.rejects(publishApproval({ episodeDir: dir, episode: "ep_01", visibility: "public", approvedBy: "joel", studioSettingsVerified: true, publisher }), /already has a publish/);
+    await assert.rejects(publishApproval({ episodeDir: dir, episode: "ep_01", visibility: "public", approvedBy: "joel", studioSettingsVerified: true, publisher, compliance: audited }), /already has a publish/);
   } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test("an unaudited OAuth project stops before upload unless the run is declared private-review-only", async () => {
+  const { dir } = await publishFixture();
+  try {
+    let uploads = 0;
+    const uploader = async () => { uploads += 1; return apiUpload; };
+    await assert.rejects(autoPrivateUpload({ episodeDir: dir, episode: "ep_01", compliance: unaudited, uploader }), /Unsupported publish path: stop before any upload/);
+    await assert.rejects(autoPrivateUpload({ episodeDir: dir, episode: "ep_01", compliance: { ...audited, audited: false }, uploader }), /audited=false/);
+    assert.equal(uploads, 0);
+    assert.deepEqual(publishPathFor({ compliance: audited }).publish_path, "data_api_publish");
+    assert.throws(() => publishPathFor({ compliance: { ...audited, verified_by: null } }), /valid config/);
+    const result = await autoPrivateUpload({ episodeDir: dir, episode: "ep_01", compliance: unaudited, privateReviewOnly: true, uploader, now: lockedAt });
+    assert.equal(result.status, "passed");
+    const receipt = JSON.parse(await readFile(result.receipt_path, "utf8"));
+    assert.equal(receipt.publish_path, "private_review_only");
+    assert.equal(receipt.api_compliance.audited, "unknown");
+    await recordFinalWatch({ episodeDir: dir, episode: "ep_01", decision: "accept", reviewer: "joel", note: "Watched end to end; fine." });
+    // Even an audit recorded later never turns a private-review-only upload into a Data API release.
+    await assert.rejects(publishApproval({ episodeDir: dir, episode: "ep_01", visibility: "public", approvedBy: "joel", studioSettingsVerified: true, publisher: async () => { throw new Error("never"); }, compliance: audited }), /declared private-review-only at upload time/);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test("compliance and channel-default files are validated, and the repo config is not audited yet", async () => {
+  const repoConfig = await loadYoutubeApiCompliance(path.resolve("config/youtube_api_compliance.json"));
+  assert.equal(repoConfig.audited, "unknown", "Q54 is unanswered; flipping this needs the audit result in hand");
+  assert.match(repoConfig.config_sha256, /^[a-f0-9]{64}$/);
+  assert.equal(validateYoutubeApiCompliance({ schema: "goldflow_youtube_api_compliance_v1", audited: true, verified_at: null, verified_by: "joel" }).status, "blocked");
+  assert.equal(validateYoutubeApiCompliance({ schema: "goldflow_youtube_api_compliance_v1", audited: "yes" }).status, "blocked");
+  assert.equal(validateChannelUploadDefaults({ schema: "goldflow_channel_upload_defaults_v1", monetization: "on", comments: "held_for_review" }).status, "passed");
+  assert.deepEqual(validateChannelUploadDefaults({ schema: "goldflow_channel_upload_defaults_v1", monetization: "maybe", studio_settings_verified: true }).blockers, ["channel_upload_defaults_monetization_invalid", "channel_upload_defaults_unknown_field"]);
+  const dir = await mkdtemp(path.join(os.tmpdir(), "goldflow-defaults-"));
+  try {
+    assert.equal(await loadChannelUploadDefaults(path.join(dir, "missing.json")), null);
+    await json(path.join(dir, "channel_upload_defaults.json"), { schema: "goldflow_channel_upload_defaults_v1", monetization: "on", mid_roll_mode: "manual", notes: "Joey channel" });
+    const loaded = await loadChannelUploadDefaults(path.join(dir, "channel_upload_defaults.json"));
+    assert.deepEqual(loaded.values, { monetization: "on", mid_roll_mode: "manual" });
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test("after final QA passes, the autopilot path to the private upload has no human stop", () => {
+  const auto = autopilotIdentity({ episode_dir: "/e", series_slug: "s", week: "w" });
+  const rows = PIPELINE_STAGE_REGISTRY.map((row) => ({ stage: row.id, state: row.order <= PIPELINE_STAGE_REGISTRY.find((r) => r.id === "final_qa").order ? "passed" : "missing" }));
+  const order = [];
+  for (let step = 0; step < 4; step += 1) {
+    const [next] = readyStageIds(rows, auto);
+    if (!next) break;
+    order.push(next);
+    if (next === "final_watch") break;
+    assert.doesNotMatch(buildStageCommand(next, auto), /<[^>]+>|Studio|browser/, `${next} must be a concrete automated command`);
+    rows.find((row) => row.stage === next).state = "passed";
+  }
+  assert.deepEqual(order, ["upload_packaging", "youtube_publish_readiness", "youtube_studio_upload", "final_watch"]);
 });
 
 test("a rejected final watch blocks publishing and names the rejection", async () => {

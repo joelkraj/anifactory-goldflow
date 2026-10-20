@@ -16,7 +16,8 @@ try {
   let result;
   if (flags.action === 'author-dense') {
     // Drafts a dense v2 candidate with the locked planner; never imports or approves it.
-    const report = await authorDensePageAllocation({ episodeDir, outputDir: flags['output-dir'] ? path.resolve(flags['output-dir']) : undefined, repoRoot: fileURLToPath(new URL('../', import.meta.url)), concurrency: Number(flags.concurrency ?? 6), limit: Number(flags.limit ?? 1000), onProgress: row => process.stderr.write(`${row.chunk_id} ${row.status} ${row.completed}/${row.total}\n`) });
+    // --repair-chunk-ids re-requests exactly those failed chunks once; everything else stays cached.
+    const report = await authorDensePageAllocation({ episodeDir, outputDir: flags['output-dir'] ? path.resolve(flags['output-dir']) : undefined, repoRoot: fileURLToPath(new URL('../', import.meta.url)), concurrency: Number(flags.concurrency ?? 6), limit: Number(flags.limit ?? 1000), repairChunkIds: String(flags['repair-chunk-ids'] ?? '').split(',').map(id => id.trim()).filter(Boolean), onProgress: row => process.stderr.write(`${row.chunk_id} ${row.status} ${row.completed}/${row.total}\n`) });
     process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
     process.exit(report.status === 'candidate_ready' ? 0 : 1);
   }
@@ -24,6 +25,6 @@ try {
   else if (flags.action === 'validate') { const loaded = await loadPanelAssetPlan({ episodeDir }); result = { status: 'passed', plan_path: loaded.planPath }; }
   else if (flags.plan) result = await writePanelAssetPlan({ episodeDir, planPath: path.resolve(flags.plan) });
   else result = await preparePanelAssetPlan({ episodeDir });
-  const summary = { status: result.status ?? result.plan?.status, plan_path: result.planPath ?? result.plan_path, packet_path: result.packetPath, candidate_path: result.candidatePath, unique_asset_count: result.plan?.unique_asset_count, beat_count: result.beats?.length, reused_beat_count: result.plan?.reused_beat_count, materialized_alias_count: result.materialized_alias_count, missing_owner_image_ids: result.missing_owner_image_ids, provider_calls: 0 };
+  const summary = { status: result.status ?? result.plan?.status, plan_path: result.planPath ?? result.plan_path, packet_path: result.packetPath, candidate_path: result.candidatePath, unique_asset_count: result.plan?.unique_asset_count, beat_count: result.beats?.length, reused_beat_count: result.plan?.reused_beat_count, materialized_alias_count: result.materialized_alias_count, missing_owner_image_ids: result.missing_owner_image_ids, allocation_route: result.plan?.allocation_route, provider_calls: result.plan?.provider_calls ?? 0 };
   process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
 } catch (error) { process.stderr.write(`${error.message}\n`); process.exitCode = 1; }

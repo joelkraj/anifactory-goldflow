@@ -303,8 +303,29 @@ function agentReviewGate(stage, method, reviewerFlag, note) {
   };
 }
 
-async function panelAllocationImport({ episodeDir, argv }) {
-  const stage = "visual_prompt_plan";
+export const ALLOCATION_IMPORT_RECEIPT_SCHEMA = "goldflow_autopilot_allocation_import_v1";
+const ALLOCATION_IMPORT_DIR = "autopilot/allocation_imports";
+
+/**
+ * Why a dense-author report may not be imported automatically. Every condition
+ * is checked separately: over-budget scenes and failed chunks are not findings.
+ */
+export function allocationImportBlockers(report) {
+  const blockers = [];
+  if (report?.schema !== "goldflow_dense_allocation_report_v1") blockers.push("report schema is not goldflow_dense_allocation_report_v1");
+  if (report?.status !== "candidate_ready") blockers.push(`report status is ${report?.status ?? "missing"}, not candidate_ready`);
+  const blocking = (report?.findings ?? []).filter((row) => row.severity === "blocker");
+  if (blocking.length) blockers.push(...blocking.map((row) => `blocker finding: ${row.message ?? row.code}`));
+  const over = report?.scene_budget?.over_budget_scenes;
+  if (!Array.isArray(over)) blockers.push("scene_budget.over_budget_scenes is missing");
+  else if (over.length) blockers.push(`over-budget scenes: ${over.map((row) => `${row.scene} (${row.used}/${row.max_generations})`).join(", ")}`);
+  if (!Array.isArray(report?.failed_chunk_ids)) blockers.push("failed_chunk_ids is missing");
+  else if (report.failed_chunk_ids.length) blockers.push(`failed chunks: ${report.failed_chunk_ids.join(", ")}`);
+  if (typeof report?.candidate_path !== "string" || !report.candidate_path) blockers.push("candidate_path is missing");
+  return blockers;
+}
+
+async function latestDenseAuthorReport(episodeDir) {
   const root = path.join(episodeDir, "reports", "panel_assets", "dense-author");
   const reports = [];
   for (const job of await fs.readdir(root).catch(() => [])) {
@@ -313,18 +334,57 @@ async function panelAllocationImport({ episodeDir, argv }) {
     }
   }
   reports.sort((a, b) => Number(path.basename(b).match(/\d+/)[0]) - Number(path.basename(a).match(/\d+/)[0]));
-  const latest = reports.length ? await readJson(reports[0]) : null;
-  if (!latest || latest.status !== "candidate_ready") {
-    return run(stage, ["visual", "panel-assets", "--episode-dir", episodeDir, "--action", "author-dense"], {
+  return reports.length ? { path: reports[0], report: await readJson(reports[0]) } : null;
+}
+
+/**
+ * Dense pages are the locked scene-art route of new panel identities. With no
+ * candidate, author one; with a failed chunk, repair exactly those chunks once;
+ * import only a candidate_ready report with zero blocker findings, no
+ * over-budget scene and no failed chunk, leaving an append-only import receipt.
+ */
+async function panelAllocationImport({ status, episodeDir, argv }) {
+  const stage = "visual_prompt_plan";
+  const { panelAllocationRoute, PANEL_ALLOCATION_ROUTE_DENSE } = await import("./panel-production-policy.mjs");
+  const identity = status.identity ?? await readJson(path.join(episodeDir, "run_identity.json")) ?? {};
+  if (panelAllocationRoute(identity) !== PANEL_ALLOCATION_ROUTE_DENSE) {
+    return triage(stage, "this identity does not lock the dense-page allocation route; its recorded authored route needs a hand-imported candidate");
+  }
+  const latest = await latestDenseAuthorReport(episodeDir);
+  const author = ["visual", "panel-assets", "--episode-dir", episodeDir, "--action", "author-dense"];
+  if (!latest || !["candidate_ready", "needs_exact_repair"].includes(latest.report?.status)) {
+    return run(stage, author, {
       method: "allocation_validator", decision: "execute", note: "No ready dense allocation candidate; author one with the locked planner.",
-      repairKey: latest ? `dense_author:${path.basename(path.dirname(reports[0]))}` : null,
+      repairKey: latest ? `dense_author:${path.basename(path.dirname(latest.path))}` : null,
     });
   }
-  const blockers = (latest.findings ?? []).filter((row) => row.severity === "blocker");
-  if (blockers.length) return triage(stage, "dense allocation candidate has blocker findings", blockers.map((row) => row.message ?? row.code));
-  return run(stage, setFlag(stripPlaceholderFlags(argv), "plan", latest.candidate_path), {
-    method: "allocation_validator", decision: "approve", note: `Import validated dense candidate (${latest.density?.beats_per_image ?? "?"} beats/image).`,
-    findings: (latest.findings ?? []).map((row) => row.message ?? row.code), evidence: [{ role: "author_report", path: reports[0] }, { role: "candidate", path: latest.candidate_path }],
+  const job = path.basename(path.dirname(latest.path));
+  if (latest.report.status === "needs_exact_repair") {
+    const failed = latest.report.failed_chunk_ids ?? [];
+    if (!failed.length) return triage(stage, "dense allocation report needs repair but names no failed chunk");
+    return run(stage, [...author, "--repair-chunk-ids", failed.join(",")], {
+      method: "allocation_validator", decision: "repair", note: `One exact-chunk repair for ${failed.join(", ")}; a second failure holds.`,
+      findings: failed.map((id) => `chunk ${id} failed`), evidence: [{ role: "author_report", path: latest.path }],
+      repairKey: failed.map((id) => `dense_repair:${job}:${id}`),
+    });
+  }
+  const blockers = allocationImportBlockers(latest.report);
+  if (blockers.length) return triage(stage, "dense allocation candidate is not importable automatically", blockers);
+  const candidateSha256 = sha256(await fs.readFile(latest.report.candidate_path));
+  const { writeSequencedRecord } = await import("./episode-budget.mjs");
+  const receipt = await writeSequencedRecord(episodeDir, ALLOCATION_IMPORT_DIR, `dense_${candidateSha256.slice(0, 12)}`, {
+    schema: ALLOCATION_IMPORT_RECEIPT_SCHEMA, approver: automatedReviewer("allocation_validator"), route: PANEL_ALLOCATION_ROUTE_DENSE,
+    candidate_path: latest.report.candidate_path, candidate_sha256: candidateSha256,
+    author_report_path: latest.path, author_report_sha256: sha256(await fs.readFile(latest.path)),
+    findings: latest.report.findings ?? [], density: latest.report.density ?? null, scene_budget: latest.report.scene_budget ?? null,
+    failed_chunk_ids: latest.report.failed_chunk_ids ?? [], provider_calls: latest.report.job_provider_calls ?? latest.report.provider_calls ?? null,
+    conditions: ["candidate_ready", "zero_blocker_findings", "no_over_budget_scenes", "no_failed_chunks", "dense_route_locked"],
+    run_identity_sha256: await fs.readFile(path.join(episodeDir, "run_identity.json")).then(sha256, () => null), created_at: new Date().toISOString(),
+  });
+  return run(stage, setFlag(stripPlaceholderFlags(argv), "plan", latest.report.candidate_path), {
+    method: "allocation_validator", decision: "approve", note: `Import validated dense candidate (${latest.report.density?.beats_per_image ?? latest.report.density?.beats_per_generation ?? "?"} beats/image); receipt ${path.basename(receipt.path)}.`,
+    findings: (latest.report.findings ?? []).map((row) => row.message ?? row.code),
+    evidence: [{ role: "author_report", path: latest.path }, { role: "candidate", path: latest.report.candidate_path }, { role: "import_receipt", path: receipt.path }],
   });
 }
 

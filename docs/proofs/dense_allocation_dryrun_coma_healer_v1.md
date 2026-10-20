@@ -33,3 +33,31 @@ Status: private proof. No image provider calls and no Fal spend. The source run 
   - It keeps 22 singles.
 - Getting closer to 5 would need P5L/P6G encouraged for dialogue-heavy scenes, or zones that serve more consecutive beats.
 - That is a prompt tuning question; it was not attempted here.
+
+## Tuned run: per-scene budgets (2026-10-20, `9b9fdf5`)
+
+The prompt now gives each scene a budget of max(1, round(beats ÷ 5)) generations, 176 for the episode. Rounding up would have allowed 207, which caps the episode near 4.2 beats per image.
+
+It also asks for:
+- 5–6-zone templates for dialogue, reaction and investigation runs;
+- zones serving 2–3 consecutive beats when the narration stays on one moment;
+- almost no singles.
+
+The job is now keyed on the exact prompts. Run: 26 planner calls, all chunks valid first time, no Fal.
+
+| | First run | Tuned run |
+| --- | ---: | ---: |
+| Generations | 214 (192 pages + 22 singles) | **179 pages, 0 singles** |
+| Beats per generation | 4.05 | **4.84** |
+| Zones per page | 3.6 | 4.2 |
+| Beats per zone | 1.2 | 1.14 |
+| Scene-art cost at $0.0262/page | ≈ $5.4 | **≈ $4.7** (vs $11.58 today) |
+
+- **Templates:** P5L 77, P4H 50, P3H 21, P2V 12, P6G 9, P3L 8, P4G 2.
+- **Over budget:** 3 scenes went one page over (046, 068, 073). The people cap is the stated reason.
+- **Findings:**
+  - No blockers.
+  - 12 pages need a reference selection.
+  - **28 mixed-location pages**, up from 11. These are scenes that move between rooms (e.g. elevator to room 412). Prompt planning must give such a page's shared context both places, and the image proof should check that each zone draws its own place.
+
+The density gain came from fuller pages and dropping singles, not from more beats per drawing, so picture variety is preserved. Candidate: `jobs/71897bf1b52026fb/candidate-182939df5dd7.json`. It is proof-only and not importable.

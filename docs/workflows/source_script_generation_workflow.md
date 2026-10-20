@@ -8,23 +8,25 @@ After exact-source review, new episode preflight must explicitly select `--conte
 
 ## Principle
 
-Use measured winners and outliers to find a simple clickable premise, approve one exact title and story promise, then send the operator's compact retention prompt to three independent GPT-5.6 Pro writers. Compare at Medium, preserve the selected script, and run a bounded Medium/High improvement loop before exact-script review.
+Use measured winners and outliers to find a simple clickable premise, take the shortlist's rank-one title and story promise automatically, then send the filled retention prompt to one Pro writer. Improve that single draft with directed editorial passes (diagnose, revise, verify; at most two rounds) instead of a script tournament. The only human steps are the final watch and the publish approval downstream.
 
 The default profile is `direct_manufacturer_v1`. Its north star is measured upload average percentage viewed, with title/opening agreement and the first two minutes treated as the most important pre-upload risks. No model score or simulated viewer can guarantee real APV. The pipeline records creative work; it does not manufacture intermediate bureaucracy around it.
 
 ## Source Model Contract
 
-Effective September 4, 2026, `three_56_pro_v1` uses exactly three authenticated ChatGPT Web GPT-5.6 Sol writers at visible Pro. GPT-5.5 is excluded from new drafting. All three receive the same prompt in fresh contexts. A fresh Medium selector sees only blind IDs and exact texts and saves one whole draft byte-for-byte. Ideation and comparison stay Medium; editors may use Medium or High, never Pro. Every page verifies its model and effort before submission. Historical six-draft portfolios remain readable under their original contracts, without relabeling or new GPT-5.5 submissions.
+Effective October 20, 2026, new portfolios use `single_6_sol_pro_v1`: exactly one authenticated ChatGPT Web `gpt-6-sol` writer at visible Pro (`draft_56_1`), the same per-writer model contract as the previous three-writer default. There is no selector. Ideation stays Medium; the revision loop's diagnose and rewrite calls default to High and its verify call to Medium, never Pro. Every page verifies its model and effort before submission.
+
+Historical portfolios remain readable under their recorded contracts without relabeling: `three_6_sol_pro_v1` and `three_56_pro_v1` (three Pro drafts), `six_dual_pro_v1`, and `six_56_6_pro_v1`. A portfolio without a recorded `writer_policy` is inferred from its candidates (three drafts stay a three-writer portfolio). An operator can still request a multi-draft policy explicitly with `--writer-policy`; that portfolio then uses the historical `select`/`improve` path.
 
 ## Source Wall-Clock SLO
 
-An explicit operator-requested comparison may use `six_56_6_pro_v1`: three GPT-5.6 Sol Web Pro drafts and three GPT-6 Web Pro drafts, with the same compact prompt, three concurrent writers, and the existing shared start gate. Bind `writer_policy` in the approved manufacturing brief and pass `--writer-policy six_56_6_pro_v1` to `source manufacture write`. The default remains `three_56_pro_v1`; this never reactivates GPT-5.5 or changes historical portfolios. The browser must select models by visible identity, not menu position. GPT-6 through the rolling Latest choice is accepted only when the picker explicitly verifies `6 Pro`; an unavailable or changed identity blocks rather than silently substituting a model. Six requested drafts do not authorize automatic editing, ingest, or production.
+An explicit operator-requested comparison may use `six_56_6_pro_v1`: three GPT-5.6 Sol Web Pro drafts and three GPT-6 Web Pro drafts, with the same compact prompt, three concurrent writers, and the existing shared start gate. Bind `writer_policy` in the approved manufacturing brief and pass `--writer-policy six_56_6_pro_v1` to `source manufacture write`. The default remains `single_6_sol_pro_v1`; this never reactivates GPT-5.5 or changes historical portfolios. The browser must select models by visible identity, not menu position. GPT-6 through the rolling Latest choice is accepted only when the picker explicitly verifies `6 Pro`; an unavailable or changed identity blocks rather than silently substituting a model. Six requested drafts do not authorize automatic editing, ingest, or production.
 
 GPT-6 picker diagnostics must read the complete `composer-intelligence-picker-content` enclosing the selected model panel. The generic menu selector can resolve to a nested model-only group that omits the sibling `6 Pro` description. Preserve strict identity checks; verify fixes with zero-send UI selection before exact-ID recovery of unsubmitted drafts.
 
 An operator may explicitly request an agent-directed GPT-6 edit/review loop on a chosen source candidate. Use the shared runner with explicit `gpt-6-astra` and named `winner_source_script_v3_directed_edit_gpt6_<scope>` / `winner_source_script_v3_directed_review_gpt6_<scope>` stages only before a production identity exists. Preserve the baseline, every full response and receipt, and an agent decision between calls. This does not alter default editors or authorize automatic extra rounds. Verify the actual visible model at the requested effort: the September 6 live picker showed Latest/High resolving to `5.6 High`, whereas Latest/Pro showed `6 Pro`; obtain the operator's model-versus-effort choice rather than substituting silently.
 
-New source development targets **two to three hours including bounded improvement**; this is a target, not guaranteed provider latency. Budget 15-25 minutes for premise work, up to 10 minutes for compact prompt preparation (or zero model calls for an imported prompt), 60-90 minutes for one wave of three Pro drafts, 15-20 minutes for Medium comparison, and 25-35 minutes for bounded edits/comparisons. Do not expand the packet or add rounds when behind schedule. Provider delays remain visible and require triage, not duplicate submissions.
+New source development targets **about two to two and a half hours with no operator wait**; this is a target, not guaranteed provider latency. Budget 15-25 minutes for premise work (two Medium calls), up to 10 minutes for prompt preparation (or zero model calls for an imported prompt), 45-90 minutes for one Pro draft, and 30-50 minutes per revision round (High diagnose 5-10, High complete rewrite 20-30, Medium verify 5-10), with a second round only when verify reports remaining material issues. Do not add rounds when behind schedule. Provider delays remain visible and require triage, not duplicate submissions.
 
 Code may validate completeness, exact opening-contract sentences, hashes, model receipts, and lineage, but it must not compose, summarize, patch, or rewrite creative story material. Passed prompts and drafts remain immutable; recovery names only the failed exact call or candidate. Provider queue time, operator deliberation, and active generation time are recorded separately.
 
@@ -36,20 +38,40 @@ No LLM score can prove retention. Predicted APV is a consistent pre-upload compa
 
 ## Direct Manufacturer V1 Default Flow
 
-1. Prepare one compact evidence file containing measured own-channel winner titles and a small current set of verified external outlier titles. Titles and metrics are evidence; AI commentary is optional.
-2. Run `goldflow source manufacture ideate --development-slug <slug> --evidence <file>`. One GPT-5.6 Medium context creates exactly thirty original title-only premises. A fresh independent GPT-5.6 Medium context shortlists ten using story-led hook comparison, click clarity, emotional stakes, a simple engine or situation, title-to-opening compatibility, and longform runway. New shortlists use `story_led_hooks_v1` and retain the winning hook rationale and promised payment scenes; no mandatory family-betrayal title grammar.
-3. The operator approves one exact title and plain-language premise. Record it in `manufacturing_brief.json`; do not create treatments or architecture.
-4. Run `goldflow source manufacture prepare --development-slug <slug> --brief <approved-json>`. One Medium context fills the legacy-derived contract in `docs/prompts/manhwa_recap_manufacturing_template_v1.txt` while preserving its binding first-40/80/120/300/600-word deadlines. Its reversal ladder requires recurring betrayers to return with fresh confidence, receive distinct public proof, break visibly, lose something tangible, and create the next opportunity. Short old-status challengers are allowed only when their reversal advances the active plot. The compact V2 experiment remains available for comparison but is not the production default.
-5. Run `goldflow source manufacture write --development-slug <slug>`. Three isolated GPT-5.6 Sol Web Pro writers run in one wave, concurrency three and 15-second staggering. Each writes one complete narration. Target word count is advisory. `--candidate-ids` limits new submissions to those exact IDs; other drafts must already be reusable. An explicitly named `--recover-browser-jobs <json>` map can adopt matching existing browser jobs by manifest, prompt, model, effort, receipt, and artifact hashes without another submission.
-6. Run `goldflow source manufacture select --development-slug <slug>`. A fresh Medium selector uses twenty advisory viewer profiles and opening-survival checkpoints to rank the three blind complete scripts only by predicted percentage viewed under normal ads and midrolls. It cannot blend scripts or rank by word count. Synthetic viewer scores are not measured retention or CTR.
-   An explicit `source manufacture compare-prompts --legacy-manifest <file>` comparison can include hash-verified legacy scripts, but does not replace the ordinary portfolio or silently promote a winner.
-7. Run `goldflow source manufacture improve --development-slug <slug> --max-rounds 2 --edit-efforts medium,high`. Each round uses one editor call to privately diagnose and write a complete challenger, then three concurrent Medium blind A/B comparisons. The High round occurs only if the Medium edit wins. Stop at the first loss; preserve every incumbent and challenger. Promotion requires at least two panel wins, at least 0.5 simulated APV-point improvement, and loose ten-percent length comparability. Word count is never a viewer score. The operator can limit this to one Medium round; there are no automatic retries or separate critique calls. For an agent-directed run, read the complete incumbent and pass `--director-notes <json>` containing its exact `incumbent_sha256` and compact `instructions`. Run one round, inspect its actual story changes, then extend `--max-rounds` with notes bound to the retained revision. Mismatched notes stop before editor spend. Simulated APV is not a measured retention improvement and cannot replace the director's comparison.
-8. Review `improvement_loop/current_winner.txt` and its exact hash before run preflight/ingest. Optional blind opening-audio auditions may help review but are not a required extra source stage. The operator can retain an earlier saved candidate.
-9. At 24 hours, 72 hours, and 7 days, record CTR and retention outcomes. After enough distinct uploads support one concrete change, propose one complete revised manufacturing template. Only explicit operator approval may activate that version at the channel level. Learning replaces the complete prompt template with a versioned, rollback-safe template; it never appends an addendum or extra context to a writer call.
+The default runs from ideation to the final script file with no operator stop. One command does all of it:
 
-`source manufacture run` carries new three-draft portfolios through writing, Medium selection, and the bounded improvement loop, then stops for exact-script review. Separate commands remain available for checkpoints. Historical six-draft runs keep their selection-only `run` behavior unless improvement is explicitly requested.
+```bash
+node bin/goldflow.mjs source manufacture run --development-slug <slug> --evidence <evidence.md>
+```
 
-Every source-manufacturing run writes `manufacturing_timing_report.json`; each edit round also records timestamps in `improvement_loop/round_*/decision.json`. Queue time and operator deliberation remain visible rather than being disguised as model latency. Later historical sections describe optional older rooms, not the new default.
+1. Prepare one compact evidence file containing measured own-channel winner titles and a small current set of verified external outlier titles (with URLs). Titles and metrics are evidence; AI commentary is optional.
+2. **Ideate.** One GPT-6 Sol Medium context creates exactly thirty original title-only premises. A fresh independent Medium context shortlists ten using story-led hook comparison, click clarity, emotional stakes, a simple engine or situation, title-to-opening compatibility, and longform runway. Shortlists use `story_led_hooks_v1` and retain the winning hook rationale and promised payment scenes.
+3. **Auto-title.** Goldflow copies the shortlist's rank-one title, premise, opening target, hook contract, genre elements and reference outlier byte-for-byte into `manufacturing_brief.json` with `status: "auto_selected"` and a `selection_basis` recording rank 1, the selector's `why_it_can_win` rationale, the shortlist path and SHA-256, and the evidence hash. Code never edits the title or premise. An existing brief is never replaced, so an operator who wants a different premise supplies `--brief <json>` (an operator-approved brief keeps its original `approved_by` contract) before `write`.
+4. **Prepare.** One Medium context fills `docs/prompts/manhwa_recap_manufacturing_template_v1.txt` (or the approved channel template) while preserving its binding first-40/80/120/300/600-word deadlines and reversal ladder.
+5. **Write one draft.** One isolated `gpt-6-sol` Web Pro writer writes one complete narration (`manufactured_drafts/draft_56_1.txt`, recorded in `manufacturing_portfolio.json` with `writer_policy: single_6_sol_pro_v1`). Target word count is advisory. `--recover-browser-jobs <json>` can adopt a matching existing browser job without another submission.
+6. **Revise.** The draft enters `revision_loop/` as `v00_incumbent.txt`. Each round is exactly three calls:
+   - **diagnose** (`manhwa_recap_revision_diagnose_v1.md`, High): concrete notes anchored by exact quotations, covering continuity and logic, cold-viewer explanation and world-building, pacing and repetition, the opening deadlines (checked against exact word windows Goldflow slices from the script), storytelling, payoff, and useful additions. Each note is `material` or `minor`. Notes whose anchors mostly fail to match the script block the round.
+   - **revise** (`manhwa_recap_revision_rewrite_v1.md`, High): one complete revised narration from those notes. A result outside 0.8-1.3 times the incumbent's length is treated as truncated and reverted without a verify call.
+   - **verify** (`manhwa_recap_revision_verify_v1.md`, Medium): compares revision against incumbent on the same dimensions, checks regressions, and decides `keep_revision` or `revert` with reasons, then lists remaining material issues in the kept version.
+   A second round runs only when verify reports remaining material issues; its diagnose call sees those issues and any regressions. The hard cap is two rounds (`--max-rounds 1` limits it further). A diagnose that finds every dimension fine ends the loop without a rewrite. There are no A/B judge panels, no selector, and no automatic retries.
+7. **Hand-off.** The retained script is written once to `revision_loop/final_script.txt`; the command prints its path and SHA-256 for `goldflow run preflight --content-profile manhwa_recap_v1 --media-workflow generated_visuals_v1 ... --source <final_script_path>` and ingest.
+8. At 24 hours, 72 hours, and 7 days, record CTR and retention outcomes. After enough distinct uploads support one concrete change, propose one complete revised manufacturing template. Only explicit operator approval may activate that version at the channel level (`source manufacture learn`). Learning replaces the complete prompt template with a versioned, rollback-safe template; it never appends an addendum or extra context to a writer call.
+
+**Brought scripts.** An operator-supplied script gets the same passes:
+
+```bash
+node bin/goldflow.mjs source manufacture revise --script <script.txt> [--development-dir <dir>] [--brief <json>]
+```
+
+Without `--development-dir` the loop writes to a sibling `<script-name>_revision/` folder. The brought file is copied to `v00_incumbent.txt` and never modified; if verify does not judge a revision better, the original is the final script. A brief is optional; without one, diagnose infers the promise from the script. One development folder holds one brought script.
+
+**Artifacts and receipts.** Every round folder keeps `incumbent.txt`, `notes.json`, `revision.txt`, `verdict.json`, `decision.json`, and each raw response with its `.meta.json` receipt, all written exclusively. `revision_loop_report.json` summarizes rounds, decisions and the final hash; `revision_timing_report.json` records per-call timing; `manufacturing_timing_report.json` covers ideation through revision. Rerunning any command resumes from hash-verified receipts without new spend; a changed prompt or incumbent stops rather than overwriting.
+
+**Model calls per ideation run.** Old default: 2 ideation + 1 prepare + 3 Pro drafts + 1 selector + 4-8 improvement calls (one editor plus three blind judges per round) = 11-15 calls, plus an operator title approval and exact-script review. New default: 2 + 1 + 1 Pro draft + 3-6 revision calls = 7-10 calls, no operator stop.
+
+**Separate commands** remain for checkpoints and recovery: `ideate`, `prepare`, `write`, `revise`. Existing multi-draft portfolios keep `select`, `improve`, `compare-prompts`, `audition` and `promote`, and `run` on such a folder keeps its historical select/improve behavior.
+
+Code may validate completeness, hashes, receipts, anchors and lineage and slice exact word windows, but every creative word (titles, premises, notes, revisions) comes from a model call.
 
 ## Optional First-Class Story Room V4
 
@@ -119,6 +141,26 @@ Money, ranks, systems, contracts, hearings, acquisitions, transfers, training, a
 The system is leverage rather than Joey's conscience. It may expose facts, present options, quantify danger, or unlock capability; Joey must still choose the goal, tactic, boundary, and title-native decisive action. Once he has decisive evidence of betrayal, later contact follows the blueprint's strategic-contact rule. This protects the audience's trust without flattening him into an instantly invulnerable power fantasy.
 
 ## Commands
+
+Default manhwa source manufacture (no operator stop; see the default flow above):
+
+```bash
+# Full chain: ideate -> auto-title -> prepare -> one Pro draft -> diagnose/revise/verify (<= 2 rounds)
+node bin/goldflow.mjs source manufacture run --development-slug <slug> --evidence <evidence.md>
+
+# The same stages one at a time (each resumes from hash-verified receipts)
+node bin/goldflow.mjs source manufacture ideate --development-slug <slug> --evidence <evidence.md>
+node bin/goldflow.mjs source manufacture prepare --development-slug <slug>
+node bin/goldflow.mjs source manufacture write --development-slug <slug>
+node bin/goldflow.mjs source manufacture revise --development-slug <slug> [--max-rounds 1]
+
+# Operator-supplied script through the same revision passes
+node bin/goldflow.mjs source manufacture revise --script /absolute/path/to/script.txt
+```
+
+Revision efforts default to `--diagnose-effort high --revise-effort high --verify-effort medium`; each accepts only `medium` or `high`. `--target-word-count` (default 10000) sets the auto-selected brief's advisory length.
+
+The room commands below are the optional First-Class Story Room and legacy retention room.
 
 Live ideation author and selector calls honor `--timeout-ms` and default to sixty minutes. A provider throttle or transport failure before submission is not a creative attempt; inspect the provider receipt and wait for the applicable cooldown before starting one intentional replacement call. If the author passed and only the independent selector failed, rerun `source ideate` with the same inputs plus `--resume-selector true`; Goldflow hash-verifies and reuses the passed author output without another author submission.
 

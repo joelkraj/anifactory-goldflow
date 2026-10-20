@@ -1,5 +1,7 @@
 # Manhwa Recap Manufacturing APV Selector
 
+Legacy multi-draft path only (`select`/`improve` on three- or six-draft portfolios). The default single-draft flow uses the diagnose/rewrite/verify prompts (`manhwa_recap_revision_*_v1.md`) instead. The fenced prompt is unchanged so historical receipts still resume.
+
 ```text
 Select one blinded manhwa recap script using one ranking metric only: predicted average percentage viewed on a normally monetized longform YouTube upload with ordinary pre-roll and automatic mid-roll ads.
 

@@ -1059,6 +1059,8 @@ async function testDesktopHostContract() {
   assert.equal(chatGptEffortLabel("max"), "Pro");
   assert.equal(chatGptEffortSliderIndex("Pro"), 4);
   assert.equal(chatGptModelLabel("gpt-5.5"), "GPT-5.5");
+  assert.equal(chatGptModelLabel("gpt-6-astra"), "GPT-6", "live picker label read on 2026-10-20");
+  assert.throws(() => chatGptModelLabel("gpt-6.1-sol"), /Unsupported ChatGPT Web model/, "no 6.1 label exists in the web picker");
   assert.equal(chatGptModelLabel("gpt-6-sol"), "GPT-6 Sol");
   assert.equal(chatGptModelLabel("gpt-5.6-sol"), "GPT-5.6 Sol");
   assert.equal(chatGptModelControlMatches("Model 5.5", "GPT-5.5"), true);

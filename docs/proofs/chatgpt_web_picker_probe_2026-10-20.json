@@ -1,0 +1,21 @@
+{
+  "schema": "goldflow_chatgpt_web_picker_probe_v1",
+  "captured_at": "2026-10-20T21:13:25.972Z",
+  "profile_dir": "~/.goldflow-studio/chatgpt-browser-profile",
+  "method": "read-only Playwright probe: open chatgpt.com in the Studio profile, open the composer control labelled 'Select ChatGPT model', open its 'Select model' submenu, record the visible choices, press Escape, close. Nothing was typed or sent.",
+  "state": "composer_visible",
+  "trigger": { "aria_label": "Select ChatGPT model", "visible_text": "Pro", "data_selected_reasoning_effort": "medium" },
+  "menu_text": "Pro Pro, 5 of 5. Use Left and Right arrow keys to adjust power Locked, opens access options Usage limit reached GPT-6 GPT-5.6 Sol",
+  "model_choices": [
+    { "role": "menuitemradio", "text": "GPT-6", "checked": true },
+    { "role": "menuitemradio", "text": "GPT-5.6 Sol", "checked": false }
+  ],
+  "effort_control": "role=slider inside a 'Power' menuitem; 'Pro, 5 of 5' is the maximum position",
+  "labels_not_present": ["GPT Astra", "GPT-6 Astra", "GPT Sol 6.1", "GPT-6.1 Sol", "GPT-6 Sol", "GPT-5.5", "Latest"],
+  "studio_adapter_drift": [
+    "composer selectors in apps/goldflow-studio/desktop/chatgpt-browser.mjs (COMPOSER_SELECTOR) matched nothing; the composer is a contenteditable with placeholder 'Ask ChatGPT'",
+    "power-button selector 'button[aria-haspopup=\"menu\"]:has(.uFxlGa_SliderTriggerChatSelectionLabel)' matched nothing; the control is button[aria-label=\"Select ChatGPT model\"]",
+    "menu has no 'Advanced' row and no 'Model' menuitem; the model list is the 'Select model' view toggle inside the same menu",
+    "effort text is 'Pro, 5 of 5.' not 'Effort Pro'"
+  ]
+}

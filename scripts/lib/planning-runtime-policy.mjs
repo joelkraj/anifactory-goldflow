@@ -195,7 +195,7 @@ export function planningRuntimeFromProcessContext({
       ?? explicitModel
       ?? plannerModelForProvider(provider, context.identity ?? {}, env))).trim();
   const sourceDraftModelAllowed = (/^winner_source_script_v3_draft_55_/.test(String(overrideStage ?? ""))
-    && model === "gpt-5.5") || (/^winner_source_script_v3_draft_6_/.test(String(overrideStage ?? ""))
+    && model === "gpt-5.5") || (/^winner_source_script_v3_draft_(?:6|56)_/.test(String(overrideStage ?? ""))
     && model === "gpt-6-astra");
   // Explicit directed source edits/reviews do not change a production identity's model lock.
   const directedSourceModelAllowed = !context.identity && explicitModel === "gpt-6-astra"

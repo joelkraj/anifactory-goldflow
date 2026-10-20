@@ -6,7 +6,13 @@ const EFFORT_LABELS = Object.freeze({
   max: "Pro",
 });
 
+// Visible picker labels. `gpt-6-astra` -> "GPT-6" and `gpt-5.6-sol` -> "GPT-5.6 Sol" were read
+// from the live picker in the Studio ChatGPT profile on 2026-10-20
+// (docs/proofs/chatgpt_web_picker_probe_2026-10-20.json): those were the only two choices.
+// "GPT-6 Sol" and "GPT-5.5" are historical labels kept for recorded receipts; neither was in
+// that picker. No "GPT Sol 6.1" label exists in ChatGPT Web, so gpt-6.1-sol is CLI-only.
 const MODEL_LABELS = Object.freeze({
+  "gpt-6-astra": "GPT-6",
   "gpt-6-sol": "GPT-6 Sol",
   "gpt-5.6-sol": "GPT-5.6 Sol",
   "gpt-5.5": "GPT-5.5",

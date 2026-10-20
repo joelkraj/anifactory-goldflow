@@ -115,6 +115,10 @@ const gpt6SourceDraftRuntime = planningRuntimeFromProcessContext({
   overrideStage: "winner_source_script_v3_draft_6_1", argv: [], env: {},
 });
 assert.equal(gpt6SourceDraftRuntime.model, "gpt-6-astra");
+assert.equal(planningRuntimeFromProcessContext({
+  explicitProvider: "chatgpt_web", explicitModel: "gpt-6-astra",
+  overrideStage: "winner_source_script_v3_draft_56_1", argv: [], env: {},
+}).model, "gpt-6-astra", "the single-draft writer stage may use the opt-in GPT-6 web writer");
 for (const kind of ["edit", "review"]) {
   const runtime = planningRuntimeFromProcessContext({
     explicitProvider: "chatgpt_web", explicitModel: "gpt-6-astra",

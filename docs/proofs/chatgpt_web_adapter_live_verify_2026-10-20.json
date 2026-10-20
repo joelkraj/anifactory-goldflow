@@ -1,0 +1,23 @@
+{
+  "schema": "goldflow_chatgpt_web_adapter_live_verify_v1",
+  "captured_at": "2026-10-20T22:33:27.906Z",
+  "profile_dir": "~/.goldflow-studio/chatgpt-browser-profile",
+  "adapter_commit": "a647d7c",
+  "method": "read-only: ChatGptBrowser.start, waitForAuthentication, newJobPage, verifyUiContract({ account_plan: Pro, model_label: GPT-6, effort_label: Pro }), close. The composer stayed empty; nothing was typed, attached or sent; no job was leased.",
+  "authentication": "ChatGPT authentication verified",
+  "composer": { "tag": "DIV", "role": "textbox", "aria_label": "Ask ChatGPT", "text_before": "\n", "text_after": "\n" },
+  "verified": {
+    "account_plan": "Pro",
+    "model_label": "GPT-6",
+    "effort_label": "Pro",
+    "model_choices": ["GPT-6", "GPT-5.6 Sol"],
+    "effort_slider_value": 4,
+    "effort_announcement": "Pro, 5 of 5",
+    "selected_reasoning_effort_attribute": "medium"
+  },
+  "notes": [
+    "The trigger's data-selected-reasoning-effort attribute read 'medium' while the slider sat at 4 ('Pro, 5 of 5'); the adapter records that attribute but gates on the slider value and the announcement text.",
+    "An earlier attempt failed with account_mismatch because the profile-plan read accepted the first non-empty [data-state=open] overlay before the profile menu rendered; the read now polls the menu the control opens until a plan tier appears.",
+    "A separate `npm run studio:desktop --open-dashboard false` start reached 'ChatGPT authentication verified' and 'Desktop worker ready with 3 browser slot(s): llm, image' with zero queued jobs, then exited cleanly on SIGINT; port 4317 was released."
+  ]
+}

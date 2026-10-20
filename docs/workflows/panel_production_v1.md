@@ -38,6 +38,25 @@ After actual inspection, the same command accepts a `goldflow_visual_prop_editor
 
 If an import is interrupted after a source image was accepted, status can select `imagegen panel-reconcile --episode-dir <episode-dir>` to restore missing derivative panels and their ledger rows with zero provider calls. A failed source image is repaired by its exact owner ID. Changed or conflicting accepted bytes stop for triage.
 
+### Multi-zone page orders (opt-in, design `docs/designs/panel_multizone_pages_v1.md`)
+
+An authored allocation may use `schema: goldflow_panel_asset_plan_v2` page orders. One generation holds 2–4 zones from one scene in a closed template (`P2V`, `P2H`, `P3L`, `P4G`). Each zone serves a contiguous run of beats, and every bound beat names its `zone_id`.
+
+How the stages handle pages:
+
+- **Prompts.** Page owners get a fixed page frame plus `Panel k (slot):` sections. Hardening blocks a missing frame or missing sections, more than four references, or more than three visible people.
+- **Fal.** Fal sends page owners with page board guidance. Finalization writes a raster-keyed geometry receipt under `panel_page_geometry/<asset_id>/<sha16>/`.
+- **Image QA.** It reviews each zone on its pixel-exact crop and blocks a zone whose geometry is missing, failed or changed.
+- **Composition.** It crops each zone beat's panel to the measured safe rectangle. The ordinary layouts are unchanged, and viewers never see the page.
+
+A blocked zone is repaired alone, never by re-editing its page:
+
+1. `imagegen fal --action prepare-zone-repair --request <absolute reviewed request>` (`goldflow_panel_zone_repair_request_v1`, with hash-bound rejection or failed-geometry evidence). This makes no provider call.
+2. Run status names `dispatch-zone-repair --spec <spec> --confirm-spend exact_fal_zone_repair`, then `observe-zone-repair`, then `apply-zone-repair`.
+3. Apply swaps only that zone's beats to the reviewed replacement and sets them to pending image QA. It retains the previous report and ledger in a receipt, and leaves the page and sibling zones unchanged.
+
+Alias reconciliation refuses to run while zone repairs are applied. A full Fal re-finalization supersedes them, so they must be re-applied.
+
 Measure savings as unique scene artwork orders versus covered beats, then compare actual provider receipts. Reference images still have their own cost. Do not claim a savings percentage from the three-minute experiment, which reused artwork already generated for an earlier edit.
 
 ## Author composition after image QA

@@ -10,8 +10,10 @@ export function falFailureReceiptPath(row) {
     : resultDir === "review-repair-v3-result-receipts" ? "review-repair-v3-failure-receipts"
     : resultDir === "transport-recovery-result-receipts" ? "transport-recovery-failure-receipts"
     : "failure-receipts";
+  // Zone repairs are keyed by zone and request, so one owner image can have several.
+  const zoneRepair = path.basename(path.dirname(path.dirname(row.result_receipt_path))) === "zone-repair";
   const receiptName = resultDir === "review-repair-result-receipts"
-    || resultDir === "review-repair-transport-recovery-result-receipts"
+    || resultDir === "review-repair-transport-recovery-result-receipts" || zoneRepair
     ? path.basename(row.result_receipt_path) : `${row.image_id}.json`;
   return path.join(path.dirname(path.dirname(row.result_receipt_path)), failureDir, receiptName);
 }

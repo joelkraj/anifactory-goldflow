@@ -23,6 +23,7 @@ import { falArtworkOrders, completeFalPanelArtwork } from "./lib/fal-panel-artwo
 import { reviewedBulkHoldRecoveryPrompt } from "./lib/fal-reviewed-bulk-hold-recovery.mjs";
 import { inspectReferenceProbeReview, prepareReferenceProbeReview, acceptReferenceProbeReview } from "./lib/fal-reference-probe-review.mjs";
 import { reviewedFalCharacterAdditions } from "./lib/fal-reviewed-character-additions.mjs";
+import { prepareZoneRepair, applyZoneRepair, validateZoneRepairRequest, buildZoneRepairAssignment, ZONE_REPAIR_RECEIPT_DIR } from "./lib/panel-zone-repair.mjs";
 
 const digest = value => createHash("sha256").update(value).digest("hex");
 const bytes = value => `${JSON.stringify(value, null, 2)}\n`;
@@ -995,6 +996,37 @@ async function main(){
    await write(path.join(ctx.root,"bulk","image-reports",`reviewed-${digest(JSON.stringify(report)).slice(0,16)}.json`),report);
    await fs.writeFile(reportPath,bytes(report));await fs.writeFile(ledgerPath,bytes(ledger));
    return console.log(JSON.stringify({status:"reviewed_bulk_repair_finalized",image_ids:qa.critical_rejected_image_ids,imagegen_report:reportPath,cut_execution_ledger:ledgerPath},null,2));
+ }
+ // Zone-scoped page repair: one reviewed single artwork for exactly one rejected zone.
+ if(["prepare-zone-repair","dispatch-zone-repair","observe-zone-repair","apply-zone-repair"].includes(action)){
+   if(action==="prepare-zone-repair"){
+     need(path.isAbsolute(f.request??""),"Zone repair preparation requires an absolute --request file.");
+     const spec=await prepareZoneRepair({episodeDir:ctx.episodeDir,episode:ctx.identity.episode,request:await read(f.request)});
+     return console.log(JSON.stringify({status:spec.status,spec_path:spec.spec_path,spec_sha256:spec.spec_sha256,image_ids:spec.image_ids,provider_calls:0},null,2));
+   }
+   need(path.isAbsolute(f.spec??""),"Zone repair requires an absolute --spec file.");
+   const specSha256=await falFileSha256(f.spec),spec=await read(f.spec);
+   await validateZoneRepairRequest({episodeDir:ctx.episodeDir,episode:ctx.identity.episode,request:spec.request});
+   const bulk=await readEffectiveBulk(ctx);const owner=(await read(path.join(ctx.episodeDir,"section_image_prompts_hardened.json"))).prompts.find(row=>row.panel_asset_id===spec.request.page_asset_id&&row.provider_submission_required!==false);
+   const original=bulk.assignments.find(row=>row.image_id===owner?.image_id);need(original,`Accepted Fal assignment missing for page ${spec.request.page_asset_id}.`);
+   const board=original.board_manifest_path?await read(original.board_manifest_path):null;
+   if(board)need(await falFileSha256(original.board_path)===original.board_sha256,`Page owner reference board changed: ${original.image_id}.`);
+   const row=buildZoneRepairAssignment({falRoot:ctx.root,spec,specSha256,original,boardGuidance:board?referenceBoardPromptGuidance(board):null,identityHash:ctx.identityHash,objectSha256:falObjectSha256});
+   if(action==="dispatch-zone-repair"){
+     need(f["confirm-spend"]==="exact_fal_zone_repair","Paid zone repair requires the exact confirmation token.");
+     await write(row.assignment_path,row);
+     await preflightPaidRepair(ctx,ZONE_REPAIR_RECEIPT_DIR,[row.image_id],()=>row.stem);
+     const result=await submitRows(ctx,[row],1);return console.log(JSON.stringify({status:"zone_repair_submitted",count:result.length,stem:row.stem,image_ids:spec.image_ids},null,2));
+   }
+   const assigned=await read(row.assignment_path);need(assigned.assignment_sha256===row.assignment_sha256,`Zone repair assignment changed: ${row.stem}.`);
+   if(action==="observe-zone-repair"){
+     if(await fs.access(falFailureReceiptPath(assigned)).then(()=>true,()=>false))return console.log(JSON.stringify({status:"blocked",stem:row.stem,failure_path:falFailureReceiptPath(assigned)},null,2));
+     if(await fs.access(assigned.result_receipt_path).then(()=>true,()=>false))return console.log(JSON.stringify({status:"complete",stem:row.stem},null,2));
+     const result=(await observeRows(ctx,[assigned],1))[0];return console.log(JSON.stringify({status:result.failed?"blocked":result.complete?"complete":"pending",stem:row.stem,result},null,2));
+   }
+   const receipt=await read(assigned.result_receipt_path);need(receipt.output_path===assigned.output_path,"Zone repair result receipt binding differs.");
+   const applied=await applyZoneRepair({episodeDir:ctx.episodeDir,episode:ctx.identity.episode,specPath:f.spec,specSha256,replacementPath:assigned.output_path,resultReceiptPath:assigned.result_receipt_path,resultReceiptSha256:await falFileSha256(assigned.result_receipt_path)});
+   return console.log(JSON.stringify(applied,null,2));
  }
  if(action==="dispatch-bulk"){
    need(f["confirm-spend"]==="exact_fal_bulk_batch","Paid bulk dispatch requires exact confirmation token.");const bulk=await readEffectiveBulk(ctx);const limit=Math.min(Number(f.limit??100),100);need(Number.isInteger(limit)&&limit>0,"Bulk limit must be 1..100.");const rows=[];for(const row of bulk.assignments)if(!await fs.access(row.submission_receipt_path).then(()=>true,()=>false)&&!await fs.access(falAdjudicationPath(ctx.episodeDir,row.image_id)).then(()=>true,()=>false)){rows.push(row);if(rows.length===limit)break;}const result=await submitRows(ctx,rows,ctx.contract.production_concurrency);return console.log(JSON.stringify({status:"submitted",count:result.length,remaining:bulk.assignments.length-(await Promise.all(bulk.assignments.map(row=>fs.access(row.submission_receipt_path).then(()=>1,()=>0)))).reduce((a,b)=>a+b,0)},null,2));

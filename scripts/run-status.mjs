@@ -1751,6 +1751,18 @@ export async function imageOutputQaComplete(episodeDir, episode, identity) {
     };
   }
   const status = String(report.status ?? "").toLowerCase();
+  if (isPanelProductionIdentity(identity)) {
+    // A prepared or in-flight zone repair holds image QA at its exact next step.
+    const { panelZoneRepairState } = await import("./lib/panel-zone-repair.mjs");
+    const quote = value => `'${String(value).replaceAll("'", "'\\''")}'`;
+    const active = (await panelZoneRepairState({ episodeDir })).find(row => row.state !== "applied");
+    if (active) {
+      const shape = active.next_action
+        ? `node bin/goldflow.mjs imagegen fal --episode-dir ${quote(episodeDir)} --action ${active.next_action} --spec ${quote(active.spec_path)}${active.next_action === "dispatch-zone-repair" ? " --confirm-spend exact_fal_zone_repair" : ""}`
+        : `Triage zone repair ${active.stem} (${active.state}); do not resubmit it.`;
+      return { done: false, state: "blocked", evidence: `zone repair ${active.zone_id} for ${active.image_ids.join(", ")} is ${active.state}`, next_command_shape: shape };
+    }
+  }
   if (isPanelProductionIdentity(identity) && status !== "passed") {
     try {
       const { loadPanelAssetPlan } = await import("./lib/panel-production-assets.mjs");
@@ -1758,6 +1770,10 @@ export async function imageOutputQaComplete(episodeDir, episode, identity) {
       const beatsById = new Map(allocation.beats.map(beat => [beat.visual_beat_id, beat.image_id_hint]));
       const aliases = new Map(allocation.plan.asset_orders.flatMap(order => order.beat_ids.filter(id => id !== order.owner_beat_id).map(id => [beatsById.get(id), beatsById.get(order.owner_beat_id)])));
       const failedIds = new Set([...(report.critical_rejected_image_ids ?? []), ...(report.findings ?? []).filter(row => row.severity === "blocker").map(row => row.image_id)]);
+      // A blocked page zone is repaired alone; its page and sibling zones stay accepted.
+      const zoneByImage = new Map(allocation.plan.beat_bindings.filter(row => row.zone_id).map(row => [beatsById.get(row.beat_id), row.zone_id]));
+      const failedZones = [...new Set([...failedIds].filter(id => zoneByImage.has(id)).map(id => zoneByImage.get(id)))];
+      if (failedZones.length) return { done: false, state: "blocked", evidence: `${path.basename(reportPath)} blocks page zones=${failedZones.join(", ")}`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir '${episodeDir.replaceAll("'", "'\\''")}' --action prepare-zone-repair --request <absolute_reviewed_zone_repair_request.json>` };
       const rejectedAliases = [...failedIds].filter(id => aliases.has(id));
       if (rejectedAliases.length) return { done: false, state: "blocked", evidence: `${path.basename(reportPath)} rejects allocated aliases=${rejectedAliases.join(", ")}; source owners=${[...new Set(rejectedAliases.map(id => aliases.get(id)))].join(", ")}`, next_command_shape: "Review the authored panel allocation, accepted owner artwork and alias-specific QA finding; record an exact local repair or allocation correction before requesting any provider regeneration." };
     } catch (error) { return { done: false, state: "stale", evidence: `Panel QA recovery requires current asset allocation: ${error.message}` }; }

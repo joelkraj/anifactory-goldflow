@@ -5,7 +5,11 @@ import path from 'node:path';
 import sharp from 'sharp';
 import { panelProductionFixture, writeJson, digest } from './panel-production-fixture.mjs';
 import { resolveZoneReviewImages, reviewViewReport } from '../lib/panel-zone-review.mjs';
-import { prepareZoneRepair, applyZoneRepair, validateZoneRepairRequest } from '../lib/panel-zone-repair.mjs';
+import { prepareZoneRepair, applyZoneRepair, validateZoneRepairRequest, buildZoneRepairAssignment, panelZoneRepairState, zoneRepairAssignmentPaths } from '../lib/panel-zone-repair.mjs';
+import { falAmbiguousSubmissionAttempts } from '../lib/fal-retry-budget.mjs';
+import { falFailureReceiptPath } from '../lib/fal-failure-receipt.mjs';
+import { imageOutputQaComplete } from '../run-status.mjs';
+import { createHash } from 'node:crypto';
 import { readPanelProductionInputs } from '../lib/panel-production-plan.mjs';
 import { reconcilePanelAssetReport } from '../lib/panel-production-assets.mjs';
 import { structuralAuditForTests } from '../image-output-qa.mjs';
@@ -99,6 +103,59 @@ try {
     assert.deepEqual(loaded.timeline.panels[1].source_rect, { x: 0, y: 0, width: 1, height: 1 });
     assert.equal(loaded.timeline.panels[1].metadata.zone_repair_request_sha256, spec.request_sha256);
     assert.deepEqual(loaded.timeline.panels[0].source_rect, f.geometry.zones[0].safe_rect, 'the sibling still crops its page zone');
+  });
+  await test('a prepared spec becomes one exact single-artwork Fal assignment on the owner board', async () => {
+    const f = await panelProductionFixture(path.join(root, 'assign'), { pages: true });
+    await reject(f, 'image_b');
+    const spec = await prepareZoneRepair({ episodeDir: f.episodeDir, episode: 'ep_01', request: request(f) });
+    const original = { image_id: 'image_a', assignment_sha256: 'a'.repeat(64), endpoint: 'openai/gpt-image-2.5/sunburst/edit', reference_mode: 'one_positional_collage', reference_asset_ids: ['gf.ref.a'], reference_hashes: ['b'.repeat(64)], board_path: '/boards/a.png', board_sha256: 'c'.repeat(64), board_manifest_path: '/boards/a.json' };
+    const objectSha256 = value => createHash('sha256').update(value).digest('hex');
+    const build = specSha256 => buildZoneRepairAssignment({ falRoot: f.p('fal'), spec, specSha256, original, boardGuidance: 'SINGLE FRAME GUIDANCE', identityHash: 'd'.repeat(64), objectSha256 });
+    const row = build(spec.spec_sha256);
+    assert.equal(row.image_id, 'image_b'); assert.deepEqual(row.zone_repair_image_ids, ['image_b']);
+    assert.ok(row.prompt.startsWith(spec.prompt) && row.prompt.endsWith('SINGLE FRAME GUIDANCE'));
+    assert.deepEqual([row.board_path, row.reference_asset_ids, row.previous_assignment_sha256], [original.board_path, original.reference_asset_ids, original.assignment_sha256]);
+    assert.equal(path.dirname(row.submission_receipt_path), f.p('fal/zone-repair/submission-receipts'));
+    assert.deepEqual(row, build(spec.spec_sha256), 'deterministic');
+    assert.notEqual(build('e'.repeat(64)).assignment_sha256, row.assignment_sha256, 'bound to the exact spec');
+    assert.equal(falFailureReceiptPath(row), row.failure_receipt_path, 'shared failure recording uses the zone-repair stem');
+    assert.throws(() => buildZoneRepairAssignment({ falRoot: f.p('fal'), spec, specSha256: spec.spec_sha256, original: {}, boardGuidance: '', identityHash: 'd'.repeat(64), objectSha256 }), /assignment is required/);
+  });
+
+  await test('zone repair state follows receipts and holds ambiguous or failed submissions', async () => {
+    const f = await panelProductionFixture(path.join(root, 'state'), { pages: true });
+    await reject(f, 'image_b');
+    const spec = await prepareZoneRepair({ episodeDir: f.episodeDir, episode: 'ep_01', request: request(f) });
+    const p = zoneRepairAssignmentPaths(f.p('fal'), `page_0_z2--${spec.request_sha256.slice(0, 16)}`);
+    const state = async () => (await panelZoneRepairState({ episodeDir: f.episodeDir })).map(row => [row.state, row.next_action]);
+    assert.deepEqual(await state(), [['prepared', 'dispatch-zone-repair']]);
+    const attempt = path.join(`${path.dirname(p.submission_receipt_path)}-attempts`, path.basename(p.submission_receipt_path));
+    await fs.mkdir(path.dirname(attempt), { recursive: true });
+    await writeJson(attempt, { schema: 'goldflow_fal_submission_attempt_v1', image_id: 'image_b', assignment_sha256: 'a'.repeat(64), submission_receipt_path: p.submission_receipt_path });
+    assert.deepEqual(await state(), [['ambiguous_submission', null]]);
+    assert.equal((await falAmbiguousSubmissionAttempts(f.episodeDir)).length, 1, 'paid accounting sees zone-repair attempts');
+    await fs.mkdir(path.dirname(p.submission_receipt_path), { recursive: true });
+    await writeJson(p.submission_receipt_path, { schema: 'goldflow_fal_submission_receipt_v1', image_id: 'image_b', assignment_sha256: 'a'.repeat(64), request_id: 'r1' });
+    assert.deepEqual(await state(), [['submitted', 'observe-zone-repair']]);
+    await fs.mkdir(path.dirname(p.result_receipt_path), { recursive: true }); await writeJson(p.result_receipt_path, {});
+    assert.deepEqual(await state(), [['complete', 'apply-zone-repair']]);
+    await fs.mkdir(path.dirname(p.failure_receipt_path), { recursive: true }); await writeJson(p.failure_receipt_path, {});
+    assert.deepEqual(await state(), [['failed', null]]);
+  });
+
+  await test('run status routes blocked zones to prepare, then holds QA at the exact repair step', async () => {
+    const f = await panelProductionFixture(path.join(root, 'status'), { pages: true });
+    const identity = { ...f.identity, image_output_qa_required: true };
+    const qa = await read(f.p('image_output_qa_ep_01.json'));
+    await writeJson(f.p('image_output_qa_ep_01.json'), { ...qa, status: 'blocked', critical_rejected_image_ids: ['image_b'], findings: [{ image_id: 'image_b', severity: 'blocker', code: 'operator_confirmed_story_or_identity_failure' }] });
+    const blocked = await imageOutputQaComplete(f.episodeDir, 'ep_01', identity);
+    assert.equal(blocked.state, 'blocked'); assert.match(blocked.evidence, /page zones=page_0_z2/);
+    assert.match(blocked.next_command_shape, /--action prepare-zone-repair --request/);
+    await reject(f, 'image_b');
+    const spec = await prepareZoneRepair({ episodeDir: f.episodeDir, episode: 'ep_01', request: request(f) });
+    const held = await imageOutputQaComplete(f.episodeDir, 'ep_01', identity);
+    assert.match(held.next_command_shape, /--action dispatch-zone-repair --spec .*spec\.json' --confirm-spend exact_fal_zone_repair/);
+    assert.ok(held.next_command_shape.includes(spec.spec_path));
   });
   console.log(`Panel zone QA and repair: ${count} test groups passed.`);
 } finally { await fs.rm(root, { recursive: true, force: true }); }

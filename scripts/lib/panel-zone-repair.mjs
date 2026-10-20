@@ -124,3 +124,70 @@ export async function applyZoneRepair({ episodeDir, episode, specPath, specSha25
   await writeAtomic(p.report, newReport);
   return { status: 'applied', image_ids: spec.image_ids, replacement_sha256: replacementSha256, receipt_path: path.join(receiptDir, 'receipt.json') };
 }
+
+// ---- Fal dispatch support (receipts live in one flat directory so the
+// shared retry, spend and ambiguous-attempt accounting sees every request).
+export const ZONE_REPAIR_RECEIPT_DIR = 'zone-repair/submission-receipts';
+
+export function zoneRepairStem(spec) {
+  need(/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(spec?.request?.zone_id ?? '') && /^[a-f0-9]{64}$/.test(spec.request_sha256 ?? ''), 'spec zone and request hash required');
+  return `${spec.request.zone_id}--${spec.request_sha256.slice(0, 16)}`;
+}
+
+export function zoneRepairAssignmentPaths(falRoot, stem) {
+  const dir = path.join(falRoot, 'zone-repair');
+  return {
+    assignment_path: path.join(dir, 'assignments', `${stem}.json`),
+    submission_receipt_path: path.join(dir, 'submission-receipts', `${stem}.json`),
+    result_receipt_path: path.join(dir, 'result-receipts', `${stem}.json`),
+    output_path: path.join(dir, 'outputs', `${stem}.png`),
+    upload_receipt_path: path.join(dir, 'upload-receipts', `${stem}.json`),
+    failure_receipt_path: path.join(dir, 'failure-receipts', `${stem}.json`),
+  };
+}
+
+/**
+ * Builds the exact single-artwork Fal assignment for a prepared spec. It reuses
+ * the page owner's accepted reference board unchanged and the single-frame
+ * board guidance (a repaired zone is one picture, not a page).
+ */
+export function buildZoneRepairAssignment({ falRoot, spec, specSha256, original, boardGuidance, identityHash, objectSha256 }) {
+  need(spec?.status === 'prepared_not_dispatched' && /^[a-f0-9]{64}$/.test(specSha256 ?? ''), 'prepared zone-repair spec required');
+  need(original?.image_id && original.assignment_sha256, 'the page owner\'s accepted Fal assignment is required');
+  const stem = zoneRepairStem(spec), p = zoneRepairAssignmentPaths(falRoot, stem);
+  const board = Boolean(original.board_path);
+  const prompt = board ? `${spec.prompt}\n\n${boardGuidance}` : spec.prompt;
+  const core = {
+    image_id: spec.zone_owner_image_id, endpoint: original.endpoint, prompt, prompt_sha256: sha(prompt), run_identity_sha256: identityHash,
+    reference_mode: original.reference_mode, reference_asset_ids: original.reference_asset_ids ?? [], reference_hashes: original.reference_hashes ?? [],
+    board_path: original.board_path ?? null, board_sha256: original.board_sha256 ?? null, board_manifest_path: original.board_manifest_path ?? null,
+    max_cost_usd: spec.max_cost_usd, zone_repair_spec_sha256: specSha256, zone_repair_image_ids: spec.image_ids,
+    previous_assignment_sha256: original.assignment_sha256, repair_reason: spec.request.reason,
+  };
+  return { ...core, assignment_sha256: objectSha256(JSON.stringify(core)), ...p, stem };
+}
+
+/** Next exact step for every prepared zone repair; no provider is contacted. */
+export async function panelZoneRepairState({ episodeDir }) {
+  const falRoot = path.join(episodeDir, 'fal'), zonesDir = path.join(falRoot, 'zone-repair'), rows = [];
+  const zones = await fs.readdir(zonesDir, { withFileTypes: true }).catch(error => { if (error.code === 'ENOENT') return []; throw error; });
+  const reserved = new Set(['assignments', 'submission-receipts', 'submission-receipts-attempts', 'result-receipts', 'outputs', 'upload-receipts', 'failure-receipts', 'transport-holds']);
+  for (const zone of zones.filter(entry => entry.isDirectory() && !reserved.has(entry.name))) {
+    for (const attempt of await fs.readdir(path.join(zonesDir, zone.name), { withFileTypes: true })) {
+      const specPath = path.join(zonesDir, zone.name, attempt.name, 'spec.json');
+      const spec = attempt.isDirectory() ? await readOptional(specPath) : null;
+      if (!spec) continue;
+      const stem = zoneRepairStem(spec), p = zoneRepairAssignmentPaths(falRoot, stem);
+      const has = file => fs.access(file).then(() => true, () => false);
+      const state = await has(path.join(path.dirname(specPath), 'applied', 'receipt.json')) ? 'applied'
+        : await has(p.failure_receipt_path) ? 'failed'
+          : await has(p.result_receipt_path) ? 'complete'
+            : await has(p.submission_receipt_path) ? 'submitted'
+              // An attempt without a request receipt may have been billed: hold for triage, never resubmit.
+              : await has(path.join(`${path.dirname(p.submission_receipt_path)}-attempts`, path.basename(p.submission_receipt_path))) ? 'ambiguous_submission' : 'prepared';
+      const next = { prepared: 'dispatch-zone-repair', submitted: 'observe-zone-repair', complete: 'apply-zone-repair', failed: null, applied: null, ambiguous_submission: null }[state];
+      rows.push({ zone_id: spec.request.zone_id, image_ids: spec.image_ids, spec_path: specPath, stem, state, next_action: next });
+    }
+  }
+  return rows;
+}

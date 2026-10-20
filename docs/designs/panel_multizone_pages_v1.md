@@ -349,9 +349,12 @@ Anything short of that is a triage point, not a rerun order.
     - The page raster, its geometry and sibling zones stay byte-identical.
     - Composition shows a repaired zone's replacement whole.
     - Alias reconciliation refuses to run while repairs are applied, so it cannot revert them.
+- **Done (zone-repair dispatch, branch only):**
+  - `imagegen fal` actions: `prepare-zone-repair --request`, `dispatch-zone-repair --spec --confirm-spend exact_fal_zone_repair`, `observe-zone-repair --spec` and `apply-zone-repair --spec`.
+  - Dispatch reuses the page owner's accepted reference board with the single-frame guidance, and goes through the shared paid-dispatch lock, retry cap, spend projection and ambiguous-attempt checks.
+  - Receipts live in `fal/zone-repair/submission-receipts`, which the retry accounting now scans; failures are recorded per zone-repair stem.
+  - Run status holds image QA at the exact next zone-repair step. When it finds a blocked page zone, it routes to `prepare-zone-repair`. A failed or ambiguous submission becomes a triage hold, never a resubmission.
 - **Not yet done:**
-  - Fal dispatch and observation of a prepared zone-repair spec. This is the only remaining spend path; it should reuse the exact-repair submit/observe flow under the retry and spend caps.
-  - Run-status routing for the zone-repair steps.
   - Focal analysis still runs on the page raster; it is advisory only.
   - A full Fal re-finalization rebuilds the report from page owners and supersedes applied zone repairs, which must then be re-applied.
   - Pre-existing failures, which also fail on the base branch: `fal-repair-failure-tests.mjs` (one case) and `goldflow-fixture-tests.mjs` (`render_profile` of null).

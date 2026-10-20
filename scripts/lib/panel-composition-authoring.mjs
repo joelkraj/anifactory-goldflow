@@ -85,6 +85,94 @@ function cameraKeys(start, end, rect, row) {
   return keys;
 }
 
+const pageLayouts = ['full_frame', 'inset', 'reveal', 'reaction_pair', 'page_pan', 'page_build'];
+const finiteRect = r => r && ['x', 'y', 'width', 'height'].every(k => Number.isFinite(r[k])) && r.width > 0 && r.height > 0;
+const isFull = r => r == null || (r.x === 0 && r.y === 0 && r.width === 1 && r.height === 1);
+const zoneOnPage = (page, zone) => ({ x: page.x + zone.x * page.width, y: page.y + zone.y * page.height, width: zone.width * page.width, height: zone.height * page.height });
+const overlapArea = (a, b) => Math.max(0, Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x)) * Math.max(0, Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y));
+const pageColor = (value, fallback, name) => { if (value == null) return fallback; if (typeof value !== 'string' || !/^#[0-9a-f]{6}$/i.test(value)) fail(`${name} must be #rrggbb`); return value; };
+
+/**
+ * page_build shows one generated multi-zone page as a comic page being read.
+ * Zones are ordinary panels whose source_rect is a region of the same page
+ * raster. Undisclosed zones render as empty frames (never artwork); the main
+ * zone may enter on its beat; one shared page rectangle carries the camera,
+ * and every zone layer follows it through identical key times.
+ */
+function pageBuildLayers(scene, row, panel, timeline) {
+  const start = scene.start_sec, end = scene.end_sec, page = row.page;
+  if (!page || !Array.isArray(page.zones)) fail(`page_build requires page.zones: ${scene.id}`);
+  if (row.context) fail(`page_build has no context panel: ${scene.id}`);
+  if (!isFull(row.source_rect)) fail(`page_build selects zones, not a source crop: ${scene.id}`);
+  for (const view of [row.camera_from, row.camera_to].filter(Boolean)) if (view.zoom !== 1 || view.x !== 0.5 || view.y !== 0.5) fail(`page_build moves the page rectangle, not a panel camera: ${scene.id}`);
+  const zones = [{ panel_id: row.panel_id, state: 'main' }, ...page.zones];
+  // Generation templates use at most four zones; five admits reviewed precedents such as a half page plus a 2x2 grid.
+  if (zones.length > 5) fail(`page_build supports at most five zones: ${scene.id}`);
+  const ids = new Set(), assets = new Map((timeline.assets ?? []).map(asset => [asset.id, asset]));
+  let pageHash = null, pageAsset = null;
+  for (const zone of zones) {
+    if (ids.has(zone.panel_id)) fail(`duplicate page zone ${zone.panel_id}: ${scene.id}`); ids.add(zone.panel_id);
+    if (!['main', 'visible', 'empty'].includes(zone.state) || (zone.state === 'main') !== (zone.panel_id === row.panel_id)) fail(`page zone state must be visible or empty: ${scene.id}`);
+    zone.panel = panel(zone.panel_id); zone.rect = zone.panel.source_rect;
+    const asset = assets.get(zone.panel.asset_id);
+    if (!asset?.sha256) fail(`page zone asset missing: ${zone.panel_id}`);
+    if (pageHash && asset.sha256 !== pageHash) fail(`page_build zones must come from one page raster: ${scene.id}`);
+    pageHash = asset.sha256; pageAsset = asset;
+    if (isFull(zone.rect)) fail(`page zone ${zone.panel_id} is the whole page, not a zone: ${scene.id}`);
+  }
+  for (let i = 0; i < zones.length; i++) for (let j = i + 1; j < zones.length; j++) {
+    if (overlapArea(zones[i].rect, zones[j].rect) > 1e-6) fail(`page zones overlap: ${zones[i].panel_id}/${zones[j].panel_id}`);
+  }
+  const rect = row.rect, rectTo = row.rect_to ?? row.rect;
+  for (const box of [rect, rectTo]) {
+    if (!finiteRect(box) || box.width > 3 || box.height > 3 || box.x < -2 || box.y < -2 || box.x > 1 || box.y > 1) fail(`invalid page rectangle for ${scene.id}`);
+    if (pageAsset?.width && pageAsset?.height) {
+      const shown = (box.width * timeline.width) / (box.height * timeline.height), native = pageAsset.width / pageAsset.height;
+      if (Math.abs(shown - native) / native > 0.02) fail(`page rectangle must keep the page aspect: ${scene.id}`);
+    }
+  }
+  const moving = Boolean(row.rect_to);
+  const a = row.move_start_sec ?? start, b = row.move_end_sec ?? end;
+  if (moving && (![a, b].every(Number.isFinite) || a < start || b > end || b <= a)) fail(`invalid page move interval for ${scene.id}`);
+  const entry = row.entry ?? null;
+  let entryEnd = null;
+  if (entry) {
+    entryEnd = entry.start_sec + entry.duration_sec;
+    if (!['left', 'right', 'up', 'down'].includes(entry.direction) || !Number.isFinite(entry.start_sec) || !Number.isFinite(entry.duration_sec)
+      || entry.start_sec < start || entry.duration_sec <= 0 || entryEnd >= end) fail(`entry must fit inside ${scene.id}`);
+    if (!Number.isFinite(entry.distance) || entry.distance <= 0 || entry.distance > 0.5) fail(`page_build entry needs an explicit distance within 0..0.5: ${scene.id}`);
+    if (entry.opacity_from != null && (!Number.isFinite(entry.opacity_from) || entry.opacity_from < 0 || entry.opacity_from > 1)) fail(`invalid entry opacity for ${scene.id}`);
+    if (moving && a < entryEnd && b > entry.start_sec) fail(`page move and zone entry must not overlap: ${scene.id}`);
+  }
+  const pageAt = t => moving && t >= b ? rectTo : rect;
+  const follow = (zone, from, to) => {
+    const times = [...new Set([from, ...(moving ? [a, b] : []), to])].filter(t => t >= from && t <= to).sort((x, y) => x - y);
+    return times.map(t => ({ at_sec: t, rect: zoneOnPage(pageAt(t), zone), camera: { ...camera }, opacity: 1, easing: moving && t === a ? 'smooth' : 'hold' }));
+  };
+  const paper = pageColor(page.paper_fill, '#f1ede4', 'page.paper_fill');
+  const empty = pageColor(page.empty_fill, '#c9c4b8', 'page.empty_fill');
+  const layers = [{ id: `${scene.id}__page_sheet`, panel_id: row.panel_id, placeholder: true, placeholder_fill: paper, start_sec: start, end_sec: end, z: 0, fit: 'contain', border_px: 0, keyframes: follow(full, start, end) }];
+  let z = 1;
+  for (const zone of zones) {
+    const base = { panel_id: zone.panel_id, fit: 'cover', border_px: 0, shadow: false };
+    if (zone.state === 'visible') { layers.push({ id: `${scene.id}__zone_${z}`, ...base, start_sec: start, end_sec: end, z: z++, keyframes: follow(zone.rect, start, end) }); continue; }
+    // Empty frame: the main zone keeps it underneath its entrance.
+    layers.push({ id: `${scene.id}__zone_${z}_frame`, ...base, placeholder: true, placeholder_fill: empty, start_sec: start, end_sec: end, z: z++, keyframes: follow(zone.rect, start, end) });
+    if (zone.state !== 'main') continue;
+    let keys = follow(zone.rect, entry ? entryEnd : start, end);
+    if (entry) {
+      const settled = zoneOnPage(pageAt(entry.start_sec), zone.rect), from = { ...settled };
+      if (entry.direction === 'left') from.x -= entry.distance;
+      if (entry.direction === 'right') from.x += entry.distance;
+      if (entry.direction === 'up') from.y -= entry.distance;
+      if (entry.direction === 'down') from.y += entry.distance;
+      keys = [{ at_sec: entry.start_sec, rect: from, camera: { ...camera }, opacity: entry.opacity_from ?? 1, easing: 'smooth' }, ...keys];
+    }
+    layers.push({ id: `${scene.id}__main`, ...base, start_sec: entry ? entry.start_sec : start, end_sec: end, z: z++, keyframes: keys });
+  }
+  return { layers, editorial: { page: { raster_sha256: pageHash, zones: zones.map(({ panel_id, state, rect: zoneRect }) => ({ panel_id, state, source_rect: zoneRect })) } } };
+}
+
 export function compilePanelComposition(timeline, recipe, { mode = 'editing_experiment' } = {}) {
   if (!['editing_experiment', 'production_panel_composition'].includes(mode)) fail('unsupported compilation mode');
   if (recipe?.schema !== 'goldflow_panel_composition_recipe_v1' || !recipe.author?.trim()) fail('recipe schema and author are required');
@@ -100,8 +188,14 @@ export function compilePanelComposition(timeline, recipe, { mode = 'editing_expe
   const panel = id => { if (!panels.has(id)) fail(`unknown panel ${id}`); return panels.get(id); };
   result.scenes = timeline.scenes.map(scene => {
     const row = decisions.get(scene.id);
-    if (!row || !['full_frame', 'inset', 'reveal', 'reaction_pair', 'page_pan'].includes(row.layout)) fail(`explicit layout required for ${scene.id}`);
+    if (!row || !pageLayouts.includes(row.layout)) fail(`explicit layout required for ${scene.id}`);
     if (!row.editorial_reason?.trim()) fail(`editorial reason required for ${scene.id}`);
+    if (row.layout === 'page_build') {
+      panel(row.panel_id); panel(row.background_panel_id);
+      const built = pageBuildLayers(scene, row, panel, result);
+      return { id: scene.id, start_sec: scene.start_sec, end_sec: scene.end_sec, background: { panel_id: row.background_panel_id, blur_px: row.blur_px ?? 32, brightness: row.background_brightness ?? 0.32 }, layers: built.layers, editorial: { layout: row.layout, reason: row.editorial_reason, author: recipe.author, ...built.editorial } };
+    }
+    if (row.page) fail(`page is only valid for page_build: ${scene.id}`);
     let source = panel(row.panel_id); panel(row.background_panel_id);
     if (row.source_rect) {
       const c = row.source_rect, base = source.source_rect;

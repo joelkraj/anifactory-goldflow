@@ -85,6 +85,10 @@ const unique = (rows, name) => {
       ensure(layer.end_sec > layer.start_sec, `layer ${layer.id} has zero duration`);
       ensure(Number.isInteger(layer.z) && !zValues.has(layer.z), `layer ${layer.id} z must be a unique integer within the scene`); zValues.add(layer.z);
       number(layer.border_px, 0, 20, 'border_px');
+      // An empty comic-panel frame: drawn as a solid fill, never as artwork.
+      ensure(layer.placeholder === undefined || layer.placeholder === true, `layer ${layer.id} placeholder must be true when present`);
+      ensure(layer.placeholder_fill === undefined || (layer.placeholder === true && typeof layer.placeholder_fill === 'string' && /^#[0-9a-f]{6}$/i.test(layer.placeholder_fill)), `layer ${layer.id} placeholder_fill must be a #rrggbb color on a placeholder`);
+      ensure(layer.shadow === undefined || layer.shadow === false, `layer ${layer.id} shadow may only be disabled explicitly`);
       const keys = layer.keyframes;
       ensure(Array.isArray(keys) && keys.length >= 2 && keys.length <= 32, `layer ${layer.id} needs 2..32 keys`);
       ensure(keys[0].at_sec === layer.start_sec && keys.at(-1).at_sec === layer.end_sec, `layer ${layer.id} keys must span its exact lifetime`);

@@ -189,6 +189,12 @@ export function validateEditorialBindings(baseline, recipe) {
     const scene = sceneById.get(decision.scene_id);
     need(scene && decision.panel_id === scene.layers[0].panel_id, `main panel must match the approved beat: ${decision.scene_id}`);
     for (const id of [decision.background_panel_id, decision.context?.panel_id].filter(Boolean)) need(firstUse.has(id) && firstUse.get(id) <= scene.start_sec, `future or unknown context panel ${id}`);
+    // A page carries later zones. Only already-disclosed zones may show artwork;
+    // undisclosed zones of the page are drawn as empty frames.
+    for (const zone of decision.layout === 'page_build' ? decision.page?.zones ?? [] : []) {
+      need(firstUse.has(zone.panel_id), `unknown page zone ${zone.panel_id}`);
+      if (zone.state === 'visible') need(firstUse.get(zone.panel_id) <= scene.start_sec, `future page zone ${zone.panel_id} cannot be visible in ${decision.scene_id}`);
+    }
   }
 }
 

@@ -1,6 +1,6 @@
 # Manhwa Recap Revision Rewrite V1
 
-One call in the single-draft revision loop. It receives the exact incumbent narration and the diagnose call's anchored notes, and returns one complete revised narration. Goldflow never edits the returned prose.
+One call in the single-draft revision loop. It receives the exact incumbent narration and the diagnose call's anchored notes, and returns one complete revised narration. Goldflow never edits the returned prose. The model and transport come from the run's `manufacturing_model_lock.json` (default Codex CLI `gpt-6.1-sol`).
 
 ```text
 Revise the complete longform manhwa recap narration below using the editor's notes. Output only the complete revised raw narration: no headings, notes, commentary, or production directions.

@@ -21,8 +21,8 @@ const gpt6Candidates = Object.freeze(legacyCandidates.map((row) => Object.freeze
   model: "gpt-6-sol",
 })));
 
-// The one-draft default keeps the Pro writer's exact model contract and the historical first ID.
-const singleCandidates = Object.freeze([currentCandidates[0]]);
+// The one-draft default writes through the Codex CLI; the run's model lock can replace the model.
+const singleCandidates = Object.freeze([Object.freeze({ ...currentCandidates[0], model: "gpt-6.1-sol", provider: "codex_cli" })]);
 
 function inferredHistoricalPolicy(portfolio) {
   const candidates = Array.isArray(portfolio?.candidates) ? portfolio.candidates : null;

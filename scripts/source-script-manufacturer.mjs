@@ -8,6 +8,7 @@ import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { runCodexCli, readCodexCallMetadata } from "./lib/codex-cli-runner.mjs";
 import { CLAUDE_CODE_PROVIDER, runClaudeCodePrint } from "./lib/claude-code-print-runner.mjs";
+import { CODEX_EXEC_PROVIDER, runCodexExec } from "./lib/codex-exec-runner.mjs";
 import {
   MANUFACTURING_MODEL_LOCK_SCHEMA,
   modelLockConflicts,
@@ -260,15 +261,28 @@ async function ideateTopics(directory, flags) {
   const evidencePath = path.resolve(flags.evidence);
   const evidence = await fs.readFile(evidencePath, "utf8");
   if (!evidence.trim()) throw new Error("Premise evidence file is empty.");
+  const poolPath = path.join(directory, "manufacturing_topic_pool.json");
+  const shortlistPath = path.join(directory, "manufacturing_topic_shortlist.json");
+  if (await exists(poolPath) && await exists(shortlistPath)) {
+    // Completed ideation is reused from its validated, hash-recorded files without new calls.
+    const pool = JSON.parse(await fs.readFile(poolPath, "utf8"));
+    const shortlist = JSON.parse(await fs.readFile(shortlistPath, "utf8"));
+    assertValid("manufacturing topic pool", validateManufacturingTopicPool(pool));
+    assertValid("manufacturing topic shortlist", validateManufacturingTopicShortlist(shortlist, { topicPool: pool }));
+    if (pool.evidence_sha256 !== sha256Text(evidence)) throw new Error("Existing ideation used different evidence; use a new development folder.");
+    const brief = await autoSelectTitle(directory, flags, { shortlistPath, evidencePath, evidence });
+    return { poolPath, shortlistPath, shortlist, brief };
+  }
+  const planning = (await loadModelLock(directory, flags)).document.roles.planning;
   const topicInstruction = promptBody(await fs.readFile(TOPIC_PROMPT_PATH, "utf8"));
   const topicPrompt = `${topicInstruction}\n\nMEASURED OWN-CHANNEL AND EXTERNAL OUTLIER EVIDENCE\n${evidence}`;
   const rawPoolPath = path.join(directory, ".model_responses", "manufacturing_topic_pool.txt");
   const poolResponse = await modelCall({
     outputPath: rawPoolPath,
     prompt: topicPrompt,
-    provider: "chatgpt_web",
-    model: "gpt-6-sol",
-    effort: "medium",
+    provider: planning.provider,
+    model: planning.model,
+    effort: planning.reasoning_effort,
     stageName: "winner_source_premise_manufacturing_pool",
     timeoutMs: Number(flags["ideation-timeout-ms"] ?? 1_800_000),
   });
@@ -286,7 +300,6 @@ async function ideateTopics(directory, flags) {
     completed_at: new Date().toISOString(),
   };
   assertValid("manufacturing topic pool", validateManufacturingTopicPool(pool));
-  const poolPath = path.join(directory, "manufacturing_topic_pool.json");
   if (!await exists(poolPath)) await writeJsonExclusive(poolPath, pool);
 
   const shortlistInstruction = promptBody(await fs.readFile(TOPIC_SHORTLIST_PROMPT_PATH, "utf8"));
@@ -295,15 +308,14 @@ async function ideateTopics(directory, flags) {
   const shortlistResponse = await modelCall({
     outputPath: rawShortlistPath,
     prompt: shortlistPrompt,
-    provider: "chatgpt_web",
-    model: "gpt-6-sol",
-    effort: "medium",
+    provider: planning.provider,
+    model: planning.model,
+    effort: planning.reasoning_effort,
     stageName: "winner_source_premise_manufacturing_shortlist",
     timeoutMs: Number(flags["shortlist-timeout-ms"] ?? 1_800_000),
   });
   const shortlist = parseJsonObjectFromPlannerOutput(shortlistResponse.content).value;
   assertValid("manufacturing topic shortlist", validateManufacturingTopicShortlist(shortlist, { topicPool: pool }));
-  const shortlistPath = path.join(directory, "manufacturing_topic_shortlist.json");
   if (!await exists(shortlistPath)) await writeJsonExclusive(shortlistPath, shortlist);
   const brief = await autoSelectTitle(directory, flags, { shortlistPath, evidencePath, evidence });
   return { poolPath, shortlistPath, shortlist, brief };
@@ -352,7 +364,18 @@ async function reusableResponse({ outputPath, prompt, provider, model, effort, s
 // Tests inject a no-network executor with runCodexCli's contract: write the output file and its
 // passed .meta.json receipt, then return { content, ...metadata }.
 function providerExecutor(options) {
-  return options.provider === CLAUDE_CODE_PROVIDER ? runClaudeCodePrint(options) : runCodexCli(options);
+  if (options.provider === CODEX_EXEC_PROVIDER) return runCodexExec(options);
+  if (options.provider === CLAUDE_CODE_PROVIDER) return runClaudeCodePrint(options);
+  // Retired browser transport, reachable only behind --transport chatgpt_web.
+  return runCodexCli(options);
+}
+
+// ChatGPT Web browser automation is retired. Recorded browser responses still resume, but a new
+// browser submission needs an explicit --transport chatgpt_web.
+let chatGptWebTransportAllowed = false;
+
+export function allowChatGptWebTransport(allowed) {
+  chatGptWebTransportAllowed = Boolean(allowed);
 }
 
 let modelExecutor = providerExecutor;
@@ -364,6 +387,9 @@ export function setModelExecutorForTests(executor) {
 async function modelCall({ outputPath, prompt, provider, model, effort, stageName, timeoutMs }) {
   const resumed = await reusableResponse({ outputPath, prompt, provider, model, effort, stageName });
   if (resumed) return resumed;
+  if (provider === "chatgpt_web" && !chatGptWebTransportAllowed) {
+    throw new Error(`Stage ${stageName} would submit to the retired ChatGPT Web browser transport. Pass --transport chatgpt_web to run this legacy path explicitly.`);
+  }
   return modelExecutor({
     prompt,
     stageName,
@@ -427,15 +453,24 @@ async function prepare(directory, flags) {
     }
     return { brief, filled, finalPath, manifestPath, manifest };
   }
+  if (await exists(manifestPath) && await exists(finalPath)) {
+    // A prepared prompt is reused from its manifest and hash, so resumes never resubmit the filler.
+    const manifest = JSON.parse(await fs.readFile(manifestPath, "utf8"));
+    if (manifest.brief_sha256 !== brief.sha256 || await fileSha256(finalPath) !== manifest.filled_prompt_sha256) {
+      throw new Error("Existing manufacturing prompt manifest does not match the brief or prompt file.");
+    }
+    return { brief, filled: await fs.readFile(finalPath, "utf8"), finalPath, manifestPath, manifest };
+  }
+  const planning = (await loadModelLock(directory, flags)).document.roles.planning;
   const template = await activeManufacturingTemplate(directory, flags);
   const filler = promptBody(await fs.readFile(FILLER_PROMPT_PATH, "utf8"));
   const prompt = `${filler}\n\n${brief.document.status === "auto_selected" ? "SELECTED PREMISE BRIEF" : "APPROVED PREMISE BRIEF"}\n${JSON.stringify(brief.document, null, 2)}\n\nOPERATOR TEMPLATE\n${template.content}`;
   const response = await modelCall({
     outputPath,
     prompt,
-    provider: "chatgpt_web",
-    model: "gpt-6-sol",
-    effort: "medium",
+    provider: planning.provider,
+    model: planning.model,
+    effort: planning.reasoning_effort,
     stageName: "winner_source_script_manufacturing_prompt",
     timeoutMs: Number(flags["prepare-timeout-ms"] ?? 1_800_000),
   });
@@ -451,9 +486,9 @@ async function prepare(directory, flags) {
     active_template_sha256: template.sha256,
     active_template_version: template.version,
     active_template_manifest_path: template.currentPath,
-    filler_provider: "chatgpt_web",
-    filler_model: "gpt-6-sol",
-    filler_reasoning_effort: "medium",
+    filler_provider: planning.provider,
+    filler_model: planning.model,
+    filler_reasoning_effort: planning.reasoning_effort,
     filler_prompt_sha256: sha256Text(prompt),
     raw_response_path: outputPath,
     raw_response_sha256: await fileSha256(outputPath),
@@ -517,6 +552,9 @@ async function writeCandidates(directory, flags) {
   if (policy.candidates.length > 1 && flags["writer-model"]) throw new Error("--writer-model applies only to the single-draft writer policy.");
   const lock = policy.candidates.length === 1 ? await loadModelLock(directory, flags) : null;
   const candidates = lockedWriterCandidates(policy, lock);
+  if (candidates.some((row) => row.provider === "chatgpt_web") && !chatGptWebTransportAllowed) {
+    throw new Error(`Writer policy ${policy.name} submits to the retired ChatGPT Web browser transport. Pass --transport chatgpt_web to run this legacy path explicitly.`);
+  }
   const recovery = flags["recover-browser-jobs"] ? JSON.parse(await fs.readFile(path.resolve(flags["recover-browser-jobs"]), "utf8")) : {};
   if (Object.keys(recovery).some((id) => !candidates.some((row) => row.id === id))) throw new Error("Recovery map contains a candidate outside the active writer policy.");
   await fs.mkdir(outputDirectory, { recursive: true });
@@ -1905,6 +1943,8 @@ async function main() {
   const action = process.argv[2] ?? "help";
   const flags = flagsFrom(process.argv.slice(3));
   const directory = developmentDirectory(flags, action);
+  if (flags.transport != null && flags.transport !== "chatgpt_web") throw new Error("--transport accepts only chatgpt_web (the retired legacy browser path).");
+  allowChatGptWebTransport(flags.transport === "chatgpt_web");
   if (action === "ideate") {
     const result = await ideateTopics(directory, flags);
     const timing = await writeManufacturingTimingReport(directory);
@@ -2015,9 +2055,9 @@ async function main() {
     }, null, 2));
     return;
   }
-  console.log(`Usage: goldflow source manufacture <run|ideate|prepare|write|revise|select|compare-prompts|improve|audition|promote|learn> --development-slug <slug> [--evidence <txt>] [--brief <json>] [--target-word-count 10000] [--writer-model gpt-6-sol|claude-fable-5-1|claude-opus-5-5] [--revision-model <model>] [--max-rounds 2] [--diagnose-effort high] [--revise-effort high] [--verify-effort medium]
+  console.log(`Usage: goldflow source manufacture <run|ideate|prepare|write|revise|select|compare-prompts|improve|audition|promote|learn> --development-slug <slug> [--evidence <txt>] [--brief <json>] [--target-word-count 10000] [--writer-model gpt-6.1-sol|gpt-6-sol|claude-fable-5-1|claude-opus-5-5] [--revision-model <model>] [--planning-model <model>] [--max-rounds 2] [--diagnose-effort high] [--revise-effort high] [--verify-effort medium]
        goldflow source manufacture revise --script <brought-script.txt> [--development-dir <dir>] [--brief <json>]
-       Legacy multi-draft flags: [--writer-prompt <operator-approved.txt>] [--script <incumbent.txt>] [--max-rounds 1] [--minimum-apv-delta 0.5] [--writer-concurrency 3] [--writer-stagger-ms 15000] [--legacy-manifest <recovered-drafts-manifest.json>] [--audition-candidate-count 3] [--candidate-id draft_56_2 --approved-by <name> --reason <text>] [--template <complete-template.txt>]`);
+       Legacy multi-draft and browser paths need --transport chatgpt_web. Legacy flags: [--writer-prompt <operator-approved.txt>] [--script <incumbent.txt>] [--max-rounds 1] [--minimum-apv-delta 0.5] [--writer-concurrency 3] [--writer-stagger-ms 15000] [--legacy-manifest <recovered-drafts-manifest.json>] [--audition-candidate-count 3] [--candidate-id draft_56_2 --approved-by <name> --reason <text>] [--template <complete-template.txt>]`);
 }
 
 function invokedDirectly() {

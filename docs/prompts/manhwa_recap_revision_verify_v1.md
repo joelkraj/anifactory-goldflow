@@ -1,6 +1,6 @@
 # Manhwa Recap Revision Verify V1
 
-One call in the single-draft revision loop. It compares the revised narration against the incumbent on the diagnose dimensions and decides keep or revert. There are no blind A/B panels or selector; this is the only judgment call per round.
+One call in the single-draft revision loop. It compares the revised narration against the incumbent on the diagnose dimensions and decides keep or revert. There are no blind A/B panels or selector; this is the only judgment call per round. The model and transport come from the run's `manufacturing_model_lock.json` (default Codex CLI `gpt-6.1-sol`).
 
 ```text
 You are the final story editor deciding whether a revision is better than the script it was revised from. You receive the editor's anchored notes, the INCUMBENT narration, and the REVISION narration. Read both completely.

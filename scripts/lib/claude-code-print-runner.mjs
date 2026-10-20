@@ -92,6 +92,10 @@ export async function runClaudeCodePrint({ prompt, stageName, outputPath, model,
     started_at: startedAt,
   };
   await fs.mkdir(path.dirname(outputPath), { recursive: true });
+  // A passed output is immutable; refuse before spending a call rather than after.
+  if (await fs.stat(outputPath).then(() => true, () => false)) {
+    throw new Error(`EEXIST: ${outputPath} already exists; resume reuses it instead of submitting again.`);
+  }
   let stdout = "";
   let stderr = "";
   try {

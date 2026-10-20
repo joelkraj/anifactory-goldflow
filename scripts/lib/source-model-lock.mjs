@@ -1,17 +1,20 @@
 // Per-run model choice for source manufacture. The lock is written once per development folder
 // and every later stage uses it; flags that disagree with it stop instead of switching models.
 export const MANUFACTURING_MODEL_LOCK_SCHEMA = "goldflow_manhwa_manufacturing_model_lock_v1";
-export const MANUFACTURING_MODEL_LOCK_ROLES = Object.freeze(["writer", "diagnose", "revise", "verify"]);
+// planning covers ideation, the shortlist and template filling.
+export const MANUFACTURING_MODEL_LOCK_ROLES = Object.freeze(["planning", "writer", "diagnose", "revise", "verify"]);
 
-// Only models whose exact slug the transport is known to accept. ChatGPT Web models must also
-// have a verified picker label in apps/goldflow-studio/lib/chatgpt-ui-contract.mjs.
+// Selectable models, CLI transports only. gpt-6.1-sol was confirmed by an accepted codex exec
+// smoke call (docs/proofs/codex_gpt61_sol_smoke_v1). Browser automation is retired.
 export const SUPPORTED_SOURCE_MODELS = Object.freeze({
-  chatgpt_web: Object.freeze(["gpt-6-sol"]),
+  codex_cli: Object.freeze(["gpt-6.1-sol", "gpt-6-sol"]),
   claude_cli: Object.freeze(["claude-fable-5-1", "claude-opus-5-5"]),
 });
-export const DEFAULT_SOURCE_MODEL = "gpt-6-sol";
+// Historical providers stay readable in recorded locks; they are never selected for new work.
+export const HISTORICAL_SOURCE_PROVIDERS = Object.freeze(["chatgpt_web"]);
+export const DEFAULT_SOURCE_MODEL = "gpt-6.1-sol";
 export const DEFAULT_CLAUDE_SOURCE_MODEL = "claude-fable-5-1";
-const DEFAULT_EFFORTS = Object.freeze({ writer: "max", diagnose: "high", revise: "high", verify: "medium" });
+const DEFAULT_EFFORTS = Object.freeze({ planning: "medium", writer: "max", diagnose: "high", revise: "high", verify: "medium" });
 
 export function providerForSourceModel(model) {
   const value = String(model ?? "").trim();
@@ -37,6 +40,7 @@ function roleSpec(model, effort) {
 export function requestedModelLock(flags = {}) {
   const revisionModel = flags["revision-model"] ?? DEFAULT_SOURCE_MODEL;
   return {
+    planning: roleSpec(flags["planning-model"] ?? DEFAULT_SOURCE_MODEL, DEFAULT_EFFORTS.planning),
     writer: roleSpec(flags["writer-model"] ?? DEFAULT_SOURCE_MODEL, DEFAULT_EFFORTS.writer),
     diagnose: roleSpec(flags["diagnose-model"] ?? revisionModel, revisionEffort(flags["diagnose-effort"] ?? DEFAULT_EFFORTS.diagnose, "diagnose")),
     revise: roleSpec(flags["revise-model"] ?? revisionModel, revisionEffort(flags["revise-effort"] ?? DEFAULT_EFFORTS.revise, "revise")),
@@ -45,6 +49,7 @@ export function requestedModelLock(flags = {}) {
 }
 
 const ROLE_FLAGS = Object.freeze({
+  planning: { model: ["planning-model"], effort: null },
   writer: { model: ["writer-model"], effort: null },
   diagnose: { model: ["diagnose-model", "revision-model"], effort: "diagnose-effort" },
   revise: { model: ["revise-model", "revision-model"], effort: "revise-effort" },
@@ -76,7 +81,7 @@ export function validateModelLock(document) {
       continue;
     }
     // Historical model IDs stay readable; the provider must still match the recorded model.
-    if (SUPPORTED_SOURCE_MODELS[spec.provider] == null) blockers.push(`model_lock_${role}_provider_unknown`);
+    if (SUPPORTED_SOURCE_MODELS[spec.provider] == null && !HISTORICAL_SOURCE_PROVIDERS.includes(spec.provider)) blockers.push(`model_lock_${role}_provider_unknown`);
   }
   return { done: blockers.length === 0, blockers };
 }

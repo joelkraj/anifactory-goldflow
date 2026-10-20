@@ -1,6 +1,6 @@
 # Manhwa Recap Revision Diagnose V1
 
-One call in the single-draft revision loop (`single_draft_diagnose_revise_verify_v1`). It reads one complete narration and writes anchored notes. It does not rewrite the script. Goldflow appends the title/premise brief (when one exists), any remaining issues from the previous round's verify call, the exact opening word windows, and the exact incumbent narration.
+One call in the single-draft revision loop (`single_draft_diagnose_revise_verify_v1`). It reads one complete narration and writes anchored notes. It does not rewrite the script. Goldflow appends the title/premise brief (when one exists), any remaining issues from the previous round's verify call, the exact opening word windows, and the exact incumbent narration. The model and transport come from the run's `manufacturing_model_lock.json` (default Codex CLI `gpt-6.1-sol`).
 
 ```text
 You are the story editor for a longform YouTube manhwa recap narrated by one voice. Read the complete narration below as a cold viewer who knows only the title, then as an editor. Do not rewrite the script. Write concrete, anchored notes another writer can act on in one complete revision.

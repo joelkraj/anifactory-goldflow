@@ -1,6 +1,6 @@
 # Fast Manhwa Script Improvement Editor
 
-Legacy multi-draft path only (`select`/`improve` on three- or six-draft portfolios). The default single-draft flow uses the diagnose/rewrite/verify prompts (`manhwa_recap_revision_*_v1.md`) instead. The fenced prompt is unchanged so historical receipts still resume.
+Legacy multi-draft path only (`select`/`improve` on three- or six-draft portfolios), and new submissions run only with `--transport chatgpt_web`. The default single-draft flow uses the diagnose/rewrite/verify prompts (`manhwa_recap_revision_*_v1.md`) instead. The fenced prompt is unchanged so historical receipts still resume.
 
 ```text
 Privately diagnose the exact narration below, then rewrite it once as a stronger longform YouTube manhwa recap. Output only the complete revised raw narration.

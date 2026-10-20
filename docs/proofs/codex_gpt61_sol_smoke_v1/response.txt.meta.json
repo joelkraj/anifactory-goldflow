@@ -1,0 +1,18 @@
+{
+  "schema": "goldflow_codex_call_metadata_v1",
+  "stage_name": "source_manufacture_codex_gpt61_sol_smoke_v1",
+  "provider": "codex_cli",
+  "transport": "codex_exec_cli",
+  "model": "gpt-6.1-sol",
+  "reasoning_effort": "low",
+  "sandbox": "read-only",
+  "codex_cli_path": "/opt/homebrew/bin/codex",
+  "codex_cli_version": "0.163.0",
+  "prompt_sha256": "d916dc73642541acd46fe2c970d5543feab747d151aa7db24a4864c43bcac208",
+  "output_path": "docs/proofs/codex_gpt61_sol_smoke_v1/response.txt",
+  "timeout_ms": 300000,
+  "started_at": "2026-10-20T15:46:21.800Z",
+  "status": "passed",
+  "output_sha256": "565339bc4d33d72817b583024112eb7f5cdf3e5eef0252d6ec1b9c9a94e12bb3",
+  "completed_at": "2026-10-20T15:46:28.226Z"
+}

@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { readFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { promises as fs } from "node:fs";
@@ -12,6 +13,8 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 const QWEN_LIAM_PROFILE_ID = "qwen3_1_7b_base_joel_sentence_v1";
 const PUCK_TO_QWEN_RECOVERY_KIND = "puck_to_qwen_joel_identity_migration";
 const LIAM_TO_JOEL_RECOVERY_KIND = "qwen_liam_to_joel_identity_migration";
+const OPERATOR_VOICE_RECOVERY_KIND = "operator_selected_qwen_voice_migration";
+const DEEPMALE_PROFILE_ID = "qwen3_1_7b_base_deepmale_sentence_v1";
 const QWEN_PLANNER_FIX_RECOVERY_KIND = "qwen_joel_planner_fix_relock";
 const INTERRUPTED_QWEN_REUSE_POLICY =
   "reuse_allowed_only_for_exact_unchanged_single_segment_content_addressed_units";
@@ -101,7 +104,7 @@ function requireCanonicalQwenLiamOptions(options) {
   const synthesis = options?.synthesis_contract ?? {};
   const mismatches = [];
   if (primary.provider !== "qwen_local") mismatches.push(`provider=${primary.provider ?? "missing"}`);
-  if (primary.voice_id !== "joel_owned_narrator_clone") mismatches.push(`voice=${primary.voice_id ?? "missing"}`);
+  if (!["joel_owned_narrator_clone", narrationPolicy.QWEN_DEEPMALE_PRIMARY_LOCK.voice_id].includes(primary.voice_id)) mismatches.push(`voice=${primary.voice_id ?? "missing"}`);
   if (options?.fallback != null) mismatches.push("fallback must be null");
   if (unit.sentence_complete !== true) mismatches.push("sentence_complete must be true");
   if (unit.target_words_min !== null) mismatches.push(`target_words_min=${unit.target_words_min ?? "missing"}`);
@@ -177,12 +180,14 @@ export function plannerFixProfileCompatibleForTests(identity = {}) {
 }
 
 function recoveryArchiveLabel(recoveryKind) {
+  if (recoveryKind === OPERATOR_VOICE_RECOVERY_KIND) return "operator-selected-deepmale-voice";
   if (recoveryKind === PUCK_TO_QWEN_RECOVERY_KIND) return "puck-to-qwen-joel";
   if (recoveryKind === LIAM_TO_JOEL_RECOVERY_KIND) return "qwen-liam-to-joel";
   return "qwen-joel-planner-fix-relock";
 }
 
 function recoveryDisposition(recoveryKind) {
+  if (recoveryKind === OPERATOR_VOICE_RECOVERY_KIND) return "operator_requested_full_voice_plan_and_narration_rebuild_with_new_locked_voice";
   return recoveryKind === QWEN_PLANNER_FIX_RECOVERY_KIND
     ? "full_official_qwen_joel_voice_plan_and_narration_rebuild_after_committed_planner_fix"
     : "full_official_qwen_joel_voice_plan_and_narration_rebuild";
@@ -199,6 +204,12 @@ function recoveryEvidence(
   interruptedQwenTts = {},
   { synthesisContractChanged = false } = {},
 ) {
+  if (recoveryKind === OPERATOR_VOICE_RECOVERY_KIND) return [
+    "The user explicitly selected the delivered deepmale reference as the future default and requested complete Coma Healer revoicing.",
+    "This is direct operator selection, not a claimed blind preference test or fatigue approval.",
+    "Old identity, reports and canonical audio bytes are archived with hashes before replacement; accepted raw units remain in place.",
+    "Approved source, captions, speakability and semantic facts are unchanged. Narration and all dependent timing must be rebuilt.",
+  ];
   return recoveryKind !== QWEN_PLANNER_FIX_RECOVERY_KIND
     ? [
         "The operator explicitly superseded the prior narrator lock with Qwen3-TTS 1.7B Base conditioned by the owned Joel reference.",
@@ -308,19 +319,29 @@ export function relockedIdentityForTests(identity, {
   const identityChanged = voiceIdentityChanged || synthesisContractChanged;
   const migrated = structuredClone(identity);
   migrated.stage_registry_version = PIPELINE_STAGE_REGISTRY_VERSION;
-  migrated.tts_profile = QWEN_LIAM_PROFILE_ID;
+  migrated.tts_profile = primary.voice_id === narrationPolicy.QWEN_DEEPMALE_PRIMARY_LOCK.voice_id ? DEEPMALE_PROFILE_ID : QWEN_LIAM_PROFILE_ID;
   migrated.tts_provider = primary.provider;
   migrated.tts_fallback_provider = null;
   migrated.narrator_voice_id = primary.voice_id;
   migrated.tts_voice_id = primary.voice_id;
   migrated.tts_native_speed = null;
   migrated.voice_provider_options = structuredClone(options);
+  if (primary.delivery_reference_bank_path) {
+    const bytes = readFileSync(primary.delivery_reference_bank_path);
+    const bank = JSON.parse(bytes);
+    migrated.narration_delivery_reference_bank = {
+      path: primary.delivery_reference_bank_path, sha256: sha256(bytes), schema: bank.schema,
+      default_delivery_id: bank.default_delivery_id, production_active_delivery_ids: bank.production_active_delivery_ids,
+    };
+    migrated.voice_provider_options.primary.delivery_reference_bank_sha256 = sha256(bytes);
+  }
   delete migrated.qwen_narrator_voice_id;
   delete migrated.qwen_narrator_voice_policy;
   delete migrated.qwen_native_speed;
   migrated.provider_locks = {
     ...(migrated.provider_locks ?? {}),
     ...qwenLiamProviderLocks(primary, options),
+    primary_reference_variant_id: primary.reference_variant_id ?? null,
   };
   migrated.model_versions = {
     ...(migrated.model_versions ?? {}),
@@ -756,7 +777,7 @@ async function main() {
     throw new Error("--workflow-bypass true is required because this recovery intentionally returns an established run to voice_plan.");
   }
   if (!reason) throw new Error("--reason is required for the append-only recovery record.");
-  if (requestedProfile !== QWEN_LIAM_PROFILE_ID) {
+  if (![QWEN_LIAM_PROFILE_ID, DEEPMALE_PROFILE_ID].includes(requestedProfile)) {
     throw new Error(`--tts-profile must be the exact audited profile ${QWEN_LIAM_PROFILE_ID}.`);
   }
 
@@ -772,7 +793,11 @@ async function main() {
   if (identity.proof_scope?.mode !== "full_episode") {
     throw new Error("run relock-tts refuses a bounded proof identity.");
   }
-  const recoveryKind = recoveryKindForIdentityForTests(identity);
+  const targetVoiceId = cleanValue(flags["narrator-voice-id"]) ?? narrationPolicy.DEFAULT_NARRATOR_VOICE_ID;
+  if (![narrationPolicy.DEFAULT_NARRATOR_VOICE_ID, narrationPolicy.QWEN_DEEPMALE_PRIMARY_LOCK.voice_id].includes(targetVoiceId)) throw new Error("Unsupported target narrator");
+  if ((requestedProfile === DEEPMALE_PROFILE_ID) !== (targetVoiceId === narrationPolicy.QWEN_DEEPMALE_PRIMARY_LOCK.voice_id)) throw new Error("Target voice and TTS profile disagree");
+  const priorRecoveryKind = recoveryKindForIdentityForTests(identity);
+  const recoveryKind = targetVoiceId !== identity.narrator_voice_id ? OPERATOR_VOICE_RECOVERY_KIND : priorRecoveryKind;
   const existingNarrationPolicy =
     narrationPolicy.narrationTtsPolicyForIdentity(identity);
   const promotesExistingSerialQwen =
@@ -809,9 +834,14 @@ async function main() {
     }
   }
   const voiceProviderOptions = requireCanonicalQwenLiamOptions(
-    narrationPolicy.defaultNarrationVoiceProviderOptions(),
+    narrationPolicy.defaultNarrationVoiceProviderOptions({voiceId: targetVoiceId}),
   );
   await verifyCanonicalAssets(voiceProviderOptions.primary);
+  if (voiceProviderOptions.primary.delivery_reference_bank_path) {
+    const {loadNarrationDeliveryReferenceBank,validateNarrationDeliveryBankPrimaryBinding} = await import("./lib/narration-delivery-reference-bank.mjs");
+    const bank = await loadNarrationDeliveryReferenceBank(voiceProviderOptions.primary.delivery_reference_bank_path);
+    if (bank.validation.status !== "passed" || validateNarrationDeliveryBankPrimaryBinding(bank.document,voiceProviderOptions.primary).status !== "passed") throw new Error("Target delivery bank is invalid");
+  }
 
   const timestamp = new Date().toISOString();
   const archiveSlug = timestamp.replace(/[:.]/g, "-");
@@ -833,6 +863,14 @@ async function main() {
     episodeDir,
     identity.episode,
   );
+  for (const asset of retainedAudioAssets) {
+    const destination = path.join(archiveDir, "audio", path.basename(asset.path));
+    await fs.mkdir(path.dirname(destination), {recursive:true});
+    await fs.copyFile(asset.path, destination);
+    asset.archived_path = destination;
+    asset.archived_sha256 = await sha256File(destination);
+    if (asset.archived_sha256 !== asset.sha256) throw new Error("Prior narration archive hash mismatch");
+  }
   const interruptedQwenTts = await interruptedQwenTtsInventoryForTests(
     episodeDir,
   );

@@ -1,0 +1,23 @@
+{
+  "voice_id": "deepmale_narration_reference_20261019",
+  "voice_sha256": "05b3ac6f3e8c11c69c8976524862f75b5b2b5985e15275765d55da594d00f86d",
+  "reference_variant_id": "deepmale_narration_reference_v1",
+  "reference_audio_path": "/Users/joel/AniFactoryData/voice_bank/qwen/reference_samples/deepmale_voicedesign_20261019/deepmale_narration_reference.wav",
+  "reference_audio_sha256": "178b663c91712249d791ea064817c32b53b23deda061a9611aa85ccdb1c1fdf5",
+  "reference_text": "The room fell quiet as I opened the envelope. Inside was a key, a folded map, and a note written in blue ink. I read it once, took a slow breath, and stepped into the morning light.",
+  "reference_text_sha256": "d40a51c2564f87b16a929aa60c6a1c0c7f670263677aa3dab1efd98e7f10dfd0",
+  "reference_manifest_path": "/Users/joel/AniFactoryData/voice_bank/qwen/reference_samples/deepmale_voicedesign_20261019/production_reference_manifest.json",
+  "reference_manifest_sha256": "3d5c08c66fd12c53830c90326a6c9caede030d479a81b48a2e418d0bd14d3e88",
+  "reference_metadata_path": "/Users/joel/AniFactoryData/voice_bank/qwen/reference_samples/deepmale_voicedesign_20261019/production_voice.json",
+  "reference_metadata_sha256": "05b3ac6f3e8c11c69c8976524862f75b5b2b5985e15275765d55da594d00f86d",
+  "reference_voice_id": "deepmale_narration_reference_20261019",
+  "reference_voice_sha256": "05b3ac6f3e8c11c69c8976524862f75b5b2b5985e15275765d55da594d00f86d",
+  "reference_source_provider": "operator_supplied_synthetic_audio",
+  "reference_source_model_id": "qwen3_tts_base_clone",
+  "reference_source_model_revision": "deepmale_reference_20261019_v1",
+  "reference_origin_unit_id": "deepmale_narration_reference",
+  "voice_continuity_contract": "qwen_icl_clone_of_operator_selected_deepmale_reference",
+  "voice_clone_contract": "qwen_icl_clone_of_operator_selected_deepmale_reference",
+  "speaker_similarity_calibration_path": "/Users/joel/AniFactoryData/voice_bank/qwen/reference_samples/deepmale_voicedesign_20261019/production_calibration.json",
+  "speaker_similarity_calibration_sha256": "1282c57cdabef90576ce4c6fa32b45e392c2a2d9008d91461a7b3fc16246e59a"
+}

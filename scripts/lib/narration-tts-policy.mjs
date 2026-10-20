@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import {
   QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT,
@@ -320,7 +322,18 @@ export const QWEN_JOEL_DRY_DEADPAN_PRIMARY_LOCK = Object.freeze({
   voice_clone_contract: "qwen_icl_clone_of_selected_joel_owned_dry_deadpan_reference",
 });
 
+export const QWEN_DEEPMALE_PRIMARY_LOCK = Object.freeze({
+  ...QWEN_JOEL_PRIMARY_LOCK,
+  ...JSON.parse(readFileSync(new URL("../../config/qwen_deepmale_voice.json", import.meta.url), "utf8")),
+  delivery_reference_bank_path: fileURLToPath(new URL("../../config/narration_deepmale_delivery_reference_bank.json", import.meta.url)),
+});
+export const DEFAULT_NEW_NARRATOR_VOICE_ID = QWEN_DEEPMALE_PRIMARY_LOCK.voice_id;
+
 export function qwenPrimaryLockForVoice(voiceId, referenceVariantId = null) {
+  if (voiceId === QWEN_DEEPMALE_PRIMARY_LOCK.voice_id) {
+    if (referenceVariantId && referenceVariantId !== QWEN_DEEPMALE_PRIMARY_LOCK.reference_variant_id) throw new Error("Deepmale reference variant mismatch");
+    return QWEN_DEEPMALE_PRIMARY_LOCK;
+  }
   return voiceId === QWEN_LIAM_PRIMARY_LOCK.voice_id
     ? QWEN_LIAM_PRIMARY_LOCK
     : referenceVariantId == null
@@ -550,7 +563,9 @@ export function narrationTtsPolicyForIdentity(identity = {}) {
     ? null
     : positiveNumber(rawNativeSpeed, null);
   const contract = primaryProvider === "qwen_local"
-    ? voiceId === QWEN_LIAM_PRIMARY_LOCK.voice_id
+    ? voiceId === QWEN_DEEPMALE_PRIMARY_LOCK.voice_id
+      ? "qwen_operator_selected_primary_v1"
+      : voiceId === QWEN_LIAM_PRIMARY_LOCK.voice_id
       ? "qwen_liam_primary_v1"
       : "qwen_joel_primary_v1"
     : primaryProvider === "kokoro_local"
@@ -1112,11 +1127,11 @@ export function validateNarrationTtsPolicy(policy, { production = true } = {}) {
       );
     }
   } else {
-    if (!["qwen_joel_primary_v1", "qwen_liam_primary_v1"].includes(policy.contract)
+    if (!["qwen_joel_primary_v1", "qwen_liam_primary_v1", "qwen_operator_selected_primary_v1"].includes(policy.contract)
       || policy.primary?.provider !== "qwen_local") {
       throw new Error(`The production narration lane requires a locked qwen_local narrator; got ${policy.primary?.provider ?? "missing"}.`);
     }
-    if (![DEFAULT_NARRATOR_VOICE_ID, QWEN_LIAM_PRIMARY_LOCK.voice_id].includes(policy.primary.voice_id)) {
+    if (![DEFAULT_NARRATOR_VOICE_ID, QWEN_LIAM_PRIMARY_LOCK.voice_id, QWEN_DEEPMALE_PRIMARY_LOCK.voice_id].includes(policy.primary.voice_id)) {
       throw new Error(`Narration identities require an approved locked narrator voice; got ${policy.primary.voice_id ?? "missing"}.`);
     }
     const expectedPrimaryLock = {
@@ -1322,7 +1337,7 @@ export function defaultNarrationVoiceProviderOptions({
       synthesis_contract: null,
     };
   }
-  if (voiceId !== DEFAULT_NARRATOR_VOICE_ID) {
+  if (![DEFAULT_NARRATOR_VOICE_ID, DEFAULT_NEW_NARRATOR_VOICE_ID].includes(voiceId)) {
     throw new Error(`New narration identities require ${DEFAULT_NARRATOR_VOICE_ID}; ${voiceId ?? "missing"} is not selectable for production.`);
   }
   if (fallback !== null) {
@@ -1345,8 +1360,8 @@ export function defaultNarrationVoiceProviderOptions({
     fallback: null,
     qa_policy: NARRATION_TTS_QA_POLICY_VERSION,
     pace_strategy: "qwen_reference_native_cadence_no_speed_no_post_tempo",
-    narrator_identity_policy: "single_voice_qwen_joel_owned_icl",
-    allowed_production_voice_ids: [DEFAULT_NARRATOR_VOICE_ID],
+    narrator_identity_policy: voiceId === DEFAULT_NEW_NARRATOR_VOICE_ID ? "single_voice_qwen_operator_selected_icl" : "single_voice_qwen_joel_owned_icl",
+    allowed_production_voice_ids: [voiceId],
     narration_quality_contract: narrationQualityContract,
     unit_contract: unitContract,
     stitch_contract: stitchContract,

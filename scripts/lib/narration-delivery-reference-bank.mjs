@@ -59,7 +59,13 @@ export function validateNarrationDeliveryReferenceBank(document) {
     const row = rows.find((entry) => entry?.delivery_id === deliveryId);
     if (!row) findings.push({ code: "narration_delivery_bank_active_reference_missing", delivery_id: deliveryId });
     else if (!new Set(["production_approved_baseline", "production_approved"]).has(row.status)) findings.push({ code: "narration_delivery_bank_unapproved_reference_active", delivery_id: deliveryId });
-    if (!approvedIds.includes(deliveryId)) findings.push({ code: "narration_delivery_bank_active_reference_not_blind_approved", delivery_id: deliveryId });
+    const explicitSelection = document.operator_selection;
+    const operatorSelected = document.operator_approved_delivery_ids?.includes(deliveryId)
+      && explicitSelection?.authority === "explicit_user_request"
+      && Boolean(clean(explicitSelection.request))
+      && explicitSelection.voice_id === document.voice_id
+      && explicitSelection.reference_audio_sha256 === row?.audio_sha256;
+    if (!approvedIds.includes(deliveryId) && !operatorSelected) findings.push({ code: "narration_delivery_bank_active_reference_not_blind_approved", delivery_id: deliveryId });
   }
   return { status: findings.length ? "blocked" : "passed", findings };
 }

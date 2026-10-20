@@ -238,7 +238,26 @@ QWEN_PUCK_REFERENCE = {
         "max_tokens": 1200,
     },
 }
+# Same operator-selected immutable lock consumed by the JS policy layer.
+_DEEPMALE_LOCK = json.loads((Path(__file__).resolve().parent.parent / "config/qwen_deepmale_voice.json").read_text())
+QWEN_DEEPMALE_REFERENCE = {
+    **QWEN_JOEL_REFERENCE,
+    "contract_id": "qwen_operator_selected_primary_v1",
+    "voice_id": _DEEPMALE_LOCK["voice_id"],
+    "voice_sha256": _DEEPMALE_LOCK["voice_sha256"],
+    "voice_continuity_contract": _DEEPMALE_LOCK["voice_continuity_contract"],
+    "voice_clone_contract": _DEEPMALE_LOCK["voice_clone_contract"],
+    **{dst: _DEEPMALE_LOCK[src] for dst, src in {
+        "audio_path": "reference_audio_path", "audio_sha256": "reference_audio_sha256",
+        "text": "reference_text", "text_sha256": "reference_text_sha256",
+        "manifest_path": "reference_manifest_path", "manifest_sha256": "reference_manifest_sha256",
+        "metadata_path": "reference_metadata_path", "metadata_sha256": "reference_metadata_sha256",
+        "source_provider": "reference_source_provider", "source_model_id": "reference_source_model_id",
+        "source_model_revision": "reference_source_model_revision", "source_unit_id": "reference_origin_unit_id",
+    }.items()},
+}
 QWEN_REFERENCE_CONTRACTS = {
+    QWEN_DEEPMALE_REFERENCE["voice_continuity_contract"]: QWEN_DEEPMALE_REFERENCE,
     QWEN_JOEL_REFERENCE["voice_continuity_contract"]: QWEN_JOEL_REFERENCE,
     QWEN_JOEL_DRY_DEADPAN_REFERENCE["voice_continuity_contract"]: (
         QWEN_JOEL_DRY_DEADPAN_REFERENCE

@@ -80,6 +80,9 @@ import {
 } from "./lib/local-whisper-policy.mjs";
 import {
   DEFAULT_NARRATOR_VOICE_ID,
+  DEFAULT_NEW_NARRATOR_VOICE_ID,
+  QWEN_DEEPMALE_PRIMARY_LOCK,
+  qwenPrimaryLockForVoice,
   DEFAULT_TTS_FALLBACK_PROVIDER,
   DEFAULT_TTS_PROVIDER,
   EXTERNAL_NARRATION_TTS_PROVIDERS,
@@ -379,7 +382,7 @@ const narratorVoiceId = cleanOptionalId(
   flags["narrator-voice-id"]
   ?? flags["tts-voice-id"]
   ?? (ttsProvider === "qwen_local"
-    ? DEFAULT_NARRATOR_VOICE_ID
+    ? DEFAULT_NEW_NARRATOR_VOICE_ID
     : ttsProvider === "kokoro_local" ? "am_puck" : null),
 );
 if (EXTERNAL_NARRATION_TTS_PROVIDERS.includes(ttsProvider)
@@ -391,17 +394,17 @@ if (EXTERNAL_NARRATION_TTS_PROVIDERS.includes(ttsProvider)
 const narratorReferenceVariantId = cleanOptionalId(
   flags["narrator-reference-variant"]
     ?? (ttsProvider === "qwen_local"
-      ? QWEN_JOEL_DRY_DEADPAN_PRIMARY_LOCK.reference_variant_id
+      ? qwenPrimaryLockForVoice(narratorVoiceId).reference_variant_id
       : null),
 );
 if (ttsProvider === "qwen_local"
   && narratorReferenceVariantId
-    !== QWEN_JOEL_DRY_DEADPAN_PRIMARY_LOCK.reference_variant_id) {
+    !== qwenPrimaryLockForVoice(narratorVoiceId).reference_variant_id) {
   throw new Error(
     `New Joel/Qwen narration requires --narrator-reference-variant ${QWEN_JOEL_DRY_DEADPAN_PRIMARY_LOCK.reference_variant_id}.`,
   );
 }
-if (ttsProvider === "qwen_local" && narratorVoiceId !== DEFAULT_NARRATOR_VOICE_ID) {
+if (ttsProvider === "qwen_local" && ![DEFAULT_NEW_NARRATOR_VOICE_ID, DEFAULT_NARRATOR_VOICE_ID].includes(narratorVoiceId)) {
   throw new Error(`New narration identities use the owned Joel reference: --narrator-voice-id must be ${DEFAULT_NARRATOR_VOICE_ID}.`);
 }
 if (ttsProvider === "qwen_local" && ttsFallbackProvider !== null) {
@@ -434,7 +437,7 @@ const externalNarrationProvider = EXTERNAL_NARRATION_TTS_PROVIDERS.includes(
 );
 const narratorVoiceSha256 = externalNarrationProvider
   ? cleanOptionalId(flags["narrator-voice-sha256"] ?? flags["tts-voice-sha256"])
-  : ttsProvider === "qwen_local" ? QWEN_JOEL_PRIMARY_LOCK.voice_sha256 : null;
+  : ttsProvider === "qwen_local" ? qwenPrimaryLockForVoice(narratorVoiceId).voice_sha256 : null;
 const externalTtsPrimaryOptions = externalNarrationProvider
   ? {
       model_id: cleanOptionalId(flags["tts-model"]),
@@ -1256,7 +1259,7 @@ async function main() {
   );
   const narrationDeliveryBank = ttsProvider === "qwen_local"
     ? await loadNarrationDeliveryReferenceBank(
-      flags["narration-delivery-bank"] ?? DEFAULT_NARRATION_DELIVERY_BANK_PATH,
+      flags["narration-delivery-bank"] ?? resolvedVoiceProviderOptions.primary.delivery_reference_bank_path ?? DEFAULT_NARRATION_DELIVERY_BANK_PATH,
     )
     : null;
   if (narrationDeliveryBank?.validation.status === "blocked") {

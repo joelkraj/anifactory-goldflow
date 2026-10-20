@@ -145,14 +145,14 @@ test("bin/goldflow.mjs refuses a drifted stage command and records an allowed dr
   assert.doesNotMatch(status.stderr, /Code drift/);
 
   // A stage command on an identity whose commit HEAD does not contain is refused before any event.
-  const blocked = cli("final", "qa", "--episode-dir", episodeDir, "--workflow-bypass", "true");
+  const blocked = cli("final", "qa", "--episode-dir", episodeDir, "--workflow-bypass", "true", "--bypass-reason-code", "test_fixture");
   assert.equal(blocked.status, 1);
   assert.match(blocked.stderr, /Code drift blocked: final qa/);
   assert.match(blocked.stderr, /identity_commit_unknown_to_repository/);
   assert.deepEqual(await readEvents(episodeDir), []);
 
   // A reason code admits the command; the drift is recorded append-only and the flag is not forwarded.
-  const allowed = cli("final", "qa", "--episode-dir", episodeDir, "--workflow-bypass", "true", "--allow-code-drift", "fixture_drift_reviewed");
+  const allowed = cli("final", "qa", "--episode-dir", episodeDir, "--workflow-bypass", "true", "--bypass-reason-code", "test_fixture", "--allow-code-drift", "fixture_drift_reviewed");
   assert.doesNotMatch(allowed.stderr, /Code drift blocked/);
   const events = await readEvents(episodeDir);
   assert.deepEqual(events.slice(0, 2).map((row) => row.event_type), ["stage_started", "code_drift"]);
@@ -172,7 +172,7 @@ test("bin/goldflow.mjs refuses a drifted stage command and records an allowed dr
   await fs.mkdir(legacyDir, { recursive: true });
   const { git, code_commit, ...legacy } = identity;
   await fs.writeFile(path.join(legacyDir, "run_identity.json"), `${JSON.stringify(legacy, null, 2)}\n`);
-  const legacyRun = cli("final", "qa", "--episode-dir", legacyDir, "--workflow-bypass", "true");
+  const legacyRun = cli("final", "qa", "--episode-dir", legacyDir, "--workflow-bypass", "true", "--bypass-reason-code", "test_fixture");
   assert.doesNotMatch(legacyRun.stderr, /Code drift/);
   const legacyEvents = await readEvents(legacyDir);
   assert.equal(legacyEvents[0]?.event_type, "stage_started");

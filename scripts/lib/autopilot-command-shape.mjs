@@ -3,6 +3,35 @@
 // with unresolved <placeholders> are never guessed.
 
 const PREFIX = ["node", "bin/goldflow.mjs"];
+export const GOLDFLOW_SHAPE_PREFIX = PREFIX.join(" ");
+
+/** Shell-quotes one token for a status shape; plain tokens (and <placeholders>) stay plain. */
+export function quoteShapeToken(value) {
+  const text = String(value);
+  if (text === "") return "''";
+  if (/^[A-Za-z0-9_@%+=:,./<>-]+$/.test(text)) return text;
+  return `'${text.replaceAll("'", "'\\''")}'`;
+}
+
+/**
+ * Composes `node bin/goldflow.mjs <command> <subcommand> --flag value …` from
+ * [name, value] pairs (order kept; `true` renders as `--name true`; null,
+ * undefined and false pairs are skipped). The inverse of `goldflowArgv`.
+ */
+export function composeShape(command, subcommand, flags = [], { positional = [] } = {}) {
+  const pairs = Array.isArray(flags) ? flags : Object.entries(flags);
+  const parts = [GOLDFLOW_SHAPE_PREFIX, command, subcommand, ...positional.map(quoteShapeToken)];
+  for (const [name, value] of pairs) {
+    if (value === null || value === undefined || value === false) continue;
+    parts.push(`--${name}`, value === true ? "true" : quoteShapeToken(value));
+  }
+  return parts.join(" ");
+}
+
+/** Episode-dir-targeted `imagegen fal --action <action> …` shapes. */
+export function falShape(episodeDir, action, flags = []) {
+  return composeShape("imagegen", "fal", [["episode-dir", episodeDir], ["action", action], ...(Array.isArray(flags) ? flags : Object.entries(flags))]);
+}
 
 export function tokenizeShape(shape) {
   const text = String(shape ?? "").trim();

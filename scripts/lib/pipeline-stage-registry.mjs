@@ -12,6 +12,7 @@ import {
 } from "./local-whisper-policy.mjs";
 import { generatedMotionEnabled } from "./generated-motion-contract.mjs";
 import { autopilotEnabled } from "./autopilot-policy.mjs";
+import { GOLDFLOW_SHAPE_PREFIX as GOLDFLOW } from "./autopilot-command-shape.mjs";
 import { isBrowserPoolImageProvider } from "./image-provider-policy.mjs";
 import {
   plannerConcurrencyForIdentity,
@@ -734,103 +735,103 @@ export function buildStageCommand(stageId, identity = {}, options = {}) {
     localWhisperContractForIdentity(identity),
   );
   const commands = {
-    run_identity: `node bin/goldflow.mjs run preflight ${base} --content-profile ${identity.content_profile ?? "<content-profile>"} --media-workflow generated_visuals_v1 --title "<episode-title>" --source <source.md> --planning-provider planning_room --planning-effort-policy planning_room_stage_routed_v1 --image-provider federated_google_web_image_pool --audio-target narrator_only`,
-    source_ingest: `node bin/goldflow.mjs ingest source ${base} --source <source.md>`,
-    script_approval: `node bin/goldflow.mjs script approve ${base} --hash <script_clean_hash>`,
-    script_pace_check: `node bin/goldflow.mjs script pace-check ${base} --target-wpm-min ${minWpm} --target-wpm-max ${maxWpm}${paceFlag}${pacePolicy === "diagnostic" ? " --allow-hook-warnings true" : ""}`,
-    targeted_speakability: `node bin/goldflow.mjs script targeted ${base}`,
+    run_identity: `${GOLDFLOW} run preflight ${base} --content-profile ${identity.content_profile ?? "<content-profile>"} --media-workflow generated_visuals_v1 --title "<episode-title>" --source <source.md> --planning-provider planning_room --planning-effort-policy planning_room_stage_routed_v1 --image-provider federated_google_web_image_pool --audio-target narrator_only`,
+    source_ingest: `${GOLDFLOW} ingest source ${base} --source <source.md>`,
+    script_approval: `${GOLDFLOW} script approve ${base} --hash <script_clean_hash>`,
+    script_pace_check: `${GOLDFLOW} script pace-check ${base} --target-wpm-min ${minWpm} --target-wpm-max ${maxWpm}${paceFlag}${pacePolicy === "diagnostic" ? " --allow-hook-warnings true" : ""}`,
+    targeted_speakability: `${GOLDFLOW} script targeted ${base}`,
     semantic_scene_plan: identity?.proof_scope?.mode === "bounded"
       && identity?.proof_source_mode !== "standalone_bounded_source"
-      ? `node bin/goldflow.mjs semantic plan ${base} --concurrency ${semanticConcurrency} --semantic-json-attempts 1 --semantic-chunk-validation-attempts 1 --semantic-reconciliation-attempts 1 --proof-baseline-word-timing <audited-baseline-word-timing.json>${boundedProofScopeFlag(identity)}`
-      : `node bin/goldflow.mjs semantic plan ${base} --concurrency ${semanticConcurrency} --semantic-json-attempts 1 --semantic-chunk-validation-attempts 1 --semantic-reconciliation-attempts 1`,
-    voice_plan: `node bin/goldflow.mjs voice plan ${base}`,
+      ? `${GOLDFLOW} semantic plan ${base} --concurrency ${semanticConcurrency} --semantic-json-attempts 1 --semantic-chunk-validation-attempts 1 --semantic-reconciliation-attempts 1 --proof-baseline-word-timing <audited-baseline-word-timing.json>${boundedProofScopeFlag(identity)}`
+      : `${GOLDFLOW} semantic plan ${base} --concurrency ${semanticConcurrency} --semantic-json-attempts 1 --semantic-chunk-validation-attempts 1 --semantic-reconciliation-attempts 1`,
+    voice_plan: `${GOLDFLOW} voice plan ${base}`,
     // The stage id is retained for historical manifests; the stage itself is
     // provider-neutral for every quality-V2 run.
     qwen_tts_stitch: isLegacyQwenIdentity(identity)
-      ? `node bin/goldflow.mjs tts qwen ${base} --native-speed ${nativeSpeed} --concurrency ${media.qwen_tts_concurrency}`
+      ? `${GOLDFLOW} tts qwen ${base} --native-speed ${nativeSpeed} --concurrency ${media.qwen_tts_concurrency}`
       : ["fish_audio", "elevenlabs", "generic_tts"].includes(
         ttsPolicy.primary?.provider,
       )
-        ? `node bin/goldflow.mjs tts import-provider ${base} --results <provider-results.json>`
-        : `node bin/goldflow.mjs tts narrate ${base} --concurrency ${narrationConcurrency} --batch-size ${ttsPolicy.synthesis_contract?.nominal_batch_size ?? 1}`,
+        ? `${GOLDFLOW} tts import-provider ${base} --results <provider-results.json>`
+        : `${GOLDFLOW} tts narrate ${base} --concurrency ${narrationConcurrency} --batch-size ${ttsPolicy.synthesis_contract?.nominal_batch_size ?? 1}`,
     local_whisper_word_timing:
-      `node bin/goldflow.mjs audio whisper-timing ${base} `
+      `${GOLDFLOW} audio whisper-timing ${base} `
       + localWhisperFlags,
-    audio_pace_check: `node bin/goldflow.mjs audio pace-check ${base} --target-wpm-min ${minWpm} --target-wpm-max ${maxWpm}${paceFlag}`,
-    timing_bind: `node bin/goldflow.mjs timing bind ${base}`,
+    audio_pace_check: `${GOLDFLOW} audio pace-check ${base} --target-wpm-min ${minWpm} --target-wpm-max ${maxWpm}${paceFlag}`,
+    timing_bind: `${GOLDFLOW} timing bind ${base}`,
     sfx_score_plan: narratorOnly(identity)
       ? "skipped with waiver because run_identity.audio_target is narrator_only"
-      : `node bin/goldflow.mjs audio enrich-sfx-score ${base} --score-mode drops_only`,
+      : `${GOLDFLOW} audio enrich-sfx-score ${base} --score-mode drops_only`,
     longform_audio_mix: narratorOnly(identity)
-      ? `node bin/goldflow.mjs audio longform-bed ${base} --narration-only true --narration-volume-db 0 --target-lufs -16 --true-peak-db -1.5`
-      : `node bin/goldflow.mjs audio longform-bed ${base} --narration-volume-db 3 --target-lufs -13 --true-peak-db -1${narrationDuckingFlags(identity)}`,
-    visual_beat_plan: `node bin/goldflow.mjs visual beats ${base} --editorial-concurrency ${editorialConcurrency} --editorial-attempts 1${visualBeatTimingFlags(identity)}${boundedProofScopeFlag(identity)}`,
-    visual_reference_plan: `node bin/goldflow.mjs visual refs ${base} --visual-ref-chunk-concurrency ${referenceConcurrency} --visual-ref-json-attempts 1 --visual-ref-merge-validation-attempts 1`,
-    reference_plan_approval: `node bin/goldflow.mjs visual approve-ref-plan ${base} --note "<reference plan review notes>"`,
+      ? `${GOLDFLOW} audio longform-bed ${base} --narration-only true --narration-volume-db 0 --target-lufs -16 --true-peak-db -1.5`
+      : `${GOLDFLOW} audio longform-bed ${base} --narration-volume-db 3 --target-lufs -13 --true-peak-db -1${narrationDuckingFlags(identity)}`,
+    visual_beat_plan: `${GOLDFLOW} visual beats ${base} --editorial-concurrency ${editorialConcurrency} --editorial-attempts 1${visualBeatTimingFlags(identity)}${boundedProofScopeFlag(identity)}`,
+    visual_reference_plan: `${GOLDFLOW} visual refs ${base} --visual-ref-chunk-concurrency ${referenceConcurrency} --visual-ref-json-attempts 1 --visual-ref-merge-validation-attempts 1`,
+    reference_plan_approval: `${GOLDFLOW} visual approve-ref-plan ${base} --note "<reference plan review notes>"`,
     reference_generation: hybridBrowserPool
-      ? `node bin/goldflow.mjs imagegen browser-pool ${base} --references-only true`
+      ? `${GOLDFLOW} imagegen browser-pool ${base} --references-only true`
       : codexReferences(identity)
-      ? `node bin/goldflow.mjs imagegen codex-work ${base} --action create --references-only true --reference-ids <ref_ids> --max-attempts 1 --lease-sec 900`
-      : `node bin/goldflow.mjs imagegen start ${base} --image-provider ${provider} --reference-image-model ${referenceModel} --references-only true --reference-concurrency ${referenceMediaConcurrency}`,
-    reference_image_approval: `node bin/goldflow.mjs visual approve-refs ${base} --cleanliness-reviewed true --note "<generated reference review notes>"`,
-    visual_prompt_plan: `node bin/goldflow.mjs visual plan ${base} --visual-chunk-concurrency ${visualPromptConcurrency} --visual-json-attempts 1 --codex-call-attempts 1 --visual-chunk-validation-attempts ${planner.chunk_validation_attempts}`,
-    visual_prompt_harden: `node bin/goldflow.mjs visual harden ${base} --prompts <episode-dir>/section_image_prompts.json`,
-    visual_prompt_blocker_repair: `node bin/goldflow.mjs visual review ${base} --blockers-only true --auto-resolve true --max-resolve-iterations 1 --visual-review-chunk-attempts 1 --visual-chunk-concurrency ${visualPromptConcurrency}`,
-    transition_edit_plan: `node bin/goldflow.mjs visual transitions ${base} --prompts <episode-dir>/section_image_prompts_hardened.json${narratorOnly(identity) ? " --transition-sfx false" : ""}`,
+      ? `${GOLDFLOW} imagegen codex-work ${base} --action create --references-only true --reference-ids <ref_ids> --max-attempts 1 --lease-sec 900`
+      : `${GOLDFLOW} imagegen start ${base} --image-provider ${provider} --reference-image-model ${referenceModel} --references-only true --reference-concurrency ${referenceMediaConcurrency}`,
+    reference_image_approval: `${GOLDFLOW} visual approve-refs ${base} --cleanliness-reviewed true --note "<generated reference review notes>"`,
+    visual_prompt_plan: `${GOLDFLOW} visual plan ${base} --visual-chunk-concurrency ${visualPromptConcurrency} --visual-json-attempts 1 --codex-call-attempts 1 --visual-chunk-validation-attempts ${planner.chunk_validation_attempts}`,
+    visual_prompt_harden: `${GOLDFLOW} visual harden ${base} --prompts <episode-dir>/section_image_prompts.json`,
+    visual_prompt_blocker_repair: `${GOLDFLOW} visual review ${base} --blockers-only true --auto-resolve true --max-resolve-iterations 1 --visual-review-chunk-attempts 1 --visual-chunk-concurrency ${visualPromptConcurrency}`,
+    transition_edit_plan: `${GOLDFLOW} visual transitions ${base} --prompts <episode-dir>/section_image_prompts_hardened.json${narratorOnly(identity) ? " --transition-sfx false" : ""}`,
     image_generation: hybridBrowserPool
-      ? `node bin/goldflow.mjs imagegen browser-pool ${base}`
+      ? `${GOLDFLOW} imagegen browser-pool ${base}`
       : codexSceneCuts(identity)
-      ? `node bin/goldflow.mjs imagegen codex-work ${base} --action create --prompts <episode-dir>/section_image_prompts_hardened.json --image-ids <codex_cut_ids> --max-attempts 1 --lease-sec 900; after the validated Codex manifest is imported, run the ModelsLab remainder when this is a hybrid lane: node bin/goldflow.mjs imagegen start ${base}${codexOpeningFlag(identity)} --image-provider ${provider} --image-model ${imageModel} --provider-filter modelslab --skip-reference-generation true --concurrency ${media.image_concurrency} --output <episode-dir>/imagegen_report_${episode}.json`
-      : `node bin/goldflow.mjs imagegen start ${base} --image-provider ${provider} --image-model ${imageModel} --prompts <episode-dir>/section_image_prompts_hardened.json --skip-reference-generation true --concurrency ${imageConcurrency} --reference-concurrency ${referenceMediaConcurrency}`,
-    image_focal_analysis: `node bin/goldflow.mjs imagegen analyze ${base} --concurrency ${media.focal_analysis_concurrency}`,
-    image_output_qa: `node bin/goldflow.mjs imagegen qa ${base} --semantic-audit true --semantic-audit-concurrency 8 --semantic-audit-effort medium`,
-    animation_direction_plan: `node bin/goldflow.mjs visual animation-plan ${base}`,
-    generated_video_motion: `node bin/goldflow.mjs visual generated-motion ${base} --concurrency ${media.generated_motion_concurrency ?? 3}${(orchestration.generated_motion_coherence_prefetch ?? orchestration.incremental_generated_motion_prefetch) === true ? " --prefetch-coherence-cache true" : ""}`,
-    generated_video_motion_approval: `node bin/goldflow.mjs visual approve-generated-motion ${base} --reviewer <name> --note "<clip review notes>" --approve-ids <ids> --reject-ids <ids>`,
-    parallax_asset_generation: `node bin/goldflow.mjs visual parallax-assets ${base}`,
-    parallax_asset_approval: `node bin/goldflow.mjs visual approve-parallax ${base} --reviewer <name> --note "<mask and layer review notes>" --approve-ids <ids> --decline-ids <ids>`,
+      ? `${GOLDFLOW} imagegen codex-work ${base} --action create --prompts <episode-dir>/section_image_prompts_hardened.json --image-ids <codex_cut_ids> --max-attempts 1 --lease-sec 900; after the validated Codex manifest is imported, run the ModelsLab remainder when this is a hybrid lane: ${GOLDFLOW} imagegen start ${base}${codexOpeningFlag(identity)} --image-provider ${provider} --image-model ${imageModel} --provider-filter modelslab --skip-reference-generation true --concurrency ${media.image_concurrency} --output <episode-dir>/imagegen_report_${episode}.json`
+      : `${GOLDFLOW} imagegen start ${base} --image-provider ${provider} --image-model ${imageModel} --prompts <episode-dir>/section_image_prompts_hardened.json --skip-reference-generation true --concurrency ${imageConcurrency} --reference-concurrency ${referenceMediaConcurrency}`,
+    image_focal_analysis: `${GOLDFLOW} imagegen analyze ${base} --concurrency ${media.focal_analysis_concurrency}`,
+    image_output_qa: `${GOLDFLOW} imagegen qa ${base} --semantic-audit true --semantic-audit-concurrency 8 --semantic-audit-effort medium`,
+    animation_direction_plan: `${GOLDFLOW} visual animation-plan ${base}`,
+    generated_video_motion: `${GOLDFLOW} visual generated-motion ${base} --concurrency ${media.generated_motion_concurrency ?? 3}${(orchestration.generated_motion_coherence_prefetch ?? orchestration.incremental_generated_motion_prefetch) === true ? " --prefetch-coherence-cache true" : ""}`,
+    generated_video_motion_approval: `${GOLDFLOW} visual approve-generated-motion ${base} --reviewer <name> --note "<clip review notes>" --approve-ids <ids> --reject-ids <ids>`,
+    parallax_asset_generation: `${GOLDFLOW} visual parallax-assets ${base}`,
+    parallax_asset_approval: `${GOLDFLOW} visual approve-parallax ${base} --reviewer <name> --note "<mask and layer review notes>" --approve-ids <ids> --decline-ids <ids>`,
     motion_edit_plan: panelComposition
-      ? `node bin/goldflow.mjs visual panel-plan ${base} --action prepare`
-      : `node bin/goldflow.mjs visual motion-plan ${base}`,
+      ? `${GOLDFLOW} visual panel-plan ${base} --action prepare`
+      : `${GOLDFLOW} visual motion-plan ${base}`,
     premium_render: panelComposition
-      ? `node bin/goldflow.mjs render start ${base} --motion panel_composition_v1 --fps 30 --final-preset ${render.final_preset}`
-      : `node bin/goldflow.mjs render start ${base} --motion-plan <episode-dir>/motion_edit_plan_${episode}.json --motion ${renderProfile} --render-concurrency ${render.render_concurrency} --clip-preset ${render.clip_preset} --final-preset ${render.final_preset}${identity?.proof_scope?.mode === "bounded" ? ` --diagnostic-proof true --proof-scope-end-sec ${Number(identity.proof_scope.end_sec)}` : ""}`,
-    final_qa: `node bin/goldflow.mjs final qa ${base} --master-scan true --approve true --reviewed-finding-codes <comma_separated_codes_if_any> --note "<QA review notes>"`,
-    upload_packaging: `node bin/goldflow.mjs youtube approve-packaging ${base} --approve true --approved-by <name> --note "<packaging review notes>"`,
-    youtube_publish_readiness: `node bin/goldflow.mjs youtube prepare ${base}`,
-    youtube_studio_upload: `Use the youtube-studio-publish browser skill, upload privately first, verify every field, then run node bin/goldflow.mjs youtube record-upload ${base} --video-id <id> --watch-url <url> --visibility <private|unlisted|public|scheduled> --channel-verified true --initial-private-verified true --title-verified true --description-verified true --thumbnail-verified true --audience-verified true --monetization-verified true --mid-rolls-verified true --comments-verified true --checks-complete true --recorded-by <name>`,
-    youtube_pinned_comment: `For an explicitly approved scheduled release, verify Studio and run node bin/goldflow.mjs youtube record-schedule ${base} --video-id <id> --schedule-at <ISO-timestamp> --time-zone <zone> --publish-approved true --publish-approved-by <name> --channel-verified true --schedule-verified true --existing-fields-verified true --checks-complete true --recorded-by <name>; after explicit comment approval, pin the exact manifest comment and run node bin/goldflow.mjs youtube record-comment ${base} --comment-id <id> --text-verified true --post-approved true --post-approved-by <name> --pinned-verified true --recorded-by <name>`,
+      ? `${GOLDFLOW} render start ${base} --motion panel_composition_v1 --fps 30 --final-preset ${render.final_preset}`
+      : `${GOLDFLOW} render start ${base} --motion-plan <episode-dir>/motion_edit_plan_${episode}.json --motion ${renderProfile} --render-concurrency ${render.render_concurrency} --clip-preset ${render.clip_preset} --final-preset ${render.final_preset}${identity?.proof_scope?.mode === "bounded" ? ` --diagnostic-proof true --proof-scope-end-sec ${Number(identity.proof_scope.end_sec)}` : ""}`,
+    final_qa: `${GOLDFLOW} final qa ${base} --master-scan true --approve true --reviewed-finding-codes <comma_separated_codes_if_any> --note "<QA review notes>"`,
+    upload_packaging: `${GOLDFLOW} youtube approve-packaging ${base} --approve true --approved-by <name> --note "<packaging review notes>"`,
+    youtube_publish_readiness: `${GOLDFLOW} youtube prepare ${base}`,
+    youtube_studio_upload: `Use the youtube-studio-publish browser skill, upload privately first, verify every field, then run ${GOLDFLOW} youtube record-upload ${base} --video-id <id> --watch-url <url> --visibility <private|unlisted|public|scheduled> --channel-verified true --initial-private-verified true --title-verified true --description-verified true --thumbnail-verified true --audience-verified true --monetization-verified true --mid-rolls-verified true --comments-verified true --checks-complete true --recorded-by <name>`,
+    youtube_pinned_comment: `For an explicitly approved scheduled release, verify Studio and run ${GOLDFLOW} youtube record-schedule ${base} --video-id <id> --schedule-at <ISO-timestamp> --time-zone <zone> --publish-approved true --publish-approved-by <name> --channel-verified true --schedule-verified true --existing-fields-verified true --checks-complete true --recorded-by <name>; after explicit comment approval, pin the exact manifest comment and run ${GOLDFLOW} youtube record-comment ${base} --comment-id <id> --text-verified true --post-approved true --post-approved-by <name> --pinned-verified true --recorded-by <name>`,
   };
   if (autopilotEnabled(identity)) {
     const dir = identity.episode_dir ? `--episode-dir ${identity.episode_dir}` : base;
     Object.assign(commands, {
-      upload_packaging: `node bin/goldflow.mjs youtube author-packaging ${dir}`,
-      youtube_studio_upload: `node bin/goldflow.mjs youtube auto-upload ${dir}`,
-      final_watch: `Watch the final MP4, then run node bin/goldflow.mjs run final-watch ${dir} --decision accept --reviewer <name> --note "<watch notes>"`,
-      youtube_pinned_comment: `node bin/goldflow.mjs youtube publish ${dir} --visibility <public|scheduled> --approved-by <name> --studio-settings-verified true`,
+      upload_packaging: `${GOLDFLOW} youtube author-packaging ${dir}`,
+      youtube_studio_upload: `${GOLDFLOW} youtube auto-upload ${dir}`,
+      final_watch: `Watch the final MP4, then run ${GOLDFLOW} run final-watch ${dir} --decision accept --reviewer <name> --note "<watch notes>"`,
+      youtube_pinned_comment: `${GOLDFLOW} youtube publish ${dir} --visibility <public|scheduled> --approved-by <name> --studio-settings-verified true`,
     });
   }
   if (identity.image_provider === "openart_cli") {
     const lockedOpenArtConcurrency = Number(identity.image_provider_options?.openart?.concurrency ?? identity.openart_contract?.concurrency ?? 1);
     const referenceWorkers = Number.isInteger(lockedOpenArtConcurrency) && lockedOpenArtConcurrency > 0 ? Math.min(4, lockedOpenArtConcurrency) : 1;
     Object.assign(commands, {
-      visual_reference_plan: `node bin/goldflow.mjs visual openart-bank ${base} --action plan --catalog <canonical-catalog.json>`,
-      reference_plan_approval: `node bin/goldflow.mjs visual openart-bank ${base} --action approve-plan --reviewer <name> --note "<reference plan review>"`,
-      reference_generation: `node bin/goldflow.mjs imagegen openart ${base} --references-only true --action prepare-ready --max-workers ${referenceWorkers}`,
-      reference_image_approval: `node bin/goldflow.mjs visual openart-bank ${base} --action approve-refs --reviewer <name> --note "<completed visual review>"`,
-      visual_prompt_plan: `node bin/goldflow.mjs visual openart-bank ${base} --action bind-shots --shot-plan <shot-plan.json>`,
-      visual_prompt_harden: `node bin/goldflow.mjs visual openart-bank ${base} --action harden`,
-      image_generation: `node bin/goldflow.mjs imagegen openart ${base} --action prepare --image-ids <next_exact_image_ids>`,
+      visual_reference_plan: `${GOLDFLOW} visual openart-bank ${base} --action plan --catalog <canonical-catalog.json>`,
+      reference_plan_approval: `${GOLDFLOW} visual openart-bank ${base} --action approve-plan --reviewer <name> --note "<reference plan review>"`,
+      reference_generation: `${GOLDFLOW} imagegen openart ${base} --references-only true --action prepare-ready --max-workers ${referenceWorkers}`,
+      reference_image_approval: `${GOLDFLOW} visual openart-bank ${base} --action approve-refs --reviewer <name> --note "<completed visual review>"`,
+      visual_prompt_plan: `${GOLDFLOW} visual openart-bank ${base} --action bind-shots --shot-plan <shot-plan.json>`,
+      visual_prompt_harden: `${GOLDFLOW} visual openart-bank ${base} --action harden`,
+      image_generation: `${GOLDFLOW} imagegen openart ${base} --action prepare --image-ids <next_exact_image_ids>`,
     });
   }
   if (identity.image_provider === "fal_ai") {
     Object.assign(commands, {
       ...(identity.visual_restart?.fork_at === "visual_reference_plan" ? {
-        reference_generation: `node bin/goldflow.mjs imagegen fal ${base} --action prepare-references`,
-        image_generation: `node bin/goldflow.mjs imagegen fal ${base} --action prepare-validation`,
+        reference_generation: `${GOLDFLOW} imagegen fal ${base} --action prepare-references`,
+        image_generation: `${GOLDFLOW} imagegen fal ${base} --action prepare-validation`,
       } : {
-        reference_image_approval: `node bin/goldflow.mjs imagegen fal ${base} --action prepare-validation`,
-        image_generation: `node bin/goldflow.mjs imagegen fal ${base} --action prepare-bulk --image-ids all`,
+        reference_image_approval: `${GOLDFLOW} imagegen fal ${base} --action prepare-validation`,
+        image_generation: `${GOLDFLOW} imagegen fal ${base} --action prepare-bulk --image-ids all`,
       }),
     });
   }

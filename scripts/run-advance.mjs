@@ -5,6 +5,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildStageCommand, stageDefinition, stageIsSatisfied } from "./lib/pipeline-stage-registry.mjs";
+import { parseShape } from "./lib/workflow-command-builder.mjs";
 import { normalizeImageProvider } from "./lib/image-provider-routing.mjs";
 import { isBrowserPoolImageProvider } from "./lib/image-provider-policy.mjs";
 import { productionProfileById, productionProfileForIdentity } from "./lib/production-profiles.mjs";
@@ -89,41 +90,6 @@ async function readStatus() {
   return JSON.parse(result.stdout);
 }
 
-function quoteAwareTokens(command) {
-  const tokens = [];
-  let current = "";
-  let quote = null;
-  let escaped = false;
-  for (const character of String(command ?? "")) {
-    if (escaped) {
-      current += character;
-      escaped = false;
-      continue;
-    }
-    if (character === "\\") {
-      escaped = true;
-      continue;
-    }
-    if (quote) {
-      if (character === quote) quote = null;
-      else current += character;
-      continue;
-    }
-    if (character === '"' || character === "'") {
-      quote = character;
-      continue;
-    }
-    if (/\s/.test(character)) {
-      if (current) tokens.push(current);
-      current = "";
-      continue;
-    }
-    current += character;
-  }
-  if (current) tokens.push(current);
-  return tokens;
-}
-
 export function autoAdvanceDecisionForTests(stageId, stageState, options = {}) {
   const definition = stageDefinition(stageId);
   if (!definition) return { executable: false, reason: "unknown_stage" };
@@ -179,10 +145,11 @@ export function advanceCommandTokensForTests(command, episodeDir, sourcePath = n
   const resolved = String(command ?? "")
     .replaceAll("<episode-dir>", episodeDir)
     .replaceAll("<source.md>", sourcePath ?? "<source.md>");
-  if (!resolved.startsWith("node bin/goldflow.mjs ") || /[;<>]/.test(resolved)) return null;
-  const tokens = quoteAwareTokens(resolved);
-  if (tokens[0] !== "node" || tokens[1] !== "bin/goldflow.mjs") return null;
-  return [path.join(repoRoot, tokens[1]), ...tokens.slice(2)];
+  // The shared command builder decides executability: prose, compound shapes
+  // and shapes with unresolved <placeholders> are never materialized here.
+  const parsed = parseShape(resolved);
+  if (parsed.prose || !parsed.executable) return null;
+  return [path.join(repoRoot, "bin/goldflow.mjs"), ...parsed.argv];
 }
 
 async function writeAdvanceState(episodeDir, payload) {

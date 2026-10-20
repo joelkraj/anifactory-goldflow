@@ -1,5 +1,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
+import { currentIdentityRevisionSync, eventsSinceIdentityRevision } from "./run-identity-revisions.mjs";
+import { PIPELINE_STAGE_REGISTRY } from "./pipeline-stage-registry.mjs";
 
 export const PLANNER_STAGE_IDS = Object.freeze(new Set([
   "semantic_scene_plan",
@@ -282,7 +284,8 @@ export function plannerRerunDecisionForEpisode({ command, subcommand, stage, fla
     };
   }
   const priorEvents = episodeDir
-    ? readJsonLines(path.join(episodeDir, "execution_events.jsonl"))
+    ? eventsSinceIdentityRevision(readJsonLines(path.join(episodeDir, "execution_events.jsonl")), currentIdentityRevisionSync(episodeDir),
+      { stage, stageOrder: PIPELINE_STAGE_REGISTRY.map((row) => row.id) })
     : [];
   const unresolvedExpectedIds = episodeDir ? unresolvedPlannerIds(episodeDir, stage) : [];
   const decision = plannerRerunDecision({

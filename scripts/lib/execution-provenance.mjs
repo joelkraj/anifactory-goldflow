@@ -397,7 +397,7 @@ function combinedCostBasis(parts) {
   return "mixed";
 }
 
-export async function beginStageExecution({ stage, command, flags = {}, args = [], env = process.env, repoRoot = MODULE_REPO_ROOT, codeDrift = null }) {
+export async function beginStageExecution({ stage, command, flags = {}, args = [], env = process.env, repoRoot = MODULE_REPO_ROOT, codeDrift = null, workflowBypass = null }) {
   const episodeDir = episodeDirForFlags(flags, env);
   const provenance = gitExecutionProvenance(repoRoot);
   const now = new Date();
@@ -426,6 +426,9 @@ export async function beginStageExecution({ stage, command, flags = {}, args = [
     code_drift: codeDrift && codeDrift.applicable
       ? { identity_commit: codeDrift.identity_commit, head_commit: codeDrift.head_commit, ancestor: codeDrift.ancestor, allow_reason_code: codeDrift.allow_reason_code ?? null }
       : null,
+    // Structured bypass record (R07): only new events carry it; historical
+    // events with prose reasons stay readable and are never backfilled.
+    workflow_bypass: workflowBypass ?? null,
     started_event_written: false,
   };
   if (eventPath && episodeExists) {
@@ -485,6 +488,7 @@ export async function finishStageExecution(execution, {
     git_worktree: execution.git_worktree ?? null,
     git_dirty: execution.git_dirty ?? null,
     code_drift: execution.code_drift ?? null,
+    workflow_bypass: execution.workflow_bypass ?? null,
     input_hashes: execution.input_hashes,
     output_hashes: outputHashes,
     exit_code: exitCode,
@@ -527,6 +531,7 @@ export async function finishStageExecution(execution, {
       git_worktree: execution.git_worktree ?? null,
       git_dirty: execution.git_dirty ?? null,
       code_drift: execution.code_drift ?? null,
+      workflow_bypass: execution.workflow_bypass ?? null,
     });
   }
   await appendJsonLine(eventPath, {

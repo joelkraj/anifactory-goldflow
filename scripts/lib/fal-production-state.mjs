@@ -7,6 +7,7 @@ import { validateFalPrebulkPromptCorrection } from "./fal-prebulk-prompt-correct
 import { inspectFalPostplanPromptCorrection } from "./fal-postplan-prompt-correction.mjs";
 import { validateFalReviewedReferenceSuccessRepair } from "./fal-reviewed-reference-success-repair.mjs";
 import { inspectReferenceProbeReview, referenceProbeReviewStage } from "./fal-reference-probe-review.mjs";
+import { falShape } from "./autopilot-command-shape.mjs";
 
 async function exists(file) { return fs.access(file).then(() => true, () => false); }
 async function read(file) { return JSON.parse(await fs.readFile(file, "utf8")); }
@@ -155,7 +156,7 @@ export async function falProductionStageStates({ episodeDir, identity } = {}) {
         next.state = "blocked";
         next.evidence += "; hold further paid submission";
         next.next_command_shape = ambiguousAttempts[0].submission_receipt_path.includes(`${path.sep}bulk${path.sep}submission-receipts${path.sep}`)
-          ? `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action adjudicate-no-job --image-id ${ambiguousAttempts[0].image_id} --review-spec <absolute_reviewed_json>`
+          ? falShape(episodeDir, "adjudicate-no-job", [["image-id", ambiguousAttempts[0].image_id], ["review-spec", "<absolute_reviewed_json>"]])
           : null;
       } else if ((spend?.hard_reached || projectedWithPendingBulkUsd >= contract?.hard_budget_usd || ambiguousAttempts.length)
         && /\bimagegen fal\b.*--confirm-spend\b/.test(next.next_command_shape ?? "")) {
@@ -172,7 +173,7 @@ export async function falProductionStageStates({ episodeDir, identity } = {}) {
   if (earlyReferenceFork) {
     const referencePlanPath = path.join(root, "reference-plan.json");
     const referencePlan = await exists(referencePlanPath) ? await read(referencePlanPath) : null;
-    if (!referencePlan) referenceState = { state: "missing", evidence: "Fal canonical reference assignments are missing", next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action prepare-references` };
+    if (!referencePlan) referenceState = { state: "missing", evidence: "Fal canonical reference assignments are missing", next_command_shape: falShape(episodeDir, "prepare-references") };
     else {
       const submitted = await Promise.all(referencePlan.assignments.map(row => exists(row.submission_receipt_path)));
       const originalResults = await Promise.all(referencePlan.assignments.map(row => exists(row.result_receipt_path)));
@@ -221,31 +222,31 @@ export async function falProductionStageStates({ episodeDir, identity } = {}) {
           && target.conditioning_image_path === target.reference_image_path));
       if (completed.every(Boolean)) referenceState = materialized
         ? { done: true, evidence: `Fal canonical references=${completed.length}/${completed.length}, all hash-bound result receipts and local plan paths present` }
-        : { state: "missing", evidence: `Fal canonical references=${completed.length}/${completed.length}; approved plan paths need materialization`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action finalize-references` };
+        : { state: "missing", evidence: `Fal canonical references=${completed.length}/${completed.length}; approved plan paths need materialization`, next_command_shape: falShape(episodeDir, "finalize-references") };
       else if (transportFailures.some((value,index)=>value&&!completed[index])
         || transportHolds.some((value,index)=>value&&!completed[index]))
         referenceState = { state: "blocked", evidence: "A paid Fal reference transport recovery failed or its result transport is held; inspect its exact immutable receipt before further spend" };
       else if (transportSubmitted.some((value,index)=>value&&!completed[index]&&!transportResults[index]))
-        referenceState = { state: "blocked", evidence: "Exact Fal reference transport recovery is pending", next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action observe-reference-transport-recovery` };
+        referenceState = { state: "blocked", evidence: "Exact Fal reference transport recovery is pending", next_command_shape: falShape(episodeDir, "observe-reference-transport-recovery") };
       else if (heldUnresolved.some((value,index)=>value&&!recheckedHolds[index]))
-        referenceState = { state: "blocked", evidence: `${heldUnresolved.filter(Boolean).length} exact Fal reference transport hold(s) need a no-spend recheck of their original request IDs`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action observe-reference-holds` };
+        referenceState = { state: "blocked", evidence: `${heldUnresolved.filter(Boolean).length} exact Fal reference transport hold(s) need a no-spend recheck of their original request IDs`, next_command_shape: falShape(episodeDir, "observe-reference-holds") };
       else if (heldUnresolved.some(Boolean)) referenceState = retryCapEvidence
         ? { state: "blocked", evidence: retryCapEvidence }
-        : { state: "blocked", evidence: `${heldUnresolved.filter(Boolean).length} original Fal reference request(s) remained failed or transport-held after exact no-spend recheck; reviewed paid transport recovery may use the unchanged prompt`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action recover-reference-holds --directives <absolute_reference_transport_recovery_directives.json> --confirm-spend exact_fal_reference_transport_recovery` };
+        : { state: "blocked", evidence: `${heldUnresolved.filter(Boolean).length} original Fal reference request(s) remained failed or transport-held after exact no-spend recheck; reviewed paid transport recovery may use the unchanged prompt`, next_command_shape: falShape(episodeDir, "recover-reference-holds", [["directives", "<absolute_reference_transport_recovery_directives.json>"], ["confirm-spend", "exact_fal_reference_transport_recovery"]]) };
       else if (pendingProbe != null) referenceState = {
         state: "missing", evidence: `Fal low-quality endpoint probes passed=${probes.filter(index => completed[index]).length}/${probes.length}`,
         next_command_shape: submitted[pendingProbe]
-          ? `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action billing-observe-reference --image-id ${referencePlan.assignments[pendingProbe].image_id}`
-          : `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action billing-submit-reference --image-id ${referencePlan.assignments[pendingProbe].image_id} --confirm-spend exact_fal_reference_probe`,
+          ? falShape(episodeDir, "billing-observe-reference", [["image-id", referencePlan.assignments[pendingProbe].image_id]])
+          : falShape(episodeDir, "billing-submit-reference", [["image-id", referencePlan.assignments[pendingProbe].image_id], ["confirm-spend", "exact_fal_reference_probe"]]),
       };
-      else if (pendingOriginal) referenceState = { state: "missing", evidence: `Fal canonical references=${completed.filter(Boolean).length}/${completed.length}`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action observe-references` };
+      else if (pendingOriginal) referenceState = { state: "missing", evidence: `Fal canonical references=${completed.filter(Boolean).length}/${completed.length}`, next_command_shape: falShape(episodeDir, "observe-references") };
       else if (repairFailures.some((value,index)=>value&&!completed[index]))
         referenceState = { state: "blocked", evidence: `Fal reference repair failed for exact ID ${referencePlan.assignments[repairFailures.findIndex((value,index)=>value&&!completed[index])].image_id}; inspect immutable repair failure receipt before any new recovery decision` };
-      else if (pendingRepair) referenceState = { state: "blocked", evidence: "Exact Fal reference repair is pending", next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action observe-reference-repairs` };
+      else if (pendingRepair) referenceState = { state: "blocked", evidence: "Exact Fal reference repair is pending", next_command_shape: falShape(episodeDir, "observe-reference-repairs") };
       else if (failedUnresolved.some(Boolean)) referenceState = retryCapEvidence
         ? { state: "blocked", evidence: retryCapEvidence }
-        : { state: "blocked", evidence: `Fal exact-reference failures=${failedUnresolved.filter(Boolean).length}; inspect exact receipts before scoped repair`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action repair-reference-failures --directives <absolute_reference_repair_directives.json> --confirm-spend exact_fal_reference_repair` };
-      else referenceState = { state: "missing", evidence: `Fal canonical references submitted=${submitted.filter(Boolean).length}/${submitted.length}`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action dispatch-references --confirm-spend exact_fal_reference_batch` };
+        : { state: "blocked", evidence: `Fal exact-reference failures=${failedUnresolved.filter(Boolean).length}; inspect exact receipts before scoped repair`, next_command_shape: falShape(episodeDir, "repair-reference-failures", [["directives", "<absolute_reference_repair_directives.json>"], ["confirm-spend", "exact_fal_reference_repair"]]) };
+      else referenceState = { state: "missing", evidence: `Fal canonical references submitted=${submitted.filter(Boolean).length}/${submitted.length}`, next_command_shape: falShape(episodeDir, "dispatch-references", [["confirm-spend", "exact_fal_reference_batch"]]) };
     }
   }
   let reviewRepairState = null;
@@ -291,31 +292,31 @@ export async function falProductionStageStates({ episodeDir, identity } = {}) {
           ? retryCapEvidence
             ? { state: "blocked", evidence: retryCapEvidence }
             : { state: "blocked", evidence: `Exact successful-reference visual redo required=${success.ids.join(",")}`,
-              next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action repair-successful-reviewed-references --directives ${successDirectivePath} --confirm-spend exact_fal_reviewed_reference_success_v3` }
+              next_command_shape: falShape(episodeDir, "repair-successful-reviewed-references", [["directives", successDirectivePath], ["confirm-spend", "exact_fal_reviewed_reference_success_v3"]]) }
           : successFailures.some(Boolean)
             ? { state: "blocked", evidence: `Successful-reference visual redo failed for exact ID ${success.ids[successFailures.indexOf(true)]}; inspect immutable failure receipt` }
             : !successSubmissions.every(Boolean) || !successResults.every(Boolean)
               ? { state: "blocked", evidence: `Successful-reference visual redo complete=${successResults.filter(Boolean).length}/${success.ids.length}`,
-                next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action observe-successful-reviewed-references` }
+                next_command_shape: falShape(episodeDir, "observe-successful-reviewed-references") }
               : { state: "blocked", evidence: `Successful-reference visual redo complete=${success.ids.length}/${success.ids.length}; materialization pending`,
-                next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action finalize-reviewed-references` };
+                next_command_shape: falShape(episodeDir, "finalize-reviewed-references") };
       }
       if (successState) reviewRepairState = successState;
       else if (!materialized) reviewRepairState = !assignments.every(Boolean)
         ? retryCapEvidence
           ? { state: "blocked", evidence: retryCapEvidence }
-          : { state: "blocked", evidence: `Exact visual reference repairs required=${ids.length}`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action repair-reviewed-references --confirm-spend exact_fal_reviewed_reference_repair` }
+          : { state: "blocked", evidence: `Exact visual reference repairs required=${ids.length}`, next_command_shape: falShape(episodeDir, "repair-reviewed-references", [["confirm-spend", "exact_fal_reviewed_reference_repair"]]) }
         : v3FailedIndex >= 0
           ? { state: "blocked", evidence: `Second reviewed-reference repair failed for exact ID ${ids[v3FailedIndex]}; inspect immutable provider failure receipt before another recovery decision` }
         : v2FailedIndex >= 0
           ? v3Assignments[v2FailedIndex] && v3Submissions[v2FailedIndex]
-            ? { state: "blocked", evidence: `Second reviewed-reference repair submitted for exact ID ${ids[v2FailedIndex]}`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action observe-failed-reviewed-reference --image-id ${ids[v2FailedIndex]}` }
+            ? { state: "blocked", evidence: `Second reviewed-reference repair submitted for exact ID ${ids[v2FailedIndex]}`, next_command_shape: falShape(episodeDir, "observe-failed-reviewed-reference", [["image-id", ids[v2FailedIndex]]]) }
             : retryCapEvidence
               ? { state: "blocked", evidence: retryCapEvidence }
-              : { state: "blocked", evidence: `Provider rejected reviewed reference ${ids[v2FailedIndex]}; record a changed, hash-bound exact prompt in ${secondRepairDirective}`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action repair-failed-reviewed-reference --image-id ${ids[v2FailedIndex]} --directives ${secondRepairDirective} --confirm-spend exact_fal_reviewed_reference_v3` }
+              : { state: "blocked", evidence: `Provider rejected reviewed reference ${ids[v2FailedIndex]}; record a changed, hash-bound exact prompt in ${secondRepairDirective}`, next_command_shape: falShape(episodeDir, "repair-failed-reviewed-reference", [["image-id", ids[v2FailedIndex]], ["directives", secondRepairDirective], ["confirm-spend", "exact_fal_reviewed_reference_v3"]]) }
         : !effectiveResults.every(Boolean)
-          ? { state: "blocked", evidence: `Exact visual reference repairs complete=${effectiveResults.filter(Boolean).length}/${ids.length}`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action observe-reviewed-references` }
-          : { state: "blocked", evidence: `Exact visual reference repairs complete=${ids.length}/${ids.length}; materialization pending`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action finalize-reviewed-references` };
+          ? { state: "blocked", evidence: `Exact visual reference repairs complete=${effectiveResults.filter(Boolean).length}/${ids.length}`, next_command_shape: falShape(episodeDir, "observe-reviewed-references") }
+          : { state: "blocked", evidence: `Exact visual reference repairs complete=${ids.length}/${ids.length}; materialization pending`, next_command_shape: falShape(episodeDir, "finalize-reviewed-references") };
     }
   }
   const revisionRequestPath = path.join(root, "validation-revision-request.json");
@@ -326,24 +327,24 @@ export async function falProductionStageStates({ episodeDir, identity } = {}) {
   const reviewPath = path.join(root, revisionPrepared ? "validation-review-v2.json" : "validation-review.json");
   const plan = await exists(planPath) ? await read(planPath) : null;
   let next;
-  if (revisionRequested && !revisionPrepared) next = `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action prepare-validation-revision`;
-  else if (!plan) next = `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action prepare-validation`;
+  if (revisionRequested && !revisionPrepared) next = falShape(episodeDir, "prepare-validation-revision");
+  else if (!plan) next = falShape(episodeDir, "prepare-validation");
   else {
     const submissions = await Promise.all(plan.assignments.map((row) => exists(row.submission_receipt_path)));
     const results = await Promise.all(plan.assignments.map((row) => exists(row.result_receipt_path)));
-    if (!submissions[0]) next = `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action billing-submit --confirm-spend exact_fal_validation_probe`;
-    else if (!results[0]) next = `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action billing-observe`;
-    else if (submissions.some((value) => !value)) next = `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action dispatch-validation --confirm-spend exact_fal_validation_set`;
-    else if (results.some((value) => !value)) next = `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action observe-validation`;
-    else if (!await exists(reviewPath)) next = `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action review-validation --reviewer <name> --note "<production-grade visual review>" --approve-ids <ids> --reject-ids <ids>`;
+    if (!submissions[0]) next = falShape(episodeDir, "billing-submit", [["confirm-spend", "exact_fal_validation_probe"]]);
+    else if (!results[0]) next = falShape(episodeDir, "billing-observe");
+    else if (submissions.some((value) => !value)) next = falShape(episodeDir, "dispatch-validation", [["confirm-spend", "exact_fal_validation_set"]]);
+    else if (results.some((value) => !value)) next = falShape(episodeDir, "observe-validation");
+    else if (!await exists(reviewPath)) next = falShape(episodeDir, "review-validation", [["reviewer", "<name>"], ["note", "<production-grade visual review>"], ["approve-ids", "<ids>"], ["reject-ids", "<ids>"]]);
   }
   const review = await exists(reviewPath) ? await read(reviewPath) : null;
   const correction = review ? await validateFalValidationCorrection({ root, validationPlanPath: planPath, validationReviewPath: reviewPath }) : null;
   const recovery = correction ? await validateFalValidationRecovery({ root, correction }) : null;
   let validationEvidence = "Fal validation review did not pass";
   if (correction) {
-    if (!correction.recorded) next = `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action correct-validation-review`;
-    else if (recovery.status === "plan_missing") next = `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action prepare-validation-recovery`;
+    if (!correction.recorded) next = falShape(episodeDir, "correct-validation-review");
+    else if (recovery.status === "plan_missing") next = falShape(episodeDir, "prepare-validation-recovery");
     else if (recovery.status === "pending") {
       if (recovery.failures.some(Boolean) || recovery.holds.some(Boolean)) {
         next = null;
@@ -352,15 +353,15 @@ export async function falProductionStageStates({ episodeDir, identity } = {}) {
         next = null;
         validationEvidence = "Exact validation recovery has a partial submission; inspect attempts before further spend";
       } else if (!recovery.submissions.some(Boolean)) {
-        next = retryCapEvidence ? null : `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action dispatch-validation-recovery --confirm-spend exact_fal_validation_recovery`;
+        next = retryCapEvidence ? null : falShape(episodeDir, "dispatch-validation-recovery", [["confirm-spend", "exact_fal_validation_recovery"]]);
         if (retryCapEvidence) validationEvidence = retryCapEvidence;
-      } else if (!recovery.results.every(Boolean)) next = `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action observe-validation-recovery`;
-      else next = `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action review-validation-recovery --reviewer <name> --note "<exact visual review>" --approve-ids <ids> --reject-ids <ids>`;
+      } else if (!recovery.results.every(Boolean)) next = falShape(episodeDir, "observe-validation-recovery");
+      else next = falShape(episodeDir, "review-validation-recovery", [["reviewer", "<name>"], ["note", "<exact visual review>"], ["approve-ids", "<ids>"], ["reject-ids", "<ids>"]]);
     } else if(recovery.status === "second_pending") {
       const state=recovery.second.state;
-      next=state==="submit"&&!retryCapEvidence?`node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action dispatch-validation-second --confirm-spend exact_fal_validation_second`
-        :state==="observe"?`node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action observe-validation-second`
-        :state==="review"?`node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action review-validation-second --reviewer <name> --note "<exact visual review>" --approve-ids <ids> --reject-ids <ids>`:null;
+      next=state==="submit"&&!retryCapEvidence?falShape(episodeDir, "dispatch-validation-second", [["confirm-spend", "exact_fal_validation_second"]])
+        :state==="observe"?falShape(episodeDir, "observe-validation-second")
+        :state==="review"?falShape(episodeDir, "review-validation-second", [["reviewer", "<name>"], ["note", "<exact visual review>"], ["approve-ids", "<ids>"], ["reject-ids", "<ids>"]]):null;
       validationEvidence=retryCapEvidence??"Explicit reviewed second validation repair; accepted shots remain immutable";
     } else if (recovery.status === "failed" || recovery.status === "second_failed") {
       next = null;
@@ -380,7 +381,7 @@ export async function falProductionStageStates({ episodeDir, identity } = {}) {
   const bulk = lockedBulk && postplanCorrection?.state === "applied"
     ? { ...lockedBulk, assignments: postplanCorrection.assignments } : lockedBulk;
   let bulkState;
-  if (validationPassed && !bulk) bulkState = { state: "missing", evidence: "Fal bulk plan is missing", next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action prepare-bulk --image-ids all` };
+  if (validationPassed && !bulk) bulkState = { state: "missing", evidence: "Fal bulk plan is missing", next_command_shape: falShape(episodeDir, "prepare-bulk", [["image-ids", "all"]]) };
   else if (bulk) {
     const submitted = await Promise.all(bulk.assignments.map(row => exists(row.submission_receipt_path)));
     const adjudicated = await Promise.all(bulk.assignments.map(row => exists(falAdjudicationPath(episodeDir,row.image_id))));
@@ -413,18 +414,18 @@ export async function falProductionStageStates({ episodeDir, identity } = {}) {
       const ledgerReady = await exists(path.join(episodeDir, "cut_execution_ledger.json"));
       bulkState = reportReady && ledgerReady
         ? { done: true, evidence: `All ${bulk.assignments.length} Fal frames have exact request/result receipts, including scoped repair lineage` }
-        : { state: "missing", evidence: `All ${bulk.assignments.length} Fal frames are complete; native image report and cut ledger need finalization`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action finalize-bulk` };
+        : { state: "missing", evidence: `All ${bulk.assignments.length} Fal frames are complete; native image report and cut ledger need finalization`, next_command_shape: falShape(episodeDir, "finalize-bulk") };
     }
     else if (heldUnresolved.some(Boolean)) {
       const recoverySubmitted = await Promise.all(bulk.assignments.map(row => exists(path.join(root,"bulk","transport-recovery-submission-receipts",`${row.image_id}.json`))));
       const holdRechecked = await Promise.all(bulk.assignments.map(row => exists(path.join(root,"bulk","hold-observation-receipts",`${row.image_id}.json`))));
       bulkState = recoverySubmitted.some((value,index)=>value&&heldUnresolved[index]&&!transportRecoveryResults[index])
-        ? { state: "blocked", evidence: `${heldUnresolved.filter(Boolean).length} exact Fal transport recoveries are pending`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action observe-transport-recovery` }
+        ? { state: "blocked", evidence: `${heldUnresolved.filter(Boolean).length} exact Fal transport recoveries are pending`, next_command_shape: falShape(episodeDir, "observe-transport-recovery") }
         : heldUnresolved.some((value,index)=>value&&!holdRechecked[index])
-          ? { state: "blocked", evidence: `${heldUnresolved.filter(Boolean).length} exact Fal transport holds need a no-spend original-request recheck`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action observe-holds` }
+          ? { state: "blocked", evidence: `${heldUnresolved.filter(Boolean).length} exact Fal transport holds need a no-spend original-request recheck`, next_command_shape: falShape(episodeDir, "observe-holds") }
         : retryCapEvidence
           ? { state: "blocked", evidence: retryCapEvidence }
-          : { state: "blocked", evidence: `${heldUnresolved.filter(Boolean).length} completed Fal requests have persistently unavailable result transport`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action recover-holds --directives <absolute_transport_recovery_directives.json> --confirm-spend exact_fal_transport_recovery` };
+          : { state: "blocked", evidence: `${heldUnresolved.filter(Boolean).length} completed Fal requests have persistently unavailable result transport`, next_command_shape: falShape(episodeDir, "recover-holds", [["directives", "<absolute_transport_recovery_directives.json>"], ["confirm-spend", "exact_fal_transport_recovery"]]) };
     }
     else if (failedUnresolved.some(Boolean)) {
       const repairSubmitted = await Promise.all(bulk.assignments.map(row => exists(path.join(root,"bulk","repair-submission-receipts",`${row.image_id}.json`))));
@@ -437,31 +438,31 @@ export async function falProductionStageStates({ episodeDir, identity } = {}) {
       bulkState = failedV2Index >= 0
         ? { state: "blocked", evidence: `Second Fal repair failed for exact ID ${bulk.assignments[failedV2Index].image_id}; inspect its immutable receipt and hold further paid retries` }
         : pendingV2Index >= 0
-        ? { state: "blocked", evidence: `Second Fal repair is pending for exact ID ${bulk.assignments[pendingV2Index].image_id}`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action observe-repair-v2 --image-id ${bulk.assignments[pendingV2Index].image_id}` }
+        ? { state: "blocked", evidence: `Second Fal repair is pending for exact ID ${bulk.assignments[pendingV2Index].image_id}`, next_command_shape: falShape(episodeDir, "observe-repair-v2", [["image-id", bulk.assignments[pendingV2Index].image_id]]) }
         : unsubmittedV2Index >= 0
         ? { state: "blocked", evidence: `Second Fal repair assignment exists without a submission receipt for exact ID ${bulk.assignments[unsubmittedV2Index].image_id}; reconcile the submission attempt before any paid action` }
         : reviewedV2Directive && !retryCapEvidence
-        ? { state: "blocked", evidence: `Reviewed second Fal repair is ready for exact ID ${failedRepairId}; inspect the original and repair failure receipts before paid dispatch`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action repair-failed-repair --image-id ${failedRepairId} --directives ${reviewedV2Directive} --confirm-spend exact_fal_repair_v2` }
+        ? { state: "blocked", evidence: `Reviewed second Fal repair is ready for exact ID ${failedRepairId}; inspect the original and repair failure receipts before paid dispatch`, next_command_shape: falShape(episodeDir, "repair-failed-repair", [["image-id", failedRepairId], ["directives", reviewedV2Directive], ["confirm-spend", "exact_fal_repair_v2"]]) }
         : failedRepairIndex >= 0
-        ? { state: "blocked", evidence: `Fal repair failed for exact ID ${failedRepairId}; inspect original and repair receipts before any new recovery decision${retryCapEvidence ? `; ${retryCapEvidence}` : ""}`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action inspect-repair-failure --image-id ${failedRepairId}` }
+        ? { state: "blocked", evidence: `Fal repair failed for exact ID ${failedRepairId}; inspect original and repair receipts before any new recovery decision${retryCapEvidence ? `; ${retryCapEvidence}` : ""}`, next_command_shape: falShape(episodeDir, "inspect-repair-failure", [["image-id", failedRepairId]]) }
         : repairSubmitted.some((value,index)=>value&&failedUnresolved[index]&&!repairResults[index])
-        ? { state: "blocked", evidence: `${failedUnresolved.filter(Boolean).length} exact Fal repair is pending`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action observe-repairs` }
+        ? { state: "blocked", evidence: `${failedUnresolved.filter(Boolean).length} exact Fal repair is pending`, next_command_shape: falShape(episodeDir, "observe-repairs") }
         : retryCapEvidence
           ? { state: "blocked", evidence: retryCapEvidence }
-          : { state: "blocked", evidence: `${failedUnresolved.filter(Boolean).length} exact Fal IDs need scoped repair`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action repair-failures --directives <absolute_repair_directives.json> --confirm-spend exact_fal_repair_batch` };
+          : { state: "blocked", evidence: `${failedUnresolved.filter(Boolean).length} exact Fal IDs need scoped repair`, next_command_shape: falShape(episodeDir, "repair-failures", [["directives", "<absolute_repair_directives.json>"], ["confirm-spend", "exact_fal_repair_batch"]]) };
     }
-    else if (unsubmittedCount > 0 && outstanding < queueTarget) bulkState = { state: "missing", evidence: `${queued.filter(Boolean).length}/${bulk.assignments.length} Fal requests queued; filling ${queueTarget-outstanding} queue positions while provider enforces ${concurrency} active generations`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action dispatch-bulk --limit ${Math.min(20,unsubmittedCount,queueTarget-outstanding)} --confirm-spend exact_fal_bulk_batch` };
-    else if (outstanding > 0) bulkState = { state: "missing", evidence: `${effectiveResults.filter(Boolean).length}/${bulk.assignments.length} Fal frames complete; ${outstanding} submitted requests pending`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action observe-bulk --limit 100` };
-    else bulkState = { state: "missing", evidence: `${queued.filter(Boolean).length}/${bulk.assignments.length} Fal requests submitted`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action dispatch-bulk --limit 100 --confirm-spend exact_fal_bulk_batch` };
+    else if (unsubmittedCount > 0 && outstanding < queueTarget) bulkState = { state: "missing", evidence: `${queued.filter(Boolean).length}/${bulk.assignments.length} Fal requests queued; filling ${queueTarget-outstanding} queue positions while provider enforces ${concurrency} active generations`, next_command_shape: falShape(episodeDir, "dispatch-bulk", [["limit", Math.min(20,unsubmittedCount,queueTarget-outstanding)], ["confirm-spend", "exact_fal_bulk_batch"]]) };
+    else if (outstanding > 0) bulkState = { state: "missing", evidence: `${effectiveResults.filter(Boolean).length}/${bulk.assignments.length} Fal frames complete; ${outstanding} submitted requests pending`, next_command_shape: falShape(episodeDir, "observe-bulk", [["limit", "100"]]) };
+    else bulkState = { state: "missing", evidence: `${queued.filter(Boolean).length}/${bulk.assignments.length} Fal requests submitted`, next_command_shape: falShape(episodeDir, "dispatch-bulk", [["limit", "100"], ["confirm-spend", "exact_fal_bulk_batch"]]) };
     const retryPending = adjudicated.findIndex((value,index)=>value&&!retrySubmitted[index]);
-    if (retryPending >= 0) bulkState = { state: "missing", evidence: `Reviewed no-job adjudication awaits one conservative paid retry: ${bulk.assignments[retryPending].image_id}`, next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action dispatch-adjudicated --image-id ${bulk.assignments[retryPending].image_id} --confirm-spend exact_fal_ambiguous_retry` };
-    else if (retrySubmitted.some((value,index)=>value&&!retryResults[index])) bulkState = { state: "missing", evidence: "Exact adjudicated retry is pending observation", next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action observe-adjudicated` };
+    if (retryPending >= 0) bulkState = { state: "missing", evidence: `Reviewed no-job adjudication awaits one conservative paid retry: ${bulk.assignments[retryPending].image_id}`, next_command_shape: falShape(episodeDir, "dispatch-adjudicated", [["image-id", bulk.assignments[retryPending].image_id], ["confirm-spend", "exact_fal_ambiguous_retry"]]) };
+    else if (retrySubmitted.some((value,index)=>value&&!retryResults[index])) bulkState = { state: "missing", evidence: "Exact adjudicated retry is pending observation", next_command_shape: falShape(episodeDir, "observe-adjudicated") };
   }
   if (postplanError) bulkState = { state: "blocked",
     evidence: `Fal post-plan prompt correction is invalid: ${postplanError.message}` };
   else if (postplanCorrection?.state === "pending") bulkState = { state: "missing",
     evidence: `Reviewed post-plan prompt correction for ${postplanCorrection.changed.size} unsubmitted cuts requires an append-only receipt before more paid dispatch`,
-    next_command_shape: `node bin/goldflow.mjs imagegen fal --episode-dir ${episodeDir} --action apply-postplan-prompt-correction --request ${postplanCorrection.paths.request}` };
+    next_command_shape: falShape(episodeDir, "apply-postplan-prompt-correction", [["request", postplanCorrection.paths.request]]) };
   if (earlyReferenceFork) {
     const probeReview=referenceProbeReviewStage(episodeDir,await inspectReferenceProbeReview(episodeDir));
     if(probeReview)referenceState=probeReview;

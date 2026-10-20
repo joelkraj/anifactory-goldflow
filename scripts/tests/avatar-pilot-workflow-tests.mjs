@@ -155,14 +155,8 @@ try {
   assert.equal((await pilotStatus(episodeDir)).program_preview_command_shape, null);
   await assert.rejects(() => run("publish"), /Unknown pilot action/);
   await assert.rejects(() => run("narrate"), /Unknown pilot action/);
-  const priorBypass = process.env.GOLDFLOW_WORKFLOW_BYPASS;
-  try {
-    process.env.GOLDFLOW_WORKFLOW_BYPASS = "true";
-    await assert.rejects(() => run("approve-script", { accept: "true", reviewer: "fixture", note: "Out of order" }), /stopped at pilot_script/);
-  } finally {
-    if (priorBypass === undefined) delete process.env.GOLDFLOW_WORKFLOW_BYPASS;
-    else process.env.GOLDFLOW_WORKFLOW_BYPASS = priorBypass;
-  }
+  // There is no environment bypass; an explicit reason-coded bypass flag is refused by the pilot's own gates.
+  await assert.rejects(() => run("approve-script", { accept: "true", reviewer: "fixture", note: "Out of order", "workflow-bypass": "true", "bypass-reason-code": "test_fixture" }), /cannot be bypassed|stopped at pilot_script/);
   const ingested = await run("ingest", { script: scriptPath });
   assert.equal(ingested.current_stage, "pilot_script_approval");
   const immutableScript = await fs.readFile(path.join(episodeDir, "pilot_script.json"));

@@ -1,3 +1,12 @@
+import { existsSync } from "node:fs";
+
+// Keep ASR on the installed dependency runtime when Homebrew advances python3.
+// An explicit environment choice always wins; other hosts retain PATH behavior.
+export function localWhisperPython(env = process.env, exists = existsSync) {
+  return String(env.ANIFACTORY_ASR_PYTHON ?? "").trim()
+    || (exists("/opt/homebrew/bin/python3.14") ? "/opt/homebrew/bin/python3.14" : "python3");
+}
+
 export const LOCAL_WHISPER_CONTRACT_VERSION =
   "local_whisper_word_timing_v2";
 

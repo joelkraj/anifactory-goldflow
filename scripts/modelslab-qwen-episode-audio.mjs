@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { localWhisperPython } from "./lib/local-whisper-policy.mjs";
 import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
@@ -2538,7 +2539,7 @@ with open(output_path, "w", encoding="utf-8") as handle:
   try {
     const timeoutMs = Number(process.env.ANIFACTORY_MODELSLAB_QWEN_UNIT_QA_TIMEOUT_MS ?? 7_200_000);
     await new Promise((resolve, reject) => {
-      const child = spawn("python3", [
+      const child = spawn(localWhisperPython(), [
         "-c", python,
         inputPath,
         outputPath,

@@ -389,9 +389,17 @@ export function buildNarrationPreSynthesisGate({
   referenceAssetHashes = {},
   synthesisScope = null,
   historicalSynthesisAuthorized = false,
+  runtimePreflight = null,
   generatedAt = new Date().toISOString(),
 } = {}) {
   const findings = [];
+  // Additive (R04): a runtime fingerprint is bound into new gates only when the
+  // caller ran the preflight; gates built without it hash exactly as before.
+  if (runtimePreflight && runtimePreflight.status !== "passed") {
+    addFinding(findings, "pre_synthesis_runtime_preflight_blocked", {
+      runtime_findings: structuredClone(runtimePreflight.findings ?? []),
+    });
+  }
   if (plan?.schema !== "goldflow_tts_generation_plan_v2") {
     addFinding(findings, "pre_synthesis_plan_schema_invalid", {
       actual: plan?.schema ?? null,
@@ -656,6 +664,7 @@ export function buildNarrationPreSynthesisGate({
       (sum, unit) => sum + Number(unit?.source_unit_refs?.length ?? 0),
       0,
     ),
+    ...(runtimePreflight ? { runtime_preflight: structuredClone(runtimePreflight) } : {}),
     findings,
   };
   report.gate_sha256 = narrationPreSynthesisGateSha256(report);

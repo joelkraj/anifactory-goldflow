@@ -1,5 +1,12 @@
 #!/usr/bin/env node
 import { isSameValueNumberContraction } from "./lib/narration-number-contraction.mjs";
+import {
+  NARRATION_GROUPED_NUMBER_RULES,
+  NARRATION_SPOKEN_FORM_EQUIVALENCES_SHA256,
+  NARRATION_SPOKEN_FORM_EQUIVALENCES_VERSION,
+  applyNarrationSpokenFormSpellings,
+  narrationSpokenFormCompound,
+} from "./lib/narration-spoken-form-equivalences.mjs";
 import { localWhisperPython } from "./lib/local-whisper-policy.mjs";
 import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -1759,12 +1766,17 @@ function transcriptInputText(value) {
 }
 
 export const TRANSCRIPT_QA_COMPARISON_VERSION = "unicode_words_exact_stable_source_numeric_alignment_v13";
+// The spoken-form equivalences the comparator applies are the frozen table in
+// config/narration_spoken_form_equivalences_v1.json (R05); its sha is bound into
+// new automated identities' narration quality contracts.
+export const TRANSCRIPT_QA_SPOKEN_FORM_EQUIVALENCES_VERSION = NARRATION_SPOKEN_FORM_EQUIVALENCES_VERSION;
+export const TRANSCRIPT_QA_SPOKEN_FORM_EQUIVALENCES_SHA256 = NARRATION_SPOKEN_FORM_EQUIVALENCES_SHA256;
 
 const TRANSCRIPT_PUNCTUATION = new Set([".", ",", ";", ":", "!", "?", "…"]);
 
 function rawTranscriptTokens(value) {
-  return (transcriptInputText(value)
-    .normalize("NFC")
+  return (applyNarrationSpokenFormSpellings(transcriptInputText(value)
+    .normalize("NFC"))
     .replace(/−/g, "-")
     .replace(/\b(\d{1,3})\s+,(\d{3})\b/g, "$1,$2")
     .replace(/([+-])\s*\$\s*(?=\d)/g, (_match, sign) => `$${sign}`)
@@ -1773,9 +1785,6 @@ function rawTranscriptTokens(value) {
     // Do not expand ambiguous 's/'d forms or an unpunctuated name such as Im.
     .replace(/(?<![\p{L}\p{M}])I['’]m(?![\p{L}\p{M}])/giu, "I am")
     .replace(/\b(thousand|million|billion)fold\b/gi, "$1 fold")
-    .replace(/\bDr\.(?=\s|$)/g, "doctor")
-    .replace(/\bMr\.(?=\s|$)/g, "mister")
-    .replace(/\bcancelled\b/gi, "canceled")
     .replace(/([\p{L}\p{M}])[-‐‑‒–—]([\p{L}\p{M}])/gu, "$1 $2")
     .match(/[+-]?\d+(?:,\d{3})*(?:\.\d+)?(?:st|nd|rd|th|%|[xXsS])?|\bSt\.|[\p{L}\p{M}]+(?:['’][\p{L}\p{M}]+)?|[/$%.,;:!?…]/giu) ?? [])
     .map((raw) => {
@@ -1958,8 +1967,8 @@ function canonicalTranscriptTokensWithoutAliases(value, preserveBoundaries = fal
     } else if (base[index] === "wi" && base[index + 1] === "fi") {
       compounds.push("wifi");
       index += 1;
-    } else if (base[index] === "every" && base[index + 1] === "one") {
-      compounds.push("everyone");
+    } else if (narrationSpokenFormCompound(base[index], base[index + 1])) {
+      compounds.push(narrationSpokenFormCompound(base[index], base[index + 1]));
       index += 1;
     } else if (base[index] === "every" && base[index + 1] === "body") {
       compounds.push("everybody");
@@ -2099,17 +2108,18 @@ function alignGroupedNumberNotation(leftTokens, rightTokens, leftText, rightText
     }
     if (cursor !== tokens.length) return;
     const groups = [];
+    const rules = NARRATION_GROUPED_NUMBER_RULES;
     for (let i = 0; i < tokens.length; i += 1) {
-      if (!/^num:[1-9]\d?$/.test(tokens[i])) continue;
+      if (!rules.lead.test(tokens[i])) continue;
       let digits = tokens[i].slice(4);
-      for (let end = i + 1; end <= Math.min(i + 2, tokens.length - 1); end += 1) {
+      for (let end = i + 1; end <= Math.min(i + rules.maxGroupTokens - 1, tokens.length - 1); end += 1) {
         if (boundaries.has(end)) break;
-        const part = tokens[end] === "oh" ? "0" : /^num:\d{1,2}$/.test(tokens[end]) ? tokens[end].slice(4) : null;
+        const part = tokens[end] === rules.zeroWord ? "0" : rules.part.test(tokens[end]) ? tokens[end].slice(4) : null;
         if (part === null) break;
         digits += part;
-        if (tokens[end] === "oh") continue;
-        const matches = [...new Set(other.filter((t) => /^num:\d{3,4}$/.test(t) && t.slice(4) === digits
-          || /^num:\d{1,2}\.\d{2}$/.test(t) && t.slice(4).replace(".", "") === digits))];
+        if (tokens[end] === rules.zeroWord) continue;
+        const matches = [...new Set(other.filter((t) => rules.targets.some((target) => target.test(t))
+          && t.slice(4).replace(".", "") === digits))];
         if (matches.length === 1) { groups.push({ start: i, count: end - i + 1, token: matches[0] }); i = end; break; }
       }
     }
@@ -2561,9 +2571,11 @@ async function runFasterWhisperUnitBatch(rows, {
   await fs.writeFile(inputPath, JSON.stringify(rows.map((row) => ({ unit_id: row.unit_id, wav: row.wav }))), "utf8");
   const python = String.raw`
 import json, sys
+import faster_whisper
 from faster_whisper import WhisperModel
 
 input_path, output_path, model_name, device, compute_type = sys.argv[1:6]
+engine_version = str(getattr(faster_whisper, "__version__", "") or "unknown")
 with open(input_path, "r", encoding="utf-8") as handle:
     rows = json.load(handle)
 model = WhisperModel(model_name, device=device, compute_type=compute_type)
@@ -2593,6 +2605,7 @@ for row in rows:
         "words": words,
         "language": info.language,
         "language_probability": float(info.language_probability),
+        "asr_engine_version": engine_version,
     })
 with open(output_path, "w", encoding="utf-8") as handle:
     json.dump(output, handle, ensure_ascii=False)
@@ -2738,6 +2751,7 @@ async function runUnitOutputQa(results, options = {}) {
         asr_contract: previousQa.transcript.asr_contract ?? null,
         asr_contract_sha256:
           previousQa.transcript.asr_contract_sha256 ?? null,
+        asr_engine_version: previousQa.transcript.asr_engine_version ?? null,
         reused: true,
       });
     } else if (transcriptQaRequired) {
@@ -2871,6 +2885,7 @@ async function runUnitOutputQa(results, options = {}) {
         language_probability: recognized.language_probability ?? null,
         asr_contract: recognized.asr_contract ?? null,
         asr_contract_sha256: recognized.asr_contract_sha256 ?? null,
+        asr_engine_version: recognized.asr_engine_version ?? null,
         recognized_text: recognized.text,
         recognized_words: recognized.words ?? [],
         reused_exact_hash_qa: Boolean(recognized.reused),

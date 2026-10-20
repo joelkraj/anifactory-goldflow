@@ -104,6 +104,10 @@ export function bindNarrationProviderUnitAsrReuse({
   unitId,
   audioSha256,
   narrationQualityContractSha256,
+  // R05(5): three-way reuse binding for identities that bind the spoken-form
+  // table: unit WAV sha + ASR model/engine version + equivalence-table sha.
+  spokenFormEquivalencesSha256 = null,
+  asrEngineVersion = null,
 } = {}) {
   if (!providerUnitQa || typeof providerUnitQa !== "object") return null;
   const qa = structuredClone(providerUnitQa);
@@ -125,6 +129,8 @@ export function bindNarrationProviderUnitAsrReuse({
     narration_quality_contract_sha256: narrationQualityContractSha256,
     provider_unit_qa_policy_version: qa.policy_version,
     asr_contract_sha256: asrContract.contract_sha256,
+    asr_engine_version: transcript.asr_engine_version ?? asrEngineVersion ?? null,
+    spoken_form_equivalences_sha256: spokenFormEquivalencesSha256 ?? null,
     recognized_text_sha256: contentSha256(String(transcript.recognized_text)),
     recognized_words_sha256: contentSha256(transcript.recognized_words),
   };
@@ -143,6 +149,8 @@ export function validateNarrationProviderUnitAsrReuse({
   providerUnitQaSha256,
   narrationQualityContractSha256,
   expectedAsrContract,
+  expectedSpokenFormEquivalencesSha256 = null,
+  expectedAsrEngineVersion = null,
   providerUnitQaContentSha256 = contentSha256,
 } = {}) {
   const findings = [];
@@ -183,6 +191,14 @@ export function validateNarrationProviderUnitAsrReuse({
       !== expectedContract?.contract_sha256
     || !transcriptMatchesContract(transcript, expectedContract)) {
     findings.push({ code: "provider_unit_asr_contract_mismatch" });
+  }
+  if (expectedSpokenFormEquivalencesSha256
+    && (binding?.spoken_form_equivalences_sha256 ?? null) !== expectedSpokenFormEquivalencesSha256) {
+    findings.push({ code: "provider_unit_asr_spoken_form_equivalences_mismatch" });
+  }
+  if (expectedAsrEngineVersion
+    && (binding?.asr_engine_version ?? null) !== expectedAsrEngineVersion) {
+    findings.push({ code: "provider_unit_asr_engine_version_mismatch" });
   }
   if (binding?.recognized_text_sha256
       !== contentSha256(String(transcript?.recognized_text ?? ""))

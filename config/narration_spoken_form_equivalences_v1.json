@@ -1,0 +1,67 @@
+{
+  "schema": "goldflow_narration_spoken_form_equivalences_v1",
+  "version": "narration_spoken_form_equivalences_v1",
+  "policy": "Comparison-only spoken-form equivalences applied to both the intended spoken text and the ASR transcript. Protected values (numbers, names) must still match after normalization on both sides. The table never rewrites approved spoken text, captions, or source text; changing it requires a new identity relock, never a mid-run edit.",
+  "frozen_from": {
+    "branch": "codex/deepmale-default",
+    "commits": [
+      "27257e3b1bc59efc2212c6e80a146057454a91bf",
+      "6cc44662047820d430bcc10ba93fa2b3d3346d1a",
+      "9d150d0687be137afe00e81143478d7254aed782",
+      "febb0912a64cfefdd361116d66c4182941ec1abe"
+    ],
+    "transcript_comparison_version": "unicode_words_exact_stable_source_numeric_alignment_v13",
+    "delivery_consensus_version": "protected_operations_lexical_number_contraction_v3",
+    "evidence": "BASE 2026-W43 ep_01 operator_narration_review/blocked_units_review.md (44 clips, Oct 19) and manual_blocker_triage_qwen_tts_stitch_ep_01 v1-v5 (Oct 19-20): blocked counts 53/44/39 and 64/36 were mostly notation diffs (room 412 vs four twelve, Dr. vs doctor, 1.58 vs one fifty-eight, one's vs one)."
+  },
+  "honorific_spellings": [
+    { "written": "Dr.", "spoken": "doctor", "pattern": "\\bDr\\.(?=\\s|$)" },
+    { "written": "Mr.", "spoken": "mister", "pattern": "\\bMr\\.(?=\\s|$)" }
+  ],
+  "orthographic_variants": [
+    { "from": "cancelled", "to": "canceled", "case_insensitive": true }
+  ],
+  "compounds": [
+    { "parts": ["every", "one"], "joined": "everyone" }
+  ],
+  "same_value_contractions": [
+    {
+      "intended": "one's",
+      "recognized": "num:1",
+      "disposition": "lexical_substitution_warning_not_protected_mismatch",
+      "note": "ASR's digit for the pronoun in one's does not prove a changed numeric value; omissions and opening/final differences stay blocking."
+    }
+  ],
+  "grouped_numbers": {
+    "policy": "pairwise_notation_reconciliation_only",
+    "lead_token_pattern": "^num:[1-9]\\d?$",
+    "part_token_pattern": "^num:\\d{1,2}$",
+    "zero_word": "oh",
+    "max_group_tokens": 3,
+    "target_patterns": [
+      { "pattern": "^num:\\d{3,4}$", "kind": "identifier_or_clock" },
+      { "pattern": "^num:\\d{1,2}\\.\\d{2}$", "kind": "decimal_clock" }
+    ],
+    "boundary_rule": "groups never cross a punctuation boundary; punctuation, currencies, changed digits, intervening words and hundred/scale arithmetic remain distinct",
+    "source_coordinates": "the source token coordinates are authoritative; a matched ASR shorthand expands back to the source's numeric groups",
+    "examples_equivalent": [
+      ["Room four twelve.", "Room 412."],
+      ["At ten twenty-two.", "At 10.22."],
+      ["Two oh one.", "201."],
+      ["Doctor Ward.", "Dr. Ward."],
+      ["Mister Walsh.", "Mr. Walsh."],
+      ["It was canceled.", "It was cancelled."],
+      ["Every one.", "Everyone."]
+    ],
+    "examples_distinct": [
+      ["Room four twelve.", "Room 413."],
+      ["Four, twelve.", "412."],
+      ["Four and twelve.", "412."],
+      ["Two oh one.", "207."],
+      ["Ten dollars twenty-two.", "1022."],
+      ["A hundred dollars.", "A thousand dollars."],
+      ["Doctor Ward.", "Ward."]
+    ]
+  },
+  "regression_corpus_path": "scripts/tests/fixtures/narration_spoken_form_regression_corpus_v1.json"
+}

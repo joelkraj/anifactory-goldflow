@@ -5197,7 +5197,13 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
       && listenPacket?.narration_quality_contract_sha256
         === narrationQualityContract.contract_sha256
       && Number(listenPacket?.item_count ?? -1) === expectedListenCount;
-    if (!listenPacketCurrent) {
+    // R05(4): under automated_asr_v1 the listen packets and the approve-listen /
+    // approve-subjective routes are legacy-contract artifacts; the identity's
+    // recorded acceptance mode decides, independent of the branch being run.
+    const automatedListenRoutesOff = narrationUsesAutomatedAsrAcceptance(narrationQualityContract);
+    if (automatedListenRoutesOff) {
+      // No packet is required or hashed; delivery acceptance is the automated QA.
+    } else if (!listenPacketCurrent) {
       v2Findings.push("exact_listen_review_packet");
     } else {
       for (const item of listenPacket.items ?? []) {
@@ -5208,7 +5214,7 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
         }
       }
     }
-    if (!narrationUsesAutomatedAsrAcceptance(narrationQualityContract)
+    if (!automatedListenRoutesOff
       && listenPacketCurrent && expectedListenCount > 0) {
       const listenDecisionValidation = validateNarrationExactListenReviewDecision(
         listenPacket,
@@ -5266,8 +5272,9 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
         === narrationQualityContract.contract_sha256
       && subjectiveReviewWaiver?.narration_audio_sha256
         === stitchReport.output_sha256;
-    if (narrationQualityContract.subjective_review
-      ?.hash_bound_sampling_manifest_required === true
+    if (!automatedListenRoutesOff
+      && narrationQualityContract.subjective_review
+        ?.hash_bound_sampling_manifest_required === true
       && !subjectiveReviewWaived) {
       const subjectiveManifestPath = path.join(
         episodeDir,

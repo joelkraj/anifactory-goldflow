@@ -1,5 +1,10 @@
 import { createHash } from "node:crypto";
 import { PROVIDER_SAFE_SPOKEN_COMPILER_ID } from "./narration-spoken-text.mjs";
+import {
+  NARRATION_SPOKEN_FORM_EQUIVALENCES_SCHEMA,
+  NARRATION_SPOKEN_FORM_EQUIVALENCES_SHA256,
+  narrationSpokenFormEquivalencesBinding,
+} from "./narration-spoken-form-equivalences.mjs";
 
 export const NARRATION_QUALITY_CONTRACT_SCHEMA =
   "goldflow_narration_quality_contract_v2";
@@ -36,8 +41,14 @@ export function buildNarrationQualityContract({
   modelId = null,
   modelRevision = null,
   deliveryQaPolicy = null,
+  // R05(3): new automated identities bind the frozen comparator spoken-form
+  // table by sha. Historical identities keep the contract they recorded.
+  spokenFormEquivalences = "default",
 } = {}) {
   const automatedAcceptance = deliveryQaPolicy?.acceptance_mode === "automated_asr_v1";
+  const spokenFormBinding = spokenFormEquivalences === "default"
+    ? (automatedAcceptance ? narrationSpokenFormEquivalencesBinding() : null)
+    : spokenFormEquivalences;
   const contract = {
     schema: NARRATION_QUALITY_CONTRACT_SCHEMA,
     version: automatedAcceptance
@@ -119,6 +130,7 @@ export function buildNarrationQualityContract({
       full_stream_confirmation_model: "medium",
       confirm_any_unit_transcript_difference: true,
       ...(automatedAcceptance ? { acceptance_mode: "automated_asr_v1" } : {}),
+      ...(spokenFormBinding ? { spoken_form_equivalences: structuredClone(spokenFormBinding) } : {}),
       confirmed_isolated_deletion_is_blocking: true,
       confirmed_isolated_insertion_is_blocking: true,
       substitution_only_asr_disagreement_requires_exact_listen:
@@ -215,6 +227,34 @@ export function narrationUsesAutomatedAsrAcceptance(contract) {
     && contract?.delivery_qa?.acceptance_mode === "automated_asr_v1";
 }
 
+// The binding an identity recorded, or null for identities without the field
+// (frozen comparator v13 / consensus v3 with their listen routes unchanged).
+export function narrationSpokenFormEquivalencesForContract(contract) {
+  const binding = contract?.delivery_qa?.spoken_form_equivalences;
+  return binding && typeof binding === "object" && !Array.isArray(binding) ? binding : null;
+}
+
+export function validateNarrationSpokenFormEquivalencesBinding(contract) {
+  const binding = narrationSpokenFormEquivalencesForContract(contract);
+  if (!binding) return { status: "legacy_unbound", findings: [] };
+  const findings = [];
+  if (binding.schema !== NARRATION_SPOKEN_FORM_EQUIVALENCES_SCHEMA
+    || !/^[a-f0-9]{64}$/u.test(String(binding.config_sha256 ?? ""))
+    || !String(binding.version ?? "").trim()
+    || !String(binding.config_path ?? "").trim()) {
+    findings.push({ code: "narration_quality_spoken_form_equivalences_binding_invalid" });
+  } else if (binding.config_sha256 !== NARRATION_SPOKEN_FORM_EQUIVALENCES_SHA256) {
+    // The table changed after the identity was locked: stop, never compare
+    // with a table the identity did not bind. A relock records the new sha.
+    findings.push({
+      code: "narration_quality_spoken_form_equivalences_stale",
+      bound_sha256: binding.config_sha256,
+      current_sha256: NARRATION_SPOKEN_FORM_EQUIVALENCES_SHA256,
+    });
+  }
+  return { status: findings.length ? "blocked" : "bound", findings };
+}
+
 export function validateNarrationQualityContract(contract) {
   const findings = [];
   if (!contract || typeof contract !== "object") {
@@ -234,6 +274,7 @@ export function validateNarrationQualityContract(contract) {
     && !narrationUsesAutomatedAsrAcceptance(contract)) {
     findings.push({ code: "narration_quality_automated_asr_mode_missing" });
   }
+  findings.push(...validateNarrationSpokenFormEquivalencesBinding(contract).findings);
   if (contract.edge_editing?.amplitude_only_trimming_forbidden !== true) {
     findings.push({ code: "narration_quality_amplitude_only_trim_not_forbidden" });
   }

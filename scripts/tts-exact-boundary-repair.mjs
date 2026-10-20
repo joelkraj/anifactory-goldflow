@@ -295,7 +295,7 @@ export function selectBoundaryRepairFullStreamForTests({ candidate, report, spec
   return { current: null, historical: candidate };
 }
 
-export async function main(parts = process.argv.slice(2)) {
+export async function main(parts = process.argv.slice(2), { inProcessAuthorization = null } = {}) {
   const options = flags(parts);
   const episodeDir = path.resolve(options["episode-dir"] ?? "");
   const specPath = path.resolve(options.spec ?? "");
@@ -305,10 +305,20 @@ export async function main(parts = process.argv.slice(2)) {
   if (!specPath.startsWith(`${episodeDir}${path.sep}`)) {
     throw new Error("Exact boundary repair spec must be inside the episode directory.");
   }
-  const status = await run("node", ["bin/goldflow.mjs", "run", "status", "--episode-dir", episodeDir, "--format", "markdown"], { cwd: path.resolve(DIR, "..") });
-  if (!status.out.includes("Current stage: qwen_tts_stitch")
-    || !status.out.includes("tts repair-boundary")) {
-    throw new Error("Goldflow status does not authorize exact-boundary repair here.");
+  if (inProcessAuthorization) {
+    // R05(2): the automated retake loop inside `tts narrate` (itself admitted by
+    // the workflow guard) authorizes this repair with a hash-bound loop receipt
+    // instead of a status round trip; the receipt is recorded in the request.
+    if (!inProcessAuthorization.receipt_path?.startsWith(`${episodeDir}${path.sep}`)
+      || await fileHash(inProcessAuthorization.receipt_path) !== inProcessAuthorization.receipt_sha256) {
+      throw new Error("In-process boundary repair authorization receipt is missing or stale.");
+    }
+  } else {
+    const status = await run("node", ["bin/goldflow.mjs", "run", "status", "--episode-dir", episodeDir, "--format", "markdown"], { cwd: path.resolve(DIR, "..") });
+    if (!status.out.includes("Current stage: qwen_tts_stitch")
+      || !status.out.includes("tts repair-boundary")) {
+      throw new Error("Goldflow status does not authorize exact-boundary repair here.");
+    }
   }
   const episode = path.basename(episodeDir);
   const planPath = path.join(episodeDir, "narration_generation_plan.json");
@@ -401,6 +411,12 @@ export async function main(parts = process.argv.slice(2)) {
     prior_report_file_sha256: await fileHash(reportPath),
     spec_path: specPath,
     spec_file_sha256: await fileHash(specPath),
+    ...(inProcessAuthorization ? { in_process_authorization: {
+      schema: inProcessAuthorization.schema,
+      receipt_path: inProcessAuthorization.receipt_path,
+      receipt_sha256: inProcessAuthorization.receipt_sha256,
+      blocked_report_sha256: inProcessAuthorization.blocked_report_sha256,
+    } } : {}),
     model_id: manifest.model_id, model_revision: manifest.model_revision,
     voice_id: manifest.voice_id, voice_sha256: manifest.voice_sha256,
     voice_continuity_contract: manifest.voice_continuity_contract,

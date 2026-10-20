@@ -16,7 +16,9 @@ import {
   strictNarrationDeliveryDecision,
   validateNarrationExactListenReviewDecision,
 } from "./lib/narration-delivery-quality.mjs";
+import { runNarrationRuntimePreflight } from "./lib/narration-runtime-preflight.mjs";
 import {
+  narrationSpokenFormEquivalencesForContract,
   buildNarrationQualityContract,
   narrationQualityContractForIdentity,
   narrationUsesAutomatedAsrAcceptance,
@@ -1957,6 +1959,15 @@ export async function finalizeNarrationProviderOutput(
     device: "cpu",
     computeType: "int8_float32",
   });
+  // R05(5): identities that bind the spoken-form table reuse narrate's unit
+  // ASR only on an exact three-way match: unit WAV sha, ASR model + engine
+  // version, equivalence-table sha. Legacy identities keep the existing binding.
+  const expectedSpokenFormEquivalencesSha256 =
+    narrationSpokenFormEquivalencesForContract(qualityContract)?.config_sha256 ?? null;
+  const expectedAsrEngineVersion = expectedSpokenFormEquivalencesSha256
+    ? (await runNarrationRuntimePreflight({ requiredTools: ["asr_python"] }))
+      .tools?.asr_python?.modules?.faster_whisper ?? null
+    : null;
   for (const row of rows) {
     const cached = String(row.unit_id) === contractionReview?.unit_id ? null
       : reusableNarrationFinalizationUnit(
@@ -1979,6 +1990,8 @@ export async function finalizeNarrationProviderOutput(
         providerUnitQaSha256: row.provider_unit_qa_sha256,
         narrationQualityContractSha256: qualityContract.contract_sha256,
         expectedAsrContract: primaryAsrContract,
+        expectedSpokenFormEquivalencesSha256,
+        expectedAsrEngineVersion,
         providerUnitQaContentSha256: narrationProviderUnitQaSha256,
       });
       embeddedPrimaryReuseDecisions.push({
@@ -2443,6 +2456,11 @@ export async function finalizeNarrationProviderOutput(
     generationPlanFileSha256: planFileSha256,
     qualityContractSha256: qualityContract.contract_sha256,
   });
+  // R05(4): under automated_asr_v1 the listen/repair packets are not emitted;
+  // the reports record `listen_review_status: automated_asr_qa` and null paths.
+  const automatedListenRoutesOff = narrationUsesAutomatedAsrAcceptance(qualityContract);
+  const emittedListenPacketPath = automatedListenRoutesOff ? null : listenPacketPath;
+  const emittedListenPacketSha256 = automatedListenRoutesOff ? null : listenPacket.packet_sha256;
   if (reviewContinuation && validateNarrationExactListenReviewDecision(
     listenPacket, reviewContinuation.listenDecision,
   ).status !== "approved") {
@@ -2568,14 +2586,17 @@ export async function finalizeNarrationProviderOutput(
     selected_units: selectedUnits,
   };
   assertPartialRepairUnitBlockerHoldForTests({ requireUnitBlockers, blockers });
+  if (automatedListenRoutesOff) unitDeliveryArtifact.listen_review_status = "automated_asr_qa";
   await Promise.all([
     atomicWriteJson(unitDeliveryPath, unitDeliveryArtifact),
     atomicWriteJson(unitQaPath, unitQaArtifact),
-    atomicWriteJson(listenPacketPath, listenPacket),
-    atomicWriteJson(repairPacketPath, exactNarrationRepairPacket({
-      decision: { status: blockers.length ? "blocked" : "passed", blockers },
-      units: rows,
-    })),
+    ...(automatedListenRoutesOff ? [] : [
+      atomicWriteJson(listenPacketPath, listenPacket),
+      atomicWriteJson(repairPacketPath, exactNarrationRepairPacket({
+        decision: { status: blockers.length ? "blocked" : "passed", blockers },
+        units: rows,
+      })),
+    ]),
     atomicWriteJson(checkpointPath, checkpoint),
   ]);
   if (blockers.length) {
@@ -2645,9 +2666,9 @@ export async function finalizeNarrationProviderOutput(
         qa_status: selectedUnits[index].qa_status,
       })),
       blockers,
-      listen_review_packet_path: listenPacketPath,
-      listen_review_packet_sha256: listenPacket.packet_sha256,
-      listen_review_status: "blocked_before_review",
+      listen_review_packet_path: emittedListenPacketPath,
+      listen_review_packet_sha256: emittedListenPacketSha256,
+      listen_review_status: automatedListenRoutesOff ? "automated_asr_qa" : "blocked_before_review",
     });
     throw new Error(
       `Provider-neutral delivery QA blocked ${new Set(
@@ -3276,8 +3297,8 @@ export async function finalizeNarrationProviderOutput(
       acceptAsrDeliveryBlockers || acceptReviewWarnings || skipSubjectiveReview
         ? operatorNarrationWaiver
         : null,
-    listen_review_packet_path: listenPacketPath,
-    listen_review_packet_sha256: listenPacket.packet_sha256,
+    listen_review_packet_path: emittedListenPacketPath,
+    listen_review_packet_sha256: emittedListenPacketSha256,
     listen_review_status: automatedAsrAcceptance
       ? "automated_asr_qa"
       : listenPacket.item_count === 0
@@ -3345,11 +3366,11 @@ export async function finalizeNarrationProviderOutput(
   await Promise.all([
     atomicWriteJson(stitchReportPath, stitchReport),
     atomicWriteJson(ttsReportPath, ttsReport),
-    atomicWriteJson(repairPacketPath, exactNarrationRepairPacket({
+    ...(automatedListenRoutesOff ? [] : [atomicWriteJson(repairPacketPath, exactNarrationRepairPacket({
       decision: fullStream.decision,
       units: rows,
       boundaries: stitch.boundaries,
-    })),
+    }))]),
   ]);
   if (await sha256File(scriptPath) !== actualSourceScriptSha256) {
     throw new Error(

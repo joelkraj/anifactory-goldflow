@@ -3,5 +3,6 @@
   "audited": "unknown",
   "verified_at": null,
   "verified_by": null,
-  "notes": "Q54 (docs/designs/stabilization_roadmap_v1.md section 6.2) is unanswered: whether the Google OAuth project behind scripts/youtube-data-api-upload.py has passed the YouTube API Services compliance audit. Until audited is true, `youtube publish` refuses to make a video public or scheduled through the Data API and `youtube auto-upload` stops at the unsupported-publish-path gate unless the run is declared private-review-only. Set audited to true with verified_at (ISO-8601) and verified_by only after the audit result is in hand; false records a failed or not-requested audit."
+  "notes": "Q54 (docs/designs/stabilization_roadmap_v1.md section 6.2) is unanswered: whether the Google OAuth project behind scripts/youtube-data-api-upload.py has passed the YouTube API Services compliance audit. Until audited is true, `youtube publish` refuses to make a video public or scheduled through the Data API and `youtube auto-upload` stops at the unsupported-publish-path gate unless the run is declared private-review-only. Set audited to true with verified_at (ISO-8601) and verified_by only after the audit result is in hand; false records a failed or not-requested audit. How to find out (do not run inside a production session): see docs/designs/autopilot_gates_v1.md, 'Checking the audit status'.",
+  "check_procedure": "docs/designs/autopilot_gates_v1.md#checking-the-audit-status"
 }

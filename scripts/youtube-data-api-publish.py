@@ -47,14 +47,22 @@ def credentials(client_secret: Path, token: Path, port: int):
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--video-id", required=True)
-    parser.add_argument("--visibility", choices=("public", "scheduled"), required=True)
+    parser.add_argument("--video-id")
+    parser.add_argument("--visibility", choices=("public", "scheduled"))
     parser.add_argument("--publish-at")
-    parser.add_argument("--comment-text", required=True)
+    parser.add_argument("--comment-text")
+    parser.add_argument("--authorize-only", action="store_true", help="Run the one-time youtube.force-ssl consent, write the token and exit without touching any video.")
     parser.add_argument("--client-secret", type=Path, default=DEFAULT_CLIENT_SECRET)
     parser.add_argument("--token", type=Path, default=DEFAULT_TOKEN)
     parser.add_argument("--port", type=int, default=8766)
     args = parser.parse_args()
+    if args.authorize_only:
+        credentials(args.client_secret, args.token, args.port)
+        print(json.dumps({"status": "authorized", "token_path": str(args.token), "scopes": list(SCOPES)}))
+        return
+    for required in ("video_id", "visibility", "comment_text"):
+        if not getattr(args, required):
+            raise SystemExit(f"--{required.replace('_', '-')} is required unless --authorize-only is given.")
     if args.visibility == "scheduled" and not args.publish_at:
         raise SystemExit("--publish-at is required for scheduled visibility.")
 

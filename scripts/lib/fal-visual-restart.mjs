@@ -34,13 +34,16 @@ export async function validateFalContract(contract) {
   return contract;
 }
 
-export function createFalRestartIdentity({ baseline, targetDir, week, contract, git, receiptSha256, baselineIdentitySha256, createdAt, forkAt = null }) {
-  // Fal may use the first OpenArt restart as its approved visual-plan baseline,
-  // but it never changes or consumes that run's generated frame receipts.
-  need(baseline?.schema === "goldflow_run_identity_v2" && baseline.run_intent === "production", "Fal restart requires a production identity.");
-  need(baseline.content_profile === "manhwa_recap_v1" && baseline.media_workflow === "generated_visuals_v1", "Fal restart supports manhwa generated visuals only.");
-  const next = structuredClone(baseline);
-  Object.assign(next, { week, episode_dir: targetDir, status: "fal_visual_restart_imported", created_at: createdAt, updated_at: createdAt, git, image_provider: "fal_ai", image_provider_options: { fal: { ...structuredClone(contract), per_request_caps_usd: contract.per_request_caps_usd ?? buildFalPerRequestCaps(), per_request_caps_locked_at: createdAt } } });
+/**
+ * Binds a validated Fal image contract onto an identity: provider options with
+ * locked per-request caps, image provider/model locks, model versions and the
+ * production profile's media defaults. Used by the visual restart fork and by
+ * `run preflight --image-provider fal_ai --fal-contract <path>`.
+ */
+export function applyFalContractOverlay(identity, { contract, createdAt, contractPath = null, contractSha256 = null }) {
+  const next = identity;
+  next.image_provider = "fal_ai";
+  next.image_provider_options = { ...(next.image_provider_options ?? {}), fal: { ...structuredClone(contract), per_request_caps_usd: contract.per_request_caps_usd ?? buildFalPerRequestCaps(), per_request_caps_locked_at: createdAt, ...(contractPath ? { contract_path: contractPath, contract_sha256: contractSha256 } : {}) } };
   for (const key of Object.keys(next.provider_locks ?? {})) if (providerLock(key)) delete next.provider_locks[key];
   next.provider_locks = { ...next.provider_locks, image_provider: "fal_ai", reference_image_provider: "fal_ai", image_model: contract.endpoints.primary_edit, reference_model: contract.endpoints.primary_edit, creative_submission_attempts: 1, image_automatic_retry_policy: "transport_only_no_billable_output", image_automatic_provider_failover_policy: "none" };
   next.model_versions = { ...next.model_versions, image_model: contract.endpoints.primary_edit, reference_model: contract.endpoints.primary_edit, image_provider_models: { fal_ai: { image_model: contract.endpoints.primary_edit, reference_model: contract.endpoints.primary_edit } } };
@@ -48,6 +51,18 @@ export function createFalRestartIdentity({ baseline, targetDir, week, contract, 
     for (const key of Object.keys(next.production_profile_config.media)) if (mediaVisual(key)) delete next.production_profile_config.media[key];
     Object.assign(next.production_profile_config.media, { default_image_provider: "fal_ai", image_concurrency: contract.production_concurrency, reference_concurrency: contract.validation_concurrency });
   }
+  next.image_output_qa_required = true;
+  return next;
+}
+
+export function createFalRestartIdentity({ baseline, targetDir, week, contract, git, receiptSha256, baselineIdentitySha256, createdAt, forkAt = null }) {
+  // Fal may use the first OpenArt restart as its approved visual-plan baseline,
+  // but it never changes or consumes that run's generated frame receipts.
+  need(baseline?.schema === "goldflow_run_identity_v2" && baseline.run_intent === "production", "Fal restart requires a production identity.");
+  need(baseline.content_profile === "manhwa_recap_v1" && baseline.media_workflow === "generated_visuals_v1", "Fal restart supports manhwa generated visuals only.");
+  const next = structuredClone(baseline);
+  Object.assign(next, { week, episode_dir: targetDir, status: "fal_visual_restart_imported", created_at: createdAt, updated_at: createdAt, git });
+  applyFalContractOverlay(next, { contract, createdAt });
   next.visual_restart = { schema: RESTART_SCHEMA, provider: "fal_ai", receipt_path: path.join(targetDir, "visual_restart_receipt.json"), receipt_sha256: receiptSha256, baseline_episode_dir: baseline.episode_dir, baseline_identity_sha256: baselineIdentitySha256, historical_visuals_policy: "immutable_excluded_from_fal_production", approved_visual_plan_carryforward: forkAt !== "visual_reference_plan", ...(forkAt ? { fork_at: forkAt } : {}) };
   next.stage_checklist = stageChecklistFor(next);
   need(objectHash(nonvisualIdentityBinding(next)) === objectHash(nonvisualIdentityBinding(baseline)), "Fal restart altered a nonvisual contract.");

@@ -116,3 +116,19 @@ The driver runs only the status command shapes, so the workflow guard, provenanc
 - **Studio-only settings.** The Data API cannot read monetization, mid-roll or comment settings, so the human confirms them as part of the publish approval (`--studio-settings-verified true`).
 - **Legacy narration contracts** (exact listen and subjective sampling) go to triage instead of a fake listening attestation.
 - **Creative recoveries that need authored artifacts**: reference-plan repair recipes, panel composition repair recipes, Fal transport recovery and no-job adjudication. These go to triage, with the model's findings attached where it gave any.
+
+## First unattended episode: setup checklist (2026-10-20)
+
+Operator setup, once per channel (none of it is an approval gate):
+
+1. `<AniFactoryData>/channels/<channel>/channel_preset.json` (schema `goldflow_channel_preset_v1`, see `docs/workflows/channel_preset.md`) with `image-provider: fal_ai`, `fal-contract`, the narrator voice id, `autopilot: true` and `episode-budget-usd`.
+2. `<AniFactoryData>/channels/<channel>/autopilot_packaging.json` (schema `goldflow_autopilot_packaging_config_v1`): at least three recorded `research_evidence` rows observed within 120 days, `youtube_channel` {expected_name, expected_handle, expected_channel_id} and `publish_settings`.
+3. YouTube Data API consent, one time, in the research venv: the upload token (`youtube.upload` + `youtube.readonly`) is obtained by the first `youtube auto-upload`; the publish token (`youtube.force-ssl`) is obtained without touching any video by `python scripts/youtube-data-api-publish.py --authorize-only` (opens a browser consent, writes `youtube_publish_manage_token.json`).
+4. `config/youtube_api_compliance.json`: leave `audited: "unknown"` until the YouTube API Services audit result is known; the public flip then stays in Studio.
+
+Run:
+
+```bash
+node bin/goldflow.mjs run preflight --content-profile manhwa_recap_v1 --media-workflow generated_visuals_v1 --run-intent production --source-handoff <dev-dir>/revision_loop/source_handoff.json --channel-preset <AniFactoryData>/channels/<channel>/channel_preset.json --channel <channel> --series <series-slug> --week <run-slug> --episode ep_01
+node bin/goldflow.mjs run auto --episode-dir <episode-dir>
+```

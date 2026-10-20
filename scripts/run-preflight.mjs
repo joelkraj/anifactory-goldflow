@@ -10,6 +10,7 @@ import { buildEpisodeBudget } from "./lib/episode-budget.mjs";
 import { autopilotIdentityFields } from "./lib/autopilot-policy.mjs";
 import { PANEL_PRODUCTION_RENDER_PROFILE, createPanelProductionContract, assertPanelProductionIdentity, assertPanelProductionPreflightFlags } from "./lib/panel-production-policy.mjs";
 import { normalizeImageProvider } from "./lib/image-provider-routing.mjs";
+import { validateFalContract, applyFalContractOverlay } from "./lib/fal-visual-restart.mjs";
 import {
   DEFAULT_GOOGLE_GEMINI_MODEL,
   DEFAULT_GOOGLE_GEMINI_PLAN,
@@ -1671,6 +1672,13 @@ async function main() {
     validateLocalWhisperIdentityContract(manifest);
   if (!localWhisperIdentityValidation.done) {
     throw new Error(localWhisperIdentityValidation.evidence);
+  }
+  if (imageProvider === "fal_ai") {
+    // A fresh Fal identity binds the same exact contract the visual-restart fork binds.
+    const falContractPath = flags["fal-contract"] ? path.resolve(String(flags["fal-contract"])) : null;
+    if (!falContractPath) throw new Error("--image-provider fal_ai requires --fal-contract <fal_contract.json> (or a channel preset supplying fal-contract).");
+    const falContract = await validateFalContract(JSON.parse(await fs.readFile(falContractPath, "utf8")));
+    applyFalContractOverlay(manifest, { contract: falContract, createdAt: now, contractPath: falContractPath, contractSha256: await sha256File(falContractPath) });
   }
   const manifestPath = path.join(episodeDir, "run_identity.json");
   await writeJson(manifestPath, manifest);

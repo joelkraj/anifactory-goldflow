@@ -41,7 +41,10 @@ run identity. An explicit command-line flag always wins over the preset and is r
 override.
 
 Allowed keys (operational flags only): planning (`planning-provider`, `planning-effort-policy`,
-`planning-model`, `planning-reasoning-effort`), images (`image-provider`, `image-model`,
+`planning-model`, `planning-reasoning-effort`), images (`image-provider`, `fal-contract` (required
+with `image-provider: fal_ai`; the absolute path of a validated `goldflow_fal_image_contract_v1`
+file, bound into `image_provider_options.fal` with its sha256 exactly as `run restart-visuals-fal`
+binds it), `image-model`,
 `reference-model`, `image-fallback-*`, `google-*`, `chatgpt-project-url`), narration
 (`audio-target`, `tts-provider`, `narrator-voice-id`, `narrator-reference-variant`,
 `narration-delivery-bank`), pace (`pace-policy`, `target-wpm-min`, `target-wpm-max`), render,
@@ -77,9 +80,11 @@ example.
   "flags": {
     "planning-provider": "planning_room",
     "planning-effort-policy": "planning_room_stage_routed_v1",
-    "image-provider": "codex_imagegen",
+    "image-provider": "fal_ai",
+    "fal-contract": "/Users/joel/AniFactoryData/fal_discovery/2026-09-28-alder-mill/fal_contract.json",
     "audio-target": "narrator_only",
     "tts-provider": "qwen_local",
+    "narrator-voice-id": "deepmale_narration_reference_20261019",
     "production-profile": "fast_premium_v2",
     "pace-policy": "diagnostic",
     "target-wpm-min": 180,

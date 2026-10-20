@@ -14,7 +14,7 @@ export const CHANNEL_PRESET_OPERATIONAL_FLAGS = Object.freeze([
   // planning
   "planning-provider", "planning-effort-policy", "planning-model", "planning-reasoning-effort",
   // images
-  "image-provider", "image-model", "reference-model", "image-fallback-provider", "image-fallback-condition",
+  "image-provider", "fal-contract", "image-model", "reference-model", "image-fallback-provider", "image-fallback-condition",
   "google-flow-plan", "google-flow-model", "google-gemini-plan", "google-gemini-model", "google-image-scheduling",
   "google-flow-health-proof", "google-flow-health-proof-sha256", "chatgpt-project-url",
   // narration

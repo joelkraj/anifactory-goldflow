@@ -52,17 +52,10 @@ function validVerdict(verdict) {
 
 /* ---------- script approval ---------- */
 
-function fillAnchorOffsets(value, script) {
-  if (Array.isArray(value)) return value.map((row) => fillAnchorOffsets(row, script));
-  if (!value || typeof value !== "object") return value;
-  const out = Object.fromEntries(Object.entries(value).map(([key, inner]) => [key, fillAnchorOffsets(inner, script)]));
-  if (typeof out.exact_excerpt === "string") {
-    const start = script.indexOf(out.exact_excerpt.trim());
-    if (start >= 0) Object.assign(out, { exact_excerpt: out.exact_excerpt.trim(), start_offset: start, end_offset: start + out.exact_excerpt.trim().length });
-  }
-  return out;
-}
-
+// On registry ≥ 2026-10-20.1 identities the audit is its own registered stage
+// (`script power-audit --author planner`, scripts/lib/script-comprehension-audit.mjs)
+// and runs before this gate is reached; the candidate authoring below is the
+// historical-registry fallback and shares that stage's prompt and offset filling.
 async function scriptApproval({ status, episodeDir, argv, deps }) {
   const stage = "script_approval";
   const ingest = status.stage_ledger?.find((row) => row.stage === "source_ingest");
@@ -78,12 +71,14 @@ async function scriptApproval({ status, episodeDir, argv, deps }) {
   const audit = await readJson(auditPath);
   const auditValidation = audit ? validatePowerSystemComprehensionAudit(audit, script) : null;
   if (!audit || audit.source_script_hash !== scriptHash) {
+    if (status.stage_ledger?.some((row) => row.stage === "script_comprehension_audit")) {
+      return triage(stage, "script_comprehension_audit is a registered stage on this identity and has not passed for the current script; it is not re-authored here");
+    }
     // The audit is authored by the model reviewer and verified deterministically (exact excerpts and offsets).
-    const { POWER_SYSTEM_COMPREHENSION_SCHEMA } = await import("./power-system-comprehension-contract.mjs");
-    const contractSource = await fs.readFile(new URL("./power-system-comprehension-contract.mjs", import.meta.url), "utf8");
+    const { comprehensionAuditPrompt, comprehensionContractSource, fillAnchorOffsets } = await import("./script-comprehension-audit.mjs");
     const candidate = await deps.reviewer({
       task: "power_system_audit",
-      prompt: `${REVIEW_RULES}\nAuthor a power-system comprehension audit candidate for this exact script. The candidate is validated by the JavaScript contract below (schema ${POWER_SYSTEM_COMPREHENSION_SCHEMA}); return only the candidate object with power_system_present, no_power_system_rationale (when false) and abilities. Every exact_excerpt must be copied verbatim from the script; offsets are computed for you.\n\nCONTRACT:\n${contractSource}\n\nSCRIPT:\n${truncate(script, 120_000)}`,
+      prompt: comprehensionAuditPrompt({ script, contractSource: await comprehensionContractSource(), rules: REVIEW_RULES }),
       validate: (value) => (typeof value?.power_system_present === "boolean" ? [] : ["power_system_present must be boolean"]),
     });
     const inputPath = await writeNew(path.join(episodeDir, "autopilot", "requests", `power_audit_candidate_${scriptHash.slice(0, 16)}.json`), fillAnchorOffsets(candidate, script));

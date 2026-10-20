@@ -15,6 +15,7 @@ import {
   stageDefinition,
   stageIsSatisfied,
 } from "./lib/pipeline-stage-registry.mjs";
+import { GENERATED_VISUALS_HISTORICAL_STAGE_REGISTRY_VERSIONS } from "./lib/media-workflows.mjs";
 import { assertCommandWorkflowRoute, assertEpisodeWorkflowFlags, readEpisodeRoutingIdentity } from "./lib/episode-workflow-routing.mjs";
 import { referencePlanApprovalMatches } from "./lib/reference-plan-contract.mjs";
 import { readReferenceImageQaRecoveryScope } from "./lib/reference-image-recovery.mjs";
@@ -472,6 +473,7 @@ function runIdentityTtsComplete(runIdentity = {}) {
         runIdentity.stage_registry_version === "2026-07-29.1"
         || runIdentity.stage_registry_version
           === PIPELINE_STAGE_REGISTRY_VERSION
+        || GENERATED_VISUALS_HISTORICAL_STAGE_REGISTRY_VERSIONS.includes(runIdentity.stage_registry_version)
         || runIdentity.provider_locks?.tts_synthesis_contract_id
           === QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT.contract_id;
       if (batch4Required) {
@@ -1994,6 +1996,24 @@ async function parallaxAssetApprovalComplete(episodeDir, episode) {
     done: true,
     evidence: `${path.basename(approvalPath)} approved=${approval.approved_image_ids?.length ?? 0}; low_motion=${approval.approved_low_motion_image_ids?.length ?? 0}; repairable=${approval.repairable_image_ids?.length ?? 0}; declined=${approval.declined_image_ids?.length ?? 0}`,
   };
+}
+
+// Registered stage (registry ≥ 2026-10-20.1): the recorded audit must be bound to the current
+// script and pass the deterministic contract again now; a blocked audit is a triage hold.
+async function scriptComprehensionAuditComplete(episodeDir, currentScriptHash) {
+  if (!currentScriptHash) return { done: false, evidence: "script_clean.md missing" };
+  const auditPath = path.join(episodeDir, "power_system_comprehension_audit.json");
+  const audit = await readJson(auditPath, null);
+  if (!audit) return { done: false, evidence: "power_system_comprehension_audit.json missing" };
+  const recordedHash = audit.source_script_hash ?? null;
+  if (recordedHash !== currentScriptHash) return { done: false, state: "stale", evidence: `power_system_comprehension_audit.json bound to ${recordedHash ?? "no hash"}, current script ${currentScriptHash}` };
+  const { validatePowerSystemComprehensionAudit } = await import("./lib/power-system-comprehension-contract.mjs");
+  const validation = validatePowerSystemComprehensionAudit(audit, await fs.readFile(path.join(episodeDir, "script_clean.md"), "utf8"));
+  if (audit.status !== "passed" || validation.status !== "passed") {
+    const codes = [...new Set(validation.blockers.map((row) => row.code))].slice(0, 6).join(", ");
+    return { done: false, state: "blocked", evidence: `power_system_comprehension_audit.json ${audit.status ?? "unknown"}; held for triage (${codes || "artifact status"}); no automatic planner re-call` };
+  }
+  return { done: true, evidence: `power_system_comprehension_audit.json -> ${currentScriptHash}; abilities=${audit.ability_count ?? audit.abilities?.length ?? 0}; reviewed_by=${audit.reviewed_by ?? "unknown"}` };
 }
 
 async function scriptApprovalComplete(episodeDir, currentScriptHash) {
@@ -6564,6 +6584,7 @@ async function main() {
   const episode = identity.episode;
   const scriptHash = await fileSha256(path.join(episodeDir, "script_clean.md"));
   const scriptApproval = await scriptApprovalComplete(episodeDir, scriptHash);
+  const scriptComprehensionAudit = await scriptComprehensionAuditComplete(episodeDir, scriptHash);
   const scriptPace = await paceReportComplete(path.join(episodeDir, "script_pace_report.json"), scriptHash, "script_pace_report.json", identity);
   const speakability = await jsonArtifactHashComplete(path.join(episodeDir, "script_speakability_report.json"), scriptHash, "script_speakability_report.json");
   const ttsOverrides = await jsonArtifactHashComplete(path.join(episodeDir, "tts_spoken_overrides.json"), scriptHash, "tts_spoken_overrides.json");
@@ -6789,6 +6810,7 @@ async function main() {
       done: await exists(path.join(episodeDir, "script_clean.md")) && await exists(path.join(episodeDir, "source_story_ingest_report.json")),
       evidence: "script_clean.md + source_story_ingest_report.json",
     },
+    script_comprehension_audit: scriptComprehensionAudit,
     script_approval: scriptApproval,
     script_pace_check: scriptPace,
     targeted_speakability: { done: speakability.done && ttsOverrides.done, evidence: `${speakability.evidence}; ${ttsOverrides.evidence}` },

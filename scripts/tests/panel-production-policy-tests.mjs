@@ -7,7 +7,7 @@ import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { createPanelProductionContract, assertPanelProductionIdentity, assertPanelProductionPreflightFlags } from '../lib/panel-production-policy.mjs';
 import { mediaWorkflowForPreflight, GENERATED_VISUALS_STAGE_REGISTRY_VERSION } from '../lib/media-workflows.mjs';
-import { stageRegistryFor, PIPELINE_STAGE_REGISTRY, PIPELINE_STAGE_REGISTRY_VERSION, stageChecklistFor, stageDefinition, commandStageFor, buildStageCommand } from '../lib/pipeline-stage-registry.mjs';
+import { stageRegistryFor, PIPELINE_STAGE_REGISTRY, PIPELINE_STAGE_REGISTRY_CURRENT, PIPELINE_STAGE_REGISTRY_VERSION, stageChecklistFor, stageDefinition, commandStageFor, buildStageCommand } from '../lib/pipeline-stage-registry.mjs';
 import { assertCommandWorkflowRoute, assertEpisodeWorkflowFlags } from '../lib/episode-workflow-routing.mjs';
 import { creativeStageRerunDecision } from '../lib/creative-stage-rerun-policy.mjs';
 import { plannerRerunDecision } from '../lib/planner-rerun-policy.mjs';
@@ -33,8 +33,11 @@ async function tree(dir) {
 }
 try {
   await test('new profile preserves generated registry and ordinary defaults', () => {
-    assert.equal(stageRegistryFor(base), PIPELINE_STAGE_REGISTRY);
-    assert.equal(stageRegistryFor(panel), PIPELINE_STAGE_REGISTRY);
+    // A newly bound identity takes the current generated chain; the historical export stays
+    // the 2026-08-22.1 row set and shares every row after the script lock.
+    assert.equal(stageRegistryFor(base), PIPELINE_STAGE_REGISTRY_CURRENT);
+    assert.equal(stageRegistryFor(panel), PIPELINE_STAGE_REGISTRY_CURRENT);
+    assert.deepEqual(PIPELINE_STAGE_REGISTRY_CURRENT.map(row => row.id).slice(4), PIPELINE_STAGE_REGISTRY.map(row => row.id).slice(5));
     assert.equal(PIPELINE_STAGE_REGISTRY_VERSION, GENERATED_VISUALS_STAGE_REGISTRY_VERSION);
     assert.equal(stageChecklistFor(base).find(row => row.stage === 'transition_edit_plan').status, 'missing');
     assert.equal(stageChecklistFor(panel).find(row => row.stage === 'transition_edit_plan').status, 'skipped_with_waiver');

@@ -1,7 +1,11 @@
 import { productionProfileForIdentity } from "./production-profiles.mjs";
 import { isPanelProductionIdentity, assertPanelProductionIdentity } from "./panel-production-policy.mjs";
 import { AVATAR_PILOT_STAGES } from "./avatar-pilot-stage-registry.mjs";
-import { assertAvailableMediaWorkflow, GENERATED_VISUALS_STAGE_REGISTRY_VERSION } from "./media-workflows.mjs";
+import {
+  assertAvailableMediaWorkflow,
+  GENERATED_VISUALS_HISTORICAL_STAGE_REGISTRY_VERSIONS,
+  GENERATED_VISUALS_STAGE_REGISTRY_VERSION,
+} from "./media-workflows.mjs";
 import {
   isLegacyQwenIdentity,
   narrationTtsPolicyForIdentity,
@@ -19,6 +23,8 @@ import {
 } from "./planning-runtime-policy.mjs";
 
 export const PIPELINE_STAGE_REGISTRY_VERSION = GENERATED_VISUALS_STAGE_REGISTRY_VERSION;
+// The row set every historical generated-visuals identity (≤ 2026-08-22.1) was locked to.
+export const PIPELINE_STAGE_REGISTRY_HISTORICAL_VERSION = GENERATED_VISUALS_HISTORICAL_STAGE_REGISTRY_VERSIONS.at(-1);
 
 export const STAGE_STATES = Object.freeze([
   "passed",
@@ -49,6 +55,20 @@ const stages = [
     commands: ["ingest source"],
   },
   {
+    // New identities only (since 2026-10-20.1): one budgeted planner call through the
+    // codex-cli-runner call layer, then the deterministic comprehension validator. A blocked
+    // audit holds for triage; nothing re-calls the planner or edits the script.
+    id: "script_comprehension_audit",
+    title: "Script comprehension audit",
+    required_input: "script_clean.md",
+    output_artifact: "power_system_comprehension_audit.json",
+    approval: "automatic",
+    validator: "power_system_comprehension_contract",
+    since_registry_version: "2026-10-20.1",
+    output_patterns: [/^power_system_comprehension_audit\.json$/],
+    commands: ["script power-audit"],
+  },
+  {
     id: "script_approval",
     title: "Script approval",
     required_input: "script_clean.md",
@@ -58,12 +78,15 @@ const stages = [
     commands: ["script approve"],
   },
   {
+    // Historical row set only: since 2026-10-20.1 the pace and speakability validators run
+    // inside the script lock (script approve) and still emit the same files.
     id: "script_pace_check",
     title: "Script pace diagnostics",
     required_input: "approved script hash",
     output_artifact: "script_pace_report.json",
     approval: "automatic",
     validator: "script_pace_hash_and_policy",
+    retired_in_registry_version: "2026-10-20.1",
     commands: ["script pace-check"],
   },
   {
@@ -73,6 +96,7 @@ const stages = [
     output_artifact: "script_speakability_report.json + tts_spoken_overrides.json",
     approval: "automatic",
     validator: "speakability_hashes",
+    retired_in_registry_version: "2026-10-20.1",
     commands: ["script targeted"],
   },
   {
@@ -451,20 +475,72 @@ const stages = [
   },
 ];
 
-export const PIPELINE_STAGE_REGISTRY = Object.freeze(stages.map((entry, index) => Object.freeze({
-  ...entry,
-  order: index,
-  dependencies: Object.freeze(entry.depends_on ?? (index === 0 ? [] : [stages[index - 1].id])),
-  output_patterns: Object.freeze(entry.output_patterns ?? []),
-  artifact_contract: Object.freeze({
-    output: entry.output_artifact,
-    validator: entry.validator,
-  }),
-})));
+function compareRegistryVersion(left, right) {
+  return String(left).localeCompare(String(right));
+}
 
-const stagesById = new Map(PIPELINE_STAGE_REGISTRY.map((entry) => [entry.id, entry]));
+function rowInVersion(entry, version) {
+  if (entry.since_registry_version && compareRegistryVersion(version, entry.since_registry_version) < 0) return false;
+  if (entry.retired_in_registry_version && compareRegistryVersion(version, entry.retired_in_registry_version) >= 0) return false;
+  return true;
+}
 
-// The legacy export remains byte-for-byte the generated-visual stage chain.
+// A retired row is contracted out of the dependency graph: whatever depended on it depends on
+// the row(s) it depended on, so `voice_plan` follows `script_approval` once the speakability
+// row is folded into the lock.
+function dependenciesInVersion(entry, index, chain, version) {
+  const byId = new Map(stages.map((row) => [row.id, row]));
+  const present = new Set(chain.map((row) => row.id));
+  const explicit = entry.depends_on ?? (index === 0 ? [] : [stages[stages.indexOf(entry) - 1]?.id]);
+  const resolved = [];
+  const resolve = (id) => {
+    if (!id || resolved.includes(id)) return;
+    if (present.has(id)) {
+      resolved.push(id);
+      return;
+    }
+    const removed = byId.get(id);
+    const removedIndex = stages.indexOf(removed);
+    for (const upstream of removed?.depends_on ?? (removedIndex > 0 ? [stages[removedIndex - 1].id] : [])) resolve(upstream);
+  };
+  for (const id of explicit) resolve(id);
+  void version;
+  return resolved;
+}
+
+function buildGeneratedRegistry(version) {
+  const chain = stages.filter((entry) => rowInVersion(entry, version));
+  return Object.freeze(chain.map((entry, index) => Object.freeze({
+    ...entry,
+    order: index,
+    dependencies: Object.freeze(dependenciesInVersion(entry, index, chain, version)),
+    output_patterns: Object.freeze(entry.output_patterns ?? []),
+    artifact_contract: Object.freeze({
+      output: entry.output_artifact,
+      validator: entry.validator,
+    }),
+  })));
+}
+
+// The legacy export remains byte-for-byte the historical generated-visual stage chain that
+// every identity locked at or before 2026-08-22.1 recorded.
+export const PIPELINE_STAGE_REGISTRY = buildGeneratedRegistry(PIPELINE_STAGE_REGISTRY_HISTORICAL_VERSION);
+// New identities (2026-10-20.1): script_comprehension_audit before script_approval; the pace
+// and speakability rows are folded into the lock.
+export const PIPELINE_STAGE_REGISTRY_CURRENT = buildGeneratedRegistry(PIPELINE_STAGE_REGISTRY_VERSION);
+const GENERATED_REGISTRIES = new Set([PIPELINE_STAGE_REGISTRY, PIPELINE_STAGE_REGISTRY_CURRENT]);
+
+// Only an explicit workflow lock selects the current chain. A historical identity without
+// workflow fields keeps the legacy generated route whatever its top-level marker says.
+export function generatedRegistryVersionFor(identity = {}) {
+  const recorded = identity.workflow_contract?.stage_registry_version ?? null;
+  return recorded === PIPELINE_STAGE_REGISTRY_VERSION ? PIPELINE_STAGE_REGISTRY_VERSION : PIPELINE_STAGE_REGISTRY_HISTORICAL_VERSION;
+}
+
+export function isGeneratedStageRegistry(registry) {
+  return GENERATED_REGISTRIES.has(registry);
+}
+
 // Other workflows must supply a real registry and validators before dispatch.
 export function stageRegistryFor(identity = {}) {
   const workflow = assertAvailableMediaWorkflow(identity);
@@ -472,12 +548,12 @@ export function stageRegistryFor(identity = {}) {
   else if (identity.panel_composition_contract != null) throw new Error("Panel composition contract requires its locked panel_composition_v1 render profile.");
   if (workflow.id === "true_crime_hybrid_proof_v1") throw new Error("True-crime proof uses its dedicated private stage registry; use crime-proof commands or run status.");
   if (workflow.id === "avatar_footage_pilot_v1") return AVATAR_PILOT_STAGES;
-  return PIPELINE_STAGE_REGISTRY;
+  return generatedRegistryVersionFor(identity) === PIPELINE_STAGE_REGISTRY_VERSION ? PIPELINE_STAGE_REGISTRY_CURRENT : PIPELINE_STAGE_REGISTRY;
 }
 
 export function stageDefinition(stageId, identity = {}) {
   const registry = stageRegistryFor(identity);
-  const definition = registry === PIPELINE_STAGE_REGISTRY ? stagesById.get(stageId) ?? null : registry.find((entry) => entry.id === stageId) ?? null;
+  const definition = registry.find((entry) => entry.id === stageId) ?? null;
   if (!isPanelProductionIdentity(identity) || !definition) return definition;
   const overrides = {
     visual_prompt_plan: { title: "Panel asset allocation and prompt authoring", required_input: "approved beats + approved refs + authored panel asset allocation", output_artifact: "panel_asset_plan_<episode>.json + section_image_prompts.json", validator: "panel_asset_allocation_and_prompt_source_hashes" },
@@ -499,14 +575,14 @@ export function stageIsSatisfied(state) {
 export function commandStageFor(commandName, subcommandName, flags = {}, identity = {}) {
   const registry = stageRegistryFor(identity);
   const key = `${commandName} ${subcommandName}`.trim();
-  if (registry === PIPELINE_STAGE_REGISTRY && key === "visual openart-bank") {
+  if (isGeneratedStageRegistry(registry) && key === "visual openart-bank") {
     return ({ plan: "visual_reference_plan", "revise-plan": "reference_generation", "approve-plan": "reference_plan_approval", "approve-refs": "reference_image_approval", "bind-shots": "visual_prompt_plan", harden: "visual_prompt_harden" })[String(flags.action ?? "")] ?? null;
   }
-  if (registry === PIPELINE_STAGE_REGISTRY && key === "imagegen openart") {
+  if (isGeneratedStageRegistry(registry) && key === "imagegen openart") {
     if (!["generate", "review", "prepare", "mark-submitted", "import", "sync-library", "triage", "fail"].includes(String(flags.action ?? ""))) return null;
     return /^(true|1|yes)$/i.test(String(flags["references-only"] ?? "")) ? "reference_generation" : "image_generation";
   }
-  if (registry === PIPELINE_STAGE_REGISTRY && key === "imagegen fal") {
+  if (isGeneratedStageRegistry(registry) && key === "imagegen fal") {
     if (["repair-reviewed-bulk", "recover-reviewed-bulk-hold", "observe-reviewed-bulk", "finalize-reviewed-bulk"].includes(String(flags.action ?? ""))) return "image_output_qa";
     if (identity.visual_restart?.fork_at === "visual_reference_plan") {
       if (["repair-reviewed-references", "observe-reviewed-references", "repair-failed-reviewed-reference", "observe-failed-reviewed-reference", "repair-successful-reviewed-references", "observe-successful-reviewed-references", "finalize-reviewed-references"].includes(String(flags.action ?? ""))) return "reference_image_approval";
@@ -516,11 +592,11 @@ export function commandStageFor(commandName, subcommandName, flags = {}, identit
     return ["prepare-validation", "billing-submit", "billing-observe", "dispatch-validation", "observe-validation", "review-validation"].includes(String(flags.action ?? ""))
       ? "reference_image_approval" : "image_generation";
   }
-  if (registry === PIPELINE_STAGE_REGISTRY && (key === "imagegen start" || key === "imagegen codex-work" || key === "imagegen browser-pool" || key === "imagegen import-codex" || key === "imagegen import-staged-codex")) {
+  if (isGeneratedStageRegistry(registry) && (key === "imagegen start" || key === "imagegen codex-work" || key === "imagegen browser-pool" || key === "imagegen import-codex" || key === "imagegen import-staged-codex")) {
     if (/^(true|1|yes)$/i.test(String(flags["references-only"] ?? ""))) return "reference_generation";
     if (/^(true|1|yes)$/i.test(String(flags["qa-recovery"] ?? ""))) return "image_output_qa";
   }
-  if (registry === PIPELINE_STAGE_REGISTRY && key === "imagegen promote-derived-refs") return "image_generation";
+  if (isGeneratedStageRegistry(registry) && key === "imagegen promote-derived-refs") return "image_generation";
   for (const entry of registry) {
     if (entry.commands.includes(key)) return entry.id;
   }
@@ -577,20 +653,20 @@ export function readyStageIds(stageRows = [], identity = {}) {
 }
 
 export function workflowCommandSummary() {
-  return PIPELINE_STAGE_REGISTRY
+  return PIPELINE_STAGE_REGISTRY_CURRENT
     .filter((entry) => entry.commands.length)
     .map((entry) => `${entry.id}: ${entry.commands.join(" | ")}`)
     .join("\n");
 }
 
 export function helpCommandLines() {
-  return PIPELINE_STAGE_REGISTRY.flatMap((entry) => entry.commands
+  return PIPELINE_STAGE_REGISTRY_CURRENT.flatMap((entry) => entry.commands
     .filter((command) => !command.includes(":"))
     .map((command) => `  goldflow ${command.padEnd(30)} ${entry.title}`));
 }
 
 export function productionOrderSummary() {
-  return PIPELINE_STAGE_REGISTRY
+  return PIPELINE_STAGE_REGISTRY_CURRENT
     .map((entry) => {
       const command = entry.commands.find((value) => !value.includes(":"));
       if (command) return command;
@@ -734,6 +810,7 @@ export function buildStageCommand(stageId, identity = {}, options = {}) {
   const commands = {
     run_identity: `node bin/goldflow.mjs run preflight ${base} --content-profile ${identity.content_profile ?? "<content-profile>"} --media-workflow generated_visuals_v1 --title "<episode-title>" --source <source.md> --planning-provider planning_room --planning-effort-policy planning_room_stage_routed_v1 --image-provider federated_google_web_image_pool --audio-target narrator_only`,
     source_ingest: `node bin/goldflow.mjs ingest source ${base} --source <source.md>`,
+    script_comprehension_audit: `node bin/goldflow.mjs script power-audit ${base} --author planner`,
     script_approval: `node bin/goldflow.mjs script approve ${base} --hash <script_clean_hash>`,
     script_pace_check: `node bin/goldflow.mjs script pace-check ${base} --target-wpm-min ${minWpm} --target-wpm-max ${maxWpm}${paceFlag}${pacePolicy === "diagnostic" ? " --allow-hook-warnings true" : ""}`,
     targeted_speakability: `node bin/goldflow.mjs script targeted ${base}`,

@@ -7,7 +7,6 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import * as narrationPolicy from "./lib/narration-tts-policy.mjs";
-import { PIPELINE_STAGE_REGISTRY_VERSION } from "./lib/pipeline-stage-registry.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const QWEN_LIAM_PROFILE_ID = "qwen3_1_7b_base_joel_sentence_v1";
@@ -322,7 +321,8 @@ export function relockedIdentityForTests(identity, {
   const voiceIdentityChanged = recoveryKind !== QWEN_PLANNER_FIX_RECOVERY_KIND;
   const identityChanged = voiceIdentityChanged || synthesisContractChanged;
   const migrated = structuredClone(identity);
-  migrated.stage_registry_version = PIPELINE_STAGE_REGISTRY_VERSION;
+  // The recorded registry version is identity-locked: a relock never migrates an episode to
+  // a newer row set (its workflow_contract would no longer agree with it).
   migrated.tts_profile = primary.voice_id === narrationPolicy.QWEN_DEEPMALE_PRIMARY_LOCK.voice_id ? DEEPMALE_PROFILE_ID : QWEN_LIAM_PROFILE_ID;
   migrated.tts_provider = primary.provider;
   migrated.tts_fallback_provider = null;

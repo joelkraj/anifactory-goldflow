@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { contentProfileDefinition } from "../lib/content-profiles.mjs";
 import { mediaWorkflowForPreflight, resolveMediaWorkflow } from "../lib/media-workflows.mjs";
-import { PIPELINE_STAGE_REGISTRY } from "../lib/pipeline-stage-registry.mjs";
+import { PIPELINE_STAGE_REGISTRY, PIPELINE_STAGE_REGISTRY_CURRENT } from "../lib/pipeline-stage-registry.mjs";
 import { assertCommandWorkflowRoute } from "../lib/episode-workflow-routing.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -119,16 +119,23 @@ try {
       const status = JSON.parse(lockedResult.stdout);
       assert.equal(status.media_workflow.legacy, false);
       assert.equal(status.media_workflow.sha256, locked.workflow_contract.sha256);
-      assert.deepEqual(status.stage_ledger.map((row) => row.stage), PIPELINE_STAGE_REGISTRY.map((row) => row.id));
+      // A historical identity keeps the 2026-08-22.1 row set; a newly locked one binds the
+      // current registry (script_comprehension_audit before approval, pace/speakability folded
+      // into the lock). Shapes are compared over the rows both chains share.
+      assert.deepEqual(legacy.stage_ledger.map((row) => row.stage), PIPELINE_STAGE_REGISTRY.map((row) => row.id));
+      assert.deepEqual(status.stage_ledger.map((row) => row.stage), PIPELINE_STAGE_REGISTRY_CURRENT.map((row) => row.id));
+      const versioned = new Set(["script_comprehension_audit", "script_pace_check", "targeted_speakability"]);
+      const shared = (shape) => shape.filter((row) => !versioned.has(row.stage));
+      assert.match(status.stage_ledger.find((row) => row.stage === "script_comprehension_audit").next_command_shape, /script power-audit/);
       if (profile === "asset_afterlife_v1") {
         assert.equal(legacy.stage_ledger.find((row) => row.stage === "upload_packaging").state, "missing");
         const packaging = status.stage_ledger.find((row) => row.stage === "upload_packaging");
         assert.equal(packaging.state, "blocked");
         assert.match(packaging.evidence, /adapter|not.*available|unsupported|not.*implemented/i);
-        assert.deepEqual(stageShape(status).filter((row) => row.stage !== "upload_packaging"),
-          stageShape(legacy).filter((row) => row.stage !== "upload_packaging"));
+        assert.deepEqual(shared(stageShape(status)).filter((row) => row.stage !== "upload_packaging"),
+          shared(stageShape(legacy)).filter((row) => row.stage !== "upload_packaging"));
       }
-      else if (profile) assert.deepEqual(stageShape(status), stageShape(legacy));
+      else if (profile) assert.deepEqual(shared(stageShape(status)), shared(stageShape(legacy)));
       else {
         // Very old runs without a registry marker keep their existing waivers;
         // an explicit current contract intentionally binds the current registry.
@@ -137,8 +144,8 @@ try {
           assert.equal(legacy.stage_ledger.find((row) => row.stage === stage).state, "skipped_with_waiver");
           assert.equal(status.stage_ledger.find((row) => row.stage === stage).state, "missing");
         }
-        assert.deepEqual(stageShape(status).filter((row) => !newerRegistryGates.has(row.stage)),
-          stageShape(legacy).filter((row) => !newerRegistryGates.has(row.stage)));
+        assert.deepEqual(shared(stageShape(status)).filter((row) => !newerRegistryGates.has(row.stage)),
+          shared(stageShape(legacy)).filter((row) => !newerRegistryGates.has(row.stage)));
       }
       for (const key of ["current_stage", "current_stage_state", "allowed_command_stages", "next_command_shape"]) assert.deepEqual(status[key], legacy[key]);
       for (const key of ["audio_target", "image_provider", "render_profile", "target_wpm_min", "target_wpm_max"]) assert.deepEqual(status.identity[key], legacy.identity[key]);

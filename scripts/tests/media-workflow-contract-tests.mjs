@@ -34,7 +34,8 @@ test("both existing editorial profiles bind the same generated-visuals workflow"
     const resolved = assertAvailableMediaWorkflow(identity);
     assert.equal(resolved.id, "generated_visuals_v1");
     assert.equal(resolved.version, GENERATED_VISUALS_WORKFLOW_VERSION);
-    assert.equal(resolved.stage_registry_version, "2026-08-22.1");
+    assert.equal(resolved.stage_registry_version, GENERATED_VISUALS_STAGE_REGISTRY_VERSION);
+    assert.equal(resolved.historical, undefined);
     assert.equal(resolved.available, true);
     assert.equal(resolved.legacy, false);
     assert.equal(JSON.stringify(identity), before);
@@ -173,6 +174,23 @@ test("contradictory workflow identifiers fail closed", () => {
     identity.workflow_contract.id = id;
     assert.throws(() => resolveMediaWorkflow(identity), /conflicts with workflow_contract.id/);
   }
+});
+
+test("a historical generated contract resolves exactly as recorded, without migration", () => {
+  const historical = { version: "2026-09-06.1", stage_registry_version: "2026-08-22.1" };
+  const payload = { schema: MEDIA_WORKFLOW_CONTRACT_SCHEMA, id: "generated_visuals_v1", ...historical };
+  const identity = { ...binding(), stage_registry_version: historical.stage_registry_version, workflow_contract: { ...payload, sha256: digest(payload) } };
+  const before = JSON.stringify(identity);
+  const resolved = resolveMediaWorkflow(identity);
+  assert.equal(resolved.version, "2026-09-06.1");
+  assert.equal(resolved.stage_registry_version, "2026-08-22.1");
+  assert.equal(resolved.historical, true);
+  assert.equal(resolved.legacy, false);
+  assert.equal(JSON.stringify(identity), before);
+  // a historical version pair with the wrong hash, or a mixed pair, still fails closed
+  assert.throws(() => resolveMediaWorkflow({ ...identity, workflow_contract: { ...identity.workflow_contract, sha256: "0".repeat(64) } }), /Invalid workflow_contract sha256/);
+  const mixed = { ...payload, version: GENERATED_VISUALS_WORKFLOW_VERSION };
+  assert.throws(() => resolveMediaWorkflow({ ...binding(), stage_registry_version: "2026-08-22.1", workflow_contract: { ...mixed, sha256: digest(mixed) } }), /Unsupported or stale workflow_contract/);
 });
 
 test("stale contract schema, workflow version, and registry version remain unsupported even if rehashed", () => {

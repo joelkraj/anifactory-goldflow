@@ -80,6 +80,43 @@ export function validatePanelAuthorResponse(response, chunk, baseline) {
   return response.decisions;
 }
 
+/**
+ * Deterministic geometry repair only: a contain panel whose authored rect does
+ * not match its crop's aspect would letterbox. Resize that rect to the exact
+ * crop aspect, keeping its centre and height (width-fit if it would overflow),
+ * clamped inside the canvas. Crops, layouts, cameras and timing are untouched.
+ * Returns the list of snaps so they are recorded with the authored chunk.
+ */
+export function snapPanelAuthorRects(response, baseline) {
+  const panels = new Map(baseline.panels.map(panel => [panel.id, panel]));
+  const assets = new Map(baseline.assets.map(asset => [asset.id, asset]));
+  const round = value => Math.round(value * 1e6) / 1e6, snaps = [];
+  const snap = (panelId, crop, rect) => {
+    const panel = panels.get(panelId), asset = assets.get(panel?.asset_id);
+    if (!asset?.width || !asset?.height || !rect || !crop) return null;
+    const aspect = (asset.width * panel.source_rect.width * crop.width) / (asset.height * panel.source_rect.height * crop.height);
+    const current = (rect.width * baseline.width) / (rect.height * baseline.height);
+    if (Math.abs(current - aspect) / aspect < 0.002) return null;
+    let height = rect.height, width = height * baseline.height * aspect / baseline.width;
+    if (width > 1) { width = 1; height = width * baseline.width / (aspect * baseline.height); }
+    const cx = rect.x + rect.width / 2, cy = rect.y + rect.height / 2;
+    return { x: round(Math.min(Math.max(cx - width / 2, 0), 1 - width)), y: round(Math.min(Math.max(cy - height / 2, 0), 1 - height)), width: round(width), height: round(height) };
+  };
+  for (const row of response?.decisions ?? []) {
+    if (row.fit === 'contain' && row.layout !== 'page_pan') {
+      for (const key of ['rect', 'rect_to']) {
+        const fixed = row[key] && snap(row.panel_id, row.source_rect, row[key]);
+        if (fixed) { snaps.push({ scene_id: row.scene_id, field: key, before: row[key], after: fixed }); row[key] = fixed; }
+      }
+    }
+    if (row.context && (row.context.fit ?? 'contain') === 'contain') {
+      const fixed = snap(row.context.panel_id, full, row.context.rect);
+      if (fixed) { snaps.push({ scene_id: row.scene_id, field: 'context.rect', before: row.context.rect, after: fixed }); row.context.rect = fixed; }
+    }
+  }
+  return snaps;
+}
+
 export function panelAuthorPrompt(packet, chunk, attachedAssets, contextScene) {
   const ids = new Set(chunk.scenes.map(scene => scene.id));
   const beats = packet.beats.filter(beat => ids.has(beat.visual_beat_id));
@@ -197,8 +234,9 @@ export async function authorPanelProduction({ episodeDir, repoRoot, limit = 1000
       const request = selected[next++], begin = Date.now(); let row;
       try {
         const response = await executor({ prompt: request.prompt, images: request.attached.map(asset => asset.path), outputPath: request.raw, repoRoot });
+        const rectSnaps = snapPanelAuthorRects(response, packet.baseline);
         validatePanelAuthorResponse(response, request.chunk, packet.baseline);
-        row = { status: 'authored', response };
+        row = { status: 'authored', response, ...(rectSnaps.length ? { rect_snaps: rectSnaps } : {}) };
       } catch (error) { row = { status: 'failed', error: error.message }; failures.push(request.chunk.id); }
       row = { schema: 'goldflow_panel_author_chunk_v1', ...row, chunk_id: request.chunk.id, request_key: request.key,
         source_packet_sha256: packetHash, code_hashes: codeHashes, input_images: request.attached, raw_output_path: request.raw,

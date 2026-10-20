@@ -6,7 +6,7 @@ import os from 'node:os';
 import { sha256File } from '../lib/file-hash.mjs';
 import { panelProductionFixture } from './panel-production-fixture.mjs';
 import { preparePanelProductionPlan, compilePanelProductionPlan } from '../lib/panel-production-plan.mjs';
-import { panelAuthorChunks, validatePanelAuthorResponse, authorPanelProduction } from '../lib/panel-production-author.mjs';
+import { panelAuthorChunks, validatePanelAuthorResponse, authorPanelProduction, snapPanelAuthorRects } from '../lib/panel-production-author.mjs';
 
 const read = async file => JSON.parse(await fs.readFile(file, 'utf8'));
 const box = { x: 0, y: 0, width: 1, height: 1 };
@@ -108,6 +108,24 @@ test('contain rejects internal letterboxing while aspect-matched panels and safe
     assert.equal(validatePanelAuthorResponse(r, chunk, f.packet.baseline).length, 2);
     r.decisions[0].rect.height = .9; r.decisions[0].fit = 'cover';
     assert.equal(validatePanelAuthorResponse(r, chunk, f.packet.baseline).length, 2);
+  } finally { await fs.rm(f.root, { recursive: true, force: true }); }
+});
+
+test('rect snap repairs only contain aspect mismatches and records each change', async () => {
+  const f = await fixture('snap');
+  try {
+    const chunk = panelAuthorChunks(f.packet)[0], r = responseFor(chunk.scenes);
+    r.decisions[0].source_rect = { x: .2, y: .4, width: .6, height: .2 };
+    const before = structuredClone(r.decisions[0]);
+    const snaps = snapPanelAuthorRects(r, f.packet.baseline);
+    assert.equal(snaps.length, 1); assert.equal(snaps[0].field, 'rect');
+    assert.equal(validatePanelAuthorResponse(r, chunk, f.packet.baseline).length, 2, 'snapped rect now fills its viewport');
+    const after = r.decisions[0];
+    assert.deepEqual([after.source_rect, after.layout, after.camera_from, after.fit], [before.source_rect, before.layout, before.camera_from, before.fit], 'only the rect changes');
+    assert.ok(Math.abs((after.rect.y + after.rect.height / 2) - (before.rect.y + before.rect.height / 2)) < 1e-6, 'centre kept');
+    assert.deepEqual(snapPanelAuthorRects(r, f.packet.baseline), [], 'idempotent');
+    r.decisions[0].rect.height = .9; r.decisions[0].fit = 'cover';
+    assert.deepEqual(snapPanelAuthorRects(r, f.packet.baseline), [], 'cover crops are never resized');
   } finally { await fs.rm(f.root, { recursive: true, force: true }); }
 });
 

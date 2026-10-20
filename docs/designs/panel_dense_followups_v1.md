@@ -1,0 +1,25 @@
+# Dense pages: follow-up tracker v1
+
+Decision (Joel, 2026-10-20): dense 3840 pages are the panel-production direction. They proved better and cheaper on the gala chapter: 5.09 beats per image at $0.0262 per page.
+
+This tracker lists the ten agreed follow-ups. Each item lands as a reviewed, tested commit on `claude/panel-multizone-pages-v1`, and this file is updated in the same commit.
+
+| # | Item | Status | Commit / evidence |
+| --- | --- | --- | --- |
+| 1 | Several shots per beat: 2–3 authored crops of one zone within a long beat | pending | |
+| 2 | More cuts between zones of the same page (reaction pairs and contexts across siblings) in the author prompt | pending | |
+| 3 | Impact beats: an authored screen-shake window and quick cut bursts | pending | |
+| 4 | Snap author rects to the crop aspect deterministically (removes manual fill reconciliation) | **done** | `snapPanelAuthorRects` in the native author, with snaps recorded per chunk. All 3 gala chunks that had failed pass with it. |
+| 5 | Garbled-text detection on zone crops, routed to crop-out or zone repair | pending | |
+| 6 | Cast rule: exactly the named characters, no lookalikes; anonymous passive background population stays welcome; no unrequested text | pending | |
+| 7 | Dense page allocation planner: templates, caps, ~5 beats per image target, full episode | pending | |
+| 8 | Smaller reference board cost test (1024×576 versus 1920×1080) | pending | |
+| 9 | Reference trimming (124 → 84) and derived-reference promotion (design §1 and §3) | pending | |
+| 10 | Review and PR the branch onto its base | pending | |
+
+## Notes
+
+- **Item 6 (corrected).** A blanket "no one else" would empty public places, so it is not the rule.
+  - Named or recognizable characters are exactly those the section lists, with no lookalikes and no extra people performing story actions.
+  - Anonymous background people may appear where the location implies them. They must be passive and visually distinct from the named cast.
+  - Signs, labels and captions appear only where a section requests them.

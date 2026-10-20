@@ -1758,7 +1758,7 @@ function transcriptInputText(value) {
     : String(value ?? "");
 }
 
-export const TRANSCRIPT_QA_COMPARISON_VERSION = "unicode_words_exact_grouped_numbers_lexical_contraction_v12";
+export const TRANSCRIPT_QA_COMPARISON_VERSION = "unicode_words_exact_stable_source_numeric_alignment_v13";
 
 const TRANSCRIPT_PUNCTUATION = new Set([".", ",", ";", ":", "!", "?", "…"]);
 
@@ -2088,7 +2088,8 @@ function transcriptTokens(value, equivalentPhrases = [], preserveBoundaries = fa
 // digits, intervening words, and ordinary hundred/scale arithmetic remain distinct.
 function alignGroupedNumberNotation(leftTokens, rightTokens, leftText, rightText, aliases) {
   const left = [...leftTokens], right = [...rightTokens];
-  const collapse = (tokens, other, text) => {
+  const leftParts = leftTokens.map((token) => [token]);
+  const collapse = (tokens, other, text, parts = null) => {
     const marked = transcriptTokens(text, aliases, true);
     const boundaries = new Set();
     let cursor = 0;
@@ -2112,11 +2113,24 @@ function alignGroupedNumberNotation(leftTokens, rightTokens, leftText, rightText
         if (matches.length === 1) { groups.push({ start: i, count: end - i + 1, token: matches[0] }); i = end; break; }
       }
     }
-    for (const group of groups.reverse()) tokens.splice(group.start, group.count, group.token);
+    for (const group of groups.reverse()) {
+      tokens.splice(group.start, group.count, group.token);
+      if (parts) parts.splice(group.start, group.count, parts.slice(group.start, group.start + group.count).flat());
+    }
   };
-  collapse(left, right, leftText);
+  collapse(left, right, leftText, leftParts);
   collapse(right, left, rightText);
-  return { left, right };
+  // Source token coordinates are authoritative for full-stream window planning.
+  // Expand a matched ASR shorthand back to the source's numeric groups rather
+  // than collapsing the source. Keep its words and every nonmatching edit.
+  const expandedRight = [];
+  let leftIndex = 0;
+  for (const op of transcriptAlignment(left, right)) {
+    if (op.recognized != null) expandedRight.push(...(op.type === "match"
+      ? leftParts[leftIndex] : [op.recognized]));
+    if (op.intended != null) leftIndex += 1;
+  }
+  return { left: [...leftTokens], right: expandedRight };
 }
 
 function alignTranscriptNotation(intendedTokens, recognizedTokens) {

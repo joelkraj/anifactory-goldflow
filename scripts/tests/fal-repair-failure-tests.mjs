@@ -102,8 +102,10 @@ test("reviewed reference provider failure gets its own receipt and an exact seco
       image_id: id, ref_id: id, endpoint: "openai/gpt-image-2.5/sunburst/text-to-image",
       output_path: originalOutput, result_receipt_path: originalResult,
     }] }));
+    // Since 996e044 reference status binds to the generated-target set: a target that
+    // prepare assigned is required_before_imagegen (or standalone_ref) by construction.
     await writeFile(path.join(episodeDir, "visual_reference_plan.json"), JSON.stringify({ reference_targets: [{
-      ref_id: id, reference_image_path: originalOutput, conditioning_image_path: originalOutput,
+      ref_id: id, reference_image_path: originalOutput, conditioning_image_path: originalOutput, required_before_imagegen: true,
     }] }));
     await writeFile(path.join(root, "review-rejections.json"), JSON.stringify({
       schema: "goldflow_fal_reference_visual_review_v1", rejections: [{ image_id: id }],
@@ -147,11 +149,15 @@ test("reviewed reference provider failure gets its own receipt and an exact seco
     assert.equal(falFailureReceiptPath(v3), path.join(root, "review-repair-v3-failure-receipts", `${id}.json`));
     await mkdir(path.dirname(v3.result_receipt_path), { recursive: true });
     const v3Output = path.join(episodeDir, "assets", "images", "reference-repairs", `${id}-v3.png`);
+    // A result receipt is written only once its output has landed; since 4fda006 the
+    // reference counts as completed only when that effective output file exists.
+    await mkdir(path.dirname(v3Output), { recursive: true });
+    await writeFile(v3Output, "repaired image v3");
     await writeFile(v3.result_receipt_path, JSON.stringify({ output_path: v3Output }));
     const ready = (await falProductionStageStates({ episodeDir, identity })).stageStates.reference_image_approval;
     assert.match(ready.next_command_shape, /--action finalize-reviewed-references$/);
     await writeFile(path.join(episodeDir, "visual_reference_plan.json"), JSON.stringify({ reference_targets: [{
-      ref_id: id, reference_image_path: v3Output, conditioning_image_path: v3Output,
+      ref_id: id, reference_image_path: v3Output, conditioning_image_path: v3Output, required_before_imagegen: true,
     }] }));
     const finalized = (await falProductionStageStates({ episodeDir, identity })).stageStates;
     assert.equal(finalized.reference_generation.done, true);

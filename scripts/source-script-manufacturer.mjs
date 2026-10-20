@@ -12,9 +12,12 @@ import {
   modelLockConflicts,
   requestedModelLock,
   validateModelLock,
+  requestedWriterFallback,
+  BROWSER_SOURCE_PROVIDERS,
 } from "./lib/source-model-lock.mjs";
 import { sourceWriterPolicy, improvementEfforts } from "./lib/source-writer-policy.mjs";
 import { recoverBrowserDraft } from "./lib/source-browser-draft-recovery.mjs";
+import { CHATGPT_WEB_THROTTLE_COOLDOWN_MS, isChatGptWebRateLimitError } from "./lib/chatgpt-web-throttle-state.mjs";
 import { parseJsonObjectFromPlannerOutput } from "./lib/json-output-repair.mjs";
 import { DEFAULT_NEW_NARRATOR_VOICE_ID as DEFAULT_NARRATOR_VOICE_ID, qwenPrimaryLockForVoice } from "./lib/narration-tts-policy.mjs";
 import { extractOpeningAuditionText, sentenceCompleteAuditionUnits } from "./lib/source-opening-audio-audition-contract.mjs";
@@ -513,10 +516,14 @@ async function loadModelLock(directory, flags) {
   }
   const roles = requestedModelLock(flags);
   const portfolioExists = await exists(path.join(directory, "manufacturing_portfolio.json"));
+  const writerFallback = portfolioExists ? null : requestedWriterFallback(flags, roles);
   const document = {
     schema: MANUFACTURING_MODEL_LOCK_SCHEMA,
     roles: portfolioExists ? { ...roles, writer: null } : roles,
     writer_recorded_in_portfolio: portfolioExists,
+    ...(BROWSER_SOURCE_PROVIDERS.includes(roles.writer.provider) && !portfolioExists
+      ? { writer_transport: roles.writer.provider, writer_resubmit_policy: WRITER_TRANSPORT_POLICY, writer_fallback: writerFallback }
+      : {}),
     locked_at: new Date().toISOString(),
   };
   assertValid("manufacturing model lock", validateModelLock(document));
@@ -529,7 +536,94 @@ async function loadModelLock(directory, flags) {
 function lockedWriterCandidates(policy, lock) {
   const writer = lock?.document?.roles?.writer;
   if (policy.candidates.length !== 1 || !writer) return policy.candidates;
-  return policy.candidates.map((row) => ({ ...row, model: writer.model, provider: writer.provider }));
+  const fallback = lock.document.writer_fallback ?? null;
+  return policy.candidates.map((row) => ({ ...row, model: writer.model, provider: writer.provider, ...(fallback ? { fallback } : {}) }));
+}
+
+// ChatGPT Web writer transport policy: one draft submission; a throttle gets exactly one
+// resubmit after the shared cooldown; any remaining failure goes to the locked CLI fallback
+// when the lock names one, else the stage stops. Every attempt is appended to a ledger and the
+// failed receipt is archived before the next submission, so receipts stay append-only.
+export const WRITER_TRANSPORT_POLICY = "chatgpt_web_writer_one_resubmit_then_locked_fallback_v1";
+export const WRITER_TRANSPORT_LEDGER_SCHEMA = "goldflow_manhwa_writer_transport_ledger_v1";
+const THROTTLE_ERROR_CODES = new Set(["rate_limited", "usage_limit", "usage_limit_reached"]);
+
+// Production waits the shared browser cooldown (floor 60 s); tests inject a short wait.
+let writerTransportTiming = { cooldownMs: CHATGPT_WEB_THROTTLE_COOLDOWN_MS, sleep };
+export function setWriterTransportTimingForTests(timing) {
+  writerTransportTiming = { cooldownMs: CHATGPT_WEB_THROTTLE_COOLDOWN_MS, sleep, ...(timing ?? {}) };
+}
+
+export function isWriterThrottleError(error) {
+  const code = String(error?.code ?? "").trim().toLowerCase();
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  return THROTTLE_ERROR_CODES.has(code) || isChatGptWebRateLimitError(message) || /cooldown active|usage limit/i.test(message);
+}
+
+// Concurrent browser drafts (legacy multi-draft policies) share one ledger; appends are serialized.
+let ledgerChain = Promise.resolve();
+function appendWriterTransportLedger(outputDirectory, entry) {
+  const ledgerPath = path.join(outputDirectory, "writer_transport_ledger.json");
+  const append = async () => {
+    const existing = await exists(ledgerPath) ? JSON.parse(await fs.readFile(ledgerPath, "utf8")) : { schema: WRITER_TRANSPORT_LEDGER_SCHEMA, policy: WRITER_TRANSPORT_POLICY, attempts: [] };
+    existing.attempts.push({ ...entry, recorded_at: new Date().toISOString() });
+    await writeJsonAtomic(ledgerPath, existing);
+    return ledgerPath;
+  };
+  const result = ledgerChain.then(append, append);
+  ledgerChain = result.catch(() => {});
+  return result;
+}
+
+async function archiveFailedReceipt(outputPath, candidateId) {
+  const receiptPath = `${outputPath}.meta.json`;
+  if (!await exists(receiptPath)) return null;
+  const archiveDirectory = path.join(path.dirname(outputPath), "failed_receipts");
+  await fs.mkdir(archiveDirectory, { recursive: true });
+  const archivedPath = path.join(archiveDirectory, `${candidateId}.${new Date().toISOString().replace(/[:.]/g, "-")}.meta.json`);
+  await fs.rename(receiptPath, archivedPath);
+  return archivedPath;
+}
+
+// Returns { provider, model, writer_fallback_used, requested_writer, transport_attempts }.
+async function writerDraftCall({ spec, outputDirectory, call }) {
+  const ledgerEntry = (fields) => appendWriterTransportLedger(outputDirectory, { candidate_id: spec.id, stage_name: call.stageName, prompt_sha256: sha256Text(call.prompt), ...fields });
+  if (!BROWSER_SOURCE_PROVIDERS.includes(spec.provider)) {
+    await modelCall({ ...call, provider: spec.provider, model: spec.model });
+    return { provider: spec.provider, model: spec.model, writer_fallback_used: false, requested_writer: null, transport_attempts: 1 };
+  }
+  const attempt = async (kind, provider, model, extra = {}) => {
+    const startedAt = new Date().toISOString();
+    try {
+      await modelCall({ ...call, provider, model });
+      await ledgerEntry({ kind, provider, model, outcome: "passed", started_at: startedAt, ...extra });
+      return null;
+    } catch (error) {
+      const archived = await archiveFailedReceipt(call.outputPath, spec.id);
+      await ledgerEntry({ kind, provider, model, outcome: isWriterThrottleError(error) ? "throttled" : "failed", error_code: error?.code ?? null,
+        error: error instanceof Error ? error.message.slice(0, 2_000) : String(error), archived_receipt_path: archived, started_at: startedAt, ...extra });
+      return error;
+    }
+  };
+  let attempts = 1;
+  let failure = await attempt("submit", spec.provider, spec.model);
+  if (failure && isWriterThrottleError(failure)) {
+    const cooldownMs = writerTransportTiming.cooldownMs;
+    await ledgerEntry({ kind: "cooldown", provider: spec.provider, model: spec.model, outcome: "waiting", cooldown_ms: cooldownMs });
+    await writerTransportTiming.sleep(cooldownMs);
+    attempts += 1;
+    failure = await attempt("resubmit", spec.provider, spec.model, { cooldown_ms: cooldownMs });
+  }
+  if (!failure) return { provider: spec.provider, model: spec.model, writer_fallback_used: false, requested_writer: null, transport_attempts: attempts };
+  if (!spec.fallback) {
+    await ledgerEntry({ kind: "stop", provider: spec.provider, model: spec.model, outcome: "no_fallback_locked" });
+    throw failure;
+  }
+  attempts += 1;
+  const fallbackFailure = await attempt("fallback", spec.fallback.provider, spec.fallback.model, { after_error: failure instanceof Error ? failure.message.slice(0, 500) : String(failure) });
+  if (fallbackFailure) throw fallbackFailure;
+  return { provider: spec.fallback.provider, model: spec.fallback.model, writer_fallback_used: true,
+    requested_writer: { provider: spec.provider, model: spec.model }, transport_attempts: attempts };
 }
 
 // Non-gate notice: the auto-selected rank-one brief is about to be drafted. The file (and
@@ -615,18 +709,28 @@ async function writeCandidates(directory, flags) {
       const reusable = await reusableResponse({ outputPath, prompt: candidatePrompt, provider: spec.provider,
         model: spec.model, effort: "max", stageName });
       if (!reusable) throw new Error(`Unscoped draft ${spec.id} cannot be reused.`);
-    } else await modelCall({
-      outputPath,
-      prompt: candidatePrompt,
-      provider: spec.provider,
-      model: spec.model,
-      effort: "max",
-      stageName,
-      timeoutMs: Number(flags["draft-timeout-ms"] ?? 5_400_000),
-    });
+    }
+    const written = scopedOut || (recovery[spec.id] && await exists(outputPath))
+      ? { provider: spec.provider, model: spec.model, writer_fallback_used: false, requested_writer: null, transport_attempts: 0 }
+      : await writerDraftCall({ spec, outputDirectory, call: {
+        outputPath,
+        prompt: candidatePrompt,
+        effort: "max",
+        stageName,
+        timeoutMs: Number(flags["draft-timeout-ms"] ?? 5_400_000),
+      } });
     const content = await fs.readFile(outputPath, "utf8");
+    const { fallback: _fallback, ...candidateSpec } = spec;
     return {
-      ...spec,
+      ...candidateSpec,
+      provider: written.provider,
+      model: written.model,
+      ...(BROWSER_SOURCE_PROVIDERS.includes(spec.provider) ? {
+        writer_transport_policy: WRITER_TRANSPORT_POLICY,
+        writer_transport_attempts: written.transport_attempts,
+        writer_fallback_used: written.writer_fallback_used,
+        requested_writer: written.requested_writer,
+      } : {}),
       reasoning_effort: "max",
       prompt_sha256: sha256Text(candidatePrompt),
       output_path: outputPath,
@@ -2002,7 +2106,8 @@ async function main() {
   const action = process.argv[2] ?? "help";
   const flags = flagsFrom(process.argv.slice(3));
   const directory = developmentDirectory(flags, action);
-  if (flags.transport != null && flags.transport !== "chatgpt_web") throw new Error("--transport accepts only chatgpt_web (the retired legacy browser path).");
+  if (flags.transport != null && flags.transport !== "chatgpt_web") throw new Error("--transport accepts only chatgpt_web (the opt-in browser writer path).");
+  if (flags["writer-fallback"] != null && flags.transport !== "chatgpt_web") throw new Error("--writer-fallback applies only with --transport chatgpt_web.");
   allowChatGptWebTransport(flags.transport === "chatgpt_web");
   if (action === "ideate") {
     const result = await ideateTopics(directory, flags);
@@ -2114,7 +2219,7 @@ async function main() {
     }, null, 2));
     return;
   }
-  console.log(`Usage: goldflow source manufacture <run|ideate|prepare|write|revise|select|compare-prompts|improve|audition|promote|learn> --development-slug <slug> [--evidence <txt>] [--brief <json>] [--target-word-count 10000] [--writer-model gpt-6.1-sol|gpt-6-sol|claude-fable-5-1|claude-opus-5-5] [--revision-model <model>] [--planning-model <model>] [--max-rounds 2] [--diagnose-effort high] [--revise-effort high] [--verify-effort medium]
+  console.log(`Usage: goldflow source manufacture <run|ideate|prepare|write|revise|select|compare-prompts|improve|audition|promote|learn> --development-slug <slug> [--evidence <txt>] [--brief <json>] [--target-word-count 10000] [--writer-model gpt-6.1-sol|gpt-6-sol|claude-fable-5-1|claude-opus-5-5|gpt-6-astra] [--transport chatgpt_web --writer-model gpt-6-astra [--writer-fallback claude-fable-5-1]] [--revision-model <model>] [--planning-model <model>] [--max-rounds 2] [--diagnose-effort high] [--revise-effort high] [--verify-effort medium]
        goldflow source manufacture revise --script <brought-script.txt> [--development-dir <dir>] [--brief <json>]
        Legacy multi-draft and browser paths need --transport chatgpt_web. Legacy flags: [--writer-prompt <operator-approved.txt>] [--script <incumbent.txt>] [--max-rounds 1] [--minimum-apv-delta 0.5] [--writer-concurrency 3] [--writer-stagger-ms 15000] [--legacy-manifest <recovered-drafts-manifest.json>] [--audition-candidate-count 3] [--candidate-id draft_56_2 --approved-by <name> --reason <text>] [--template <complete-template.txt>]`);
 }

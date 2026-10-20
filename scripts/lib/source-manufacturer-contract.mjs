@@ -189,7 +189,11 @@ export function validateManufacturingPortfolio(document, { promptSha256 = null, 
       blockers.push(`manufacturing_portfolio_${spec.id}_missing`);
       continue;
     }
-    if (row.model !== spec.model || row.provider !== spec.provider || row.reasoning_effort !== "max") blockers.push(`manufacturing_portfolio_${spec.id}_model_contract_mismatch`);
+    const requestedMatches = row.model === spec.model && row.provider === spec.provider;
+    const fallbackMatches = row.writer_fallback_used === true && spec.fallback
+      && row.model === spec.fallback.model && row.provider === spec.fallback.provider
+      && row.requested_writer?.model === spec.model && row.requested_writer?.provider === spec.provider;
+    if (!(requestedMatches || fallbackMatches) || row.reasoning_effort !== "max") blockers.push(`manufacturing_portfolio_${spec.id}_model_contract_mismatch`);
     if (!sha(row.output_sha256) || !sha(row.receipt_sha256) || !sha(row.prompt_sha256)) blockers.push(`manufacturing_portfolio_${spec.id}_hash_invalid`);
     if (!text(row.output_path) || !text(row.receipt_path)) blockers.push(`manufacturing_portfolio_${spec.id}_path_missing`);
     if (!Number.isInteger(row.word_count) || row.word_count < 1) blockers.push(`manufacturing_portfolio_${spec.id}_empty`);

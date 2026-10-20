@@ -19,6 +19,10 @@ export const PAGE_LIMITS = Object.freeze({ max_references: 6, max_visible_people
 // a size directive, small zones carry at most one short text element, and
 // multi-line cards belong only in a large zone. Review still reads every word.
 export const PAGE_LETTERING_POLICY = Object.freeze({ dense_min_zones: 4, max_words: 6, max_chars: 32, large_slots: Object.freeze(['hero', 'left']) });
+// Cast rule (dense proof: an unrequested runner resembling Joey, an
+// unrequested wall sign). Named characters are exact; anonymous background
+// population stays welcome so public places never feel hollow.
+const CAST_RULE = 'Named characters appear only in the panels that name them, and no other figure resembles a named character. Anonymous background people may fill public places where a panel implies them; they stay passive, take no story action, and look clearly different from the named cast. Add no signs, labels or other text a panel does not request.';
 const LETTERING_SIZE = 'Every requested caption or thought bubble is large, bold and mobile-readable: at least one-fifth of its panel\'s width with generous padding, and every word is spelled exactly once.';
 
 const need = (value, message) => { if (!value) throw new Error(`Page prompt: ${message}`); };
@@ -28,7 +32,7 @@ export function pageFrameText(template) {
   need(PAGE_TEMPLATES[template] && GEOMETRY[template], `unknown template ${template}`);
   const count = PAGE_TEMPLATES[template].length;
   const lettering = count >= PAGE_LETTERING_POLICY.dense_min_zones ? ` ${LETTERING_SIZE}` : '';
-  return `One 16:9 landscape anime/manhwa page divided into ${count} fully separate rectangular panels by straight solid white gutters of equal width that run edge to edge. ${GEOMETRY[template]} Nothing (no limb, hair, prop, light streak, effect or lettering) crosses a gutter. Keep the gutters and page edges free of any text; add a caption or thought bubble only where a panel section explicitly asks for it, entirely inside that panel.${lettering}`;
+  return `One 16:9 landscape anime/manhwa page divided into ${count} fully separate rectangular panels by straight solid white gutters of equal width that run edge to edge. ${GEOMETRY[template]} Nothing (no limb, hair, prop, light streak, effect or lettering) crosses a gutter. Keep the gutters and page edges free of any text; add a caption or thought bubble only where a panel section explicitly asks for it, entirely inside that panel. ${CAST_RULE}${lettering}`;
 }
 
 /** The required "Panel k (slot):" headings, in the template's reading order. */
@@ -70,6 +74,10 @@ export function pagePromptFindings(prompt, order) {
     });
   }
   const people = visiblePeople(prompt);
+  // Every visible named person needs an identity anchor in the prompt text.
+  const lower = text.toLowerCase();
+  const unanchored = [...people].filter(name => !/^(anonymous|unnamed|gala guests|attending|local news)/.test(name) && !name.split(/\s+/).filter(word => word.length >= 4).some(word => lower.includes(word)));
+  if (unanchored.length) findings.push(finding('page_cast_anchor_missing', `Page ${order.asset_id} shows ${unanchored.join(', ')} without an identity anchor in the prompt.`));
   if (people.size > PAGE_LIMITS.max_visible_people) findings.push(finding('page_visible_people_cap', `Page ${order.asset_id} shows ${people.size} distinct people; at most ${PAGE_LIMITS.max_visible_people} are allowed on one page.`));
   return findings;
 }

@@ -18,6 +18,7 @@ const prompt = (overrides = {}) => ({ image_id: 'ep-cut-007', scene_id: 'scene_3
 test('page frames are fixed per template and name every panel', () => {
   for (const template of ['P2V', 'P2H', 'P3L', 'P4G', 'P3H', 'P4H', 'P5L', 'P6G']) assert.match(pageFrameText(template), /white gutters .* Keep the gutters and page edges free of any text/);
   assert.match(pageFrameText('P4G'), /divided into 4 fully separate/);
+  assert.match(pageFrameText('P2V'), /no other figure resembles a named character\. Anonymous background people may fill public places/);
   assert.match(pageFrameText('P6G'), /divided into 6 fully separate/);
   assert.deepEqual(pagePanelHeadings({ page_template: 'P4H' }), ['Panel 1 (hero):', 'Panel 2 (right-top):', 'Panel 3 (right-middle):', 'Panel 4 (right-bottom):']);
   assert.deepEqual(pagePanelHeadings({ page_template: 'P4G' }), ['Panel 1 (top-left):', 'Panel 2 (top-right):', 'Panel 3 (bottom-left):', 'Panel 4 (bottom-right):']);
@@ -38,7 +39,7 @@ test('missing frame, sections, order, extras and caps are blocking findings', ()
   assert.deepEqual(codes(prompt({ provider_prompt: swapped })), [['page_panel_sections_invalid', true, 'blocker']]);
   assert.deepEqual(codes(prompt({ provider_prompt: `${authored()}\nPanel 4 (extra): a fourth view.` })), [['page_panel_sections_invalid', true, 'blocker']]);
   assert.deepEqual(codes(prompt({ reference_requirements: ['a', 'b', 'c', 'd', 'e', 'f', 'g'].map(ref_id => ({ ref_id })) })), [['page_reference_cap', true, 'blocker']]);
-  assert.deepEqual(codes(prompt({ shot_manifest: { visible_characters: ['Joey', 'Elena', 'Marcus', 'Vanessa', 'Richard'] } })), [['page_visible_people_cap', true, 'blocker']]);
+  assert.deepEqual(codes(prompt({ shot_manifest: { visible_characters: ['Joey', 'Elena', 'Marcus', 'Vanessa', 'Richard'] } })).filter(row => row[0] !== 'page_cast_anchor_missing'), [['page_visible_people_cap', true, 'blocker']]);
 });
 
 test('the page board instruction replaces only the single-frame line', () => {
@@ -69,5 +70,10 @@ test('dense pages size their lettering and keep small zones to one short text el
   assert.deepEqual(pagePromptFindings({ image_id: 'x', provider_prompt: build(card) }, dense).map(row => row.code), ['page_lettering_policy']);
   const long = [ok[1], 'A bubble reads exactly "This is far too many words for a small zone."', ok[2], ok[3]];
   assert.match(pagePromptFindings({ image_id: 'x', provider_prompt: build(long) }, dense)[0].message, /over-long/);
+});
+test('every visible named person must be anchored in the page prompt; anonymous crowds need no anchor', () => {
+  const base = prompt();
+  assert.deepEqual(pagePromptFindings({ ...base, shot_manifest: { visible_characters: ['Joey', 'Elena', 'Anonymous gala guests'] } }, order), []);
+  assert.deepEqual(pagePromptFindings({ ...base, shot_manifest: { visible_characters: ['Joey', 'Marcus Hale'] } }, order).map(row => row.code), ['page_cast_anchor_missing']);
 });
 process.stdout.write(`Panel page prompts: ${count} test groups passed.\n`);

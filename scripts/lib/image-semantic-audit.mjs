@@ -7,6 +7,7 @@ import {
   configuredCodexReasoningEffort,
   runCodexCli,
 } from "./codex-cli-runner.mjs";
+import { planningRuntimeFromProcessContext } from "./planning-runtime-policy.mjs";
 
 export const IMAGE_SEMANTIC_AUDIT_SCHEMA = "goldflow_image_semantic_audit_v1";
 export const IMAGE_SEMANTIC_AUDIT_ROW_SCHEMA = "goldflow_image_semantic_audit_row_v1";
@@ -314,7 +315,14 @@ export async function buildImageSemanticAudit({
   const promptPlanSha256 = promptPlanPath ? await fileHash(promptPlanPath) : sha256(JSON.stringify(promptPlan));
   const imagegenReportSha256 = imagegenReportPath ? await fileHash(imagegenReportPath) : sha256(JSON.stringify(imagegenReport));
   const resolvedProvider = cleanText(auditProvider) || "codex_cli";
-  const resolvedModel = configuredCodexModel(model);
+  // No registry literal: the audit model comes from the explicit flag or the run
+  // identity's provider locks for this provider and stage (R06 lock part). The
+  // row-cache key below still records provider/model/effort unchanged.
+  const resolvedModel = planningRuntimeFromProcessContext({
+    explicitProvider: resolvedProvider,
+    explicitModel: model,
+    overrideStage: "image_semantic_audit",
+  }).model || configuredCodexModel(model);
   const resolvedReasoningEffort = configuredCodexReasoningEffort(
     reasoningEffort,
     "image_semantic_audit",

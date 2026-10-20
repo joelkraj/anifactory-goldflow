@@ -9,6 +9,10 @@ Default planner models for **new** runs live in [`config/planner-models.json`](.
 3. Update the one test assertion that names the old default (`scripts/goldflow-fixture-tests.mjs`, `testPinnedCodexRuntimeContracts`).
 4. Run `npm run test:planner-models`.
 
+`providers.<provider>.fallback_model` (today `claude-opus-5-5` for `claude_cli`) is recorded provenance: the model an operator may lock explicitly when the default is unavailable. No runner, planner or driver fails over to it on its own; automatic provider failover stays prohibited.
+
+The `image_output_qa` registry command carries no `--semantic-audit-model` literal. The semantic audit resolves its model from an explicit flag or, by default, from the run identity's provider locks for `codex_cli`, so every pass of one identity audits under one model and the row cache (still keyed on provider, model and effort) is reused instead of missed.
+
 The per-provider `reasoning_effort` is used for new single-provider identities and standalone calls. Explicit flags win over the corresponding `ANIFACTORY_CODEX_*` or `ANIFACTORY_CLAUDE_*` model/effort environment setting, which wins over this config. Existing identity locks still win at execution.
 
 ## Aliases

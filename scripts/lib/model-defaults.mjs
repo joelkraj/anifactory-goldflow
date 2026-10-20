@@ -29,8 +29,14 @@ export function parsePlannerModelsConfig(raw, source = "planner models config") 
       if (typeof gate.pattern !== "string" || !gate.pattern.trim()) throw new Error(`${source}: providers.${id}.minimum_cli_by_model[${index}].pattern is required.`);
       return Object.freeze({ pattern: new RegExp(String(gate.pattern), "i"), minimum: gate.minimum });
     });
+    // Optional recorded fallback: provenance for operators, never automatic failover.
+    const fallback = row.fallback_model == null ? null : String(row.fallback_model).trim();
+    if (fallback !== null && (!fallback || MODEL_ALIASES.has(fallback.toLowerCase()))) {
+      throw new Error(`${source}: providers.${id}.fallback_model must be a concrete model id when present.`);
+    }
     providers[id] = Object.freeze({
       model: row.model.trim(),
+      fallback_model: fallback,
       reasoning_effort: row.reasoning_effort,
       minimum_cli_by_model: Object.freeze(gates),
     });
@@ -42,13 +48,21 @@ const PLANNER_MODELS = parsePlannerModelsConfig(readFileSync(PLANNER_MODELS_PATH
 
 export const CODEX_PLANNING_DEFAULTS = Object.freeze({
   model: PLANNER_MODELS.codex_cli.model,
+  fallback_model: PLANNER_MODELS.codex_cli.fallback_model,
   reasoning_effort: PLANNER_MODELS.codex_cli.reasoning_effort,
 });
 
 export const CLAUDE_PLANNING_DEFAULTS = Object.freeze({
   model: PLANNER_MODELS.claude_cli.model,
+  fallback_model: PLANNER_MODELS.claude_cli.fallback_model,
   reasoning_effort: PLANNER_MODELS.claude_cli.reasoning_effort,
 });
+
+// The recorded fallback for a provider, or null. Read for provenance and operator
+// choice only; no runner selects it on its own.
+export function plannerFallbackModel(provider, config = PLANNER_MODELS) {
+  return config[provider]?.fallback_model ?? null;
+}
 
 export function plannerDefaultEffort(provider, env = process.env, config = PLANNER_MODELS) {
   const key = provider === "claude_cli" ? "ANIFACTORY_CLAUDE_REASONING_EFFORT" : "ANIFACTORY_CODEX_REASONING_EFFORT";

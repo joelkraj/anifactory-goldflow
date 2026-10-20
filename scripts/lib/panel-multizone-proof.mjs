@@ -6,7 +6,7 @@ import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { PAGE_TEMPLATES, PAGE_TEMPLATE_MIN_CANVAS_WIDTH, PAGE_GEOMETRY_DETECTOR_VERSION, writePageGeometry } from './panel-page-geometry.mjs';
 import { pageFrameText, pagePanelHeadings, pagePromptFindings } from './panel-page-prompts.mjs';
-import { buildReferenceBoard, pageReferenceBoardPromptGuidance, referenceBoardPromptGuidance } from './openart-reference-board.mjs';
+import { buildReferenceBoard, pageReferenceBoardPromptGuidance, referenceBoardPromptGuidance, REFERENCE_BOARD_OUTPUT_SIZES } from './openart-reference-board.mjs';
 import { falPortableAssetId } from './fal-portable-bank.mjs';
 import { FAL_ENDPOINTS, FAL_PAGE_CANVAS_SIZES, uploadFalReference, submitFalImage, observeFalImage, falBillingForRequests } from './fal-provider.mjs';
 
@@ -61,6 +61,7 @@ export async function resolveMultizoneProofPlan(plan) {
   // An explicit page subset (e.g. a canvas-size comparison) re-draws only the
   // named pages; full coverage of every owner is then not claimed.
   const subset = plan.page_ids ? new Set(plan.page_ids) : null;
+  if (plan.board_size) need(REFERENCE_BOARD_OUTPUT_SIZES.some(row => row.width === plan.board_size.width && row.height === plan.board_size.height), 'unsupported board_size');
   if (plan.canvas) need(FAL_PAGE_CANVAS_SIZES.some(row => row.width === plan.canvas.width && row.height === plan.canvas.height), 'unsupported canvas');
   const scenes = new Set(plan.scene_ids ?? []);
   const owners = new Map(prompts.filter(row => scenes.has(row.scene_id) && row.provider_submission_required !== false).map(row => [row.image_id, row]));
@@ -103,7 +104,7 @@ export async function resolveMultizoneProofPlan(plan) {
   if (subset) need(pages.length === subset.size, 'every named page id must exist');
   const missing = subset ? [] : [...owners.keys()].filter(id => !covered.has(id));
   need(!missing.length, `every source owner must be paged or reused: ${missing.join(', ')}`);
-  return { identity, pages, reused: subset ? [] : plan.reused_singles, owners: owners.size, subset: subset ? [...subset] : null, canvas: plan.canvas ?? null };
+  return { identity, pages, reused: subset ? [] : plan.reused_singles, owners: owners.size, subset: subset ? [...subset] : null, canvas: plan.canvas ?? null, boardSize: plan.board_size ?? null };
 }
 
 export function proofPaths(proofDir, pageId) {
@@ -132,7 +133,7 @@ export async function prepareMultizoneProof({ planPath, proofDir, allowDirtyWork
     schema: MULTIZONE_PROOF_IDENTITY_SCHEMA, proof_id: plan.proof_id, intent: 'private_proof', production_eligible: false,
     source_episode_dir: source, source_hashes: sourceHashes, code,
     provider: { endpoint_with_refs: FAL_ENDPOINTS.primary_edit, endpoint_text: FAL_ENDPOINTS.primary_text, quality: 'low', width: resolved.canvas?.width ?? 1920, height: resolved.canvas?.height ?? 1080, automatic_creative_retry: false, automatic_failover: false },
-    page_subset: resolved.subset,
+    page_subset: resolved.subset, reference_board_size: resolved.boardSize ?? { width: 1920, height: 1080 },
     page_count: resolved.pages.length, zone_count: resolved.pages.reduce((n, page) => n + page.zones.length, 0),
     source_owner_count: resolved.owners, reused_single_count: resolved.reused.length,
     max_requests: resolved.pages.length + REPAIR_ALLOWANCE, max_cost_per_request_usd: MAX_COST_PER_REQUEST_USD,
@@ -144,7 +145,7 @@ export async function prepareMultizoneProof({ planPath, proofDir, allowDirtyWork
   const identitySha256 = await fileSha(path.join(proofDir, 'proof_identity.json'));
   const assignments = [];
   for (const page of resolved.pages) {
-    const board = page.refs.length ? await buildReferenceBoard({ root: proofDir, imageId: page.page_id, references: page.refs }) : null;
+    const board = page.refs.length ? await buildReferenceBoard({ root: proofDir, imageId: page.page_id, references: page.refs, outputSize: resolved.boardSize }) : null;
     const prompt = board ? `${page.provider_prompt}\n\n${pageReferenceBoardPromptGuidance(board)}` : page.provider_prompt;
     const core = {
       proof_id: plan.proof_id, image_id: page.page_id, panel_page_template: page.template, scene_id: page.scene_id,

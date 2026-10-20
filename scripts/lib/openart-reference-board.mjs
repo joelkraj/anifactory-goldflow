@@ -127,10 +127,17 @@ export function pageReferenceBoardPromptGuidance(board) {
   return guidance.replace(SINGLE_FRAME_LINE, PAGE_FRAME_BOARD_LINE);
 }
 
-export async function buildReferenceBoard({ root, imageId, references }) {
+// Proof-only smaller board outputs (follow-up 8): the same 1920x1080 layout,
+// downscaled before upload to test whether input-image tokens drive cost.
+export const REFERENCE_BOARD_OUTPUT_SIZES = Object.freeze([{ width: 1920, height: 1080 }, { width: 1280, height: 720 }, { width: 1024, height: 576 }]);
+
+export async function buildReferenceBoard({ root, imageId, references, outputSize = null }) {
   const layout = referenceBoardLayout(references);
   const source = layout.panels.map((panel) => ({ asset_id: panel.ref.asset_id, sha256: panel.ref.sha256, role: panel.role, placement: { x: panel.x, y: panel.y, width: panel.width, height: panel.height } }));
-  const cacheKey = digest(JSON.stringify({ schema: REFERENCE_BOARD_SCHEMA, compositor_version: REFERENCE_BOARD_COMPOSITOR_VERSION, width: REFERENCE_BOARD_WIDTH, height: REFERENCE_BOARD_HEIGHT, gutter: REFERENCE_BOARD_GUTTER, layout_id: layout.layout_id, panels: source }));
+  const scaled = outputSize && !(outputSize.width === REFERENCE_BOARD_WIDTH && outputSize.height === REFERENCE_BOARD_HEIGHT);
+  if (scaled && !REFERENCE_BOARD_OUTPUT_SIZES.some((row) => row.width === outputSize.width && row.height === outputSize.height)) throw new Error(`Unsupported reference board output size ${outputSize.width}x${outputSize.height}.`);
+  // The default key is unchanged, so existing boards and caches stay valid.
+  const cacheKey = digest(JSON.stringify({ schema: REFERENCE_BOARD_SCHEMA, compositor_version: REFERENCE_BOARD_COMPOSITOR_VERSION, width: REFERENCE_BOARD_WIDTH, height: REFERENCE_BOARD_HEIGHT, gutter: REFERENCE_BOARD_GUTTER, layout_id: layout.layout_id, panels: source, ...(scaled ? { output_size: { width: outputSize.width, height: outputSize.height } } : {}) }));
   const stem = `${safe(imageId)}--${cacheKey.slice(0, 16)}`;
   const boardDir = path.join(root, 'reference-boards');
   const manifestDir = path.join(root, 'reference-board-manifests');
@@ -149,7 +156,8 @@ export async function buildReferenceBoard({ root, imageId, references }) {
     const input = await sharp(panel.ref.path).resize(panel.width, panel.height, { fit: 'cover', position: 'attention', withoutEnlargement: false }).png().toBuffer();
     composites.push({ input, left: panel.x, top: panel.y });
   }
-  const bytes = await sharp({ create: { width: REFERENCE_BOARD_WIDTH, height: REFERENCE_BOARD_HEIGHT, channels: 4, background: REFERENCE_BOARD_BACKGROUND } }).composite(composites).png().toBuffer();
+  const composed = await sharp({ create: { width: REFERENCE_BOARD_WIDTH, height: REFERENCE_BOARD_HEIGHT, channels: 4, background: REFERENCE_BOARD_BACKGROUND } }).composite(composites).png().toBuffer();
+  const bytes = scaled ? await sharp(composed).resize(outputSize.width, outputSize.height, { fit: 'fill', kernel: 'lanczos3' }).png().toBuffer() : composed;
   await fs.writeFile(outputPath, bytes, { flag: 'wx' });
   const manifest = {
     schema: REFERENCE_BOARD_SCHEMA,
@@ -160,8 +168,9 @@ export async function buildReferenceBoard({ root, imageId, references }) {
     output_path: outputPath,
     manifest_path: manifestPath,
     output_sha256: digest(bytes),
-    width: REFERENCE_BOARD_WIDTH,
-    height: REFERENCE_BOARD_HEIGHT,
+    width: scaled ? outputSize.width : REFERENCE_BOARD_WIDTH,
+    height: scaled ? outputSize.height : REFERENCE_BOARD_HEIGHT,
+    ...(scaled ? { layout_width: REFERENCE_BOARD_WIDTH, layout_height: REFERENCE_BOARD_HEIGHT, downscale: 'lanczos3' } : {}),
     color_mode: 'rgba',
     panels: source,
     source_reference_order: references.map((ref) => ({ asset_id: ref.asset_id, sha256: ref.sha256 })),

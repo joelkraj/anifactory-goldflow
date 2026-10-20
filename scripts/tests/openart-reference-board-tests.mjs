@@ -36,6 +36,14 @@ try {
   assert.match(guidance, /story-confirmed twins, clones/);
   assert.match(guidance, /current shot's wardrobe state/);
   assert(!guidance.includes('Joey'));
+  // Proof-only smaller output: same layout and guidance, separate cache entry, default unchanged.
+  const small = await buildReferenceBoard({ root, imageId: 'frame.001', references: refs, outputSize: { width: 1024, height: 576 } });
+  const smallMeta = await sharp(small.output_path).metadata();
+  assert.deepEqual([smallMeta.width, smallMeta.height, small.width, small.layout_width], [1024, 576, 1024, 1920]);
+  assert.notEqual(small.cache_key, first.cache_key); assert.deepEqual(small.panels, first.panels);
+  assert.equal(referenceBoardPromptGuidance(small), guidance);
+  assert.equal((await buildReferenceBoard({ root, imageId: 'frame.001', references: refs, outputSize: { width: 1920, height: 1080 } })).cache_key, first.cache_key);
+  await assert.rejects(buildReferenceBoard({ root, imageId: 'frame.001', references: refs, outputSize: { width: 640, height: 360 } }), /Unsupported reference board output size/);
   const style = await make('probability-style', '#20152e', 'style');
   const locationStyle = await buildReferenceBoard({ root, imageId: 'frame.location-style', references: [refs[1], style] });
   const locationStyleGuidance = referenceBoardPromptGuidance(locationStyle);

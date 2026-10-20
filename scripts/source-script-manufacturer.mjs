@@ -4,6 +4,8 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { runCodexCli, readCodexCallMetadata } from "./lib/codex-cli-runner.mjs";
 import { sourceWriterPolicy, improvementEfforts } from "./lib/source-writer-policy.mjs";
 import { recoverBrowserDraft } from "./lib/source-browser-draft-recovery.mjs";
@@ -33,6 +35,18 @@ import {
 } from "./lib/source-fast-improvement-contract.mjs";
 
 import { STORY_LED_TITLE_POLICY } from "./lib/story-led-title.mjs";
+import {
+  REVISION_DECISION_SCHEMA,
+  REVISION_LOOP_SCHEMA,
+  REVISION_MAX_ROUNDS,
+  REVISION_POLICY,
+  assessRevisionLength,
+  autoTitleBrief,
+  decideRevisionRound,
+  openingDeadlineWindows,
+  validateRevisionNotes,
+  validateRevisionVerdict,
+} from "./lib/source-revision-contract.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
 const DATA_ROOT = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
@@ -42,6 +56,10 @@ const SELECTOR_PROMPT_PATH = path.join(REPO_ROOT, "docs/prompts/manhwa_recap_man
 const TOPIC_PROMPT_PATH = path.join(REPO_ROOT, "docs/prompts/manhwa_recap_topic_manufacturer_v1.md");
 const TOPIC_SHORTLIST_PROMPT_PATH = path.join(REPO_ROOT, "docs/prompts/manhwa_recap_topic_shortlist_v1.md");
 const FAST_IMPROVEMENT_EDITOR_PROMPT_PATH = path.join(REPO_ROOT, "docs/prompts/manhwa_recap_fast_improvement_editor_v1.md");
+const REVISION_DIAGNOSE_PROMPT_PATH = path.join(REPO_ROOT, "docs/prompts/manhwa_recap_revision_diagnose_v1.md");
+const REVISION_REWRITE_PROMPT_PATH = path.join(REPO_ROOT, "docs/prompts/manhwa_recap_revision_rewrite_v1.md");
+const REVISION_VERIFY_PROMPT_PATH = path.join(REPO_ROOT, "docs/prompts/manhwa_recap_revision_verify_v1.md");
+const REVISION_MODEL = "gpt-6-sol";
 const SOURCE_EVIDENCE_SNAPSHOT_PATH = path.join(REPO_ROOT, "docs/channel_formulas/53rebirth_source_evidence_snapshot_v1.json");
 const DEFAULT_QWEN_PYTHON = "/Users/joel/AniFactoryData/voice_bank/bakeoff/.venv-kokoro-mlx-audio-0.4.6/bin/python";
 
@@ -173,8 +191,13 @@ function promptBody(markdown) {
   return match[1].trim();
 }
 
-function developmentDirectory(flags) {
+function developmentDirectory(flags, action = null) {
   if (flags["development-dir"]) return path.resolve(flags["development-dir"]);
+  if (action === "revise" && flags.script && !flags["development-slug"]) {
+    // A brought script gets its own sibling revision folder; the original file is never modified.
+    const scriptPath = path.resolve(flags.script);
+    return path.join(path.dirname(scriptPath), `${path.basename(scriptPath, path.extname(scriptPath))}_revision`);
+  }
   const channel = String(flags.channel ?? "53rebirth").trim();
   const slug = String(flags["development-slug"] ?? "").trim();
   if (!slug) throw new Error("Use --development-dir or --development-slug.");
@@ -213,7 +236,7 @@ async function activeManufacturingTemplate(directory, flags) {
 async function loadBrief(directory, flags) {
   const target = path.join(directory, "manufacturing_brief.json");
   if (!await exists(target)) {
-    if (!flags.brief) throw new Error("Missing manufacturing_brief.json; pass --brief <approved-json>.");
+    if (!flags.brief) throw new Error("Missing manufacturing_brief.json; run ideate (auto-selects rank one) or pass --brief <approved-json>.");
     const source = path.resolve(flags.brief);
     const bytes = await fs.readFile(source);
     const document = JSON.parse(bytes.toString("utf8"));
@@ -276,7 +299,31 @@ async function ideateTopics(directory, flags) {
   assertValid("manufacturing topic shortlist", validateManufacturingTopicShortlist(shortlist, { topicPool: pool }));
   const shortlistPath = path.join(directory, "manufacturing_topic_shortlist.json");
   if (!await exists(shortlistPath)) await writeJsonExclusive(shortlistPath, shortlist);
-  return { poolPath, shortlistPath, shortlist };
+  const brief = await autoSelectTitle(directory, flags, { shortlistPath, evidencePath, evidence });
+  return { poolPath, shortlistPath, shortlist, brief };
+}
+
+// Rank one of the validated shortlist becomes the brief with no operator stop. An existing brief
+// (operator-supplied or from an earlier run) is never replaced.
+async function autoSelectTitle(directory, flags, { shortlistPath, evidencePath = null, evidence = null }) {
+  const briefPath = path.join(directory, "manufacturing_brief.json");
+  if (await exists(briefPath)) {
+    const document = JSON.parse(await fs.readFile(briefPath, "utf8"));
+    assertValid("manufacturing brief", validateManufacturingBrief(document));
+    return { path: briefPath, document, created: false };
+  }
+  const shortlistSha256 = await fileSha256(shortlistPath);
+  const shortlist = JSON.parse(await fs.readFile(shortlistPath, "utf8"));
+  const document = autoTitleBrief(shortlist, {
+    shortlistPath,
+    shortlistSha256,
+    evidencePath,
+    evidenceSha256: evidence == null ? null : sha256Text(evidence),
+    targetWordCount: Number(flags["target-word-count"] ?? 10_000),
+  });
+  assertValid("auto-selected manufacturing brief", validateManufacturingBrief(document));
+  await writeJsonExclusive(briefPath, document);
+  return { path: briefPath, document, created: true };
 }
 
 async function reusableResponse({ outputPath, prompt, provider, model, effort, stageName }) {
@@ -296,10 +343,18 @@ async function reusableResponse({ outputPath, prompt, provider, model, effort, s
   return { content: await fs.readFile(outputPath, "utf8"), ...metadata, resumed: true };
 }
 
+// Tests inject a no-network executor with runCodexCli's contract: write the output file and its
+// passed .meta.json receipt, then return { content, ...metadata }.
+let modelExecutor = runCodexCli;
+
+export function setModelExecutorForTests(executor) {
+  modelExecutor = executor ?? runCodexCli;
+}
+
 async function modelCall({ outputPath, prompt, provider, model, effort, stageName, timeoutMs }) {
   const resumed = await reusableResponse({ outputPath, prompt, provider, model, effort, stageName });
   if (resumed) return resumed;
-  return runCodexCli({
+  return modelExecutor({
     prompt,
     stageName,
     repoRoot: REPO_ROOT,
@@ -364,7 +419,7 @@ async function prepare(directory, flags) {
   }
   const template = await activeManufacturingTemplate(directory, flags);
   const filler = promptBody(await fs.readFile(FILLER_PROMPT_PATH, "utf8"));
-  const prompt = `${filler}\n\nAPPROVED PREMISE BRIEF\n${JSON.stringify(brief.document, null, 2)}\n\nOPERATOR TEMPLATE\n${template.content}`;
+  const prompt = `${filler}\n\n${brief.document.status === "auto_selected" ? "SELECTED PREMISE BRIEF" : "APPROVED PREMISE BRIEF"}\n${JSON.stringify(brief.document, null, 2)}\n\nOPERATOR TEMPLATE\n${template.content}`;
   const response = await modelCall({
     outputPath,
     prompt,
@@ -428,7 +483,9 @@ async function writeCandidates(directory, flags) {
     await sleep((index % writerConcurrency) * writerStaggerMs);
     const outputPath = path.join(outputDirectory, `${spec.id}.txt`);
     const stageName = `winner_source_script_v3_${spec.id}`;
-    const candidatePrompt = `${prepared.filled}\n\nIndependent candidate run ${spec.id}. Write the best complete script you can from this prompt in a fresh context. Do not compare with or anticipate another candidate. Output only raw narration.`;
+    const candidatePrompt = candidates.length === 1
+      ? `${prepared.filled}\n\nWrite the best complete script you can from this prompt in a fresh context. Output only raw narration.`
+      : `${prepared.filled}\n\nIndependent candidate run ${spec.id}. Write the best complete script you can from this prompt in a fresh context. Do not compare with or anticipate another candidate. Output only raw narration.`;
     const receiptPath = `${outputPath}.meta.json`;
     const existingReceipt = await readCodexCallMetadata(outputPath);
     const scopedOut = repairIds.size > 0 && !repairIds.has(spec.id);
@@ -695,11 +752,18 @@ async function writeManufacturingTimingReport(directory) {
     ], 10),
     candidate_writing: await manufacturingTimingStage(policy.candidates.map(
       (row) => path.join(draftDirectory, `${row.id}.txt.meta.json`),
-    ), 120),
-    selection: await manufacturingTimingStage([
-      path.join(responseDirectory, "manufacturing_selection.txt.meta.json"),
-    ], 20),
+    ), policy.candidates.length === 1 ? 90 : 120),
   };
+  if (policy.candidates.length > 1) {
+    stages.selection = await manufacturingTimingStage([
+      path.join(responseDirectory, "manufacturing_selection.txt.meta.json"),
+    ], 20);
+  } else {
+    const roundDirectories = await fs.readdir(path.join(directory, "revision_loop")).catch(() => []);
+    stages.revision = await manufacturingTimingStage(roundDirectories.filter((name) => /^round_\d+$/.test(name)).sort().flatMap((name) => (
+      ["diagnose_response", "revise_response", "verify_response"].map((call) => path.join(directory, "revision_loop", name, `${call}.txt.meta.json`))
+    )), 90);
+  }
   const measured = Object.values(stages).filter((row) => row.status !== "not_measured");
   const starts = measured.map((row) => Date.parse(row.started_at)).filter(Number.isFinite);
   const ends = measured.map((row) => Date.parse(row.completed_at)).filter(Number.isFinite);
@@ -709,7 +773,7 @@ async function writeManufacturingTimingReport(directory) {
   const report = {
     schema: "goldflow_manhwa_manufacturing_timing_v1",
     status: measured.some((row) => row.status === "over_target") ? "target_missed" : "on_target_or_incomplete",
-    target_total_minutes: 180,
+    target_total_minutes: policy.candidates.length === 1 ? 150 : 180,
     writer_policy: policy.name,
     candidate_count: policy.candidates.length,
     measured_total_minutes: totalMinutes == null ? null : Number(totalMinutes.toFixed(2)),
@@ -723,6 +787,7 @@ async function writeManufacturingTimingReport(directory) {
 
 async function selectCandidate(directory, flags) {
   const portfolio = await writeCandidates(directory, flags);
+  if (portfolio.document.candidates.length === 1) throw new Error("Single-draft portfolios have no selection stage; run source manufacture revise.");
   const selectionPath = path.join(directory, "manufacturing_selection.json");
   const selectedScriptPath = path.join(directory, "manufacturing_selected_script.txt");
   if (await exists(selectionPath)) {
@@ -1480,14 +1545,333 @@ async function improveCandidate(directory, flags) {
   return { report, reportPath };
 }
 
+function revisionEffort(value, fallback, label) {
+  const effort = String(value ?? fallback).trim();
+  if (!["medium", "high"].includes(effort)) throw new Error(`${label} supports only medium or high; Pro is reserved for drafts.`);
+  return effort;
+}
+
+async function resolveRevisionIncumbent(directory, flags) {
+  if (flags.script) {
+    const scriptPath = path.resolve(flags.script);
+    if (!await exists(scriptPath)) throw new Error(`Revision script is missing: ${scriptPath}`);
+    return { path: scriptPath, source: "operator_script" };
+  }
+  const portfolioPath = path.join(directory, "manufacturing_portfolio.json");
+  if (await exists(portfolioPath)) {
+    const portfolio = JSON.parse(await fs.readFile(portfolioPath, "utf8"));
+    if (sourceWriterPolicy(portfolio).candidates.length === 1) {
+      const draft = portfolio.candidates?.[0];
+      if (await fileSha256(draft.output_path) !== draft.output_sha256) throw new Error("Single draft hash differs from its portfolio record.");
+      return { path: draft.output_path, source: "single_draft" };
+    }
+  }
+  const selectedPath = path.join(directory, "manufacturing_selected_script.txt");
+  if (await exists(selectedPath)) return { path: selectedPath, source: "manufacturing_selection" };
+  throw new Error("No revision incumbent found. Run write, or pass --script <complete-script.txt>.");
+}
+
+async function optionalBrief(directory, flags) {
+  if (flags.brief || await exists(path.join(directory, "manufacturing_brief.json"))) return loadBrief(directory, flags);
+  return null;
+}
+
+function briefBlock(brief) {
+  if (!brief) return "TITLE AND PREMISE\nNo brief was supplied for this script. Infer its promise from the narration itself and preserve it.";
+  return `TITLE AND PREMISE\n${JSON.stringify({
+    title: brief.document.title,
+    core_premise: brief.document.core_premise,
+    opening_target: brief.document.opening_target,
+  }, null, 2)}`;
+}
+
+async function receiptFor(responsePath) {
+  return {
+    path: responsePath,
+    sha256: await fileSha256(responsePath),
+    receipt_path: `${responsePath}.meta.json`,
+    receipt_sha256: await fileSha256(`${responsePath}.meta.json`),
+  };
+}
+
+function parseModelJson(content, label) {
+  try {
+    return parseJsonObjectFromPlannerOutput(content).value;
+  } catch (error) {
+    throw new Error(`${label} returned malformed JSON: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+async function runRevisionRound({ loopDirectory, roundNumber, incumbent, brief, priorVerdict, efforts, maxRounds, flags }) {
+  const pad = String(roundNumber).padStart(2, "0");
+  const roundDirectory = path.join(loopDirectory, `round_${pad}`);
+  await fs.mkdir(roundDirectory, { recursive: true });
+  const startedAt = new Date().toISOString();
+  const roundIncumbentPath = path.join(roundDirectory, "incumbent.txt");
+  if (!await exists(roundIncumbentPath)) await writeExclusive(roundIncumbentPath, incumbent.text);
+  else if (await fileSha256(roundIncumbentPath) !== incumbent.sha256) throw new Error(`Revision round ${roundNumber} incumbent hash mismatch.`);
+  const priorBlock = priorVerdict
+    ? `\n\nPREVIOUS ROUND VERIFY RESULT\nThe previous revision was ${priorVerdict.decision === "keep_revision" ? "kept; the script below is that revision" : "reverted; the script below is unchanged"}. Prioritize these remaining material issues and avoid these regressions.\n${JSON.stringify({
+      remaining_material_issues: priorVerdict.remaining_material_issues,
+      regressions: priorVerdict.regressions,
+    }, null, 2)}`
+    : "";
+
+  // (a) diagnose
+  const diagnoseInstruction = promptBody(await fs.readFile(REVISION_DIAGNOSE_PROMPT_PATH, "utf8"));
+  const diagnosePrompt = `${diagnoseInstruction}\n\n${briefBlock(brief)}${priorBlock}\n\nOPENING WORD WINDOWS (exact narration words, counted by Goldflow)\n${JSON.stringify(openingDeadlineWindows(incumbent.text), null, 2)}\n\nINCUMBENT WORD COUNT\n${incumbent.word_count}\n\nEXACT NARRATION\n${incumbent.text}`;
+  const diagnoseResponsePath = path.join(roundDirectory, "diagnose_response.txt");
+  const diagnoseResponse = await modelCall({
+    outputPath: diagnoseResponsePath,
+    prompt: diagnosePrompt,
+    provider: "chatgpt_web",
+    model: REVISION_MODEL,
+    effort: efforts.diagnose,
+    stageName: `winner_source_script_revision_diagnose_r${pad}`,
+    timeoutMs: Number(flags["diagnose-timeout-ms"] ?? 1_800_000),
+  });
+  const notes = parseModelJson(diagnoseResponse.content, `Revision round ${roundNumber} diagnose`);
+  const notesValidation = validateRevisionNotes(notes, incumbent.text);
+  assertValid(`revision round ${roundNumber} notes`, notesValidation);
+  const notesPath = path.join(roundDirectory, "notes.json");
+  if (!await exists(notesPath)) await writeJsonExclusive(notesPath, notes);
+  const base = {
+    schema: REVISION_DECISION_SCHEMA,
+    round: roundNumber,
+    policy: REVISION_POLICY,
+    model: REVISION_MODEL,
+    efforts,
+    incumbent: { path: roundIncumbentPath, sha256: incumbent.sha256, word_count: incumbent.word_count },
+    notes: { path: notesPath, sha256: await fileSha256(notesPath), anchors: notesValidation.anchors, material_note_count: notesValidation.material_note_count },
+    diagnose_response: await receiptFor(diagnoseResponsePath),
+  };
+  if (notesValidation.nothing_to_fix) {
+    return { ...base, status: "no_issues_found", decision: { kept: false, status: "no_issues_found", reason: "diagnose_reported_every_dimension_ok", remaining_material_issue_count: 0, next_round: false }, revision: null, verdict: null, started_at: startedAt, completed_at: new Date().toISOString() };
+  }
+
+  // (b) revise
+  const rewriteInstruction = promptBody(await fs.readFile(REVISION_REWRITE_PROMPT_PATH, "utf8"));
+  const revisePrompt = `${rewriteInstruction}\n\n${briefBlock(brief)}\n\nEDITOR NOTES\n${JSON.stringify(notes, null, 2)}\n\nINCUMBENT WORD COUNT\n${incumbent.word_count}\n\nEXACT INCUMBENT NARRATION\n${incumbent.text}`;
+  const reviseResponsePath = path.join(roundDirectory, "revise_response.txt");
+  const reviseResponse = await modelCall({
+    outputPath: reviseResponsePath,
+    prompt: revisePrompt,
+    provider: "chatgpt_web",
+    model: REVISION_MODEL,
+    effort: efforts.revise,
+    stageName: `winner_source_script_revision_rewrite_r${pad}`,
+    timeoutMs: Number(flags["revise-timeout-ms"] ?? 2_400_000),
+  });
+  const revisionPath = path.join(roundDirectory, "revision.txt");
+  const revisionBytes = `${stripFence(reviseResponse.content)}\n`;
+  if (!await exists(revisionPath)) await writeExclusive(revisionPath, revisionBytes);
+  else if (await fileSha256(revisionPath) !== sha256Text(revisionBytes)) throw new Error(`Revision round ${roundNumber} revision differs from the recorded response.`);
+  const revisionText = await fs.readFile(revisionPath, "utf8");
+  const revision = { path: revisionPath, sha256: sha256Text(revisionText), word_count: words(revisionText) };
+  const length = assessRevisionLength(incumbent.word_count, revision.word_count);
+  const withRevision = { ...base, revision, revise_response: await receiptFor(reviseResponsePath), length };
+  if (!length.plausibly_complete) {
+    const decision = decideRevisionRound({ length, round: roundNumber, maxRounds });
+    return { ...withRevision, status: decision.status, decision, verdict: null, started_at: startedAt, completed_at: new Date().toISOString() };
+  }
+
+  // (c) verify
+  const verifyInstruction = promptBody(await fs.readFile(REVISION_VERIFY_PROMPT_PATH, "utf8"));
+  const verifyPrompt = `${verifyInstruction}\n\n${briefBlock(brief)}\n\nEDITOR NOTES\n${JSON.stringify(notes, null, 2)}\n\nINCUMBENT (${incumbent.word_count} words)\n${incumbent.text}\n\nREVISION (${revision.word_count} words)\n${revisionText}`;
+  const verifyResponsePath = path.join(roundDirectory, "verify_response.txt");
+  const verifyResponse = await modelCall({
+    outputPath: verifyResponsePath,
+    prompt: verifyPrompt,
+    provider: "chatgpt_web",
+    model: REVISION_MODEL,
+    effort: efforts.verify,
+    stageName: `winner_source_script_revision_verify_r${pad}`,
+    timeoutMs: Number(flags["verify-timeout-ms"] ?? 1_800_000),
+  });
+  const verdict = parseModelJson(verifyResponse.content, `Revision round ${roundNumber} verify`);
+  assertValid(`revision round ${roundNumber} verdict`, validateRevisionVerdict(verdict, { noteIds: (notes.notes ?? []).map((note) => String(note.id).trim()) }));
+  const verdictPath = path.join(roundDirectory, "verdict.json");
+  if (!await exists(verdictPath)) await writeJsonExclusive(verdictPath, verdict);
+  const decision = decideRevisionRound({ verdict, length, round: roundNumber, maxRounds });
+  return {
+    ...withRevision,
+    status: decision.status,
+    decision,
+    verdict: { path: verdictPath, sha256: await fileSha256(verdictPath), decision: verdict.decision, reasons: verdict.reasons, remaining_material_issues: verdict.remaining_material_issues, regressions: verdict.regressions },
+    verify_response: await receiptFor(verifyResponsePath),
+    started_at: startedAt,
+    completed_at: new Date().toISOString(),
+  };
+}
+
+async function callTiming(responsePath) {
+  if (!responsePath) return null;
+  const metadata = await readCodexCallMetadata(responsePath);
+  if (!metadata) return null;
+  const started = Date.parse(metadata.studio_timing?.created_at ?? metadata.started_at);
+  const completed = Date.parse(metadata.studio_timing?.completed_at ?? metadata.completed_at);
+  return {
+    stage_name: metadata.stage_name,
+    reasoning_effort: metadata.reasoning_effort,
+    started_at: Number.isFinite(started) ? new Date(started).toISOString() : null,
+    completed_at: Number.isFinite(completed) ? new Date(completed).toISOString() : null,
+    minutes: Number.isFinite(started) && Number.isFinite(completed) ? Number(((completed - started) / 60_000).toFixed(2)) : null,
+  };
+}
+
+async function reviseScript(directory, flags) {
+  const maxRounds = Math.max(1, Math.min(REVISION_MAX_ROUNDS, Number(flags["max-rounds"] ?? REVISION_MAX_ROUNDS) || REVISION_MAX_ROUNDS));
+  const efforts = {
+    diagnose: revisionEffort(flags["diagnose-effort"], "high", "Revision diagnose"),
+    revise: revisionEffort(flags["revise-effort"], "high", "Revision rewrite"),
+    verify: revisionEffort(flags["verify-effort"], "medium", "Revision verify"),
+  };
+  const loopDirectory = path.join(directory, "revision_loop");
+  const v00Path = path.join(loopDirectory, "v00_incumbent.txt");
+  await fs.mkdir(loopDirectory, { recursive: true });
+  const initial = await resolveRevisionIncumbent(directory, flags);
+  const initialBytes = await fs.readFile(initial.path);
+  if (!await exists(v00Path)) await writeExclusive(v00Path, initialBytes);
+  const v00Sha256 = await fileSha256(v00Path);
+  if (v00Sha256 !== sha256Text(initialBytes.toString("utf8"))) throw new Error("Existing revision incumbent differs from the requested script; use a new --development-dir.");
+  const brief = await optionalBrief(directory, flags);
+
+  let current = { path: v00Path, text: initialBytes.toString("utf8"), sha256: v00Sha256, word_count: words(initialBytes.toString("utf8")) };
+  let priorVerdict = null;
+  const decisions = [];
+  for (let roundNumber = 1; roundNumber <= maxRounds; roundNumber += 1) {
+    const decisionPath = path.join(loopDirectory, `round_${String(roundNumber).padStart(2, "0")}`, "decision.json");
+    let decision;
+    if (await exists(decisionPath)) {
+      decision = JSON.parse(await fs.readFile(decisionPath, "utf8"));
+      if (decision.incumbent?.sha256 !== current.sha256) throw new Error(`Revision round ${roundNumber} decision is bound to a different incumbent.`);
+    } else {
+      decision = await runRevisionRound({ loopDirectory, roundNumber, incumbent: current, brief, priorVerdict, efforts, maxRounds, flags });
+      await writeJsonExclusive(decisionPath, decision);
+    }
+    decisions.push({ ...decision, decision_path: decisionPath });
+    if (decision.decision.kept) {
+      const text = await fs.readFile(decision.revision.path, "utf8");
+      if (sha256Text(text) !== decision.revision.sha256) throw new Error(`Revision round ${roundNumber} kept revision hash mismatch.`);
+      current = { path: decision.revision.path, text, sha256: decision.revision.sha256, word_count: words(text) };
+    }
+    priorVerdict = decision.verdict;
+    if (!decision.decision.next_round) break;
+  }
+
+  const finalPath = path.join(loopDirectory, "final_script.txt");
+  if (!await exists(finalPath)) await writeExclusive(finalPath, current.text);
+  else if (await fileSha256(finalPath) !== current.sha256) throw new Error("Existing final_script.txt differs from the loop's retained script.");
+  const timing = [];
+  for (const row of decisions) {
+    for (const call of ["diagnose_response", "revise_response", "verify_response"]) {
+      const measured = await callTiming(row[call]?.path);
+      if (measured) timing.push({ round: row.round, call: call.replace(/_response$/, ""), ...measured });
+    }
+  }
+  const starts = timing.map((row) => Date.parse(row.started_at)).filter(Number.isFinite);
+  const ends = timing.map((row) => Date.parse(row.completed_at)).filter(Number.isFinite);
+  const timingReport = {
+    schema: "goldflow_manhwa_revision_timing_v1",
+    call_count: timing.length,
+    measured_minutes: starts.length && ends.length ? Number(((Math.max(...ends) - Math.min(...starts)) / 60_000).toFixed(2)) : null,
+    calls: timing,
+    generated_at: new Date().toISOString(),
+  };
+  const timingPath = path.join(loopDirectory, "revision_timing_report.json");
+  await writeJsonAtomic(timingPath, timingReport);
+  const report = {
+    schema: REVISION_LOOP_SCHEMA,
+    status: "completed",
+    policy: REVISION_POLICY,
+    max_rounds: maxRounds,
+    efforts,
+    initial_source: initial.source,
+    initial_source_path: initial.path,
+    brief_sha256: brief?.sha256 ?? null,
+    v00_incumbent_path: v00Path,
+    v00_incumbent_sha256: v00Sha256,
+    retained_script_path: current.path,
+    final_script_path: finalPath,
+    final_script_sha256: current.sha256,
+    final_word_count: current.word_count,
+    kept_rounds: decisions.filter((row) => row.decision.kept).length,
+    rounds: decisions.map((row) => ({
+      round: row.round,
+      status: row.status,
+      verify_decision: row.verdict?.decision ?? null,
+      remaining_material_issue_count: row.decision.remaining_material_issue_count,
+      decision_path: row.decision_path,
+    })),
+    timing_report_path: timingPath,
+    model_call_count: timing.length,
+    completed_at: new Date().toISOString(),
+  };
+  const reportPath = path.join(loopDirectory, "revision_loop_report.json");
+  await writeJsonAtomic(reportPath, report);
+  return { report, reportPath };
+}
+
+function revisionSummary(result, timing) {
+  return {
+    status: result.report.status,
+    policy: result.report.policy,
+    initial_source: result.report.initial_source,
+    kept_rounds: result.report.kept_rounds,
+    rounds: result.report.rounds,
+    final_script_path: result.report.final_script_path,
+    final_script_sha256: result.report.final_script_sha256,
+    final_word_count: result.report.final_word_count,
+    report_path: result.reportPath,
+    revision_timing_report_path: result.report.timing_report_path,
+    timing_report_path: timing.outputPath,
+    next_action: "goldflow run preflight --content-profile manhwa_recap_v1 --media-workflow generated_visuals_v1 ... --source <final_script_path>",
+  };
+}
+
+// New runs and existing single-draft runs use the one-draft flow; a recorded or explicitly
+// requested multi-draft portfolio keeps its historical select/improve behavior.
+async function singleDraftRun(directory, flags) {
+  const portfolioPath = path.join(directory, "manufacturing_portfolio.json");
+  const portfolio = await exists(portfolioPath) ? JSON.parse(await fs.readFile(portfolioPath, "utf8")) : null;
+  const briefPath = path.join(directory, "manufacturing_brief.json");
+  const briefPolicy = await exists(briefPath) ? JSON.parse(await fs.readFile(briefPath, "utf8")).writer_policy ?? null : null;
+  return sourceWriterPolicy(portfolio, portfolio ? null : flags["writer-policy"] ?? briefPolicy).candidates.length === 1;
+}
+
+async function runSingleDraftFlow(directory, flags) {
+  const briefPath = path.join(directory, "manufacturing_brief.json");
+  let titleSelection = null;
+  if (!await exists(briefPath) && !flags.brief) {
+    if (!flags.evidence) throw new Error("source manufacture run needs --evidence <file> for ideation, or --brief <json>.");
+    titleSelection = await ideateTopics(directory, flags);
+  }
+  const written = await writeCandidates(directory, flags);
+  const revised = await reviseScript(directory, { ...flags, script: undefined });
+  const timing = await writeManufacturingTimingReport(directory);
+  return {
+    ...revisionSummary(revised, timing),
+    title: written.prepared.brief.document.title,
+    brief_status: written.prepared.brief.document.status,
+    auto_selected_title: Boolean(titleSelection?.brief?.created),
+    draft_path: written.document.candidates[0].output_path,
+  };
+}
+
 async function main() {
   const action = process.argv[2] ?? "help";
   const flags = flagsFrom(process.argv.slice(3));
-  const directory = developmentDirectory(flags);
+  const directory = developmentDirectory(flags, action);
   if (action === "ideate") {
     const result = await ideateTopics(directory, flags);
     const timing = await writeManufacturingTimingReport(directory);
-    console.log(JSON.stringify({ status: "shortlisted", topic_pool_path: result.poolPath, shortlist_path: result.shortlistPath, timing_report_path: timing.outputPath, top_recommendation: result.shortlist.rankings[0], next_action: "operator approves one premise and supplies manufacturing_brief.json" }, null, 2));
+    console.log(JSON.stringify({ status: "title_selected", topic_pool_path: result.poolPath, shortlist_path: result.shortlistPath, brief_path: result.brief.path, brief_status: result.brief.document.status, title: result.brief.document.title, brief_created: result.brief.created, timing_report_path: timing.outputPath, next_action: "prepare" }, null, 2));
+    return;
+  }
+  if (action === "revise") {
+    const result = await reviseScript(directory, flags);
+    const timing = await writeManufacturingTimingReport(directory);
+    console.log(JSON.stringify(revisionSummary(result, timing), null, 2));
     return;
   }
   if (action === "learn") {
@@ -1503,7 +1887,7 @@ async function main() {
   if (action === "write") {
     const result = await writeCandidates(directory, flags);
     const timing = await writeManufacturingTimingReport(directory);
-    console.log(JSON.stringify({ status: "completed", portfolio_path: result.portfolioPath, draft_paths: result.document.candidates.map((row) => row.output_path), timing_report_path: timing.outputPath, next_action: "select" }, null, 2));
+    console.log(JSON.stringify({ status: "completed", portfolio_path: result.portfolioPath, draft_paths: result.document.candidates.map((row) => row.output_path), timing_report_path: timing.outputPath, next_action: result.document.candidates.length === 1 ? "revise" : "select" }, null, 2));
     return;
   }
   if (action === "audition") {
@@ -1556,6 +1940,11 @@ async function main() {
     }, null, 2));
     return;
   }
+  if (action === "run" && await singleDraftRun(directory, flags)) {
+    const result = await runSingleDraftFlow(directory, flags);
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
   if (["select", "run"].includes(action)) {
     const result = await selectCandidate(directory, flags);
     const timing = await writeManufacturingTimingReport(directory);
@@ -1583,10 +1972,25 @@ async function main() {
     }, null, 2));
     return;
   }
-  console.log(`Usage: goldflow source manufacture <ideate|prepare|write|select|compare-prompts|improve|audition|promote|run|learn> --development-slug <slug> [--evidence <txt>] [--brief <json>] [--writer-prompt <operator-approved.txt>] [--script <incumbent.txt>] [--max-rounds 1] [--minimum-apv-delta 0.5] [--writer-concurrency 3] [--writer-stagger-ms 15000] [--legacy-manifest <recovered-drafts-manifest.json>] [--audition-candidate-count 3] [--candidate-id draft_56_2 --approved-by <name> --reason <text>] [--template <complete-template.txt>]`);
+  console.log(`Usage: goldflow source manufacture <run|ideate|prepare|write|revise|select|compare-prompts|improve|audition|promote|learn> --development-slug <slug> [--evidence <txt>] [--brief <json>] [--target-word-count 10000] [--max-rounds 2] [--diagnose-effort high] [--revise-effort high] [--verify-effort medium]
+       goldflow source manufacture revise --script <brought-script.txt> [--development-dir <dir>] [--brief <json>]
+       Legacy multi-draft flags: [--writer-prompt <operator-approved.txt>] [--script <incumbent.txt>] [--max-rounds 1] [--minimum-apv-delta 0.5] [--writer-concurrency 3] [--writer-stagger-ms 15000] [--legacy-manifest <recovered-drafts-manifest.json>] [--audition-candidate-count 3] [--candidate-id draft_56_2 --approved-by <name> --reason <text>] [--template <complete-template.txt>]`);
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exitCode = 1;
-});
+function invokedDirectly() {
+  if (!process.argv[1]) return false;
+  try {
+    return realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (invokedDirectly()) {
+  main().catch((error) => {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  });
+}
+
+export { autoSelectTitle, developmentDirectory, ideateTopics, prepare, reviseScript, runSingleDraftFlow, selectCandidate, writeCandidates, writeManufacturingTimingReport };

@@ -69,11 +69,21 @@ function sha(value) {
 export function validateManufacturingBrief(document) {
   const blockers = [];
   if (document?.schema !== MANUFACTURING_BRIEF_SCHEMA) blockers.push("manufacturing_brief_schema_invalid");
-  if (document?.status !== "approved") blockers.push("manufacturing_brief_not_approved");
-  for (const field of ["title", "core_premise", "opening_target", "approved_by", "approved_at"]) {
+  // Operator-approved briefs keep their original contract; auto-selected briefs record the
+  // shortlist rank-one basis instead of an operator approval.
+  const auto = document?.status === "auto_selected";
+  if (document?.status !== "approved" && !auto) blockers.push("manufacturing_brief_not_approved");
+  const required = auto ? ["title", "core_premise", "opening_target", "selected_at"] : ["title", "core_premise", "opening_target", "approved_by", "approved_at"];
+  for (const field of required) {
     if (!text(document?.[field])) blockers.push(`manufacturing_brief_${field}_missing`);
   }
   if (!Number.isInteger(Number(document?.target_word_count)) || Number(document.target_word_count) < 1_000) blockers.push("manufacturing_brief_target_word_count_invalid");
+  if (auto) {
+    const basis = document?.selection_basis ?? {};
+    if (basis.method !== "shortlist_rank_one_auto_v1" || Number(basis.rank) !== 1) blockers.push("manufacturing_brief_selection_basis_invalid");
+    if (!sha(basis.shortlist_sha256) || !text(basis.shortlist_path) || !text(basis.rationale)) blockers.push("manufacturing_brief_selection_basis_incomplete");
+    return { done: blockers.length === 0, blockers };
+  }
   if (!Array.isArray(document?.genre_elements) || document.genre_elements.length < 1) blockers.push("manufacturing_brief_genre_elements_missing");
   if (!text(document?.reference_outlier?.url) || !text(document?.reference_outlier?.title)) blockers.push("manufacturing_brief_reference_outlier_missing");
   return { done: blockers.length === 0, blockers };

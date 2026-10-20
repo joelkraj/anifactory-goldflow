@@ -1,7 +1,8 @@
+import { isSameValueNumberContraction } from "./narration-number-contraction.mjs";
 import { createHash } from "node:crypto";
 
 export const NARRATION_DELIVERY_QA_SCHEMA = "goldflow_narration_delivery_qa_v2";
-export const NARRATION_DELIVERY_CONSENSUS_VERSION = "protected_operations_edge_spelling_v2";
+export const NARRATION_DELIVERY_CONSENSUS_VERSION = "protected_operations_lexical_number_contraction_v3";
 export const NARRATION_EXACT_LISTEN_REVIEW_PACKET_SCHEMA =
   "goldflow_narration_exact_listen_review_packet_v2";
 export const NARRATION_EXACT_LISTEN_REVIEW_DECISION_SCHEMA =
@@ -152,6 +153,7 @@ function protectedOperations(transcriptQa, type, slots) {
     // Insertions are anchored at the gap before this intended-token cursor.
     // Repeated amounts at different source positions are different evidence.
     if (operation.type === type
+      && !isSameValueNumberContraction(operation)
       && (isProtectedToken(operation.intended) || isProtectedToken(operation.recognized))) {
       let intendedSlot = slots?.[intendedIndex] ?? null;
       if (type === "insertion" && slots) {

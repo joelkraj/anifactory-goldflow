@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { isSameValueNumberContraction } from "./lib/narration-number-contraction.mjs";
 import { localWhisperPython } from "./lib/local-whisper-policy.mjs";
 import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -1757,7 +1758,7 @@ function transcriptInputText(value) {
     : String(value ?? "");
 }
 
-export const TRANSCRIPT_QA_COMPARISON_VERSION = "unicode_words_exact_grouped_numbers_honorific_spelling_v11";
+export const TRANSCRIPT_QA_COMPARISON_VERSION = "unicode_words_exact_grouped_numbers_lexical_contraction_v12";
 
 const TRANSCRIPT_PUNCTUATION = new Set([".", ",", ";", ":", "!", "?", "…"]);
 
@@ -1783,6 +1784,7 @@ function rawTranscriptTokens(value) {
       // Preserve the lexical contraction; stripping its apostrophe creates the
       // unrelated protected initialism ID. Its had/would sense is not inferred.
       if (/^i['’]d$/.test(lower)) return "i'd";
+      if (/^one['’]s$/.test(lower)) return "one's";
       if (TRANSCRIPT_PUNCTUATION.has(lower)) return lower;
       if (/^[+-]?\d/.test(lower) || ["/", "%", "$"].includes(lower)) return lower.replaceAll(",", "");
       return lower.replace(/[.'’]/g, "").replace(/[^\p{L}\p{M}0-9]+/gu, "");
@@ -2406,6 +2408,7 @@ function transcriptQa(intendedText, recognizedText, {
   }
   const protectedMismatches = operations.filter((operation) => (
     operation.type === "substitution"
+    && !isSameValueNumberContraction(operation)
     && (protectedToken(operation.intended) || protectedToken(operation.recognized))
   ));
   const protectedDeletions = operations.filter((operation) => operation.type === "deletion" && protectedToken(operation.intended));

@@ -1,3 +1,4 @@
+import { retainedBaselineSource } from './retained-baseline-source.mjs';
 import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
@@ -23,12 +24,13 @@ export function panelAssetPlanPaths(episodeDir, episode) {
 async function inputs(episodeDir) {
   need(text(episodeDir), 'explicit episodeDir required');
   const dir = await fs.realpath(episodeDir), sourceHashes = {};
+  const retainedIdentity = await read(path.join(dir, "run_identity.json"));
   const bind = async (file, expected) => {
     const absolute = await fs.realpath(path.resolve(dir, file));
-    const hash = await fileHash(absolute);
-    if (expected !== undefined) need(expected === hash, `stale source ${absolute}`);
+    const resolved = expected === undefined ? absolute : await retainedBaselineSource(retainedIdentity, absolute, expected);
+    const hash = await fileHash(resolved);
     sourceHashes[absolute] = hash;
-    return { path: absolute, hash };
+    return { path: resolved, hash };
   };
   const json = async file => { const ref = await bind(file); return { ...ref, value: await read(ref.path) }; };
   const run = await json('run_identity.json');

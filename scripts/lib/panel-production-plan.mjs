@@ -1,3 +1,4 @@
+import { retainedBaselineSource } from './retained-baseline-source.mjs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
@@ -31,11 +32,11 @@ export function panelProductionPaths(episodeDir, episode) {
   };
 }
 
-async function currentHashes(hashes) {
+async function currentHashes(hashes, identity) {
   need(hashes && Object.keys(hashes).length > 0, 'source hashes are required');
   for (const [file, expected] of Object.entries(hashes)) {
     need(path.isAbsolute(file) && hashValue(expected), 'source hash entry must use an absolute path and SHA-256');
-    need(await sha256File(file) === expected, `stale source ${file}`);
+    await retainedBaselineSource(identity, file, expected);
   }
 }
 
@@ -43,13 +44,14 @@ async function currentHashes(hashes) {
 export async function readPanelProductionInputs({ episodeDir }) {
   need(typeof episodeDir === 'string' && episodeDir.length > 0, 'explicit episodeDir required');
   const dir = await fs.realpath(episodeDir), inputHashes = {};
+  const retainedIdentity = await read(path.join(dir, "run_identity.json"));
   const bind = async (file, expected) => {
     need(typeof file === 'string' && file.length > 0 && !/^[a-z][a-z0-9+.-]*:/i.test(file), 'local source path required');
     const absolute = await fs.realpath(path.resolve(dir, file));
-    const sha256 = await sha256File(absolute);
-    if (expected !== undefined) need(hashValue(expected) && expected === sha256, `stale source ${absolute}`);
+    const resolved = expected === undefined ? absolute : await retainedBaselineSource(retainedIdentity, absolute, expected);
+    const sha256 = await sha256File(resolved);
     inputHashes[absolute] = sha256;
-    return { path: absolute, sha256 };
+    return { path: resolved, sha256 };
   };
   const artifact = async (file, expected) => { const ref = await bind(file, expected); return { ref, value: await read(ref.path) }; };
   const sources = async value => { for (const [file, expected] of Object.entries(value.source_hashes ?? {})) await bind(file, expected); };
@@ -157,9 +159,9 @@ export async function readPanelProductionInputs({ episodeDir }) {
     scenes.push({ id: beat.visual_beat_id, start_sec: start, end_sec: end, background: { panel_id: panelId, blur_px: 0, brightness: 0 }, layers: [{ id: `${beat.visual_beat_id}__baseline`, panel_id: panelId, start_sec: start, end_sec: end, z: 0, fit: 'contain', border_px: 0, keyframes: [{ at_sec: start, ...state }, { at_sec: end, ...state }] }] });
   }
   need(nextWord === words.length && Math.abs(priorEnd - duration) <= 1 / canvas.fps + 0.001, 'visual beats do not cover the whole approved audio');
-  const timeline = { schema: 'goldflow_panel_production_timeline_v1', intent: 'production_panel_composition', id: `${identity.channel}-${identity.week ?? identity.run_slug ?? 'run'}-${episode}`, content_profile: 'manhwa_recap_v1', run_identity: run.ref, ...canvas, duration_sec: duration, audio_target: 'narrator_only', audio, narration_preroll_sec: beatRows[0].start_sec, assets, panels, scenes };
+  const timeline = { schema: 'goldflow_panel_production_timeline_v1', intent: 'production_panel_composition', id: `${identity.channel}-${identity.week ?? identity.run_slug ?? 'run'}-${episode}`, content_profile: 'manhwa_recap_v1', run_identity: run.ref, ...canvas, duration_sec: duration, audio_target: 'narrator_only', audio: { ...audio, path: path.resolve(bed.value.mix?.render_input_path ?? bed.value.mix?.wav_path ?? bed.value.render_input_path ?? bed.value.final_audio_path) }, narration_preroll_sec: beatRows[0].start_sec, assets, panels, scenes };
   validatePanelTimeline(timeline, timeline.intent);
-  await currentHashes(inputHashes);
+  await currentHashes(inputHashes, identity);
   return { episodeDir: dir, identity, paths, timeline, assets, audio, inputHashes, beats: beatRows, words, allocation: allocationPlan, imageReviewDecisions: decisions.value.decisions };
 }
 
@@ -201,7 +203,7 @@ export async function compilePanelProductionPlan({ episodeDir, recipePath }) {
   const timeline = compilePanelComposition(loaded.timeline, recipe, { mode: 'production_panel_composition' });
   timeline.provenance.source_order_review = 'no_future_context_panels';
   const sources = { ...loaded.inputHashes, [absoluteRecipe]: recipeHash, [loaded.paths.packetPath]: recipe.source_packet.sha256 };
-  await currentHashes(sources);
+  await currentHashes(sources, loaded.identity);
   // Retain every compile receipt and snapshot; official pointers are promoted
   // only after their complete candidate has been validated.
   const attempt = path.join(loaded.episodeDir, 'reports', 'panel-composition', randomUUID());
@@ -219,12 +221,12 @@ export async function loadPanelProductionPlan({ episodeDir }) {
   const loaded = await readPanelProductionInputs({ episodeDir });
   const plan = await read(loaded.paths.planPath);
   need(plan.schema === 'goldflow_panel_production_plan_v1' && plan.status === 'passed', 'passed production composition report required');
-  await currentHashes(plan.source_hashes);
+  await currentHashes(plan.source_hashes, loaded.identity);
   for (const [file, hash] of Object.entries(loaded.inputHashes)) need(plan.source_hashes[file] === hash, `composition report does not bind ${file}`);
   need(plan.timeline?.path === loaded.paths.timelinePath && await sha256File(plan.timeline.path) === plan.timeline.sha256, 'composition timeline is stale');
   const timeline = await read(plan.timeline.path);
   validatePanelTimeline(timeline, 'production_panel_composition');
-  need(JSON.stringify(timeline.run_identity) === JSON.stringify(loaded.timeline.run_identity) && JSON.stringify(timeline.audio) === JSON.stringify(loaded.audio), 'timeline identity or audio differs from accepted production');
+  need(JSON.stringify(timeline.run_identity) === JSON.stringify(loaded.timeline.run_identity) && timeline.audio?.sha256 === loaded.audio.sha256 && timeline.audio?.offset_sec === loaded.audio.offset_sec, 'timeline identity or audio differs from accepted production');
   need(timeline.width === loaded.timeline.width && timeline.height === loaded.timeline.height && timeline.fps === loaded.timeline.fps && timeline.duration_sec === loaded.timeline.duration_sec, 'timeline canvas or duration differs from the production lock');
   need(JSON.stringify(timeline.assets) === JSON.stringify(loaded.assets), 'timeline assets differ from accepted production');
   const recipeEntries = Object.keys(plan.source_hashes).filter(file => file !== loaded.paths.packetPath && !Object.hasOwn(loaded.inputHashes, file));

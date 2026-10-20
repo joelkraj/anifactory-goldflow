@@ -1,3 +1,4 @@
+import { retainedBaselineSource } from './retained-baseline-source.mjs';
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { stageChecklistFor } from "./pipeline-stage-registry.mjs";
@@ -57,13 +58,15 @@ export async function falRestartBaselineState({ episodeDir, identity }) {
     const binding = identity.visual_restart; const receipt = await readJson(binding?.receipt_path);
     need(binding?.provider === "fal_ai" && receipt?.target_episode_dir === episodeDir, "Fal restart receipt/identity mismatch.");
     need(await fileSha256(binding.receipt_path) === binding.receipt_sha256, "Fal restart receipt changed.");
-    need(await fileSha256(path.join(binding.baseline_episode_dir, "run_identity.json")) === binding.baseline_identity_sha256, "Fal baseline identity changed.");
+    try { await retainedBaselineSource(identity, path.join(binding.baseline_episode_dir, "run_identity.json"), binding.baseline_identity_sha256); }
+    catch (error) { throw new Error(`Fal baseline identity changed; ${error.message}`); }
     const snapshot = await readJson(path.join(episodeDir, "baseline_status_snapshot.json"));
     const statuses = validateBaselineStages(snapshot);
     const repairedBeatFiles = new Set(["visual_beat_plan.json", "visual_beat_approval.json"]);
     const carriedBeatRows = new Map();
     for (const row of receipt.files ?? []) {
-      need(await fileSha256(row.source_path) === row.sha256, `Fal carryforward source changed: ${row.relative_path}`);
+      try { await retainedBaselineSource(identity, row.source_path, row.sha256); }
+      catch (error) { throw new Error(`Fal carryforward source changed: ${row.relative_path}; ${error.message}`); }
       const currentSha256 = await fileSha256(path.join(episodeDir, row.relative_path));
       if (repairedBeatFiles.has(row.relative_path) && binding.fork_at === "visual_reference_plan") {
         carriedBeatRows.set(row.relative_path, { originalSha256: row.sha256, currentSha256 });

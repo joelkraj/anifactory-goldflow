@@ -1,0 +1,10 @@
+import assert from 'node:assert/strict';
+import {mapWordAnchorTime,retimePictureByWordAnchors} from '../lib/narration-voice-retime.mjs';
+const anchors=[[0,0],[1,1.5],[2,2],[4,3]];
+assert.equal(mapWordAnchorTime(anchors,1),1.5);assert.equal(mapWordAnchorTime(anchors,3),2.5);assert.throws(()=>mapWordAnchorTime(anchors,5));
+const scene={start_sec:1,end_sec:4,layers:[{start_sec:1,end_sec:4,keyframes:[{at_sec:1,opacity:1},{at_sec:4,opacity:0}]}],asset_id:'accepted',entry:{duration_sec:.4}};
+const mapped=retimePictureByWordAnchors(scene,anchors);
+assert.equal(mapped.start_sec,1.5);assert.equal(mapped.end_sec,3);assert.equal(mapped.layers[0].keyframes.at(-1).at_sec,3);
+assert.equal(mapped.asset_id,scene.asset_id);assert.equal(mapped.entry.duration_sec,.4);assert.equal(scene.start_sec,1);
+for(let t=0;t<3.99;t+=.01)assert.ok(mapWordAnchorTime(anchors,t+.005)>=mapWordAnchorTime(anchors,t));
+console.log('narration-voice-retime-tests passed');

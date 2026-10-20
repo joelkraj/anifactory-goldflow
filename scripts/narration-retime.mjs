@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { replaceReviewedNarration } from './lib/narration-voice-retime.mjs';
 // Guarded narration retime. See docs/workflows/narration_final_patch.md.
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
@@ -42,6 +43,11 @@ for (const key of ["panel_plan", "word_timing", "audio_bed_report", "stitch_repo
 }
 const plan = JSON.parse(await fs.readFile(bind.panel_plan_path, "utf8"));
 need(plan.status === "passed" && plan.timeline?.sha256 === bind.timeline_sha256 && await sha256File(plan.timeline.path) === bind.timeline_sha256, "panel timeline changed since review");
+if (spec.mode === 'operator_selected_voice_replacement_v1') {
+  const result = await replaceReviewedNarration({episodeDir,spec,specPath,specSha,bind});
+  console.log(json(result));
+  process.exit(0);
+}
 const stitch = JSON.parse(await fs.readFile(bind.stitch_report_path, "utf8"));
 const audioBed = JSON.parse(await fs.readFile(bind.audio_bed_report_path, "utf8"));
 need(audioBed.final_audio_sha256 === stitch.final_wav_sha256 && audioBed.narration_only === true, "audio bed is not the narrator-only stitched master");

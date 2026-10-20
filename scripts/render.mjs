@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { retainedBaselineSource } from './lib/retained-baseline-source.mjs';
 
 import { loadNarrationRetimeForRender } from "./lib/narration-retime.mjs";
 import { execFile as execFileCb } from "node:child_process";
@@ -138,9 +139,10 @@ async function exists(filePath) {
   return Boolean(filePath) && fs.stat(filePath).then((stat) => stat.isFile()).catch(() => false);
 }
 
-async function assertSourceHashesCurrent(report, label) {
+async function assertSourceHashesCurrent(report, label, identity = null) {
   for (const [filePath, expectedHash] of Object.entries(report?.source_hashes ?? {})) {
-    const actualHash = await hashFile(filePath).catch(() => null);
+    const retainedPath = identity ? await retainedBaselineSource(identity, filePath, expectedHash) : filePath;
+    const actualHash = await hashFile(retainedPath).catch(() => null);
     if (!actualHash || actualHash !== expectedHash) throw new Error(`${label} source hash is stale: ${filePath}`);
   }
 }
@@ -2656,6 +2658,11 @@ async function main() {
       wordTimingPath, audioBedReportPath, audioStitchReportPath })
     : null;
   if (narrationRetime) {
+    const retainedHashes = {};
+    for (const [file, hash] of Object.entries(panelPlan.inputHashes)) {
+      retainedHashes[await retainedBaselineSource(runIdentity, file, hash)] = hash;
+    }
+    panelPlan = { ...panelPlan, inputHashes: { ...retainedHashes, ...narrationRetime.sourceHashes } };
     panelPlan = { ...panelPlan, timeline: narrationRetime.timeline, audio: narrationRetime.audio };
     wordTiming = narrationRetime.wordTiming;
     audioBedReport = { ...audioBedReport, final_audio_path: narrationRetime.audio.path, final_audio_sha256: narrationRetime.audio.sha256,
@@ -2718,7 +2725,7 @@ async function main() {
   }
   if (wordTiming?.status !== "passed") throw new Error(`Missing passed Whisper word timing: ${wordTimingPath}`);
   if (v2Run && visualBeatPlan?.status !== "passed") throw new Error(`Missing passed visual beat plan for locked-script captions: ${visualBeatPlanPath}`);
-  if (visualBeatPlan?.status === "passed") await assertSourceHashesCurrent(visualBeatPlan, "Visual beat plan");
+  if (visualBeatPlan?.status === "passed") await assertSourceHashesCurrent(visualBeatPlan, "Visual beat plan", runIdentity);
   const validatedSubtitleRows = buildSubtitleEvents(wordTiming, audioStitchReport, visualBeatPlan);
   const contractionCaptionSpan = contractionCaptionWordSpanForTests({
     segments: audioStitchReport?.segments, words: wordTiming?.words,

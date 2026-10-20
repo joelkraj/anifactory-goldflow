@@ -1,0 +1,52 @@
+{
+  "schema": "goldflow_test_fixture_recorded_run_identity_fields_v1",
+  "source": "BASE run_identity.json (2026-W43-coma-healer-panel-baseline-v1/ep_01), recorded 2026-10-19; timestamps, hashes of code/config and relock history omitted",
+  "fields": {
+    "channel": "53rebirth",
+    "series_slug": "coma-healer",
+    "week": "2026-W43-coma-healer-panel-baseline-v1",
+    "episode": "ep_01",
+    "title": "I Woke From a 3-Year Coma to Find My Wife Married My Doctor, and Now I Heal With One Touch | Manhwa Recap",
+    "content_profile": "manhwa_recap_v1",
+    "media_workflow": "generated_visuals_v1",
+    "run_intent": "production",
+    "planning_provider": "planning_room",
+    "planning_effort_policy": "planning_room_stage_routed_v1",
+    "image_provider": "codex_imagegen",
+    "tts_provider": "qwen_local",
+    "audio_target": "narrator_only",
+    "production_profile": "fast_premium_v2",
+    "pace_policy": "diagnostic",
+    "target_wpm_min": 180,
+    "target_wpm_max": 195,
+    "render_profile": "panel_composition_v1",
+    "motion_policy": "selective_editorial_v1",
+    "animation_policy": "disabled",
+    "generated_motion_policy": "disabled",
+    "generated_motion_provider": null,
+    "parallax_policy": "disabled",
+    "parallax_background_provider": "local_blur_legacy",
+    "visual_beat_timing_contract": {
+      "enforcement": "hard_max",
+      "target_beat_sec": 7.5,
+      "max_beat_sec": 8,
+      "min_beat_sec": 3,
+      "hook_duration_sec": 30,
+      "hook_target_beat_sec": 3.2,
+      "hook_max_beat_sec": 4.2,
+      "hook_min_beat_sec": 2.2,
+      "retention_ramp_sec": 1200,
+      "ramp_target_beat_sec": 6,
+      "ramp_max_beat_sec": 7,
+      "ramp_min_beat_sec": 3.2
+    },
+    "image_output_qa_required": true,
+    "source_path": "/Users/joel/AniFactoryData/source_ingests/coma_healer_one_touch_claude_v1_2026_10_19.txt",
+    "source_sha256": "ba4fb34d0c739e94eaf5f91fac0cecb73d5f024aad4c53b1957cc1003b280506",
+    "approval_control": {
+      "mode": "agent_led_unless_human_flag_v1",
+      "human_checkpoints": [],
+      "human_checkpoint_flag": "human-checkpoints"
+    }
+  }
+}

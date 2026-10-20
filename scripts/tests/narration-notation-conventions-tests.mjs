@@ -33,3 +33,8 @@ assert.equal(lexical.blockers.length,0);assert.ok(lexical.warnings.length);
 assert.ok(delivery("Three. One's stuck. Then he left.",'Three. Two stuck. Then he left.').blockers.length);
 assert.ok(delivery("One's stuck. Then he left.",'One stuck. Then he left.').blockers.length);
 assert.ok(delivery("Three. One's stuck. Then he left.",'Three. One stuck. Then.').blockers.length);
+for (const [a,b] of [['Room four twelve.','Room 412.'],['At two oh one.','At 201.'],['At ten twenty-two.','At 10.22.']]) {
+  const paired=qa(a,b),self=qa(a,a);
+  assert.deepEqual(paired.intended_canonical_tokens,self.intended_canonical_tokens);
+  assert.equal(paired.word_error_rate,0);
+}

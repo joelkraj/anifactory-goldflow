@@ -67,3 +67,16 @@ The layouts were 5 P4H, 2 P6G, 1 P5L, 1 P3H, 1 P3L and 1 P4G.
 - **Lettering policy** added (`790b579`). It would have flagged the offer card in a small zone. The size directive targets the three garbles.
 - **Pending:** the p05 hero zone repair, prepared as one 2560×1440 request (`dense_p05_hero_repair1`), awaiting spend approval.
 - **Decision (Joel):** dense 3840 pages are the preferred direction.
+
+## Repair and final chapter (2026-10-20)
+
+- **Spend:** `dense_p05_hero_repair1` was approved by Joel and dispatched as one 2560×1440 request at low quality. Billed $0.019855. The proof total is now 12 requests and $0.30799, within the ceiling of 14 requests / $0.70.
+- **Review:**
+  - The repair restores Richard's identity: silver hair, square face, correct build.
+  - The model added an unrequested young man running at the upper left who resembles Joey. That contradicts the later narration ("at a walk. Not a run").
+  - He is excluded by cropping x 0.40–1.00 (1536×1440). That crop has the original zone's aspect, so the authored inset decision is unchanged.
+  - Evidence: `review/p05-repair-review.json` and `review/p05-hero-before-after.jpg`.
+- **Final chapter:**
+  - Only the two affected engine parts were re-rendered; the other six were byte-identical.
+  - Outputs: `proofs/multizone-compare/gala-dense-authored-repaired.mp4`, plus `current-vs-dense-final.mp4` (current edit against dense).
+- **Final tally for the chapter:** 12 Fal requests and $0.308 against today's 47 images (about $0.83), at 56 beats.

@@ -162,6 +162,13 @@ export async function assertFalRetryBudget({ episodeDir, assignments }) {
   return { ...state, requested_paid_retries: pending.length };
 }
 
+export async function falPaidSubmissionCount(episodeDir) {
+  const root = path.join(episodeDir, "fal");
+  const groups = await Promise.all([...INITIAL_RECEIPT_DIRS, ...REPAIR_RECEIPT_DIRS]
+    .map(dir => paidSubmissionsIn(root, dir)));
+  return groups.flat().length;
+}
+
 export async function falSpendProjectionState({ episodeDir, warningBudgetUsd, hardBudgetUsd }) {
   if (!Number.isFinite(warningBudgetUsd) || !Number.isFinite(hardBudgetUsd)
     || warningBudgetUsd <= 0 || hardBudgetUsd <= warningBudgetUsd) {

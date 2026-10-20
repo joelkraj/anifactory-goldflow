@@ -6,6 +6,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { sha256File } from "./lib/file-hash.mjs";
+import { buildEpisodeBudget } from "./lib/episode-budget.mjs";
 import { PANEL_PRODUCTION_RENDER_PROFILE, createPanelProductionContract, assertPanelProductionIdentity, assertPanelProductionPreflightFlags } from "./lib/panel-production-policy.mjs";
 import { normalizeImageProvider } from "./lib/image-provider-routing.mjs";
 import {
@@ -1238,6 +1239,10 @@ async function main() {
   validateDirtyWorktreePolicy({ dirty: git.dirty, intent: runIntent, allowDirty: allowDirtyWorktree, reason: dirtyReason });
   const episodeDir = path.join(dataRoot, "channels", channel, "weekly_runs", week, "episodes", episode);
   const now = new Date().toISOString();
+  // One locked episode spend cap; the Fal contract hard budget and retry cap still apply.
+  const episodeBudgetFields = flags["episode-budget-usd"] != null
+    ? { episode_budget: buildEpisodeBudget({ usd: flags["episode-budget-usd"], lockedAt: now }) }
+    : {};
   const narrationQualityContract = buildNarrationQualityContract({
     provider: ttsProvider,
     modelId: lockedModelVersions().tts_model,
@@ -1397,6 +1402,7 @@ async function main() {
     visual_prompt_review_policy: "blockers_only_after_harden",
     run_intent: runIntent,
     proof_scope: proofScope,
+    ...episodeBudgetFields,
     proof_source_mode: proofSourceComplete ? "standalone_bounded_source" : "audited_baseline_or_full_source",
     git,
     dirty_worktree_waiver: git.dirty ? {

@@ -131,6 +131,16 @@ export function snapPanelAuthorRects(response, baseline) {
   return snaps;
 }
 
+/** Chunk panels, the previous context panel, and earlier-shown sibling zones of the chunk's pages. */
+export function authorPromptPanels(baseline, chunk, contextScene) {
+  const own = new Set(chunk.scenes.map(scene => scene.layers[0].panel_id));
+  if (contextScene) own.add(contextScene.layers[0].panel_id);
+  const pages = new Set(baseline.panels.filter(panel => own.has(panel.id)).map(panel => panel.metadata?.page_asset_id).filter(Boolean));
+  const firstUse = new Map(baseline.scenes.map(scene => [scene.layers[0].panel_id, scene.start_sec]));
+  const lastStart = Math.max(...chunk.scenes.map(scene => scene.start_sec));
+  return baseline.panels.filter(panel => own.has(panel.id) || (pages.has(panel.metadata?.page_asset_id) && firstUse.has(panel.id) && firstUse.get(panel.id) <= lastStart));
+}
+
 export function panelAuthorPrompt(packet, chunk, attachedAssets, contextScene) {
   const ids = new Set(chunk.scenes.map(scene => scene.id));
   const beats = packet.beats.filter(beat => ids.has(beat.visual_beat_id));
@@ -144,10 +154,11 @@ scene_id, layout (full_frame|inset|reveal|reaction_pair|page_pan), panel_id, bac
 Coordinates are normalized. source_rect crops the source artwork; rect places the cropped panel on the 1920x1080 canvas. Both rectangles must remain fully inside [0,1]. Full source is ${JSON.stringify(full)}. Camera x,y traverse AVAILABLE OVERFLOW, not focal-point coordinates: y=0 aligns the top, y=1 aligns the bottom when the image is taller than its viewport; x=0/1 align left/right when wider. When there is no overflow that axis is centered. Zoom is 1..4, normally restrained; identical endpoints intentionally hold. Camera zoom may cut content, so choose it from the actual raster. Optional move_start_sec/move_end_sec add holds using ABSOLUTE supplied beat times. Optional blur_px (0..80), background_brightness (0..1), border_px may be explicit.
 Fill every foreground/context panel edge to edge, with no internal black padding. For contain, size rect to the actual cropped source aspect: (rect.width*1920)/(rect.height*1080) = (asset.width*panel.source_rect.width*source_rect.width)/(asset.height*panel.source_rect.height*source_rect.height). A wide detail belongs in a wide panel; a portrait belongs in a portrait panel. cover may instead fill a viewport only after checking the actual crop and camera preserve the required faces, complete hair/head silhouettes, hands/contact and lettering. Do not remove an unwanted bubble by slicing through a face; select a different region or panel shape. The renderer preserves aspect and does not stretch artwork. For inset or page_pan, place a large sharp panel over a blurred/color-matched safe background. full_frame is appropriate for a necessary wide action or payoff, not a default every time. For reveal/reaction_pair: entry={direction:left|right|up|down,start_sec:ABSOLUTE,duration_sec:positive}; entry must finish strictly before beat end. context={panel_id:current_or_earlier_ID,rect:{x,y,width,height},fit:contain|cover,end_sec:ABSOLUTE}; context must last through entry completion, at most beat end. Optional context.camera={x,y,zoom} can frame an earlier face. Use actual word times for reveal cues. Other layouts require entry:null,context:null. Context/background can reference only supplied current or earlier panels, never later ones. Background does not inherit the main crop. Maintain main panel identity exactly.
 Optional cuts (several shots per beat): on inset, full_frame or page_pan only, a long beat may hard-cut to 1-2 further crops of the SAME main artwork: cuts=[{start_sec:ABSOLUTE,source_rect,rect(optional, defaults to the main rect),fit(optional),camera_from,camera_to,region_evidence}]. Cut where the narration's focus moves (a name, a reaction, a detail), on a word time; every shot lasts at least 1.2s; at most 2 cuts. Do not set rect_to or move times on a decision with cuts. Use cuts only when the artwork holds distinct readable regions; a quiet hold is still right for reading or dialogue.
+Sibling zones: panels whose metadata shares a page_asset_id are separate zones of one generated page, drawn in one consistent style and lighting. When a beat is a reaction, an answer or a consequence of a sibling zone ALREADY shown, prefer reaction_pair or reveal with that sibling as context (its own panel_id), or a quick cut between them, rather than another isolated hold. Never use a sibling zone before its own beat has played.
 Only allowed image/panel IDs are in this packet. Attached assets are listed in attachment order; identical hashes may serve several beat-specific aliases. Do not confuse their identities or invent panel sub-IDs.
 ${JSON.stringify({ canvas: { width: 1920, height: 1080 }, instructions: packet.instructions,
     attached_assets: attachedAssets, previous_context_scene: contextScene, scenes: chunk.scenes.map(scene => ({ id: scene.id, start_sec: scene.start_sec, end_sec: scene.end_sec, panel_id: scene.layers[0].panel_id })),
-    panels: packet.baseline.panels.filter(panel => chunk.scenes.some(scene => scene.layers[0].panel_id === panel.id) || contextScene?.layers[0].panel_id === panel.id),
+    panels: authorPromptPanels(packet.baseline, chunk, contextScene),
     beats: beats.map(beat => ({ id: beat.visual_beat_id, narration: beat.visual_beat_script_excerpt, action: beat.visual_beat_action, visual_focus: beat.visual_beat_focus, information_delta: beat.visual_information_delta, word_start: beat.source_word_start_index, word_end: beat.source_word_end_index })),
     words: packet.words.filter(word => word.index >= wordStart && word.index <= wordEnd),
     image_review_decisions: packet.image_review_decisions?.filter(row => attachedAssets.some(asset => asset.alias_ids.includes(row.image_id))) ?? [] })}`;
@@ -204,7 +215,8 @@ export async function authorPanelProduction({ episodeDir, repoRoot, limit = 1000
   for (const chunk of chunks) {
     const contextIndex = packet.baseline.scenes.findIndex(scene => scene.id === chunk.scenes[0].id) - 1;
     const context = contextIndex >= 0 ? packet.baseline.scenes[contextIndex] : null;
-    const wanted = [...chunk.scenes, ...(context ? [context] : [])].map(scene => assets.get(panels.get(scene.layers[0].panel_id).asset_id));
+    // Earlier sibling zones share their page raster, so they add aliases, not images.
+    const wanted = authorPromptPanels(packet.baseline, chunk, context).map(panel => assets.get(panel.asset_id));
     const attached = []; for (const asset of wanted) {
       const same = attached.find(row => row.sha256 === asset.sha256);
       if (same) { if (!same.alias_ids.includes(asset.id)) same.alias_ids.push(asset.id); }

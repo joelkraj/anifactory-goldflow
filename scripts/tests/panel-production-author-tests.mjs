@@ -196,3 +196,18 @@ test('authored cuts play several crops of one artwork within a beat, each valida
     assert.throws(() => compilePanelComposition(baseline, recipe, { mode: 'production_panel_composition' }), /entry and context required|cuts are only supported/);
   } finally { await fs.rm(f.root, { recursive: true, force: true }); }
 });
+
+test('sibling zones of a shown page are offered as context, never later ones', async () => {
+  const { authorPromptPanels } = await import('../lib/panel-production-author.mjs');
+  const f = await fixture('siblings');
+  try {
+    const baseline = structuredClone(f.packet.baseline), [a, b] = baseline.scenes;
+    const panel = id => baseline.panels.find(row => row.id === id);
+    for (const scene of [a, b]) panel(scene.layers[0].panel_id).metadata = { ...panel(scene.layers[0].panel_id).metadata, page_asset_id: 'page_1' };
+    const ids = rows => rows.map(row => row.id);
+    assert.deepEqual(ids(authorPromptPanels(baseline, { scenes: [b] }, null)), [a.layers[0].panel_id, b.layers[0].panel_id], 'earlier sibling offered');
+    assert.deepEqual(ids(authorPromptPanels(baseline, { scenes: [a] }, null)), [a.layers[0].panel_id], 'later sibling withheld');
+    delete panel(a.layers[0].panel_id).metadata.page_asset_id;
+    assert.deepEqual(ids(authorPromptPanels(baseline, { scenes: [b] }, null)), [b.layers[0].panel_id], 'non-siblings stay out');
+  } finally { await fs.rm(f.root, { recursive: true, force: true }); }
+});

@@ -52,11 +52,20 @@ await test('measured zones follow off-center gutters within tolerance', async ()
   assert.ok(geometry.zones[0].max_edge_deviation > 0.02 && geometry.zones[0].max_edge_deviation < 0.04);
 });
 
-await test('gutters far from the template fail instead of being guessed', async () => {
-  const geometry = await measurePageGeometry(await raster({ gutters: [vertical(1250)] }), 'P2V');
-  assert.equal(geometry.status, 'failed');
-  assert.ok(geometry.findings.some(row => row.code === 'zone_out_of_tolerance'));
-  assert.equal(geometry.zones.length, 0);
+await test('off-centre splits pass on topology; implausible or rearranged layouts fail', async () => {
+  const offCentre = await measurePageGeometry(await raster({ gutters: [vertical(710)] }), 'P2V');
+  assert.equal(offCentre.status, 'passed', 'a 37/63 split is still the requested two-panel layout');
+  assert.ok(offCentre.zones[0].max_edge_deviation > 0.1, 'deviation is recorded as information');
+  const sliver = await measurePageGeometry(await raster({ gutters: [vertical(1700)] }), 'P2V');
+  assert.equal(sliver.status, 'failed');
+  assert.deepEqual(sliver.findings.map(row => row.code), ['zone_topology_mismatch']);
+  assert.equal(sliver.zones.length, 0);
+  // P3L mirrored: stacked zones on the left, the full-height zone on the right.
+  const mirrored = await measurePageGeometry(await raster({ gutters: [vertical(960), horizontal(540, 0, 960 - GUTTER / 2)] }), 'P3L');
+  assert.equal(mirrored.status, 'failed');
+  assert.deepEqual(mirrored.findings.map(row => row.code), ['zone_topology_mismatch']);
+  // A P2V page measured against P2H has the right count but the wrong arrangement.
+  assert.equal((await measurePageGeometry(await raster({ gutters: layouts.P2V }), 'P2H')).status, 'failed');
 });
 
 await test('a figure crossing a gutter breaks it; a small speck does not', async () => {

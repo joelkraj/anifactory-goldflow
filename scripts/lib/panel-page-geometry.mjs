@@ -7,13 +7,17 @@ import sharp from 'sharp';
 // for straight light gutters but never places them exactly, so zone rectangles
 // are measured from the actual raster and checked against the declared
 // template. No model call, no retry and no repair happens here.
-export const PAGE_GEOMETRY_DETECTOR_VERSION = 'guillotine_light_gutter_v1';
+export const PAGE_GEOMETRY_DETECTOR_VERSION = 'guillotine_light_gutter_v2_topology';
 export const PAGE_GEOMETRY_POLICY = Object.freeze({
   light_threshold: 200, // 0..255 luminance; gutters are near-white
   min_continuity: 0.98, // fraction of a gutter line's span that must be light
   min_gutter_px: 2,
   max_gutter_fraction: 0.05, // of the dimension being cut; wider light bands are content
-  edge_tolerance: 0.04, // max nominal edge deviation, normalized to the page
+  // Topology, not exact placement: the model draws the requested arrangement
+  // but rarely centres its gutters (gala proof: 4 of 13 pages split 37-58%).
+  min_zone_fraction: 0.25, // each zone side, as a fraction of the page side
+  full_span_fraction: 0.9, // a nominally full-height/width zone must span this much
+  order_margin: 0.1, // nominal centres this far apart must keep their order
   safe_inset_fraction: 0.01, // of each zone dimension, per side
   max_depth: 3,
 });
@@ -78,6 +82,34 @@ function split(gray, width, region, depth, policy, gutters) {
   return [region];
 }
 
+const centre = r => ({ x: r.x + r.width / 2, y: r.y + r.height / 2 });
+function permutations(n) {
+  if (n === 0) return [[]];
+  return permutations(n - 1).flatMap(p => Array.from({ length: n }, (_, i) => [...p.slice(0, i), n - 1, ...p.slice(i)]));
+}
+/** Best one-to-one slot assignment that preserves the template's arrangement, or null. */
+function matchTopology(nominal, rects, policy) {
+  const fits = (zone, r) => r.width >= policy.min_zone_fraction && r.height >= policy.min_zone_fraction
+    && (zone.height >= 0.99 ? r.height >= policy.full_span_fraction : r.height < policy.full_span_fraction)
+    && (zone.width >= 0.99 ? r.width >= policy.full_span_fraction : r.width < policy.full_span_fraction);
+  let best = null, bestCost = Infinity;
+  for (const perm of permutations(nominal.length)) {
+    if (!nominal.every((zone, i) => fits(zone, rects[perm[i]]))) continue;
+    let ordered = true, cost = 0;
+    for (let i = 0; i < nominal.length && ordered; i++) {
+      const a = centre(nominal[i]), ra = centre(rects[perm[i]]);
+      cost += Math.hypot(a.x - ra.x, a.y - ra.y);
+      for (let j = 0; j < nominal.length; j++) {
+        const b = centre(nominal[j]), rb = centre(rects[perm[j]]);
+        if (b.x - a.x > policy.order_margin && !(rb.x > ra.x)) ordered = false;
+        if (b.y - a.y > policy.order_margin && !(rb.y > ra.y)) ordered = false;
+      }
+    }
+    if (ordered && cost < bestCost) { best = perm; bestCost = cost; }
+  }
+  return best;
+}
+
 /** Measures gutters and zones on a raster buffer and checks them against one template. */
 export async function measurePageGeometry(bytes, template, policy = PAGE_GEOMETRY_POLICY) {
   const nominal = PAGE_TEMPLATES[template];
@@ -88,21 +120,14 @@ export async function measurePageGeometry(bytes, template, policy = PAGE_GEOMETR
     .map(rect => ({ ...rect, normalized: { x: rect.x / width, y: rect.y / height, width: rect.width / width, height: rect.height / height } }));
   const findings = [];
   if (leaves.length !== nominal.length) findings.push({ code: 'zone_count_mismatch', expected: nominal.length, detected: leaves.length });
-  const used = new Set(), zones = [];
-  for (const zone of nominal) {
-    let best = null, bestDeviation = Infinity;
-    for (const [index, leaf] of leaves.entries()) {
-      if (used.has(index)) continue;
-      const n = leaf.normalized;
-      const deviation = Math.max(Math.abs(n.x - zone.x), Math.abs(n.y - zone.y), Math.abs(n.x + n.width - zone.x - zone.width), Math.abs(n.y + n.height - zone.y - zone.height));
-      if (deviation < bestDeviation) { best = index; bestDeviation = deviation; }
-    }
-    if (best === null || bestDeviation > policy.edge_tolerance) {
-      findings.push({ code: 'zone_out_of_tolerance', slot: zone.slot, max_edge_deviation: best === null ? null : round(bestDeviation) });
-      continue;
-    }
-    used.add(best);
-    const leaf = leaves[best], inset = { x: Math.ceil(leaf.width * policy.safe_inset_fraction), y: Math.ceil(leaf.height * policy.safe_inset_fraction) };
+  const zones = [];
+  const assignment = leaves.length === nominal.length ? matchTopology(nominal, leaves.map(leaf => leaf.normalized), policy) : null;
+  if (leaves.length === nominal.length && !assignment) findings.push({ code: 'zone_topology_mismatch', template, detected_rects: leaves.map(leaf => leaf.normalized) });
+  for (const [i, zone] of nominal.entries()) {
+    if (!assignment) break;
+    const leaf = leaves[assignment[i]], n = leaf.normalized;
+    const deviation = Math.max(Math.abs(n.x - zone.x), Math.abs(n.y - zone.y), Math.abs(n.x + n.width - zone.x - zone.width), Math.abs(n.y + n.height - zone.y - zone.height));
+    const inset = { x: Math.ceil(leaf.width * policy.safe_inset_fraction), y: Math.ceil(leaf.height * policy.safe_inset_fraction) };
     const safe = { x: leaf.x + inset.x, y: leaf.y + inset.y, width: leaf.width - 2 * inset.x, height: leaf.height - 2 * inset.y };
     zones.push({
       slot: zone.slot,
@@ -110,7 +135,7 @@ export async function measurePageGeometry(bytes, template, policy = PAGE_GEOMETR
       detected_px: { x: leaf.x, y: leaf.y, width: leaf.width, height: leaf.height },
       safe_px: safe,
       safe_rect: { x: round(safe.x / width), y: round(safe.y / height), width: round(safe.width / width), height: round(safe.height / height) },
-      max_edge_deviation: round(bestDeviation),
+      max_edge_deviation: round(deviation), // informational under topology matching
     });
   }
   return {

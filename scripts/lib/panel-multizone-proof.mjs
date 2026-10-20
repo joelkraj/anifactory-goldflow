@@ -4,7 +4,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { PAGE_TEMPLATES, writePageGeometry } from './panel-page-geometry.mjs';
+import { PAGE_TEMPLATES, PAGE_GEOMETRY_DETECTOR_VERSION, writePageGeometry } from './panel-page-geometry.mjs';
 import { pageFrameText, pagePanelHeadings, pagePromptFindings } from './panel-page-prompts.mjs';
 import { buildReferenceBoard, pageReferenceBoardPromptGuidance } from './openart-reference-board.mjs';
 import { falPortableAssetId } from './fal-portable-bank.mjs';
@@ -204,8 +204,9 @@ export async function observeMultizoneProof({ proofDir }) {
       const result = await observeFalImage({ endpoint: receipt.endpoint, requestId: receipt.request_id, outputPath: row.output_path, receiptPath: row.result_receipt_path });
       if (!result.complete) { rows.push({ page_id: row.image_id, state: 'pending' }); continue; }
     }
-    const geometryPath = path.join(row.geometry_dir, 'page_geometry.json');
-    const geometry = await exists(geometryPath) ? await read(geometryPath) : await writePageGeometry({ imagePath: row.output_path, template: row.panel_page_template, outputDir: row.geometry_dir });
+    // Receipts are per detector version, so a policy change re-measures without overwriting evidence.
+    const geometryDir = path.join(proofDir, 'geometry', PAGE_GEOMETRY_DETECTOR_VERSION, row.image_id), geometryPath = path.join(geometryDir, 'page_geometry.json');
+    const geometry = await exists(geometryPath) ? await read(geometryPath) : await writePageGeometry({ imagePath: row.output_path, template: row.panel_page_template, outputDir: geometryDir });
     rows.push({ page_id: row.image_id, state: 'complete', geometry_status: geometry.status, findings: geometry.findings });
   }
   return { status: rows.every(row => row.state === 'complete') ? 'complete' : 'pending', pages: rows };

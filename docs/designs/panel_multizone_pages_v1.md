@@ -148,6 +148,14 @@ Structural acceptance requires:
 - Each gutter is continuous for ≥ 98% of its span. A shorter gutter means something crosses it.
 - The **safe rectangle** of each zone is the detected rectangle inset by 1% of the zone dimension on each side.
 
+**Placement policy revised after the gala proof (`guillotine_light_gutter_v2_topology`).** Zones match the template on topology rather than ±4% edges:
+
+- the zone count equals the template
+- the arrangement is preserved: centre order, and full-span versus partial-span
+- every zone side is at least 25% of the page side
+
+Edge deviation is still recorded, as information only. In the proof, 4 of 13 pages had clean off-centre splits (37–58%) that the ±4% rule wrongly failed.
+
 Implemented (Phase 0 piece 2) in `scripts/lib/panel-page-geometry.mjs` (`guillotine_light_gutter_v1`). It splits the page recursively at full-span light runs: luminance ≥ 200 over ≥ 98% of the span, gutter width between 2 px and 5% of the dimension. Light runs touching the page edge are trimmed as borders. It then matches the detected regions to the template within ±4%, and writes `goldflow_panel_page_geometry_v1` plus pixel-exact review crops. On the coma-healer montage precedent it measured the five regions exactly (gutters at x 1066–1070 and 1460–1463, y 508–512), and correctly rejected them against `P3L`. Known limit: a thin, full-height light streak inside a panel registers as an extra gutter. That fails the page; it is never silently accepted.
 
 A geometry failure fails the page's structural QA as **one exact-scope finding**. Nothing is retried automatically: triage chooses either a zone-scoped repair (below) or one reviewed page regeneration under existing retry and spend limits.

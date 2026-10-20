@@ -2915,7 +2915,11 @@ export async function adoptInterruptedQwenFirstTakes(flags = {}) {
   const planPath = path.join(episodeDir, "narration_generation_plan.json");
   const scriptPath = path.join(episodeDir, "script_clean.md");
   const gatePath = path.join(episodeDir, `narration_tts_pre_synthesis_gate_${episode}.json`);
-  const outputDir = path.join(episodeDir, "assets/audio/narration_tts");
+  const adoptionIdentity = await readJson(identityPath, null);
+  const migratedVoiceId = adoptionIdentity?.narration_identity_relock?.recovery_kind === "operator_selected_qwen_voice_migration"
+    ? adoptionIdentity.narration_identity_relock.narrator_voice_id : null;
+  if (migratedVoiceId && !/^[a-zA-Z0-9_-]+$/.test(migratedVoiceId)) throw new Error("Unsafe migrated narrator voice ID");
+  const outputDir = path.join(episodeDir, "assets/audio/narration_tts", ...(migratedVoiceId ? [migratedVoiceId] : []));
   const reportPath = path.join(episodeDir, `narration_tts_report_${episode}.json`);
   const unitQaPath = path.join(episodeDir, `narration_tts_unit_qa_${episode}.json`);
   const receiptPath = path.join(episodeDir, `narration_interrupted_qwen_adoption_${episode}.json`);

@@ -51,7 +51,6 @@ export function applyFalContractOverlay(identity, { contract, createdAt, contrac
     for (const key of Object.keys(next.production_profile_config.media)) if (mediaVisual(key)) delete next.production_profile_config.media[key];
     Object.assign(next.production_profile_config.media, { default_image_provider: "fal_ai", image_concurrency: contract.production_concurrency, reference_concurrency: contract.validation_concurrency });
   }
-  next.image_output_qa_required = true;
   return next;
 }
 

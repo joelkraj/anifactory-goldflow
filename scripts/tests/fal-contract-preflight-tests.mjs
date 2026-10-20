@@ -36,7 +36,7 @@ test("a fresh preflight identity gets the same Fal binding the visual-restart fo
   assert.equal(identity.provider_locks.planning_provider, "planning_room", "non-image locks are untouched");
   assert.equal(identity.model_versions.image_provider_models.fal_ai.reference_model, FAL_ENDPOINTS.primary_edit);
   assert.deepEqual(identity.production_profile_config.media, { default_image_provider: "fal_ai", image_concurrency: 20, reference_concurrency: 8 });
-  assert.equal(identity.image_output_qa_required, true);
+  assert.equal("image_output_qa_required" in identity, false, "the overlay never touches nonvisual contract fields; preflight sets QA itself");
 });
 
 test("the channel preset may carry fal-contract as an operational flag", () => {

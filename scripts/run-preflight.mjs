@@ -1421,6 +1421,9 @@ async function main() {
     ...episodeBudgetFields,
     proof_source_mode: proofSourceComplete ? "standalone_bounded_source" : "audited_baseline_or_full_source",
     git,
+    // The commit this identity was preflighted on; the stage guard requires the
+    // executing HEAD to contain it (ancestry, not equality). Mirrors git.commit.
+    code_commit: git.commit,
     dirty_worktree_waiver: git.dirty ? {
       allowed: true,
       reason: dirtyReason,

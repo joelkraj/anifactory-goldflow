@@ -1,9 +1,15 @@
+import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { stageOutputPathMatches } from "./pipeline-stage-registry.mjs";
+import { resolveMediaWorkflow } from "./media-workflows.mjs";
 
 const DEFAULT_DATA_ROOT = "/Users/joel/AniFactoryData";
+const MODULE_REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+export const CODE_DRIFT_EVENT_SCHEMA = "goldflow_code_drift_event_v1";
+export const CODE_DRIFT_REASON_CODE = /^[a-z][a-z0-9_]{2,63}$/;
 const HASHABLE_EXTENSIONS = new Set([".json", ".jsonl", ".md", ".txt", ".sha256", ".ass", ".vtt", ".srt"]);
 
 function sha256(value) {
@@ -82,6 +88,111 @@ async function walkHashableFiles(root, current = root, out = {}) {
     out[path.relative(root, filePath)] = await fileSha256(filePath);
   }
   return out;
+}
+
+function git(args, cwd) {
+  const result = spawnSync("git", args, { cwd, encoding: "utf8", maxBuffer: 1024 * 1024 * 16 });
+  return result.status === 0 ? String(result.stdout ?? "").trim() : null;
+}
+
+// Executing-code provenance for new execution events: the HEAD commit, the
+// worktree it runs from and whether that worktree is dirty. Additive fields;
+// events written before this existed simply lack them (legacy/unrecorded,
+// never rewritten). Cached per process so one stage command spawns git once.
+const gitProvenanceCache = new Map();
+export function gitExecutionProvenance(repoRoot = MODULE_REPO_ROOT) {
+  const key = path.resolve(repoRoot);
+  if (gitProvenanceCache.has(key)) return gitProvenanceCache.get(key);
+  const commit = git(["rev-parse", "HEAD"], key);
+  const status = commit === null ? null : git(["status", "--porcelain=v1", "--untracked-files=all"], key);
+  const provenance = Object.freeze({
+    git_commit: commit,
+    git_worktree: commit === null ? null : git(["rev-parse", "--show-toplevel"], key) ?? key,
+    git_dirty: status === null ? null : status.length > 0,
+  });
+  gitProvenanceCache.set(key, provenance);
+  return provenance;
+}
+
+export function resetGitExecutionProvenanceCacheForTests() {
+  gitProvenanceCache.clear();
+}
+
+// The commit an identity was preflighted on. New identities record code_commit;
+// identities from before that field carry it under git.commit. Neither present
+// means a legacy identity, which the drift guard never touches.
+export function identityCodeCommit(identity = null) {
+  const value = identity?.code_commit ?? identity?.git?.commit ?? null;
+  return typeof value === "string" && /^[0-9a-f]{7,40}$/i.test(value.trim()) ? value.trim().toLowerCase() : null;
+}
+
+/**
+ * Ancestry rule, not equality: the executing HEAD must contain the identity's
+ * commit. A missing identity commit is legacy and not applicable. An unknown
+ * commit (not in this repository) counts as drift. `allowReasonCode` comes
+ * from `--allow-code-drift <reason-code>` and is validated, never free prose.
+ */
+export function codeDriftDecision({ identity = null, repoRoot = MODULE_REPO_ROOT, allowReasonCode = null } = {}) {
+  const identityCommit = identityCodeCommit(identity);
+  if (!identityCommit) return { applicable: false, allowed: true, reason: "legacy_identity_without_code_commit", identity_commit: null, head_commit: null, ancestor: null, allow_reason_code: null };
+  const head = gitExecutionProvenance(repoRoot).git_commit;
+  if (!head) return { applicable: true, allowed: false, reason: "executing_worktree_has_no_git_head", identity_commit: identityCommit, head_commit: null, ancestor: null, allow_reason_code: null };
+  const known = spawnSync("git", ["cat-file", "-e", `${identityCommit}^{commit}`], { cwd: repoRoot, encoding: "utf8" }).status === 0;
+  const ancestor = known && spawnSync("git", ["merge-base", "--is-ancestor", identityCommit, head], { cwd: repoRoot, encoding: "utf8" }).status === 0;
+  const reasonCode = allowReasonCode == null ? null : String(allowReasonCode).trim();
+  if (ancestor) return { applicable: true, allowed: true, reason: "head_contains_identity_commit", identity_commit: identityCommit, head_commit: head, ancestor: true, allow_reason_code: null };
+  if (reasonCode && CODE_DRIFT_REASON_CODE.test(reasonCode)) {
+    return { applicable: true, allowed: true, reason: "code_drift_allowed_by_recorded_reason", identity_commit: identityCommit, head_commit: head, ancestor: false, allow_reason_code: reasonCode, unknown_commit: !known };
+  }
+  return {
+    applicable: true,
+    allowed: false,
+    reason: reasonCode ? "invalid_code_drift_reason_code" : (known ? "head_does_not_contain_identity_commit" : "identity_commit_unknown_to_repository"),
+    identity_commit: identityCommit,
+    head_commit: head,
+    ancestor: false,
+    allow_reason_code: reasonCode || null,
+    unknown_commit: !known,
+  };
+}
+
+// Append-only drift record written beside the stage_started event when an
+// operator passed a valid --allow-code-drift reason. The identity is never
+// rewritten; the workflow contract hash is rechecked against the live registry.
+export async function appendCodeDriftEvent({ episodeDir, identity = null, decision, execution = null, repoRoot = MODULE_REPO_ROOT }) {
+  if (!episodeDir || !decision?.applicable || decision.ancestor !== false || !decision.allow_reason_code) return null;
+  const diffPaths = decision.unknown_commit
+    ? null
+    : (git(["diff", "--name-only", `${decision.identity_commit}..${decision.head_commit}`], repoRoot) ?? "").split("\n").filter(Boolean).slice(0, 500);
+  let contractRecheck = null;
+  if (identity?.workflow_contract?.sha256) {
+    try {
+      // resolveMediaWorkflow recomputes the canonical contract hash from the live
+      // registry and throws when the recorded sha256 no longer matches it.
+      resolveMediaWorkflow(identity);
+      contractRecheck = { recorded_sha256: identity.workflow_contract.sha256, matches: true };
+    } catch (error) {
+      contractRecheck = { recorded_sha256: identity.workflow_contract.sha256, matches: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+  const row = {
+    schema: CODE_DRIFT_EVENT_SCHEMA,
+    event_type: "code_drift",
+    execution_id: execution?.execution_id ?? null,
+    stage: execution?.stage ?? null,
+    command: execution?.command ?? null,
+    identity_commit: decision.identity_commit,
+    head_commit: decision.head_commit,
+    identity_commit_known: decision.unknown_commit !== true,
+    ...gitExecutionProvenance(repoRoot),
+    diff_paths: diffPaths,
+    diff_path_count: diffPaths?.length ?? null,
+    reason_code: decision.allow_reason_code,
+    workflow_contract_recheck: contractRecheck,
+    recorded_at: new Date().toISOString(),
+  };
+  await appendJsonLine(path.join(episodeDir, "execution_events.jsonl"), row);
+  return row;
 }
 
 async function appendJsonLine(filePath, row) {
@@ -212,8 +323,9 @@ function isImagegenExecution(event = {}) {
   return /^imagegen(?:\s|$)/i.test(String(event.command ?? ""));
 }
 
-export async function beginStageExecution({ stage, command, flags = {}, args = [], env = process.env }) {
+export async function beginStageExecution({ stage, command, flags = {}, args = [], env = process.env, repoRoot = MODULE_REPO_ROOT, codeDrift = null }) {
   const episodeDir = episodeDirForFlags(flags, env);
+  const provenance = gitExecutionProvenance(repoRoot);
   const now = new Date();
   const scope = scopeFromFlags(flags);
   const scopeHash = sha256(JSON.stringify(scope));
@@ -236,6 +348,10 @@ export async function beginStageExecution({ stage, command, flags = {}, args = [
     input_hashes: episodeDir && await fs.stat(episodeDir).catch(() => null) ? await walkHashableFiles(episodeDir) : {},
     provider: flags["image-provider"] ?? flags.provider ?? flags["score-provider"] ?? null,
     model: flags.model ?? flags["planning-model"] ?? env.ANIFACTORY_IMAGE_MODEL ?? env.ANIFACTORY_CODEX_MODEL ?? null,
+    ...provenance,
+    code_drift: codeDrift && codeDrift.applicable
+      ? { identity_commit: codeDrift.identity_commit, head_commit: codeDrift.head_commit, ancestor: codeDrift.ancestor, allow_reason_code: codeDrift.allow_reason_code ?? null }
+      : null,
     started_event_written: false,
   };
   if (eventPath && episodeExists) {
@@ -280,6 +396,10 @@ export async function finishStageExecution(execution, {
     attempt: execution.attempt,
     provider: execution.provider,
     model: execution.model,
+    git_commit: execution.git_commit ?? null,
+    git_worktree: execution.git_worktree ?? null,
+    git_dirty: execution.git_dirty ?? null,
+    code_drift: execution.code_drift ?? null,
     input_hashes: execution.input_hashes,
     output_hashes: outputHashes,
     exit_code: exitCode,
@@ -315,6 +435,10 @@ export async function finishStageExecution(execution, {
       input_hashes: execution.input_hashes,
       provider: execution.provider,
       model: execution.model,
+      git_commit: execution.git_commit ?? null,
+      git_worktree: execution.git_worktree ?? null,
+      git_dirty: execution.git_dirty ?? null,
+      code_drift: execution.code_drift ?? null,
     });
   }
   await appendJsonLine(eventPath, {

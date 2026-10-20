@@ -11,7 +11,9 @@ import {
   productionOrderSummary,
 } from "../scripts/lib/pipeline-stage-registry.mjs";
 import {
+  appendCodeDriftEvent,
   beginStageExecution,
+  codeDriftDecision,
   episodeDirForFlags,
   finishStageExecution,
 } from "../scripts/lib/execution-provenance.mjs";
@@ -398,6 +400,25 @@ function run(script, scriptArgs = []) {
   }
   enforceWorkflowGuard(command, subcommand, scriptArgs, episodeDir);
   const stage = commandStage(command, subcommand, parsedFlags, episodeDir);
+  // Executing-code guard (ancestry rule): a stage command runs only when HEAD
+  // contains the commit the identity was preflighted on. Read-only commands
+  // (no stage) and legacy identities without a recorded commit are untouched.
+  // `--allow-code-drift <reason-code>` admits the command and is recorded in
+  // the execution events; the identity itself is never rewritten.
+  const allowCodeDrift = Object.hasOwn(parsedFlags, "allow-code-drift") ? String(parsedFlags["allow-code-drift"]) : null;
+  const codeDrift = stage && command !== "crime-proof"
+    ? codeDriftDecision({ identity: episodeDir ? readEpisodeRoutingIdentity(episodeDir) : null, repoRoot, allowReasonCode: allowCodeDrift })
+    : null;
+  if (codeDrift?.applicable && !codeDrift.allowed) {
+    console.error(`Code drift blocked: ${command} ${subcommand}`);
+    console.error(`Reason: ${codeDrift.reason}. Identity commit ${codeDrift.identity_commit}; executing HEAD ${codeDrift.head_commit ?? "unknown"}.`);
+    console.error("Run from a worktree whose HEAD contains the identity commit, or pass --allow-code-drift <reason-code> (lowercase snake_case) to record an append-only drift event.");
+    process.exit(1);
+  }
+  if (allowCodeDrift !== null) {
+    // The flag belongs to this guard; child scripts never see it.
+    scriptArgs = scriptArgs.filter((arg, index, all) => arg !== "--allow-code-drift" && all[index - 1] !== "--allow-code-drift");
+  }
   const plannerRerunDecision = command === "visual" && ["repair-beats", "repair-beat-density", "repair-prompt", "repair-prompt-multiplier", "review-prop-repair", "repair-screen-identity", "repair-identity-binding", "repair-reviewed-ref-scope"].includes(subcommand)
     ? { allowed: true }
     : plannerRerunDecisionForEpisode({ command, subcommand, stage, flags: parsedFlags, episodeDir });
@@ -435,7 +456,12 @@ function run(script, scriptArgs = []) {
       flags: parsedFlags,
       args: scriptArgs,
       env: process.env,
+      repoRoot,
+      codeDrift,
     }) : null;
+    if (execution && codeDrift?.applicable && codeDrift.ancestor === false) {
+      await appendCodeDriftEvent({ episodeDir, identity: readEpisodeRoutingIdentity(episodeDir), decision: codeDrift, execution, repoRoot });
+    }
     const child = spawn(process.execPath, [path.join(repoRoot, "scripts", script), ...scriptArgs], {
       cwd: repoRoot,
       stdio: ["inherit", "pipe", "pipe"],

@@ -8,7 +8,7 @@ import { PAGE_TEMPLATES, PAGE_GEOMETRY_DETECTOR_VERSION, writePageGeometry } fro
 import { pageFrameText, pagePanelHeadings, pagePromptFindings } from './panel-page-prompts.mjs';
 import { buildReferenceBoard, pageReferenceBoardPromptGuidance } from './openart-reference-board.mjs';
 import { falPortableAssetId } from './fal-portable-bank.mjs';
-import { FAL_ENDPOINTS, uploadFalReference, submitFalImage, observeFalImage } from './fal-provider.mjs';
+import { FAL_ENDPOINTS, FAL_PAGE_CANVAS_SIZES, uploadFalReference, submitFalImage, observeFalImage } from './fal-provider.mjs';
 
 // Private multi-zone page proof. It reads one accepted run read-only, re-draws
 // only authored page orders, and never writes to the source episode or
@@ -58,14 +58,18 @@ export async function resolveMultizoneProofPlan(plan) {
   const prompts = (await read(path.join(source, 'section_image_prompts_hardened.json'))).prompts;
   const approval = await read(path.join(source, `visual_reference_approval_${identity.episode}.json`));
   need(approval.status === 'approved', 'source references must be approved');
+  // An explicit page subset (e.g. a canvas-size comparison) re-draws only the
+  // named pages; full coverage of every owner is then not claimed.
+  const subset = plan.page_ids ? new Set(plan.page_ids) : null;
+  if (plan.canvas) need(FAL_PAGE_CANVAS_SIZES.some(row => row.width === plan.canvas.width && row.height === plan.canvas.height), 'unsupported canvas');
   const scenes = new Set(plan.scene_ids ?? []);
   const owners = new Map(prompts.filter(row => scenes.has(row.scene_id) && row.provider_submission_required !== false).map(row => [row.image_id, row]));
   need(owners.size > 0, 'no source owners in the proof scenes');
   const covered = new Set();
   const claim = id => { need(owners.has(id) && !covered.has(id), `owner ${id} is unknown, outside the scenes, or used twice`); covered.add(id); };
-  for (const single of plan.reused_singles ?? []) { claim(single.source_image_id); need(text(single.reason, 10), `reuse reason required for ${single.source_image_id}`); }
+  for (const single of subset ? [] : plan.reused_singles ?? []) { claim(single.source_image_id); need(text(single.reason, 10), `reuse reason required for ${single.source_image_id}`); }
   const pageIds = new Set(), pages = [];
-  for (const page of plan.pages ?? []) {
+  for (const page of (plan.pages ?? []).filter(row => !subset || subset.has(row.page_id))) {
     need(/^[a-z0-9][a-z0-9_]*$/.test(page.page_id ?? '') && !pageIds.has(page.page_id), 'unique safe page ids required'); pageIds.add(page.page_id);
     const template = PAGE_TEMPLATES[page.template];
     need(template && Array.isArray(page.zones) && page.zones.length === template.length, `${page.page_id} needs exactly the ${page.template} zones`);
@@ -95,9 +99,10 @@ export async function resolveMultizoneProofPlan(plan) {
     need(!findings.length, `${page.page_id} page prompt fails: ${findings.map(row => row.code).join(', ')}`);
     pages.push({ page_id: page.page_id, scene_id: page.scene_id, template: page.template, refs, visible_people: page.visible_people, provider_prompt: providerPrompt, zones });
   }
-  const missing = [...owners.keys()].filter(id => !covered.has(id));
+  if (subset) need(pages.length === subset.size, 'every named page id must exist');
+  const missing = subset ? [] : [...owners.keys()].filter(id => !covered.has(id));
   need(!missing.length, `every source owner must be paged or reused: ${missing.join(', ')}`);
-  return { identity, pages, reused: plan.reused_singles, owners: owners.size };
+  return { identity, pages, reused: subset ? [] : plan.reused_singles, owners: owners.size, subset: subset ? [...subset] : null, canvas: plan.canvas ?? null };
 }
 
 export function proofPaths(proofDir, pageId) {
@@ -125,7 +130,8 @@ export async function prepareMultizoneProof({ planPath, proofDir, allowDirtyWork
   const identity = {
     schema: MULTIZONE_PROOF_IDENTITY_SCHEMA, proof_id: plan.proof_id, intent: 'private_proof', production_eligible: false,
     source_episode_dir: source, source_hashes: sourceHashes, code,
-    provider: { endpoint_with_refs: FAL_ENDPOINTS.primary_edit, endpoint_text: FAL_ENDPOINTS.primary_text, quality: 'low', width: 1920, height: 1080, automatic_creative_retry: false, automatic_failover: false },
+    provider: { endpoint_with_refs: FAL_ENDPOINTS.primary_edit, endpoint_text: FAL_ENDPOINTS.primary_text, quality: 'low', width: resolved.canvas?.width ?? 1920, height: resolved.canvas?.height ?? 1080, automatic_creative_retry: false, automatic_failover: false },
+    page_subset: resolved.subset,
     page_count: resolved.pages.length, zone_count: resolved.pages.reduce((n, page) => n + page.zones.length, 0),
     source_owner_count: resolved.owners, reused_single_count: resolved.reused.length,
     max_requests: resolved.pages.length + REPAIR_ALLOWANCE, max_cost_per_request_usd: MAX_COST_PER_REQUEST_USD,
@@ -145,6 +151,7 @@ export async function prepareMultizoneProof({ planPath, proofDir, allowDirtyWork
       reference_mode: board ? 'one_positional_collage' : 'text_only', reference_asset_ids: page.refs.map(ref => ref.asset_id), reference_hashes: page.refs.map(ref => ref.sha256),
       board_path: board?.output_path ?? null, board_sha256: board?.output_sha256 ?? null, board_manifest_path: board?.manifest_path ?? null,
       max_cost_usd: MAX_COST_PER_REQUEST_USD, visible_people: page.visible_people, zones: page.zones,
+      ...(resolved.canvas ? { image_size: { width: resolved.canvas.width, height: resolved.canvas.height } } : {}),
     };
     const assignment = { ...core, assignment_sha256: sha(JSON.stringify(core)), ...proofPaths(proofDir, page.page_id) };
     await fs.mkdir(path.dirname(assignment.assignment_path), { recursive: true });
@@ -201,7 +208,7 @@ export async function observeMultizoneProof({ proofDir }) {
     if (!await exists(row.submission_receipt_path)) { rows.push({ page_id: row.image_id, state: 'not_submitted' }); continue; }
     if (!await exists(row.result_receipt_path)) {
       const receipt = await read(row.submission_receipt_path);
-      const result = await observeFalImage({ endpoint: receipt.endpoint, requestId: receipt.request_id, outputPath: row.output_path, receiptPath: row.result_receipt_path });
+      const result = await observeFalImage({ endpoint: receipt.endpoint, requestId: receipt.request_id, outputPath: row.output_path, receiptPath: row.result_receipt_path, expectedSize: row.image_size });
       if (!result.complete) { rows.push({ page_id: row.image_id, state: 'pending' }); continue; }
     }
     // Receipts are per detector version, so a policy change re-measures without overwriting evidence.

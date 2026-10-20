@@ -15,6 +15,16 @@ export const FAL_PRIMARY_PARAMS = Object.freeze({
   quality: "low", image_size: Object.freeze({ width: 1920, height: 1080 }),
   output_format: "png", num_images: 1, background: "opaque", sync_mode: false,
 });
+// Larger canvases are allowed only when an assignment names one explicitly
+// (multi-zone page proofs); quality and every other parameter stay locked.
+export const FAL_PAGE_CANVAS_SIZES = Object.freeze([
+  Object.freeze({ width: 1920, height: 1080 }), Object.freeze({ width: 2560, height: 1440 }), Object.freeze({ width: 3840, height: 2160 }),
+]);
+const canvasSize = (size = FAL_PRIMARY_PARAMS.image_size) => {
+  const match = FAL_PAGE_CANVAS_SIZES.find(row => row.width === size?.width && row.height === size?.height);
+  need(match, `Unsupported Fal canvas ${size?.width}x${size?.height}.`);
+  return { width: match.width, height: match.height };
+};
 export const FAL_EPISODE_BUDGET = Object.freeze({ warning_usd: 30, hard_usd: 35 });
 export const FAL_PRIVATE_KEY_PATH = path.join(process.env.HOME ?? "", ".config/anifactory/fal_key");
 
@@ -44,12 +54,12 @@ async function falCredential() {
   return key;
 }
 
-export function buildFalImageInput({ prompt, referenceUrls = [], separateReferences = false } = {}) {
+export function buildFalImageInput({ prompt, referenceUrls = [], separateReferences = false, imageSize } = {}) {
   need(typeof prompt === "string" && prompt.trim(), "Fal prompt is required.");
   need(Array.isArray(referenceUrls) && referenceUrls.length <= 16, "Fal supports at most sixteen references.");
   need(referenceUrls.every((url) => typeof url === "string" && /^https:\/\//.test(url)), "Fal references must be uploaded HTTPS URLs.");
   const endpoint = referenceUrls.length ? FAL_ENDPOINTS.primary_edit : FAL_ENDPOINTS.primary_text;
-  const input = { prompt, ...structuredClone(FAL_PRIMARY_PARAMS), partial_images: 0 };
+  const input = { prompt, ...structuredClone(FAL_PRIMARY_PARAMS), image_size: canvasSize(imageSize), partial_images: 0 };
   if (!referenceUrls.length) delete input.partial_images;
   else input.image_urls = referenceUrls;
   return { endpoint, input, reference_mode: separateReferences ? "separate_ordered_references" : referenceUrls.length ? "one_positional_collage" : "text_only" };
@@ -120,7 +130,7 @@ export function falSubmissionAttemptPath(receiptPath) {
 export async function submitFalImage({ assignment, referenceUrls = [], receiptPath, fetchImpl = fetch, credentials } = {}) {
   need(assignment?.image_id && assignment?.assignment_sha256 && assignment?.run_identity_sha256 && assignment?.prompt_sha256 === hash(assignment.prompt ?? ""), "Fal assignment binding is invalid.");
   need(Number.isFinite(assignment.max_cost_usd) && assignment.max_cost_usd > 0, "Fal assignment needs a positive cost ceiling.");
-  const request = buildFalImageInput({ prompt: assignment.prompt, referenceUrls, separateReferences: assignment.reference_mode === "separate_ordered_references" });
+  const request = buildFalImageInput({ prompt: assignment.prompt, referenceUrls, separateReferences: assignment.reference_mode === "separate_ordered_references", imageSize: assignment.image_size });
   need(request.endpoint === assignment.endpoint, "Fal assignment endpoint changed.");
   const key = credentials ?? await falCredential();
   need(typeof key === "string" && key.length > 0, "Fal submission credential is missing.");
@@ -149,7 +159,7 @@ export async function submitFalImage({ assignment, referenceUrls = [], receiptPa
   const record = {
     schema: "goldflow_fal_submission_receipt_v1", submitted_at: submittedAt, image_id: assignment.image_id,
     assignment_sha256: assignment.assignment_sha256, run_identity_sha256: assignment.run_identity_sha256,
-    endpoint: request.endpoint, prompt_sha256: assignment.prompt_sha256, params: FAL_PRIMARY_PARAMS,
+    endpoint: request.endpoint, prompt_sha256: assignment.prompt_sha256, params: assignment.image_size ? { ...FAL_PRIMARY_PARAMS, image_size: request.input.image_size } : FAL_PRIMARY_PARAMS,
     reference_mode: request.reference_mode, reference_hashes: assignment.reference_hashes,
     remote_reference_url_hashes: referenceUrls.map(hash), request_id: requestId,
     max_cost_usd: assignment.max_cost_usd, automatic_creative_retry: false, automatic_failover: false,
@@ -157,7 +167,8 @@ export async function submitFalImage({ assignment, referenceUrls = [], receiptPa
   return { requestId, record, receipt: await atomicJson(receiptPath, record) };
 }
 
-export async function observeFalImage({ endpoint, requestId, outputPath, receiptPath, client, fetchImpl = fetch } = {}) {
+export async function observeFalImage({ endpoint, requestId, outputPath, receiptPath, client, fetchImpl = fetch, expectedSize } = {}) {
+  const { width: W, height: H } = canvasSize(expectedSize);
   need(Object.values(FAL_ENDPOINTS).includes(endpoint) && typeof requestId === "string" && requestId, "Exact Fal endpoint and request ID are required.");
   const fal = client ?? createFalClient({ credentials: await falCredential() });
   const status = await fal.queue.status(endpoint, { requestId, logs: false });
@@ -169,16 +180,17 @@ export async function observeFalImage({ endpoint, requestId, outputPath, receipt
   const response = await fetchImpl(mediaUrl, { redirect: "error", signal: AbortSignal.timeout(60_000) });
   need(response.ok, `Fal output download failed with HTTP ${response.status}.`);
   const bytes = Buffer.from(await response.arrayBuffer()); const metadata = await sharp(bytes).metadata();
-  need(metadata.width === 1920 && [1072, 1080].includes(metadata.height) && metadata.format === "png", `Fal output has unexpected raster ${metadata.width}x${metadata.height} ${metadata.format}.`);
+  // The provider may round the height down to a multiple of 16 (1080 -> 1072).
+  need(metadata.width === W && [H, Math.floor(H / 16) * 16].includes(metadata.height) && metadata.format === "png", `Fal output has unexpected raster ${metadata.width}x${metadata.height} ${metadata.format}.`);
   const rawPath = outputPath.replace(/\.png$/i, ".provider.png");
   await absent(rawPath); await absent(outputPath); await fs.mkdir(path.dirname(outputPath), { recursive: true }); await fs.writeFile(rawPath, bytes, { flag: "wx" });
-  const normalized = metadata.height === 1080 ? bytes : await sharp(bytes).resize(1920, 1080, { fit: "fill" }).png().toBuffer();
+  const normalized = metadata.height === H ? bytes : await sharp(bytes).resize(W, H, { fit: "fill" }).png().toBuffer();
   const normalizedMetadata = await sharp(normalized).metadata();
-  need(normalizedMetadata.width === 1920 && normalizedMetadata.height === 1080 && normalizedMetadata.format === "png", "Fal normalization failed to produce the locked raster.");
+  need(normalizedMetadata.width === W && normalizedMetadata.height === H && normalizedMetadata.format === "png", "Fal normalization failed to produce the locked raster.");
   await fs.writeFile(outputPath, normalized, { flag: "wx" });
   const record = { schema: "goldflow_fal_result_receipt_v1", completed_at: timestamp(), endpoint, request_id: requestId,
     provider_output_path: rawPath, provider_output_sha256: hash(bytes), provider_width: metadata.width, provider_height: metadata.height, provider_format: metadata.format,
-    normalization: metadata.height === 1080 ? "none" : "resize_1920x1072_to_1920x1080_png",
+    normalization: metadata.height === H ? "none" : `resize_${W}x${metadata.height}_to_${W}x${H}_png`,
     output_path: outputPath, output_sha256: hash(normalized), width: normalizedMetadata.width, height: normalizedMetadata.height, format: normalizedMetadata.format,
     source_url_sha256: hash(images[0].url), source_url_persisted: false, provider_metadata: sanitized(result) };
   return { complete: true, record, receipt: await atomicJson(receiptPath, record) };

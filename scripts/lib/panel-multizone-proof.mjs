@@ -8,7 +8,7 @@ import { PAGE_TEMPLATES, PAGE_TEMPLATE_MIN_CANVAS_WIDTH, PAGE_GEOMETRY_DETECTOR_
 import { pageFrameText, pagePanelHeadings, pagePromptFindings } from './panel-page-prompts.mjs';
 import { buildReferenceBoard, pageReferenceBoardPromptGuidance, referenceBoardPromptGuidance } from './openart-reference-board.mjs';
 import { falPortableAssetId } from './fal-portable-bank.mjs';
-import { FAL_ENDPOINTS, FAL_PAGE_CANVAS_SIZES, uploadFalReference, submitFalImage, observeFalImage } from './fal-provider.mjs';
+import { FAL_ENDPOINTS, FAL_PAGE_CANVAS_SIZES, uploadFalReference, submitFalImage, observeFalImage, falBillingForRequests } from './fal-provider.mjs';
 
 // Private multi-zone page proof. It reads one accepted run read-only, re-draws
 // only authored page orders, and never writes to the source episode or
@@ -254,4 +254,19 @@ export async function prepareMultizoneZoneRepair({ proofDir, pageId, slot, secti
   const assignment = { ...core, assignment_sha256: sha(JSON.stringify(core)), ...proofPaths(proofDir, repairId) };
   await writeNew(assignment.assignment_path, assignment);
   return { status: 'prepared_not_dispatched', repair_id: repairId, page_id: pageId, slot, replaces: zone.source_image_id, beats: zone.beat_image_ids, provider_calls: 0 };
+}
+
+/** Records the exact billed cost of every submitted proof request (read-only). */
+export async function costMultizoneProof({ proofDir }) {
+  const { assignments } = await loadPrepared(proofDir), submitted = [];
+  for (const row of assignments) if (await exists(row.submission_receipt_path)) submitted.push({ row, receipt: await read(row.submission_receipt_path) });
+  need(submitted.length, 'no submitted requests');
+  const times = submitted.map(item => Date.parse(item.receipt.submitted_at));
+  const billing = await falBillingForRequests({ requestIds: submitted.map(item => item.receipt.request_id), start: new Date(Math.min(...times) - 3600e3).toISOString(), end: new Date(Math.max(...times) + 6 * 3600e3).toISOString() });
+  const byRequest = new Map(billing.events.map(row => [row.request_id, row]));
+  const rows = submitted.map(({ row, receipt }) => ({ image_id: row.image_id, kind: row.kind ?? 'page', template: row.panel_page_template ?? null, canvas: row.image_size ?? { width: 1920, height: 1080 }, beats: (row.zones ?? []).reduce((n, zone) => n + zone.beat_image_ids.length, 0) || (row.beat_image_ids?.length ?? 0), request_id: receipt.request_id, cost_usd: byRequest.get(receipt.request_id)?.cost_usd ?? null }));
+  const billed = rows.filter(row => row.cost_usd !== null), total = billed.reduce((sum, row) => sum + row.cost_usd, 0), beats = rows.reduce((n, row) => n + row.beats, 0);
+  const report = { schema: 'goldflow_multizone_proof_cost_v1', proof_dir: proofDir, requests: rows.length, billed_requests: billed.length, missing_request_ids: billing.missing_request_ids, total_cost_usd: Math.round(total * 1e6) / 1e6, mean_cost_per_request_usd: billed.length ? Math.round(total / billed.length * 1e6) / 1e6 : null, beats_covered: beats, cost_per_beat_usd: beats ? Math.round(total / beats * 1e6) / 1e6 : null, rows, source: 'fal_billing_events', created_at: new Date().toISOString() };
+  await fs.writeFile(path.join(proofDir, `cost_report_${Date.now()}.json`), json(report), { flag: 'wx' });
+  return report;
 }

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { parseMultizoneProofArgs } from '../panel-multizone-proof.mjs';
-import { buildFalImageInput, FAL_PRIMARY_PARAMS } from '../lib/fal-provider.mjs';
+import { buildFalImageInput, FAL_PRIMARY_PARAMS, falBillingForRequests } from '../lib/fal-provider.mjs';
 import { dispatchMultizoneProof, prepareMultizoneProof, resolveMultizoneProofPlan, MULTIZONE_PROOF_SPEND_TOKEN } from '../lib/panel-multizone-proof.mjs';
 
 let count = 0;
@@ -26,5 +26,21 @@ await test('larger page canvases are explicit and allowlisted; quality stays loc
   const large = buildFalImageInput({ prompt: 'p', referenceUrls: urls, imageSize: { width: 3840, height: 2160 } }).input;
   assert.deepEqual([large.image_size, large.quality], [{ width: 3840, height: 2160 }, 'low']);
   assert.throws(() => buildFalImageInput({ prompt: 'p', imageSize: { width: 1000, height: 1000 } }), /Unsupported Fal canvas/);
+});
+await test('billing lookup returns exact request costs, pages through results and never echoes the key', async () => {
+  process.env.FAL_BILLING_KEY = 'test-key:secret';
+  const calls = [];
+  const fetchImpl = async (url, init) => {
+    calls.push({ url, auth: init.headers.Authorization });
+    const cursor = new URL(url).searchParams.get('cursor');
+    return { ok: true, json: async () => cursor ? { billing_events: [{ request_id: 'b', cost_total: 0.0262 }], has_more: false } : { billing_events: [{ request_id: 'a', cost_total: 0.0187 }, { request_id: 'x', cost_total: 9 }], has_more: true, next_cursor: 'c2' } };
+  };
+  const result = await falBillingForRequests({ requestIds: ['a', 'b', 'z'], start: '2026-10-20T00:00:00Z', end: '2026-10-21T00:00:00Z', fetchImpl });
+  assert.deepEqual(result.events.map(row => [row.request_id, row.cost_usd]), [['a', 0.0187], ['b', 0.0262]]);
+  assert.deepEqual(result.missing_request_ids, ['z']);
+  assert.equal(calls.length, 2);
+  assert.ok(!JSON.stringify(result).includes('secret'));
+  await assert.rejects(falBillingForRequests({ requestIds: ['a'], start: 's', end: 'e', fetchImpl: async () => ({ ok: false, status: 403 }) }), /lacks billing permission/);
+  delete process.env.FAL_BILLING_KEY;
 });
 console.log(`Panel multizone proof: ${count} test groups passed.`);

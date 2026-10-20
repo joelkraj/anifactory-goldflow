@@ -27,6 +27,9 @@ const canvasSize = (size = FAL_PRIMARY_PARAMS.image_size) => {
 };
 export const FAL_EPISODE_BUDGET = Object.freeze({ warning_usd: 30, hard_usd: 35 });
 export const FAL_PRIVATE_KEY_PATH = path.join(process.env.HOME ?? "", ".config/anifactory/fal_key");
+// Optional separate key with billing:usage:read (Fal BILLING preset). A FULL
+// key saved as fal_key also works; billing reads fall back to it.
+export const FAL_PRIVATE_BILLING_KEY_PATH = path.join(process.env.HOME ?? "", ".config/anifactory/fal_billing_key");
 
 const hash = (value) => createHash("sha256").update(value).digest("hex");
 const timestamp = () => new Date().toISOString();
@@ -45,11 +48,11 @@ function sanitized(value) {
   if (!value || typeof value !== "object") return value;
   return Object.fromEntries(Object.entries(value).filter(([key]) => !/^(url|signed_url|authorization|credentials|key)$/i.test(key)).map(([key, item]) => [key, sanitized(item)]));
 }
-async function falCredential() {
-  if (process.env.FAL_KEY?.trim()) return process.env.FAL_KEY.trim();
-  const stat = await fs.stat(FAL_PRIVATE_KEY_PATH).catch(() => null);
+async function falCredential(keyPath = FAL_PRIVATE_KEY_PATH) {
+  if (keyPath === FAL_PRIVATE_KEY_PATH && process.env.FAL_KEY?.trim()) return process.env.FAL_KEY.trim();
+  const stat = await fs.stat(keyPath).catch(() => null);
   need(stat?.isFile() && (stat.mode & 0o077) === 0, "Fal private credential is missing or has unsafe permissions.");
-  const key = (await fs.readFile(FAL_PRIVATE_KEY_PATH, "utf8")).trim();
+  const key = (await fs.readFile(keyPath, "utf8")).trim();
   need(/^[^:\s]+:[^:\s]+$/.test(key), "Fal private credential is malformed.");
   return key;
 }
@@ -197,3 +200,24 @@ export async function observeFalImage({ endpoint, requestId, outputPath, receipt
 }
 
 export { fileHash as falFileSha256, hash as falObjectSha256 };
+
+/**
+ * Read-only billed cost for exact request IDs (Fal Platform billing events).
+ * Uses the private billing key when present, else the main key (a FULL key).
+ * Never persists the key; returns only request IDs and costs.
+ */
+export async function falBillingForRequests({ requestIds, start, end, endpointId = FAL_ENDPOINTS.primary_edit, fetchImpl = fetch } = {}) {
+  need(Array.isArray(requestIds) && requestIds.length && start && end, "Exact request IDs and a time window are required.");
+  const billingKey = process.env.FAL_BILLING_KEY?.trim() || await fs.stat(FAL_PRIVATE_BILLING_KEY_PATH).then(() => falCredential(FAL_PRIVATE_BILLING_KEY_PATH), () => falCredential());
+  const wanted = new Set(requestIds), found = new Map();
+  let cursor = null;
+  do {
+    const params = new URLSearchParams({ endpoint_id: endpointId, start, end, limit: "10000", ...(cursor ? { cursor } : {}) });
+    const response = await fetchImpl(`https://api.fal.ai/v1/models/billing-events?${params}`, { headers: { Authorization: `Key ${billingKey}` } });
+    need(response.ok, response.status === 403 ? "Fal key lacks billing permission; save a BILLING or FULL key privately." : `Fal billing events returned HTTP ${response.status}.`);
+    const body = await response.json();
+    for (const row of body.billing_events ?? body.items ?? []) if (wanted.has(row.request_id)) found.set(row.request_id, { request_id: row.request_id, timestamp: row.timestamp, cost_usd: Number(row.cost_total ?? Number(row.cost_estimate_nano_usd ?? 0) / 1e9), quantity: row.quantity ?? null });
+    cursor = body.has_more ? body.next_cursor : null;
+  } while (cursor);
+  return { endpoint_id: endpointId, events: [...found.values()], missing_request_ids: requestIds.filter(id => !found.has(id)) };
+}

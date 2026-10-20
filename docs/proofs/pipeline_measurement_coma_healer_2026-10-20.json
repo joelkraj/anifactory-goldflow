@@ -1,0 +1,469 @@
+{
+ "runs": [
+  {
+   "episode_dir": "/Users/joel/AniFactoryData/channels/53rebirth/weekly_runs/2026-W43-coma-healer-panel-baseline-v1/episodes/ep_01",
+   "event_count": 96,
+   "stages": [
+    {
+     "stage": "run_identity",
+     "attempts": 3,
+     "total_wall_sec": 2.6,
+     "max_single_wall_sec": 1.3,
+     "elapsed_calendar_sec": 78889.1,
+     "cost_usd": 0,
+     "providers_models": "event provider=codex_imagegen/null, model=null (run preflight x1, run relock-tts x2)",
+     "status_counts": "passed=3",
+     "first_started_at": "2026-10-19T04:34:14.003Z",
+     "last_completed_at": "2026-10-20T02:29:03.151Z"
+    },
+    {
+     "stage": "source_ingest",
+     "attempts": 1,
+     "total_wall_sec": 0.1,
+     "max_single_wall_sec": 0.1,
+     "elapsed_calendar_sec": 0.1,
+     "cost_usd": 0,
+     "providers_models": "none (external ingest of coma_healer_one_touch_claude_v1_2026_10_19.txt)",
+     "status_counts": "passed=1",
+     "first_started_at": "2026-10-19T04:34:29.684Z",
+     "last_completed_at": "2026-10-19T04:34:29.766Z"
+    },
+    {
+     "stage": "script_approval",
+     "attempts": 2,
+     "total_wall_sec": 0.2,
+     "max_single_wall_sec": 0.1,
+     "elapsed_calendar_sec": 89.6,
+     "cost_usd": 0,
+     "providers_models": "none (a1 refused: power_system_comprehension_audit.json missing; audit written 04:36:05Z then a2 passed)",
+     "status_counts": "failed=1,passed=1",
+     "first_started_at": "2026-10-19T04:34:42.600Z",
+     "last_completed_at": "2026-10-19T04:36:12.194Z"
+    },
+    {
+     "stage": "script_pace_check",
+     "attempts": 1,
+     "total_wall_sec": 0.1,
+     "max_single_wall_sec": 0.1,
+     "elapsed_calendar_sec": 0.1,
+     "cost_usd": 0,
+     "providers_models": "none",
+     "status_counts": "passed=1",
+     "first_started_at": "2026-10-19T04:36:24.207Z",
+     "last_completed_at": "2026-10-19T04:36:24.285Z"
+    },
+    {
+     "stage": "targeted_speakability",
+     "attempts": 1,
+     "total_wall_sec": 0.1,
+     "max_single_wall_sec": 0.1,
+     "elapsed_calendar_sec": 0.1,
+     "cost_usd": 0,
+     "providers_models": "none",
+     "status_counts": "passed=1",
+     "first_started_at": "2026-10-19T04:36:24.833Z",
+     "last_completed_at": "2026-10-19T04:36:24.910Z"
+    },
+    {
+     "stage": "semantic_scene_plan",
+     "attempts": 3,
+     "total_wall_sec": 1505,
+     "max_single_wall_sec": 984.3,
+     "elapsed_calendar_sec": 1627.9,
+     "cost_usd": 0,
+     "providers_models": "event fields null; _codex_calls meta: codex_cli gpt-6.1-sol effort=medium (18 chunk calls conc 10 + 1 global reconciliation 626s + 1 exact repair 520s)",
+     "status_counts": "failed=2,passed=1",
+     "first_started_at": "2026-10-19T04:36:25.900Z",
+     "last_completed_at": "2026-10-19T05:03:33.817Z"
+    },
+    {
+     "stage": "voice_plan",
+     "attempts": 4,
+     "total_wall_sec": 494.9,
+     "max_single_wall_sec": 420.9,
+     "elapsed_calendar_sec": 78853.1,
+     "cost_usd": 0,
+     "providers_models": "event fields null; episodes/ep_01/_codex_calls/narration-performance-author meta: codex_cli gpt-6.1-sol, 41 calls conc 8; a2 failed 'requires approved narrator voice; got deepmale_narration_reference_20261019'",
+     "status_counts": "failed=2,passed=2",
+     "first_started_at": "2026-10-19T04:36:25.900Z",
+     "last_completed_at": "2026-10-20T02:30:38.994Z"
+    },
+    {
+     "stage": "qwen_tts_stitch",
+     "attempts": 22,
+     "total_wall_sec": 10623,
+     "max_single_wall_sec": 3692.6,
+     "elapsed_calendar_sec": 82432.8,
+     "cost_usd": 0,
+     "providers_models": "event fields null; narration_tts_report: qwen_local mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit (mlx_audio 0.4.6), voices joel_owned_narrator_clone (Oct 19) then deepmale_narration_reference_20261019 (Oct 20); QA ASR faster_whisper small.en + medium confirmation; commands: tts narrate x9, finalize-provider x7, repair-boundary x5, adopt-interrupted x1",
+     "status_counts": "failed=19,passed=3",
+     "first_started_at": "2026-10-19T05:05:31.693Z",
+     "last_completed_at": "2026-10-20T03:59:24.513Z"
+    },
+    {
+     "stage": "local_whisper_word_timing",
+     "attempts": 2,
+     "total_wall_sec": 4.4,
+     "max_single_wall_sec": 2.6,
+     "elapsed_calendar_sec": 51783.2,
+     "cost_usd": 0,
+     "providers_models": "model=small.en (faster_whisper cpu int8_float32); 1.8s/2.6s because alignment_promoted_from_finalizer_candidate=true (transcription reused, not rerun)",
+     "status_counts": "passed=2",
+     "first_started_at": "2026-10-19T13:36:42.509Z",
+     "last_completed_at": "2026-10-20T03:59:45.733Z"
+    },
+    {
+     "stage": "audio_pace_check",
+     "attempts": 2,
+     "total_wall_sec": 0.4,
+     "max_single_wall_sec": 0.2,
+     "elapsed_calendar_sec": 51798,
+     "cost_usd": 0,
+     "providers_models": "none (diagnostic: 203.8 wpm vs 180-195 target, non-blocking)",
+     "status_counts": "passed=2",
+     "first_started_at": "2026-10-19T13:36:48.413Z",
+     "last_completed_at": "2026-10-20T04:00:06.429Z"
+    },
+    {
+     "stage": "timing_bind",
+     "attempts": 2,
+     "total_wall_sec": 20.4,
+     "max_single_wall_sec": 10.7,
+     "elapsed_calendar_sec": 51822.2,
+     "cost_usd": 0,
+     "providers_models": "none",
+     "status_counts": "passed=2",
+     "first_started_at": "2026-10-19T13:36:52.640Z",
+     "last_completed_at": "2026-10-20T04:00:34.818Z"
+    },
+    {
+     "stage": "longform_audio_mix",
+     "attempts": 2,
+     "total_wall_sec": 62.4,
+     "max_single_wall_sec": 33.2,
+     "elapsed_calendar_sec": 51845.9,
+     "cost_usd": 0,
+     "providers_models": "ffmpeg narrator-only (skip_score, skip_sfx); 4483.6s master",
+     "status_counts": "passed=2",
+     "first_started_at": "2026-10-19T13:37:06.311Z",
+     "last_completed_at": "2026-10-20T04:01:12.200Z"
+    },
+    {
+     "stage": "visual_beat_plan",
+     "attempts": 3,
+     "total_wall_sec": 1592.3,
+     "max_single_wall_sec": 1587.7,
+     "elapsed_calendar_sec": 51866.4,
+     "cost_usd": 0,
+     "providers_models": "event fields null; _codex_calls/visual-beat-director meta: codex_cli gpt-6.1-sol 38 calls (mean 366s, max 693s, conc 11); a1 failed density contract beat 7.14s>7s; repair-beat-density 3.8s; a2 (Oct 20) failed 'atom count changed 2136 vs 2104'",
+     "status_counts": "failed=2,passed=1",
+     "first_started_at": "2026-10-19T13:37:44.063Z",
+     "last_completed_at": "2026-10-20T04:02:10.481Z"
+    }
+   ]
+  },
+  {
+   "episode_dir": "/Users/joel/AniFactoryData/channels/53rebirth/weekly_runs/2026-W43-coma-healer-fal-panel-v1/episodes/ep_01",
+   "event_count": 252,
+   "stages": [
+    {
+     "stage": "run_identity",
+     "attempts": 1,
+     "total_wall_sec": 0.6,
+     "max_single_wall_sec": 0.6,
+     "elapsed_calendar_sec": 0.6,
+     "cost_usd": 0,
+     "providers_models": "run restart-visuals-fal (fork from BASE at visual_reference_plan)",
+     "status_counts": "passed=1",
+     "first_started_at": "2026-10-19T14:36:14.519Z",
+     "last_completed_at": "2026-10-19T14:36:15.093Z"
+    },
+    {
+     "stage": "visual_reference_plan",
+     "attempts": 1,
+     "total_wall_sec": 1133.1,
+     "max_single_wall_sec": 1133.1,
+     "elapsed_calendar_sec": 1133.1,
+     "cost_usd": 0,
+     "providers_models": "event fields null; week-level _codex_calls meta: codex_cli gpt-6.1-sol, 47 chunk calls (mean 191s, conc 12) + 1 merge 218s",
+     "status_counts": "passed=1",
+     "first_started_at": "2026-10-19T14:36:45.230Z",
+     "last_completed_at": "2026-10-19T14:55:38.318Z"
+    },
+    {
+     "stage": "reference_plan_approval",
+     "attempts": 1,
+     "total_wall_sec": 0.1,
+     "max_single_wall_sec": 0.1,
+     "elapsed_calendar_sec": 0.1,
+     "cost_usd": 0,
+     "providers_models": "approval note 'Claude review under Joel's unattended-production authorization'",
+     "status_counts": "passed=1",
+     "first_started_at": "2026-10-19T14:56:18.046Z",
+     "last_completed_at": "2026-10-19T14:56:18.194Z"
+    },
+    {
+     "stage": "reference_generation",
+     "attempts": 16,
+     "total_wall_sec": 26.1,
+     "max_single_wall_sec": 4.3,
+     "elapsed_calendar_sec": 1605.3,
+     "cost_usd": 0,
+     "providers_models": "event fields null; fal/reference receipts: fal_ai openai/gpt-image-2.5/sunburst/text-to-image x113 + /edit x11, quality=low 1920x1080, 124 requests, provider latency mean 54s p90 91s; actions prepare/billing-submit x2/billing-observe x3/dispatch x2/observe x6/finalize x2",
+     "status_counts": "passed=15,failed=1",
+     "first_started_at": "2026-10-19T15:00:03.668Z",
+     "last_completed_at": "2026-10-19T15:26:49.004Z"
+    },
+    {
+     "stage": "reference_image_approval",
+     "attempts": 1,
+     "total_wall_sec": 0.3,
+     "max_single_wall_sec": 0.3,
+     "elapsed_calendar_sec": 0.3,
+     "cost_usd": 0,
+     "providers_models": "note 'Claude visual review of all 124 Fal references via contact sheet' (review time unmetered)",
+     "status_counts": "passed=1",
+     "first_started_at": "2026-10-19T15:30:31.824Z",
+     "last_completed_at": "2026-10-19T15:30:32.172Z"
+    },
+    {
+     "stage": "visual_prompt_plan",
+     "attempts": 4,
+     "total_wall_sec": 1907.3,
+     "max_single_wall_sec": 1807.5,
+     "elapsed_calendar_sec": 2785.3,
+     "cost_usd": 6.9,
+     "providers_models": "visual plan: codex_cli gpt-6.1-sol 430 chunk calls (mean 51s, conc 12; 4 chunks failed, 7-cut recovery rerun 99s); visual panel-assets: claude-headless claude-opus-5-5, 15 spans, cost_usd sum 6.9028 recorded in panel_asset_authoring/span_*.json (NOT in event log)",
+     "status_counts": "passed=3,failed=1",
+     "first_started_at": "2026-10-19T15:30:42.326Z",
+     "last_completed_at": "2026-10-19T16:17:07.669Z"
+    },
+    {
+     "stage": "visual_prompt_harden",
+     "attempts": 2,
+     "total_wall_sec": 1.3,
+     "max_single_wall_sec": 0.7,
+     "elapsed_calendar_sec": 217.6,
+     "cost_usd": 0,
+     "providers_models": "none (a1 'Child exited 1': unresolved_blocker_count 13)",
+     "status_counts": "failed=1,passed=1",
+     "first_started_at": "2026-10-19T16:17:28.185Z",
+     "last_completed_at": "2026-10-19T16:21:05.823Z"
+    },
+    {
+     "stage": "visual_prompt_blocker_repair",
+     "attempts": 2,
+     "total_wall_sec": 107.1,
+     "max_single_wall_sec": 102,
+     "elapsed_calendar_sec": 169.1,
+     "cost_usd": 0,
+     "providers_models": "visual review auto-resolve iter_1 (codex_cli gpt-6.1-sol, counted inside the 430 visual_plan calls; _visual_resolution/*iter_1*) then repair-identity-binding",
+     "status_counts": "failed=1,passed=1",
+     "first_started_at": "2026-10-19T16:18:01.644Z",
+     "last_completed_at": "2026-10-19T16:20:50.739Z"
+    },
+    {
+     "stage": "image_generation",
+     "attempts": 56,
+     "total_wall_sec": 734.9,
+     "max_single_wall_sec": 118.3,
+     "elapsed_calendar_sec": 2082.6,
+     "cost_usd": 0,
+     "providers_models": "event fields null; fal receipts: 8 validation + 650 bulk requests (sunburst/edit 616, text-to-image 34), quality=low 1920x1080, bulk latency mean 89s p50 87s p90 138s max 218s; 29x dispatch-bulk limit=20 + 9x observe-bulk + finalize; review-validation by claude_on_joel_authorization; 867 images in report (658 unique generated)",
+     "status_counts": "failed=1,passed=55",
+     "first_started_at": "2026-10-19T16:21:27.598Z",
+     "last_completed_at": "2026-10-19T16:56:10.192Z"
+    },
+    {
+     "stage": "image_focal_analysis",
+     "attempts": 3,
+     "total_wall_sec": 11.3,
+     "max_single_wall_sec": 6.6,
+     "elapsed_calendar_sec": 10932.8,
+     "cost_usd": 0,
+     "providers_models": "local (imagegen analyze concurrency=8)",
+     "status_counts": "passed=3",
+     "first_started_at": "2026-10-19T16:57:03.338Z",
+     "last_completed_at": "2026-10-19T19:59:16.090Z"
+    },
+    {
+     "stage": "image_output_qa",
+     "attempts": 15,
+     "total_wall_sec": 2301.7,
+     "max_single_wall_sec": 1099.2,
+     "elapsed_calendar_sec": 11102.6,
+     "cost_usd": 0,
+     "providers_models": "semantic audit: codex_cli gpt-6-sol x344 + gpt-6.1-sol x318 = 662 calls, 16200 call-sec, conc 8 (reports/image_semantic_audit_calls/raw); final audit 340 selected / 336 row-cache hits; reviewed-bulk repair: fal_ai sunburst/edit x5; reviewer claude_on_joel_authorization 'inspected all 226 semantic-flagged risk cuts'; 6 failures all 'Child exited 1' with empty stderr",
+     "status_counts": "failed=6,passed=9",
+     "first_started_at": "2026-10-19T16:57:35.472Z",
+     "last_completed_at": "2026-10-19T20:02:38.056Z"
+    },
+    {
+     "stage": "motion_edit_plan",
+     "attempts": 10,
+     "total_wall_sec": 3902,
+     "max_single_wall_sec": 3789.7,
+     "elapsed_calendar_sec": 7571.2,
+     "cost_usd": 0,
+     "providers_models": "visual panel-plan --action author: codex_cli gpt-6.1-sol native panel author 116 chunk calls (114 passed, 2 Codex transport failures 'Reconnecting... 5/5 / workspace routing discovery failed'), 29727 call-sec, conc 8, elapsed_ms 3788947, planner_cost_usd null; prepare x4 / compile x4 (a5-a8 four consecutive guard failures at 12.5s each)",
+     "status_counts": "passed=4,failed=6",
+     "first_started_at": "2026-10-19T18:02:53.030Z",
+     "last_completed_at": "2026-10-19T20:09:04.224Z"
+    },
+    {
+     "stage": "premium_render",
+     "attempts": 4,
+     "total_wall_sec": 5694.6,
+     "max_single_wall_sec": 2228.7,
+     "elapsed_calendar_sec": 60575.5,
+     "cost_usd": 0,
+     "providers_models": "ffmpeg motion=panel_composition_v1 fps=30 preset veryfast; walls 2228.7s (first), 1197.6s (montage repair rerun), 1152.1s (retime), 1116.2s (deepmale voice swap); output 4702-4708s then 4483.6s; 3 of 4 used workflow-bypass + allow-full-stage-rerun",
+     "status_counts": "passed=4",
+     "first_started_at": "2026-10-19T19:12:00.523Z",
+     "last_completed_at": "2026-10-20T12:01:36.000Z"
+    },
+    {
+     "stage": "final_qa",
+     "attempts": 7,
+     "total_wall_sec": 1141.7,
+     "max_single_wall_sec": 217.3,
+     "elapsed_calendar_sec": 56244.6,
+     "cost_usd": 0,
+     "providers_models": "final qa master-scan x4 (137-210s each, ffmpeg), tts patch-final-narration 217s (90 suspect units re-taken, qwen_local), tts retime-final-narration 174s + 49s (provider_calls 0); approvals by claude_on_joel_authorization / codex_on_user_authorization",
+     "status_counts": "failed=1,passed=6",
+     "first_started_at": "2026-10-19T20:31:50.173Z",
+     "last_completed_at": "2026-10-20T12:09:14.812Z"
+    },
+    {
+     "stage": "upload_packaging",
+     "attempts": 1,
+     "total_wall_sec": 4.2,
+     "max_single_wall_sec": 4.2,
+     "elapsed_calendar_sec": 4.2,
+     "cost_usd": 0,
+     "providers_models": "approve-packaging by codex_on_explicit_user_authorization; thumbnail via codex_imagegen (assets/packaging/thumbnail_generation_receipt.json 13:16Z, unmetered)",
+     "status_counts": "passed=1",
+     "first_started_at": "2026-10-20T13:16:49.173Z",
+     "last_completed_at": "2026-10-20T13:16:53.403Z"
+    },
+    {
+     "stage": "youtube_publish_readiness",
+     "attempts": 1,
+     "total_wall_sec": 4.1,
+     "max_single_wall_sec": 4.1,
+     "elapsed_calendar_sec": 4.1,
+     "cost_usd": 0,
+     "providers_models": "youtube prepare (prepared-by=codex)",
+     "status_counts": "passed=1",
+     "first_started_at": "2026-10-20T13:18:57.254Z",
+     "last_completed_at": "2026-10-20T13:19:01.308Z"
+    },
+    {
+     "stage": "youtube_studio_upload",
+     "attempts": 1,
+     "total_wall_sec": 0.9,
+     "max_single_wall_sec": 0.9,
+     "elapsed_calendar_sec": 0.9,
+     "cost_usd": 0,
+     "providers_models": "record-upload only; actual browser Studio upload 13:21-13:43Z visible as assets/packaging/studio_*.png mtimes; video 6s0R2wvIF6g public",
+     "status_counts": "passed=1",
+     "first_started_at": "2026-10-20T13:42:18.041Z",
+     "last_completed_at": "2026-10-20T13:42:18.951Z"
+    }
+   ]
+  }
+ ],
+ "totals": {
+  "calendar_span_hours": 33.13,
+  "cost_usd": 0,
+  "recorded_wall_hours": 8.69
+ },
+ "top_time_sinks": [
+  "BASE qwen_tts_stitch: 2.95h recorded wall over 22 attempts (19 failed), calendar 22.9h. Actual Qwen synthesis was only 26.1 min (joel voice, 131 cohorts, assets/audio/narration_tts/runs/20261019050531864-27340-qwen-attempt-1.json) + 23.5 min (deepmale, .../deepmale_narration_reference_20261019/runs/20261020023454553-99017-qwen-attempt-1.json); the remaining ~2.1h is per-unit QA/ASR (narrate a1 3692s - 1568s synth = ~2120s est.; a15 1230s was QA-only on adopted takes), full-stream dual-ASR QA inside finalize-provider (1254s, 1303s, 720s, 227s) and 13 distinct blocker signatures each followed by a manual triage file (manual_blocker_triage_qwen_tts_stitch_ep_01*.json v1-v5) and a repair spec v2-v5.",
+  "Human/idle gaps: 24.56h of the 33.13h span has no execution running (union busy 8.57h). Largest: FAL final_qa 23:27Z Oct19 -> retime 11:41Z Oct20 (12.2h, of which 7.6h overnight 04:03-11:40Z after the BASE deepmale revoice); BASE visual_beat_plan 14:35Z -> relock 02:27Z (11.9h, FAL run + voice bake-off comparisons/voicedesign_deepmale_v1 01:01Z); BASE tts failed 06:14Z -> 12:14Z (6.0h overnight wait after operator_narration_review/blocked_units_review.wav was built 06:15Z); FAL final_qa 20:41Z -> patch 22:46Z (2.1h clipped-ending diagnosis + new tooling commits 1aa6cb6/06a5d86); FAL final_qa 12:09Z -> packaging 13:16Z (1.1h thumbnail/packaging).",
+  "FAL premium_render: 1.58h for 4 full renders of a 75-78 min video (2229s, 1198s, 1152s, 1116s; reports/stages/premium_render/*). Three were re-renders for audio-only changes (montage repair, narration retime, deepmale voice swap) even though render_report flags silent_concat_reused_without_normalization_encode=true.",
+  "FAL motion_edit_plan: 1.08h; one panel-author run of 3790s = 116 codex_cli gpt-6.1-sol calls (29727 call-sec at concurrency 8, mean 261s/call; reports/panel-authoring/31c9d9d0.../report-83196141...json elapsed_ms 3788947), 2 chunks lost to Codex transport failure and hand-authored by Claude (panel_composition_recipe_reviewed_notes_ep_01.json), then 4 consecutive 12.5s guard failures (a5-a8) before compile passed.",
+  "FAL image_output_qa: 0.64h; semantic audit ran at full cost twice (a1 979s, a7 1099s) = 662 codex calls / 16200 call-sec; meta shows 344 gpt-6-sol + 318 gpt-6.1-sol, so the second pass likely missed the row-cache because audit_cache_identity includes model (estimated); later passes hit cache (336/340 hits, 58s/36s).",
+  "Codex planner stages (call-time, not calendar): visual_prompt_plan 430 calls = 6.08h call-sec (0.53h stage wall at conc 12); visual-beat-director 38 calls = 3.86h call-sec (0.44h wall at conc 11, then failed density 7.14s>7s needing code fix ca629de); visual_reference_plan 48 calls = 2.56h call-sec (0.31h wall); semantic_scene_plan 20 calls = 1.13h call-sec (0.42h wall, 2 failed reconciliations before manual repair); narration-performance-author 41 calls = 0.87h call-sec.",
+  "Failed-attempt wall across both runs: 44 failed executions = 5.77h of the 8.69h recorded (66%).",
+  "Fal image generation is NOT a time sink: 650 bulk images in 21 min calendar (16:34-16:55Z), 0.20h of stage wall, provider latency mean 89s at ~20 concurrency; but it is wrapped in 29 separate dispatch-bulk limit=20 stage executions plus 9 observe-bulk polls."
+ ],
+ "top_cost_sinks": [
+  "Event log records $0 everywhere: cost_usd=0 on all 174 stage_completed events; production_manifest.json telemetry cumulative_cost_usd=0 and imagegen_batches.batch_count=0 in both runs despite 787 Fal requests. Cost accounting is not wired for the Fal path.",
+  "Fal images (largest real external spend, unrecorded): 787 paid requests (124 reference + 8 validation + 650 bulk + 5 reviewed repair; fal/*/submission-receipts), all openai/gpt-image-2.5/sunburst quality=low 1920x1080. Receipts carry no cost (docs/proofs/fal_canvas_cost_comparison_v1.md line 18: API key cannot read billing). ESTIMATED $13.9-14.7 using the $0.0176-0.0187/request actual billing measured on 2026-10-20 proofs (same doc lines 67-80, which projects 658 x $0.0176 = $11.58 for scene art). Contract caps: hard_budget_usd 35; per-assignment max_cost_usd caps sum $164.75 (references $1.00 each).",
+  "Claude headless panel-asset authoring: $6.90 recorded (15 spans x claude-opus-5-5, panel_asset_authoring/span_001..015.json cost_usd), the only USD figure anywhere in either episode; not in execution_events.jsonl.",
+  "Codex CLI planner calls: 1355 calls (20 semantic + 41 narration-author + 38 beat-director + 48 ref-plan + 430 visual-plan + 662 semantic-audit + 116 panel-author), all gpt-6.1-sol/gpt-6-sol effort=medium via codex_cli 0.163.0 (CLI subscription auth); no token or USD figures in *.meta.json; panel report planner_cost_usd=null. ESTIMATED largest token consumers: visual_plan (430 calls, 6.08h call-time), panel author (116 calls, 8.26h call-time), semantic audit (662 calls, 4.5h call-time).",
+  "Local compute ($0 cash, but time): Qwen TTS 2 full synth passes (49.6 min) + whisper small.en/medium QA passes; ffmpeg 4 renders (1.58h) + 7 final-QA scans; render caches 9.5G + 4.4G under assets/render-work*."
+ ],
+ "planner_call_counts": [
+  {
+   "stage": "BASE semantic_scene_plan",
+   "calls": 20,
+   "source": "/Users/joel/AniFactoryData/channels/53rebirth/weekly_runs/2026-W43-coma-healer-panel-baseline-v1/_codex_calls/*.meta.json (18 chunks + global_reconciliation + exact_repair); planner_chunk_ledger.json: 19 entries, 57 attempt rows (18 cached reuses across 3 stage attempts, 2 failed)"
+  },
+  {
+   "stage": "BASE voice_plan (narration-performance-author)",
+   "calls": 41,
+   "source": "/Users/joel/AniFactoryData/channels/53rebirth/weekly_runs/2026-W43-coma-healer-panel-baseline-v1/episodes/ep_01/_codex_calls/narration-performance-author/*.meta.json (41 passed, sum 3120s, conc 8)"
+  },
+  {
+   "stage": "BASE visual_beat_plan (visual-beat-director)",
+   "calls": 38,
+   "source": ".../panel-baseline-v1/episodes/ep_01/_codex_calls/visual-beat-director/*.meta.json (38 passed, sum 13896s, max 693s, conc 11); planner_chunk_ledger.json 38 entries"
+  },
+  {
+   "stage": "FAL visual_reference_plan",
+   "calls": 48,
+   "source": "/Users/joel/AniFactoryData/channels/53rebirth/weekly_runs/2026-W43-coma-healer-fal-panel-v1/_codex_calls/*visual_reference_plan*.meta.json (47 chunk + 1 merge); planner_chunk_ledger.json 48 entries"
+  },
+  {
+   "stage": "FAL visual_prompt_plan (visual plan + review resolve)",
+   "calls": 430,
+   "source": ".../fal-panel-v1/_codex_calls/*visual_plan_chunk*-attempt_1-output.txt.meta.json (430 passed, sum 21893s, conc 12); planner_chunk_ledger.json 430 entries (426 passed, 4 failed)"
+  },
+  {
+   "stage": "FAL visual_prompt_plan (visual panel-assets, Claude headless)",
+   "calls": 15,
+   "source": ".../fal-panel-v1/episodes/ep_01/panel_asset_authoring/span_001..015.json (model claude-opus-5-5, cost_usd sum 6.9028, mtimes 15:33-15:44Z)"
+  },
+  {
+   "stage": "FAL image_output_qa (semantic audit)",
+   "calls": 662,
+   "source": ".../fal-panel-v1/episodes/ep_01/reports/image_semantic_audit_calls/raw/*.json.meta.json (662 timed: gpt-6-sol 344, gpt-6.1-sol 318, sum 16200s, conc 8, window 16:57-20:00Z); row-cache/ 662 rows; image_semantic_audit_ep_01.json selected 340, cache hits 336"
+  },
+  {
+   "stage": "FAL motion_edit_plan (native panel author)",
+   "calls": 116,
+   "source": ".../fal-panel-v1/episodes/ep_01/reports/panel-authoring/31c9d9d0da54a18a3be95b2ecd3519ac14cc8d4700f84b2ee9ccf908a644b615/native/*.meta.json (116: 114 passed, 2 failed; sum 29727s, conc 8) and chunks/ (112 authored, 4 failed); report new_planner_calls 116, cached_chunks 0"
+  },
+  {
+   "stage": "FAL Fal image requests (media provider, not planner)",
+   "calls": 787,
+   "source": "fal/reference/submission-receipts (124), fal/submission-receipts (8 validation), fal/bulk/submission-receipts (650), fal/bulk/review-repair-submission-receipts (5); submission-receipts-attempts all possible_paid_request=true, 1 attempt each (no automatic retries)"
+  },
+  {
+   "stage": "FAL upload_packaging thumbnail (codex_imagegen)",
+   "calls": 1,
+   "source": ".../fal-panel-v1/episodes/ep_01/assets/packaging/thumbnail_generation_receipt.json (provider codex_imagegen, 3 references, 13:16Z)"
+  },
+  {
+   "stage": "TOTAL Codex CLI planner calls (both runs)",
+   "calls": 1355,
+   "source": "sum of the codex_cli rows above; all model gpt-6.1-sol except 344 semantic-audit calls on gpt-6-sol; codex_cli_version 0.163.0; no token counts recorded"
+  }
+ ],
+ "unrecorded_time": "(1) Source development: zero evidence. script_clean.md (15,246 words) came from external ingest /Users/joel/AniFactoryData/source_ingests/coma_healer_one_touch_claude_v1_2026_10_19.txt whose mtime is 2026-10-19T04:34:13Z, one second before run preflight (04:34:14.003Z). analytics/youtube_script_origin_registry.json records script_origin=external_ingest, source_room_lineage=unavailable; there is no .source_receipt.json for it (unlike gamblers_eye_*), no manufacture job, and generated_scripts/source_stories/_codex_story_generation_workspace are untouched since May-June. Writing time is therefore outside every artifact. (2) TTS synthesis runtime: cohort wall sums in the runner reports are 1568s (26.1 min, joel voice, 131 cohorts x batch 4, model_load 3.3s) and 1413s (23.5 min, deepmale) for 4651s/4401s of audio, i.e. ~3x realtime; serial recovery passes (11 and 36 units) have empty cohort logs so are unmetered. narration_tts_attempt_events.jsonl (1095 rows) stamps every row with the finalize time (span 0s), so it carries no per-unit timing. Synthesis is only ~25% of the qwen_tts_stitch wall; the rest is unit QA (est. ~2120s = 3692s narrate a1 minus 1568s synth; 1230s for the QA-only a15), voice-continuity QA, stitch and full-stream QA. (3) Whisper: the local_whisper_word_timing stage shows 1.8s/2.6s only because narration_word_timing_ep_01.json has alignment_promoted_from_finalizer_candidate=true; the real faster_whisper small.en transcription of the 4483.6s master plus medium-model confirmation over 40 windows (narration_full_stream_qa_ep_01.json confirmation_model=medium) runs inside tts finalize-provider, whose walls were 1254s, 1303s, 720s, 227s with no ASR timing field. One narrate attempt (a12, 1457s) died after 24 min of synthesis on ModuleNotFoundError: faster_whisper (stderr_tail), fixed by commit c704542 at 03:02Z. (4) Human/agent waits: 24.56h of the 33.13h span is idle (union of execution intervals 8.57h). Largest gaps with their neighbours: 43998s FAL final_qa[passed] 23:27:44Z Oct19 -> final_qa[tts retime] 11:41:02Z Oct20 (BASE deepmale revoice ran 02:27-04:02Z inside it; 04:03-11:40Z nothing = overnight local 00:03-07:40 EDT; commit 10e9185 11:40Z preceded the retime); 42718s BASE visual_beat_plan[passed] 14:35:48Z -> run relock-tts 02:27:46Z Oct20 (FAL production 14:36-23:27Z, voice bake-off comparisons/voicedesign_deepmale_v1/reference.wav 01:01Z, commits 28550e6/bc973a3/cf5dfba 02:27-02:30Z); 21594s BASE qwen_tts_stitch[failed] 06:14:29Z -> finalize-provider 12:14:24Z (listening packet operator_narration_review/blocked_units_review.wav 06:15Z then nothing until delivery_*.json 12:13Z = 02:15-08:13 local); 7496s FAL final_qa[passed] 20:41:04Z -> tts patch-final-narration 22:46:00Z (watch of first render, narration_clipped_unit_suspects_ep_01.json 22:22Z, commits 1aa6cb6 22:21Z, 06a5d86 22:45Z); 4054s FAL final_qa[passed] 12:09:14Z -> upload_packaging 13:16:49Z (packaging images 13:14Z, thumbnail receipt 13:16Z); 1893s BASE visual_beat_plan[failed] 14:04Z -> repair-beat-density 14:35Z (code fix ca629de 14:34:52Z); 1397s FAL youtube prepare 13:19Z -> record-upload 13:42Z (browser Studio upload, studio_*.png 13:21-13:43Z); 1297s FAL reference_generation[failed] 15:05Z -> 15:26Z (code fixes fba35a1 15:25:55Z, 79da287, 996e044 15:29Z); 1248s BASE finalize-provider[failed] 12:50Z -> 13:11Z (operator ASR triage clips fullstream_A/B 12:52Z, manual_review_round2 13:13Z); 926s FAL image_output_qa[failed] 17:20Z -> 17:36Z (Claude inspecting 226 flagged cuts, directives round1 17:37Z); 823s FAL panel-assets a1 15:30Z -> a2 15:44Z (Claude span authoring 15:33-15:44Z); 444s FAL image_generation[failed] 16:21Z -> 16:28Z (code fix 02fa567 16:28:42Z). (5) Live code fixes: at least 30 commits landed in the production worktrees (/Users/joel/.codex/worktrees/planner-model-integration and deepmale-default) between 14:34Z Oct19 and 12:04Z Oct20, each immediately before a rerun; the gap list above aligns with commit timestamps. (6) Agent review labour: reference approval of 124 refs, validation review of 8, inspection of 226 semantic-flagged cuts, hand-authoring 15 panel decisions after Codex transport failure, 12-frame final inspection, and all triage/spec files are visible only as gaps and note fields. (7) Render/encode detail: render_report_ep_01*.json has no elapsed field; render-work caches total 13.9G. (8) Thumbnail generation (codex_imagegen) and the YouTube Studio browser session are outside the log except the 0.9s record-upload. (9) Money: no artifact records actual USD for Fal or Codex; only the Claude span cost ($6.90) exists.",
+ "notes": [
+  "Method: parser at /private/tmp/claude-501/-Users-joel-anifactory-goldflow/223de465-1014-4bae-b53f-b2bf07f14768/scratchpad/parse_events.js pairs stage_started/stage_completed by execution_id (96 and 252 events, 48 and 126 executions, 0 unpaired). All timestamps UTC; local is EDT (UTC-4). Combined span 2026-10-19T04:34:14Z -> 2026-10-20T13:42:18Z = 33.13h; BASE alone 23.47h, FAL alone 23.10h (they overlap because FAL forked at 14:36Z and BASE was re-voiced on Oct 20).",
+  "Status counts: BASE 22 passed / 26 failed (54% failure); FAL 108 passed / 18 failed. production_manifest telemetry: BASE retry_calls 29, FAL retry_calls 105 (105 same_scope_retry_calls, mostly the 29+9 dispatch/observe-bulk loops).",
+  "SLO already breached on day 1: production_slo_state.json (fast_premium_v2) target 360 min, hard ceiling 420 min, measured 567.8 min at visual_beat_plan 14:04Z Oct19 with 7 missed checkpoints, before any image, render or publish work.",
+  "Provider/model attribution lives outside the event log: event provider/model are null on 170 of 174 completions (the only non-null are 'codex_imagegen' on run preflight and 'small.en' on whisper). Real attribution is in _codex_calls/*.meta.json (codex_cli gpt-6.1-sol/gpt-6-sol), fal/*/submission-receipts (endpoint, quality), narration_tts_report (qwen_local model id), panel_asset_authoring/span_*.json (claude-opus-5-5).",
+  "Fragility pattern: every failed stage in both runs was followed by either a code commit (reference finalize, imagegen hash approval, beat density, whisper runtime, voice relock, retime provenance) or a manual triage/spec file (5 TTS triage versions, 2 Fal repair directive rounds, 2 panel recipe reconciliation notes). None of the failures was retried automatically; the failing wall (5.77h) is 66% of recorded wall.",
+  "Redundant work measured: 4 full renders for 1 picture edit + 2 audio-only changes (1.0h); semantic audit paid twice (979s + 1099s) before cache hits; qwen_tts_stitch finalize full-stream QA repeated 7 times (1254/3/1/1/720/227s); image_generation dispatched as 29 limit=20 stage executions + 9 observe polls for one 650-image batch; motion_edit_plan a5-a8 four identical-shape failures (authoring inputs changed / existing artifact retained) in 4 minutes.",
+  "Fal hard budget $35 (fal_contract.json) vs sum of per-request max_cost_usd caps $164.75: reference requests carry $1.00 caps (fal-production.mjs:105 max_cost_usd:reusableAsset?0:1.0) while bulk uses $0.05 (line 245); actual low-quality price measured on 2026-10-20 was ~$0.018/request, so the caps are 2.7x-55x above actual.",
+  "Overlap with in-flight branches (not redone here): script-single-draft (worktree script-single-draft-5ba71d, commit 1353e4c) covers the unmeasured source-development stage; autopilot-gates (worktree autopilot-gates-1ce7ff) covers the approval/triage holds that account for most of the 24.56h idle time (script approval, reference plan/image approvals, validation review, final QA approve, packaging approval, publish approval) and the 'blocker is a triage point' manual holds.",
+  "Whisper timing evidence: narration_word_timing_ep_01.json alignment_engine faster_whisper, model small.en, device cpu, compute int8_float32, omp 12 threads; local_whisper_word_timing stage reuses the finalizer candidate (1.8s/2.6s), so a standalone whisper runtime number for the 74.7-min master does not exist in these artifacts.",
+  "Qwen TTS throughput: 524 units / 131 cohorts of 4 (fixed_batch4_length_matched_v1, single resident model, concurrency 1), 1568s and 1413s synth = ~3.0-3.1x realtime; model load 2-3s. Two complete voice passes were synthesized because the narrator voice was swapped to deepmale after the first finished render (operator quote in reports/narration_retime/2026-10-20T11-41-51-242Z-67d55028/receipt.json).",
+  "Thumbnail and packaging: approve-packaging 4.2s, prepare 4.1s, record-upload 0.9s; the actual 23-minute Studio session and ~1h packaging prep are only inferable from assets/packaging/* mtimes (13:14Z-13:43Z)."
+ ]
+}

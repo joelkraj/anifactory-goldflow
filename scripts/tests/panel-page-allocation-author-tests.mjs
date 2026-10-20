@@ -79,3 +79,37 @@ test('a malformed or over-cap chunk fails alone and blocks the candidate', async
   assert.deepEqual(report.failed_chunk_ids, ['alloc_002']);
   assert.equal(report.candidate_path, undefined);
 });
+
+test('a failed chunk is repaired exactly once by id; the superseded answer is kept and every call is counted', async t => {
+  const f = await fixture(t);
+  let calls = 0;
+  const failing = async ({ prompt }) => { calls += 1; const out = answer(prompt); if (prompt.includes('"beat_4"')) out.asset_orders[0].page_template = 'P6G'; return out; };
+  const first = await authorDensePageAllocation({ episodeDir: f.dir, maxBeats: 4, executor: failing });
+  assert.equal(first.status, 'needs_exact_repair'); assert.equal(first.job_provider_calls, 2);
+  // Without a repair request the failed answer is cached, never re-asked.
+  const again = await authorDensePageAllocation({ episodeDir: f.dir, maxBeats: 4, executor: async () => { throw new Error('no re-ask'); } });
+  assert.equal(again.status, 'needs_exact_repair'); assert.equal(again.provider_calls, 0);
+  await assert.rejects(authorDensePageAllocation({ episodeDir: f.dir, maxBeats: 4, executor: failing, repairChunkIds: ['alloc_001'] }), /only a failed chunk may be repaired/);
+  await assert.rejects(authorDensePageAllocation({ episodeDir: f.dir, maxBeats: 4, executor: failing, repairChunkIds: ['alloc_009'] }), /unknown repair chunk/);
+  const repaired = await authorDensePageAllocation({ episodeDir: f.dir, maxBeats: 4, repairChunkIds: ['alloc_002'], executor: async ({ prompt }) => { calls += 1; return answer(prompt); } });
+  assert.equal(repaired.status, 'candidate_ready');
+  assert.deepEqual([repaired.provider_calls, repaired.job_provider_calls, repaired.repaired_chunk_ids, calls], [1, 3, ['alloc_002'], 3]);
+  const superseded = await fs.readdir(path.join(repaired.job_dir, 'chunks', 'superseded'));
+  assert.ok(superseded.some(name => /^alloc_002\.\d+\.json$/.test(name)), 'the failed answer is kept under superseded/ (the test executor writes no raw file)');
+  const imported = await writePanelAssetPlan({ episodeDir: f.dir, planPath: repaired.candidate_path });
+  assert.equal(imported.plan.provider_calls, 3);
+  assert.equal(imported.plan.authoring.route, 'dense_author');
+  assert.equal(imported.plan.authoring.report_path, path.join(repaired.job_dir, (await fs.readdir(repaired.job_dir)).filter(n => n.startsWith('report-')).sort().at(-1)));
+  assert.equal(imported.plan.allocation_route, 'dense_pages_v1');
+});
+
+test('the retired Claude-headless span path is refused as a production import', async t => {
+  const f = await fixture(t);
+  const spanDir = path.join(f.dir, 'panel_asset_authoring'); await fs.mkdir(spanDir);
+  const spanPath = path.join(spanDir, 'span_001.json'); await fs.writeFile(spanPath, '{}');
+  await assert.rejects(writePanelAssetPlan({ episodeDir: f.dir, planPath: spanPath }), /span_\*\.json Claude-headless path is retired/);
+  const merged = path.join(spanDir, 'authored_panel_asset_plan.json'); await fs.writeFile(merged, '{}');
+  await assert.rejects(writePanelAssetPlan({ episodeDir: f.dir, planPath: merged }), /retired/);
+  const elsewhere = path.join(f.dir, 'hand_candidate.json'); await fs.writeFile(elsewhere, JSON.stringify({ authoring_route: 'claude_headless_span' }));
+  await assert.rejects(writePanelAssetPlan({ episodeDir: f.dir, planPath: elsewhere }), /retired/);
+});

@@ -2,7 +2,7 @@ import { retainedBaselineSource } from './retained-baseline-source.mjs';
 import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { assertPanelProductionIdentity, isPanelProductionIdentity } from './panel-production-policy.mjs';
+import { assertPanelProductionIdentity, isPanelProductionIdentity, panelAllocationRoute } from './panel-production-policy.mjs';
 import { PAGE_TEMPLATES, PAGE_TEMPLATE_MIN_CANVAS_WIDTH } from './panel-page-geometry.mjs';
 import { FAL_PAGE_CANVAS_SIZES } from './fal-provider.mjs';
 import { pageFrameText, pagePanelHeadings, PAGE_LIMITS } from './panel-page-prompts.mjs';
@@ -168,14 +168,42 @@ export async function preparePanelAssetPlan({ episodeDir }) {
   return { ...loaded, packet, candidate, status: packet.status };
 }
 
+// The ad hoc Claude-headless span path (`panel_asset_authoring/span_*.json`,
+// merged by hand into one candidate) ran outside the per-run model lock and
+// the execution ledger. It is retired as a production route; historical plans
+// imported from it stay readable, and nothing here deletes those files.
+export const RETIRED_SPAN_AUTHORING_PATH = /(^|[\\/])panel_asset_authoring[\\/]/;
+export const RETIRED_SPAN_AUTHORING_MESSAGE = 'the panel_asset_authoring/span_*.json Claude-headless path is retired; author with visual panel-assets --action author-dense (locked planner, ledgered calls) and import its candidate';
+
+/** The dense-author report that produced a candidate, when the candidate lives in an author job directory. */
+export async function denseAuthorReportForCandidate(candidatePath) {
+  const dir = path.dirname(candidatePath);
+  const names = (await fs.readdir(dir).catch(() => [])).filter(name => /^report-\d+\.json$/.test(name)).sort((a, b) => Number(b.match(/\d+/)[0]) - Number(a.match(/\d+/)[0]));
+  for (const name of names) {
+    const reportPath = path.join(dir, name);
+    const report = await read(reportPath);
+    if (report.schema === 'goldflow_dense_allocation_report_v1' && report.candidate_path && path.resolve(report.candidate_path) === candidatePath) return { path: reportPath, sha256: await fileHash(reportPath), report };
+  }
+  return null;
+}
+
 export async function writePanelAssetPlan({ episodeDir, planPath }) {
   const loaded = await inputs(episodeDir);
   need(text(planPath), 'explicit authored planPath required');
+  need(!RETIRED_SPAN_AUTHORING_PATH.test(String(planPath)), RETIRED_SPAN_AUTHORING_MESSAGE);
   const sourcePath = await fs.realpath(path.resolve(planPath));
+  need(!RETIRED_SPAN_AUTHORING_PATH.test(sourcePath), RETIRED_SPAN_AUTHORING_MESSAGE);
   need(sourcePath !== loaded.planPath, 'candidate must be separate from official plan');
   const candidate = await read(sourcePath);
+  need(candidate.authoring_route !== 'claude_headless_span', RETIRED_SPAN_AUTHORING_MESSAGE);
   validatePanelAssetPlan(candidate, loaded);
-  const report = { ...candidate, status: 'passed', authored_plan: { path: sourcePath, sha256: await fileHash(sourcePath) }, unique_asset_count: candidate.asset_orders.length, beat_count: loaded.beats.length, reused_beat_count: loaded.beats.length - candidate.asset_orders.length, provider_calls: 0, cost_usd: 0, created_at: new Date().toISOString() };
+  // Real planner usage comes from the dense author's report; a hand-authored candidate records none.
+  const authored = await denseAuthorReportForCandidate(sourcePath);
+  const providerCalls = authored ? Number(authored.report.job_provider_calls ?? authored.report.provider_calls ?? 0) : 0;
+  const authoring = authored
+    ? { route: 'dense_author', report_path: authored.path, report_sha256: authored.sha256, job_dir: authored.report.job_dir ?? path.dirname(sourcePath), chunk_count: authored.report.chunk_count ?? null, provider_calls: providerCalls, image_provider_calls: 0, cost_usd: null, cost_note: 'planner calls are ledgered per call in the job chunks (*.raw.json.meta.json); no USD figure is available from the CLI transport' }
+    : { route: 'hand_authored', report_path: null, report_sha256: null, job_dir: null, chunk_count: null, provider_calls: 0, image_provider_calls: 0, cost_usd: null, cost_note: 'no planner call recorded for this candidate' };
+  const report = { ...candidate, status: 'passed', allocation_route: panelAllocationRoute(loaded.identity), authored_plan: { path: sourcePath, sha256: await fileHash(sourcePath) }, authoring, unique_asset_count: candidate.asset_orders.length, beat_count: loaded.beats.length, reused_beat_count: loaded.beats.length - candidate.asset_orders.length, provider_calls: providerCalls, cost_usd: authoring.cost_usd, created_at: new Date().toISOString() };
   // Retain exact content independently of an editable authoring candidate.
   const reportsDir = path.join(loaded.episodeDir, 'reports', 'panel_assets');
   await fs.mkdir(reportsDir, { recursive: true });

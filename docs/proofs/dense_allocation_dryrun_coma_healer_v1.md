@@ -61,3 +61,10 @@ The job is now keyed on the exact prompts. Run: 26 planner calls, all chunks val
   - **28 mixed-location pages**, up from 11. These are scenes that move between rooms (e.g. elevator to room 412). Prompt planning must give such a page's shared context both places, and the image proof should check that each zone draws its own place.
 
 The density gain came from fuller pages and dropping singles, not from more beats per drawing, so picture variety is preserved. Candidate: `jobs/71897bf1b52026fb/candidate-182939df5dd7.json`. It is proof-only and not importable.
+
+## R10 re-run (2026-10-20, $0)
+
+`review/dryrun.mjs` was run again from the R10 host code against a copy of the job's cached chunks (`jobs/71897bf1b52026fb/chunks`). The job key (`71897bf1b52026fb`), the candidate (`candidate-182939df5dd7.json`, sha256 `6bb21c12…b7551`) and the report's findings, density and scene budget were byte-for-byte identical, with 0 planner calls (`job_provider_calls` 26, the original run's calls). No Fal or planner spend.
+
+Under R10's automatic import conditions this candidate would **not** import by itself: it is `candidate_ready` with no blocker findings and no failed chunk, but three scenes are over budget (046 4/3, 068 3/2, 073 4/3), so the gates handler writes a triage instead of an import receipt. It remains a proof-only candidate (lineage unverified, see above).
+

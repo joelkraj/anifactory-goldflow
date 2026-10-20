@@ -71,15 +71,29 @@ export async function nativeAllocation({ prompt, outputPath, repoRoot }) {
   return JSON.parse(text);
 }
 
-export async function authorDensePageAllocation({ episodeDir, outputDir, repoRoot, executor = nativeAllocation, concurrency = 6, limit = 1000, maxBeats = 40, onProgress = () => {} }) {
+export const DENSE_AUTHOR_JOB_ROOT = ['reports', 'panel_assets', 'dense-author'];
+export const DENSE_ALLOCATION_REPORT_SCHEMA = 'goldflow_dense_allocation_report_v1';
+
+export async function authorDensePageAllocation({ episodeDir, outputDir, repoRoot, executor = nativeAllocation, concurrency = 6, limit = 1000, maxBeats = 40, repairChunkIds = [], onProgress = () => {} }) {
   const loaded = await loadPanelAssetInputs(episodeDir);
   const referencePlan = await read(path.join(loaded.episodeDir, 'visual_reference_plan.json'));
   need(['passed', 'approved'].includes(referencePlan.status), 'a passed reference plan is required');
-  return authorDenseAllocationChunks({ ...loaded, referencePlan, jobRoot: outputDir ?? path.join(loaded.episodeDir, 'reports', 'panel_assets', 'dense-author'), validate: plan => validatePanelAssetPlan(plan, loaded), repoRoot, executor, concurrency, limit, maxBeats, onProgress });
+  return authorDenseAllocationChunks({ ...loaded, referencePlan, jobRoot: outputDir ?? path.join(loaded.episodeDir, ...DENSE_AUTHOR_JOB_ROOT), validate: plan => validatePanelAssetPlan(plan, loaded), repoRoot, executor, concurrency, limit, maxBeats, repairChunkIds, onProgress });
 }
 
-/** Chunked authoring core. Inputs must already be verified by the caller (`validate` checks a merged candidate). */
-export async function authorDenseAllocationChunks({ identity, beats, sourceHashes, referencePlan, jobRoot, validate, repoRoot, executor = nativeAllocation, concurrency = 6, limit = 1000, maxBeats = 40, onProgress = () => {} }) {
+/** Every planner call the job has made: current chunk answers plus superseded ones. No call is ever deleted. */
+export async function denseJobProviderCalls(job) {
+  const current = (await fs.readdir(path.join(job, 'chunks')).catch(() => [])).filter(name => /^alloc_\d+\.json$/.test(name)).length;
+  const superseded = (await fs.readdir(path.join(job, 'chunks', 'superseded')).catch(() => [])).filter(name => name.endsWith('.json') && !name.includes('.raw.')).length;
+  return current + superseded;
+}
+
+/**
+ * Chunked authoring core. Inputs must already be verified by the caller (`validate` checks a merged candidate).
+ * `repairChunkIds` names failed chunks to re-request exactly once each; the failed answer is moved to
+ * `chunks/superseded/` (never deleted) and nothing else is re-requested. Authored chunks are never repaired.
+ */
+export async function authorDenseAllocationChunks({ identity, beats, sourceHashes, referencePlan, jobRoot, validate, repoRoot, executor = nativeAllocation, concurrency = 6, limit = 1000, maxBeats = 40, repairChunkIds = [], onProgress = () => {} }) {
   const constraints = beatAllocationConstraints({ beats, referencePlan });
   const chunks = denseAllocationChunks(beats, { maxBeats });
   // The job is keyed by inputs AND exact prompts, so a prompt change never reuses old answers.
@@ -88,10 +102,23 @@ export async function authorDenseAllocationChunks({ identity, beats, sourceHashe
   const job = path.resolve(jobRoot, inputsKey.slice(0, 16));
   await fs.mkdir(path.join(job, 'chunks'), { recursive: true });
   const base = { schema: 'goldflow_panel_asset_plan_v2', episode: identity.episode, author: 'Native dense page allocation author', source_hashes: sourceHashes };
-  const rows = new Map(), pending = [];
+  const repairs = new Set(repairChunkIds.map(String).filter(Boolean));
+  for (const id of repairs) need(chunks.some(chunk => chunk.id === id), `unknown repair chunk ${id}`);
+  const rows = new Map(), pending = [], superseded = [];
   for (const chunk of chunks) {
     const out = path.join(job, 'chunks', `${chunk.id}.json`);
-    if (await exists(out)) { rows.set(chunk.id, await read(out)); continue; }
+    if (await exists(out)) {
+      const row = await read(out);
+      if (!repairs.has(chunk.id)) { rows.set(chunk.id, row); continue; }
+      need(row.status === 'failed', `chunk ${chunk.id} is ${row.status}; only a failed chunk may be repaired`);
+      const stamp = Date.now();
+      await fs.mkdir(path.join(job, 'chunks', 'superseded'), { recursive: true });
+      for (const suffix of ['.json', '.raw.json', '.raw.json.meta.json']) {
+        const from = path.join(job, 'chunks', `${chunk.id}${suffix}`);
+        if (await exists(from)) await fs.rename(from, path.join(job, 'chunks', 'superseded', `${chunk.id}.${stamp}${suffix}`));
+      }
+      superseded.push({ chunk_id: chunk.id, superseded_at: new Date(stamp).toISOString(), previous_error: row.error ?? null });
+    } else need(!repairs.has(chunk.id), `chunk ${chunk.id} has no failed answer to repair`);
     pending.push({ chunk, out, raw: path.join(job, 'chunks', `${chunk.id}.raw.json`), prompt: prompts.get(chunk.id) });
   }
   let next = 0; const selected = pending.slice(0, limit);
@@ -112,7 +139,7 @@ export async function authorDenseAllocationChunks({ identity, beats, sourceHashe
     }
   }));
   const failed = chunks.filter(chunk => rows.get(chunk.id)?.status === 'failed').map(chunk => chunk.id);
-  const report = { schema: 'goldflow_dense_allocation_report_v1', episode: identity.episode, job_dir: job, chunk_count: chunks.length, authored: [...rows.values()].filter(row => row.status === 'authored').length, failed_chunk_ids: failed, provider_calls: selected.length, image_provider_calls: 0, created_at: new Date().toISOString() };
+  const report = { schema: DENSE_ALLOCATION_REPORT_SCHEMA, episode: identity.episode, job_dir: job, chunk_count: chunks.length, authored: [...rows.values()].filter(row => row.status === 'authored').length, failed_chunk_ids: failed, provider_calls: selected.length, job_provider_calls: await denseJobProviderCalls(job), repaired_chunk_ids: superseded.map(row => row.chunk_id), superseded_chunks: superseded, image_provider_calls: 0, created_at: new Date().toISOString() };
   if (rows.size === chunks.length && !failed.length) {
     const candidate = { ...base, status: 'candidate', asset_orders: chunks.flatMap(chunk => rows.get(chunk.id).response.asset_orders), beat_bindings: chunks.flatMap(chunk => rows.get(chunk.id).response.beat_bindings) };
     validate(candidate);

@@ -8,7 +8,8 @@ import sharp from "sharp";
 import { autopilotEnabled, autopilotIdentityFields, isAutomatedReviewer } from "../lib/autopilot-policy.mjs";
 import { buildEpisodeBudget } from "../lib/episode-budget.mjs";
 import { goldflowArgv, placeholdersIn, repairScope, tokenizeShape, useEpisodeBudgetToken } from "../lib/autopilot-command-shape.mjs";
-import { classifyRiskCut, decideNext } from "../lib/autopilot-gates.mjs";
+import { allocationImportBlockers, classifyRiskCut, decideNext } from "../lib/autopilot-gates.mjs";
+import { createLegacyPanelProductionContract, createPanelProductionContract } from "../lib/panel-production-policy.mjs";
 import { createModelReviewer } from "../lib/autopilot-reviewer.mjs";
 import { runAutopilot } from "../lib/autopilot-driver.mjs";
 import {
@@ -334,6 +335,61 @@ test("automatic gate decisions leave a hash-bound decision receipt", async () =>
     assert.deepEqual([receipt.schema, receipt.reviewer, receipt.decision], ["goldflow_autopilot_decision_v1", "automated:model_reviewer", "approve"]);
     assert.match(receipt.evidence[0].sha256, /^[a-f0-9]{64}$/);
     assert.match(receipt.run_identity_sha256, /^[a-f0-9]{64}$/);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+/* ---------- dense allocation import ---------- */
+
+const allocationShape = "node bin/goldflow.mjs visual panel-assets --channel chan --series s --week w --episode ep_01 --plan <authored-panel-asset-candidate.json>";
+const readyReport = (dir, extra = {}) => ({ schema: "goldflow_dense_allocation_report_v1", status: "candidate_ready", candidate_path: path.join(dir, "candidate-abc.json"), job_provider_calls: 26,
+  findings: [{ severity: "warning", code: "page_needs_reference_selection", message: "page p1 has 7 candidate refs" }], density: { beats_per_image: 4.84 }, scene_budget: { budget_generations: 176, over_budget_scenes: [] }, failed_chunk_ids: [], ...extra });
+
+test("allocation import conditions are checked separately: blockers, over-budget scenes and failed chunks each refuse", () => {
+  const ready = readyReport("/j");
+  assert.deepEqual(allocationImportBlockers(ready), []);
+  assert.match(allocationImportBlockers({ ...ready, status: "partial" }).join(";"), /not candidate_ready/);
+  assert.match(allocationImportBlockers({ ...ready, findings: [{ severity: "blocker", message: "page p3 lacks a location reference" }] }).join(";"), /blocker finding: page p3/);
+  assert.match(allocationImportBlockers({ ...ready, scene_budget: { budget_generations: 176, over_budget_scenes: [{ scene: "046", max_generations: 3, used: 4 }] } }).join(";"), /over-budget scenes: 046 \(4\/3\)/);
+  assert.match(allocationImportBlockers({ ...ready, failed_chunk_ids: ["alloc_002"] }).join(";"), /failed chunks: alloc_002/);
+  assert.match(allocationImportBlockers({ ...ready, scene_budget: {} }).join(";"), /over_budget_scenes is missing/);
+});
+
+test("dense candidates import automatically only under the strict conditions, with an append-only receipt", async () => {
+  const dense = autopilotIdentity({ render_profile: "panel_composition_v1", panel_composition_contract: createPanelProductionContract() });
+  const dir = await episodeDir(dense);
+  const denseStatus = (extra = {}) => ({ ...status("visual_prompt_plan", allocationShape), identity: dense, ...extra });
+  try {
+    // No report yet: author with the locked planner.
+    const author = await decideNext({ status: denseStatus(), episodeDir: dir, deps: { reviewer: neverReviewer, repairLedger: new Set() } });
+    assert.deepEqual(author.argv, ["visual", "panel-assets", "--episode-dir", dir, "--action", "author-dense"]);
+    const job = path.join(dir, "reports", "panel_assets", "dense-author", "0123456789abcdef");
+    // A failed chunk gets exactly one exact-chunk repair; the repair key lets the ledger hold a second one.
+    await json(path.join(job, "report-1000.json"), readyReport(job, { status: "needs_exact_repair", failed_chunk_ids: ["alloc_002", "alloc_005"], candidate_path: undefined }));
+    const repair = await decideNext({ status: denseStatus(), episodeDir: dir, deps: { reviewer: neverReviewer, repairLedger: new Set() } });
+    assert.deepEqual(repair.argv.slice(-2), ["--repair-chunk-ids", "alloc_002,alloc_005"]);
+    assert.deepEqual(repair.receipt.repairKey, ["dense_repair:0123456789abcdef:alloc_002", "dense_repair:0123456789abcdef:alloc_005"]);
+    // Over budget: triage, never an import.
+    await json(path.join(job, "report-2000.json"), readyReport(job, { scene_budget: { budget_generations: 176, over_budget_scenes: [{ scene: "046", max_generations: 3, used: 4 }] } }));
+    const held = await decideNext({ status: denseStatus(), episodeDir: dir, deps: { reviewer: neverReviewer, repairLedger: new Set() } });
+    assert.equal(held.kind, "triage"); assert.match(held.findings.join(";"), /over-budget/);
+    assert.equal((await readdir(path.join(dir, "autopilot")).catch(() => [])).includes("allocation_imports"), false);
+    // Clean candidate: import with the receipt.
+    await writeFile(path.join(job, "candidate-abc.json"), JSON.stringify({ schema: "goldflow_panel_asset_plan_v2" }));
+    await json(path.join(job, "report-3000.json"), readyReport(job));
+    const imported = await decideNext({ status: denseStatus(), episodeDir: dir, deps: { reviewer: neverReviewer, repairLedger: new Set() } });
+    assert.equal(imported.kind, "run");
+    assert.deepEqual(imported.argv.slice(-2), ["--plan", path.join(job, "candidate-abc.json")]);
+    assert.equal(imported.receipt.decision, "approve");
+    const [name] = await readdir(path.join(dir, "autopilot", "allocation_imports"));
+    const receipt = JSON.parse(await readFile(path.join(dir, "autopilot", "allocation_imports", name), "utf8"));
+    assert.equal(receipt.schema, "goldflow_autopilot_allocation_import_v1");
+    assert.equal(receipt.approver, "automated:allocation_validator");
+    assert.equal(receipt.candidate_sha256, sha(JSON.stringify({ schema: "goldflow_panel_asset_plan_v2" })));
+    assert.deepEqual([receipt.density, receipt.scene_budget.over_budget_scenes, receipt.findings.length, receipt.provider_calls], [{ beats_per_image: 4.84 }, [], 1, 26]);
+    // A historical identity without the dense lock keeps its hand-imported route.
+    const legacy = { ...dense, panel_composition_contract: createLegacyPanelProductionContract() };
+    const hand = await decideNext({ status: denseStatus({ identity: legacy }), episodeDir: dir, deps: { reviewer: neverReviewer, repairLedger: new Set() } });
+    assert.equal(hand.kind, "triage"); assert.match(hand.reason, /does not lock the dense-page allocation route/);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 

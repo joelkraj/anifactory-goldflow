@@ -54,3 +54,16 @@ The layouts were 5 P4H, 2 P6G, 1 P5L, 1 P3H, 1 P3L and 1 P4G.
   - Zone repair of the p05 hero.
   - Re-authored composition (native crop authoring) for zone panels.
   - Production allocation guidance for these templates.
+
+## Update 2026-10-20
+
+- **Exact billed cost** (Fal billing events): 11 requests, $0.288135 in total, $0.0262 per page, $0.0051 per beat. The 1920 proof cost $0.0187 per page. The cost reports are in each proof directory.
+- **Composition re-authored natively.** The repo's native image-aware author ran on zone crops (Codex CLI planner, no image provider). Inputs were the 56 beats with the retimed narration and word timing.
+  - 5 of 8 chunks were authored cleanly.
+  - 3 chunks failed only the viewport-fill check. Their 6 rects were reconciled by a recorded manual fix: resized to the crop aspect, centre and height kept, all other fields as authored.
+  - The compiled result: 41 inset, 6 reveal, 6 full-frame, 2 reaction-pair and 1 page-pan decisions.
+  - Compared with the mechanical port, panels play larger and the edit gains real punch-ins (hands, close faces).
+  - Renders: `proofs/multizone-compare/gala-dense-authored.mp4`, plus side-by-sides against the mechanical port and against the 1920 version.
+- **Lettering policy** added (`790b579`). It would have flagged the offer card in a small zone. The size directive targets the three garbles.
+- **Pending:** the p05 hero zone repair, prepared as one 2560×1440 request (`dense_p05_hero_repair1`), awaiting spend approval.
+- **Decision (Joel):** dense 3840 pages are the preferred direction.

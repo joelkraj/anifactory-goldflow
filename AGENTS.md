@@ -46,7 +46,7 @@ New `goldflow run preflight` calls require both `--content-profile` and `--media
   - the final watch: `run final-watch --decision accept|reject --reviewer <name> --note …`, bound to the master's hash;
   - the publish approval: `youtube publish --visibility public|scheduled --approved-by <name> --studio-settings-verified true`. It changes visibility and posts the pinned comment. Pin the comment in Studio afterwards, because the Data API cannot pin.
 
-  Neither step accepts an `automated:` reviewer.
+  Neither step accepts an `automated:` reviewer. Exactly two human steps remain: `run final-watch --decision accept|reject` after the private upload, and `youtube publish --visibility public|scheduled --approved-by <name>`. `youtube publish` refuses the public or scheduled flip while `config/youtube_api_compliance.json` does not record a passed OAuth audit; Studio then keeps the visibility flip. Channel upload defaults only pre-fill the Studio-only values the approver confirms; `--studio-settings-verified true` stays a per-publish human flag.
 - **Automated reviewers.** Every other gate is decided automatically. The decision writes the same approval artifact through the gate's own command, records the reviewer as `automated:<method>`, and leaves a hash-bound receipt in `autopilot/decisions/`.
   - Script approval requires passed ingest plus the deterministic script checks.
   - Narration uses automated ASR, pace, loudness and delivery QA, and never claims a listen.

@@ -923,10 +923,78 @@ export async function youtubeEffectiveThumbnailState(episodeDir, episode, option
   return { status: "passed", blockers: [], ...effective, update_count: receiptFiles.length };
 }
 
+export const YOUTUBE_API_COMPLIANCE_SCHEMA = "goldflow_youtube_api_compliance_v1";
+export const YOUTUBE_PIN_FOLLOWUP_METHOD = "manual_studio_followup";
+export const CHANNEL_UPLOAD_DEFAULTS_SCHEMA = "goldflow_channel_upload_defaults_v1";
+const CHANNEL_UPLOAD_DEFAULT_VALUES = Object.freeze({
+  monetization: ["on", "off"],
+  mid_roll_mode: ["automatic", "manual"],
+  comments: ["on", "off", "held_for_review"],
+});
+
+/**
+ * Q54: the YouTube API Services compliance audit status of the OAuth project
+ * (config/youtube_api_compliance.json). `audited` is true, false or "unknown";
+ * only true allows the Data API to make a video public or scheduled.
+ */
+export function validateYoutubeApiCompliance(config) {
+  const blockers = [];
+  push(blockers, config?.schema !== YOUTUBE_API_COMPLIANCE_SCHEMA, "youtube_api_compliance_schema_invalid");
+  push(blockers, ![true, false, "unknown"].includes(config?.audited), "youtube_api_compliance_audited_invalid");
+  push(blockers, config?.audited === true && !(Number.isFinite(Date.parse(config?.verified_at)) && clean(config?.verified_by)), "youtube_api_compliance_verification_missing");
+  return { status: blockers.length ? "blocked" : "passed", blockers: uniqueStrings(blockers), audited: config?.audited === true };
+}
+
+export async function loadYoutubeApiCompliance(configPath) {
+  const config = await readJson(configPath);
+  if (!config) throw new Error(`YouTube API compliance config missing: ${configPath}`);
+  const validation = validateYoutubeApiCompliance(config);
+  if (validation.status !== "passed") throw new Error(`YouTube API compliance config invalid (${validation.blockers.join(", ")}): ${configPath}`);
+  return { ...config, config_path: configPath, config_sha256: await sha256File(configPath) };
+}
+
+/** The human-readable refusal when the Data API may not flip visibility. */
+export function youtubeApiComplianceRefusal(compliance, action = "make this video public or scheduled") {
+  return `YouTube API compliance audit is not recorded as passed (audited=${JSON.stringify(compliance?.audited ?? "unknown")} in ${compliance?.config_path ?? "config/youtube_api_compliance.json"}), so the Data API will not ${action}. The visibility flip stays a YouTube Studio step for this video: set it there, then record it with youtube record-schedule / record-comment. If YouTube locked an unaudited-project upload to private, re-upload through Studio instead. Record the audit result (audited, verified_at, verified_by) in the config once it is in hand.`;
+}
+
+/**
+ * Optional channels/<channel>/channel_upload_defaults.json: the Studio-only
+ * values the publish approver is asked to confirm. Pre-fill only; it never
+ * satisfies --studio-settings-verified on its own.
+ */
+export function validateChannelUploadDefaults(defaults) {
+  const blockers = [];
+  push(blockers, defaults?.schema !== CHANNEL_UPLOAD_DEFAULTS_SCHEMA, "channel_upload_defaults_schema_invalid");
+  for (const [field, allowed] of Object.entries(CHANNEL_UPLOAD_DEFAULT_VALUES)) {
+    push(blockers, defaults?.[field] != null && !allowed.includes(defaults[field]), `channel_upload_defaults_${field}_invalid`);
+  }
+  push(blockers, Object.keys(defaults ?? {}).some((key) => !["schema", "notes", "updated_at", ...Object.keys(CHANNEL_UPLOAD_DEFAULT_VALUES)].includes(key)), "channel_upload_defaults_unknown_field");
+  return { status: blockers.length ? "blocked" : "passed", blockers: uniqueStrings(blockers) };
+}
+
+export async function loadChannelUploadDefaults(defaultsPath) {
+  const defaults = await readJson(defaultsPath);
+  if (!defaults) return null;
+  const validation = validateChannelUploadDefaults(defaults);
+  if (validation.status !== "passed") throw new Error(`Channel upload defaults invalid (${validation.blockers.join(", ")}): ${defaultsPath}`);
+  const values = Object.fromEntries(Object.keys(CHANNEL_UPLOAD_DEFAULT_VALUES).filter((field) => defaults[field] != null).map((field) => [field, defaults[field]]));
+  return { path: defaultsPath, sha256: await sha256File(defaultsPath), values, notes: defaults.notes ?? null };
+}
+
+/**
+ * Pinned-comment receipt. With `pinFollowupAllowed` (autopilot identities only)
+ * a comment posted through the Data API may record pinned:false with
+ * pin_method manual_studio_followup, because the API has no pin endpoint; the
+ * pin then stays an honest Studio follow-up. Historical identities keep the
+ * pinned:true check.
+ */
 export function validateYoutubePinnedCommentReceipt(receipt, options = {}) {
   const blockers = [];
   const expectedComment = clean(options.manifest?.pinned_comment?.text);
   const uploadReceipt = options.uploadReceipt ?? null;
+  const pinFollowup = options.pinFollowupAllowed === true && receipt?.pinned === false && receipt?.pin_method === YOUTUBE_PIN_FOLLOWUP_METHOD
+    && /^automated:[a-z][a-z0-9_]{2,63}$/.test(clean(receipt?.recorded_by));
   push(blockers, receipt?.schema !== YOUTUBE_PINNED_COMMENT_RECEIPT_SCHEMA, "youtube_comment_receipt_schema_invalid");
   push(blockers, clean(receipt?.status) !== "passed", "youtube_comment_receipt_not_passed");
   push(blockers, !uploadReceipt || receipt?.upload_receipt_sha256 !== options.uploadReceiptHash, "youtube_comment_receipt_upload_hash_stale");
@@ -934,11 +1002,11 @@ export function validateYoutubePinnedCommentReceipt(receipt, options = {}) {
   push(blockers, receipt?.comment_text_sha256 !== hashText(expectedComment), "youtube_comment_receipt_text_hash_mismatch");
   push(blockers, receipt?.post_approval?.approved !== true, "youtube_comment_post_approval_missing");
   push(blockers, !clean(receipt?.post_approval?.approved_by), "youtube_comment_post_approver_missing");
-  push(blockers, receipt?.pinned !== true, "youtube_comment_not_verified_pinned");
+  push(blockers, receipt?.pinned !== true && !pinFollowup, "youtube_comment_not_verified_pinned");
   push(blockers, !clean(receipt?.comment_id) && !clean(receipt?.comment_url), "youtube_comment_identity_missing");
   push(blockers, !clean(receipt?.recorded_by), "youtube_comment_recorder_missing");
   push(blockers, !clean(receipt?.recorded_at), "youtube_comment_time_missing");
-  return { status: blockers.length ? "blocked" : "passed", blockers: uniqueStrings(blockers) };
+  return { status: blockers.length ? "blocked" : "passed", blockers: uniqueStrings(blockers), pin_followup: pinFollowup };
 }
 
 export async function youtubePinnedCommentReceiptComplete(episodeDir, episode) {

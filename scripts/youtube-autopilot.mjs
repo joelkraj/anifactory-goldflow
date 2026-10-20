@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { episodeDirForFlags } from "./lib/execution-provenance.mjs";
 import { autopilotEnabled, automatedReviewer } from "./lib/autopilot-policy.mjs";
 import { autoPrivateUpload, defaultYoutubePublisher, defaultYoutubeUploader, publishApproval } from "./lib/autopilot-publish.mjs";
+import { loadChannelUploadDefaults, loadYoutubeApiCompliance } from "./lib/youtube-publish-contract.mjs";
 import { authorAutomatedPackaging, loadPackagingConfig, packagingConfigPath } from "./lib/autopilot-packaging.mjs";
 import { createModelReviewer } from "./lib/autopilot-reviewer.mjs";
 
@@ -54,8 +55,11 @@ async function main() {
     process.exitCode = approval.status ?? 1;
     return;
   }
+  // Q54 compliance status is read from the repo config on every upload and publish; it is never inferred.
+  const compliance = await loadYoutubeApiCompliance(path.join(repoRoot, "config", "youtube_api_compliance.json"));
   if (action === "auto-upload") {
-    const result = await autoPrivateUpload({ episodeDir, episode, uploader: ({ manifestPath }) => defaultYoutubeUploader({ manifestPath, repoRoot }) });
+    const result = await autoPrivateUpload({ episodeDir, episode, compliance, privateReviewOnly: flags["private-review-only"] === "true",
+      uploader: ({ manifestPath }) => defaultYoutubeUploader({ manifestPath, repoRoot }) });
     console.log(JSON.stringify(result, null, 2));
     if (result.status !== "passed") process.exitCode = 2;
     return;
@@ -65,7 +69,8 @@ async function main() {
     const result = await publishApproval({
       episodeDir, episode, visibility: flags.visibility, scheduleAt: flags["schedule-at"] ?? null, timeZone: flags["time-zone"] ?? null,
       approvedBy: flags["approved-by"], studioSettingsVerified: flags["studio-settings-verified"] === "true",
-      publisher: defaultYoutubePublisher({ repoRoot }),
+      publisher: defaultYoutubePublisher({ repoRoot }), compliance,
+      channelDefaults: await loadChannelUploadDefaults(path.join(dataRoot, "channels", identity.channel, "channel_upload_defaults.json")),
     });
     console.log(JSON.stringify(result, null, 2));
     if (result.status !== "published") process.exitCode = 2;

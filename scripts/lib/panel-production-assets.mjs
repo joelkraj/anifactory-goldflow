@@ -145,9 +145,12 @@ export async function preparePanelAssetPlan({ episodeDir }) {
       'Each order needs asset_id, owner_beat_id, beat_ids in source order, visual_brief and editorial_reason. The owner must be the first beat using the artwork. Each beat binding needs beat_id, asset_id and editorial_reason, in exact source order.',
       'Describe one coherent drawable composition that supports all bound beats. Reuse only when the same visible facts, characters, state and image-native text remain accurate; choose fresh artwork when the story needs it. Explain useful crop or reaction opportunities in the brief.',
       'Do not change narration or beat timing. Native artwork remains 16:9; the later panel composer authors crops, holds and overlays. The planner will author one prompt per unique order and aliases will retain exact source provenance.',
-      'This packet/template is not a passed plan. Fill the candidate and import it using visual panel-assets --plan <candidate>.'
+      'This packet/template is not a passed plan. Fill the candidate and import it using visual panel-assets --plan <candidate>.',
+      'Optional page orders (set schema goldflow_panel_asset_plan_v2): one generation holding 2-4 separately croppable zones from ONE scene, using a template from page_templates. Each zone gets its own drawable subject, a contiguous run of beats, a visual_brief and editorial_reason; every bound beat names its zone_id. Group only beats whose cast, wardrobe, location and state are simultaneously true, at most three people per page. Keep single orders for beats that need a large full-frame wide shot, action payoff or reveal. Pages are a generation efficiency only: each zone is later cropped into the ordinary panel layouts, and no viewer sees the page itself.'
     ],
+    page_templates: Object.fromEntries(Object.entries(PAGE_TEMPLATES).map(([id, zones]) => [id, zones.map(zone => zone.slot)])),
     candidate_shape: { asset_orders: [{ asset_id: 'asset_001', owner_beat_id: '<first beat ID>', beat_ids: ['<beat IDs>'], visual_brief: '<authored composition>', editorial_reason: '<why this image serves these beats>' }], beat_bindings: [{ beat_id: '<beat ID>', asset_id: 'asset_001', editorial_reason: '<how narration uses this art>' }] },
+    page_candidate_shape: { schema: 'goldflow_panel_asset_plan_v2', asset_orders: [{ asset_id: 'page_001', kind: 'page', page_template: 'P3L', owner_beat_id: '<earliest beat ID>', beat_ids: ['<all zone beats in source order>'], visual_brief: '<shared location, time, lighting, cast>', editorial_reason: '<why these beats share one generation>', zones: [{ zone_id: 'page_001_z1', slot: 'left', beat_ids: ['<contiguous beat IDs>'], visual_brief: '<this panel>', editorial_reason: '<why>' }] }], beat_bindings: [{ beat_id: '<beat ID>', asset_id: 'page_001', zone_id: 'page_001_z1', editorial_reason: '<how narration uses this zone>' }] },
     created_at: new Date().toISOString(),
   };
   await writeNew(packetPath, packet);
@@ -247,6 +250,7 @@ export function expandPanelAssetPrompts(ownerPrompts, { plan, beats, planSha256 
       panel_asset_id: order.asset_id, panel_asset_plan_sha256: planSha256,
       panel_asset_owner_image_id: ownerImageId, panel_asset_binding_reason: binding.editorial_reason,
       panel_page_template: order.kind === 'page' ? order.page_template : null, panel_zone_id: binding.zone_id ?? null,
+      panel_zone_slot: binding.zone_id ? order.zones.find(zone => zone.zone_id === binding.zone_id).slot : null,
       image_generation_required: true, provider_submission_required: !alias,
       image_strategy: alias ? 'reuse_prior_approved' : 'fresh',
       editorial_reuse_approved: alias, reuse_source_image_id: alias ? ownerImageId : null,
@@ -276,7 +280,8 @@ export async function assertPanelPromptAllocation({ episodeDir, prompts, allowSu
     need(row.visual_beat_id === item.binding.beat_id && row.panel_asset_id === item.binding.asset_id && row.panel_asset_plan_sha256 === loaded.planSha256, `stale prompt allocation ${row.image_id}`);
     need(row.image_generation_required === true, `every allocated beat requires a materialized image ${row.image_id}`);
     const order = loaded.plan.asset_orders.find(value => value.asset_id === item.binding.asset_id);
-    need((row.panel_page_template ?? null) === (order.kind === 'page' ? order.page_template : null) && (row.panel_zone_id ?? null) === (item.binding.zone_id ?? null), `page/zone allocation mismatch ${row.image_id}`);
+    need((row.panel_page_template ?? null) === (order.kind === 'page' ? order.page_template : null) && (row.panel_zone_id ?? null) === (item.binding.zone_id ?? null)
+      && (row.panel_zone_slot ?? null) === (order.zones?.find(zone => zone.zone_id === item.binding.zone_id)?.slot ?? null), `page/zone allocation mismatch ${row.image_id}`);
     need(row.start_sec === item.beat.start_sec && row.duration_sec === (item.beat.duration_sec ?? item.beat.end_sec - item.beat.start_sec), `beat timing changed ${row.image_id}`);
     need(item.alias || row.image_strategy === 'fresh' && row.editorial_reuse_approved === false && !row.reuse_source_image_id, `owner must remain a unique provider order ${row.image_id}`);
     need(row.panel_asset_owner_image_id === item.owner.image_id_hint && row.provider_submission_required === !item.alias, `provider allocation mismatch ${row.image_id}`);
@@ -327,6 +332,8 @@ export async function reconcilePanelAssetReport({ episodeDir, promptsPath, image
   const acceptedStatuses = new Set(['generated', 'reused_fresh', 'reused_imported_codex', 'existing_file', 'manual_imported', 'editorial_reuse', 'cached', 'passed', 'imported', 'accepted', 'completed', 'reused', 'staged_import']);
   const ledger = await read(cutExecutionLedgerPath);
   need(Array.isArray(ledger.cuts), 'existing cut execution ledger required for alias reconciliation');
+  // Rebuilding aliases from page owners would silently revert reviewed zone repairs.
+  need(!ledger.cuts.some(row => row.zone_repair), 'zone repairs are applied; alias reconciliation would revert them, so use scoped recovery');
   const promptById = new Map(promptPlan.prompts.map(row => [row.image_id, row]));
   const ledgerById = new Map(ledger.cuts.map(row => [row.image_id, row]));
   const accepted = [];

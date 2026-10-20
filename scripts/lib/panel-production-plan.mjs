@@ -131,9 +131,14 @@ export async function readPanelProductionInputs({ episodeDir }) {
   const bindingByBeat = new Map(allocationPlan.beat_bindings.map(row => [row.beat_id, row]));
   const orderById = new Map(allocationPlan.asset_orders.map(row => [row.asset_id, row]));
   const geometryByPage = new Map();
-  const zoneSource = async (beat, acceptedHash) => {
+  const zoneSource = async (beat, acceptedHash, cut) => {
     const binding = bindingByBeat.get(beat.visual_beat_id);
     if (!binding?.zone_id) return { source_rect: { ...full }, metadata: {} };
+    // An applied zone repair replaced this zone with its own reviewed single image.
+    if (cut?.zone_repair) {
+      need(cut.zone_repair.zone_id === binding.zone_id && cut.zone_repair.replacement_sha256 === acceptedHash, `zone repair does not match ${beat.visual_beat_id}`);
+      return { source_rect: { ...full }, metadata: { page_asset_id: binding.asset_id, zone_id: binding.zone_id, zone_repair_request_sha256: cut.zone_repair.request_sha256 } };
+    }
     const order = orderById.get(binding.asset_id), zone = order?.zones?.find(row => row.zone_id === binding.zone_id);
     need(order?.kind === 'page' && zone, `page zone binding is invalid for ${beat.visual_beat_id}`);
     const key = `${order.asset_id}:${acceptedHash}`;
@@ -168,7 +173,7 @@ export async function readPanelProductionInputs({ episodeDir }) {
     const metadata = await sharp(raster.path, { limitInputPixels: 100_000_000 }).metadata();
     need(['png', 'jpeg', 'webp'].includes(metadata.format) && (!metadata.pages || metadata.pages === 1), `static raster required for ${imageId}`);
     assets.push({ id: imageId, ...raster, width: metadata.width, height: metadata.height, origin: 'original_generated', provenance: `Accepted production cut ${imageId}; QA ${qa.ref.sha256}` });
-    const panelId = `panel_${beat.visual_beat_id}`, zone = await zoneSource(beat, acceptedHash);
+    const panelId = `panel_${beat.visual_beat_id}`, zone = await zoneSource(beat, acceptedHash, cut);
     panels.push({ id: panelId, asset_id: imageId, source_rect: zone.source_rect, metadata: { ...zone.metadata, source_beat_id: beat.visual_beat_id, source_start_sec: beat.start_sec, source_end_sec: beat.end_sec, source_word_start_index: beat.source_word_start_index, source_word_end_index: beat.source_word_end_index, narration_excerpt: beat.visual_beat_script_excerpt ?? '', source_image_id: imageId } });
     // Only the final authored hold may extend over final master padding. All
     // internal beat boundaries remain absolute and unchanged.

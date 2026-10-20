@@ -14,6 +14,7 @@ import { normalizeImageProvider } from "./lib/image-provider-routing.mjs";
 import { isBrowserPoolImageProvider } from "./lib/image-provider-policy.mjs";
 import { effectiveImageIdentityForEpisode } from "./lib/operator-image-route-override.mjs";
 import { buildImageSemanticAudit } from "./lib/image-semantic-audit.mjs";
+import { resolveZoneReviewImages, reviewViewReport } from "./lib/panel-zone-review.mjs";
 
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const flags = parseFlags(process.argv.slice(2));
@@ -195,6 +196,7 @@ export function mergeRiskReviewDecisions(rows, prior = {}, options = {}) {
       image_id: row.image_id,
       image_sha256: row.image_sha256,
       image_path: row.image_path,
+      ...(row.review_image_path ? { review_image_path: row.review_image_path, zone_id: row.zone_id } : {}),
       start_sec: row.start_sec,
       risk_reasons: row.risk_reasons,
       decision,
@@ -242,7 +244,8 @@ function svgEscape(value) {
 }
 
 async function contactTile(row, width = 400, imageHeight = 225, labelHeight = 70) {
-  const input = await sharp(row.image_path).resize({ width, height: imageHeight, fit: "contain", background: "#000000" }).png().toBuffer();
+  // Zone beats are reviewed on their own crop; the page raster stays the accepted bytes.
+  const input = await sharp(row.review_image_path ?? row.image_path).resize({ width, height: imageHeight, fit: "contain", background: "#000000" }).png().toBuffer();
   const detail = [
     row.visual_job ?? row.shot_job ?? "",
     ...(row.risk_reasons ?? []),
@@ -287,12 +290,12 @@ async function writeContactSheet(rows, outputPath, { columns = 4, pageSize = 24 
   return pages;
 }
 
-async function structuralAudit(promptPlan, imagegenReport, focalAnalysis = null, semanticAudit = null) {
+async function structuralAudit(promptPlan, imagegenReport, focalAnalysis = null, semanticAudit = null, zoneReview = null) {
   const resultById = new Map((imagegenReport?.results ?? []).map((row) => [String(row.image_id ?? ""), row]));
   const focalById = new Map((focalAnalysis?.analyses ?? []).map((row) => [String(row.image_id ?? ""), row]));
   const semanticById = new Map((semanticAudit?.rows ?? []).map((row) => [String(row.image_id ?? ""), row]));
   const rows = [];
-  const findings = [];
+  const findings = [...(zoneReview?.findings ?? [])];
   const hashOwners = new Map();
   for (const prompt of promptPlan.prompts ?? []) {
     if (prompt.image_generation_required === false) continue;
@@ -365,13 +368,14 @@ async function structuralAudit(promptPlan, imagegenReport, focalAnalysis = null,
       focal_confidence: focal?.confidence ?? null,
       composition_findings: focal?.findings ?? [],
       semantic_audit: semantic,
+      ...(zoneReview?.views.get(imageId) ?? {}),
     });
   }
   return { rows, findings };
 }
 
-export async function structuralAuditForTests(promptPlan, imagegenReport, focalAnalysis = null, semanticAudit = null) {
-  return structuralAudit(promptPlan, imagegenReport, focalAnalysis, semanticAudit);
+export async function structuralAuditForTests(promptPlan, imagegenReport, focalAnalysis = null, semanticAudit = null, zoneReview = null) {
+  return structuralAudit(promptPlan, imagegenReport, focalAnalysis, semanticAudit, zoneReview);
 }
 
 async function writeReviewPackets(rows) {
@@ -530,10 +534,11 @@ async function main() {
     throw new Error("Image decisions require --reviewer and --note so output QA has review provenance.");
   }
 
+  const zoneReview = await resolveZoneReviewImages({ episodeDir, prompts: promptPlan.prompts, results: imagegenReport.results });
   const semanticAudit = semanticAuditEnabled
     ? await buildImageSemanticAudit({
         promptPlan,
-        imagegenReport,
+        imagegenReport: reviewViewReport(imagegenReport, zoneReview.views),
         promptPlanPath: promptPath,
         imagegenReportPath,
         outputPath: semanticAuditPath,
@@ -547,7 +552,7 @@ async function main() {
         timeoutMs: Math.max(60_000, Number(flags["semantic-audit-timeout-ms"] ?? 600_000)),
       })
     : null;
-  const audit = await structuralAudit(promptPlan, imagegenReport, focalAnalysis, semanticAudit);
+  const audit = await structuralAudit(promptPlan, imagegenReport, focalAnalysis, semanticAudit, zoneReview);
   const packets = await writeReviewPackets(audit.rows);
   const currentImageIds = new Set(audit.rows.map((row) => row.image_id));
   const unknownCriticalIds = [...criticalRejectedIds].filter((imageId) => !currentImageIds.has(imageId));

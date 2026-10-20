@@ -339,9 +339,21 @@ Anything short of that is a triage point, not a rerun order.
   - Expanded prompt rows carry `panel_page_template` / `panel_zone_id`, and allocation checks enforce them.
   - Fal validation, bulk and review-repair use `pageReferenceBoardPromptGuidance` for page owners. It replaces only the single-frame "do not reproduce gutters" line, and the assignments record `panel_page_template`.
   - Fal finalization writes a raster-keyed geometry receipt (`panel_page_geometry/<asset_id>/<sha16>/`) for every page owner. It records the status on the owner's and aliases' ledger rows; a failed measurement is kept, not hidden or retried.
+- **Done in Phase 2 (branch only):**
+  - **Allocation packet.** It now offers page orders (`page_templates`, `page_candidate_shape`, guidance). They stay opt-in through `schema: goldflow_panel_asset_plan_v2`.
+  - **Image QA (`panel-zone-review.mjs`).** It reviews each zone beat on its pixel-exact crop: contact sheets, semantic audit input and decision rows carry `review_image_path`. Acceptance stays bound to the page raster's hash. Missing, failed, mismatched or tampered geometry blocks exactly that zone's beats (`page_geometry_missing`, `page_geometry_failed`, `page_geometry_mismatch`, `zone_review_crop_invalid`).
+  - **Zone-scoped repair (`panel-zone-repair.mjs`).**
+    - A reviewed `goldflow_panel_zone_repair_request_v1` must carry hash-bound rejection evidence or failed geometry for the current raster.
+    - It prepares an immutable, not-dispatched single-artwork spec (`fal/zone-repair/<zone_id>/<sha16>/spec.json`) that reuses the page owner's references.
+    - `applyZoneRepair` binds the produced replacement and its result receipt. It swaps only that zone's report/ledger rows, setting them to pending image QA with `zone_repair` provenance, and retains the previous report and ledger in an immutable receipt.
+    - The page raster, its geometry and sibling zones stay byte-identical.
+    - Composition shows a repaired zone's replacement whole.
+    - Alias reconciliation refuses to run while repairs are applied, so it cannot revert them.
 - **Not yet done:**
-  - The allocation packet still does not offer page orders.
-  - Per-zone image QA on review crops, using the recorded geometry, and zone-scoped repair (Phase 2).
+  - Fal dispatch and observation of a prepared zone-repair spec. This is the only remaining spend path; it should reuse the exact-repair submit/observe flow under the retry and spend caps.
+  - Run-status routing for the zone-repair steps.
+  - Focal analysis still runs on the page raster; it is advisory only.
+  - A full Fal re-finalization rebuilds the report from page owners and supersedes applied zone repairs, which must then be re-applied.
   - Pre-existing failures, which also fail on the base branch: `fal-repair-failure-tests.mjs` (one case) and `goldflow-fixture-tests.mjs` (`render_profile` of null).
 
 ## Implementation outline (after approval; each a small, tested change)

@@ -196,7 +196,9 @@ test("Fal observed-rate projection warns and stops at locked thresholds without 
     const root = path.join(episodeDir, "fal");
     await receipt(path.join(root, "bulk", "submission-receipts", "one.json"), "one");
     const initial = await falSpendProjectionState({ episodeDir, warningBudgetUsd: 0.03, hardBudgetUsd: 0.05 });
-    assert.equal(initial.projected_spend_usd, 0.022);
+    assert.equal(initial.projected_spend_usd, 0.0176, "measured 1920 edit rate replaces the $0.022 constant");
+    assert.equal(initial.cost_basis, "projected");
+    assert.equal(initial.estimate_only, true);
     assert.equal(initial.actual_charge_usd, null);
     const next = await assertFalSpendProjectionBudget({ episodeDir,
       assignments: [{ image_id: "two" }], warningBudgetUsd: 0.03, hardBudgetUsd: 0.05 });
@@ -208,11 +210,11 @@ test("Fal observed-rate projection warns and stops at locked thresholds without 
 });
 
 test("Fal status blocks pending bulk whose observed-rate projection reaches the hard budget", async () => {
-  const episodeDir = await fixture(1600);
+  const episodeDir = await fixture(2000);
   try {
     const root = path.join(episodeDir, "fal");
     await mkdir(root, { recursive: true });
-    const assignments = Array.from({ length: 1591 }, (_, i) => ({ image_id: String(i),
+    const assignments = Array.from({ length: 1989 }, (_, i) => ({ image_id: String(i),
       submission_receipt_path: path.join(root, "bulk", "submission-receipts", `${i}.json`),
       result_receipt_path: path.join(root, "bulk", "result-receipts", `${i}.json`) }));
     await writeFile(path.join(root, "bulk-plan.json"), JSON.stringify({ assignments, concurrency: 20 }));
@@ -220,7 +222,7 @@ test("Fal status blocks pending bulk whose observed-rate projection reaches the 
     const state = await falProductionStageStates({ episodeDir,
       identity: { image_provider_options: { fal: { warning_budget_usd: 30, hard_budget_usd: 35 } } } });
     assert.equal(state.stageStates.image_generation.state, "blocked");
-    assert.match(state.stageStates.image_generation.evidence, /projected episode spend.*35\.002/);
+    assert.match(state.stageStates.image_generation.evidence, /projected episode spend.*35\.0064/);
     assert.equal(state.stageStates.image_generation.next_command_shape, undefined);
   } finally { await rm(episodeDir, { recursive: true, force: true }); }
 });

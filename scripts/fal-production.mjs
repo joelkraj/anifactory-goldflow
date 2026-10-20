@@ -6,10 +6,10 @@ import { buildReferenceBoard, referenceBoardPromptGuidance, pageReferenceBoardPr
 // Page owners carry their template on the prompt row (and later on the assignment, for repairs).
 const boardGuidance=(pageTemplate,board)=>pageTemplate?pageReferenceBoardPromptGuidance(board):referenceBoardPromptGuidance(board);
 const pageField=(pageTemplate,canvas)=>pageTemplate?{panel_page_template:pageTemplate,...(canvas?{image_size:{width:canvas.width,height:canvas.height}}:{})}:{};
-import { falFileSha256, falObjectSha256, uploadFalReference, submitFalImage, observeFalImage, FAL_ENDPOINTS } from "./lib/fal-provider.mjs";
+import { falFileSha256, falObjectSha256, uploadFalReference, submitFalImage, observeFalImage, reconcileFalBilling, FAL_ENDPOINTS } from "./lib/fal-provider.mjs";
 import { falPortableAssetId, promoteApprovedFalReferences } from "./lib/fal-portable-bank.mjs";
 import { assertEpisodeBudget, spendAuthorization } from "./lib/episode-budget.mjs";
-import { assertFalRetryBudget, assertFalSpendProjectionBudget, falAmbiguousSubmissionAttempts, falSpendProjectionState, falProjectedSpendUsd } from "./lib/fal-retry-budget.mjs";
+import { assertFalRetryBudget, assertFalSpendProjectionBudget, falAmbiguousSubmissionAttempts, falSpendProjectionState, falPerRequestCapUsd, falProjectedRateUsd, falBilledRateState, FAL_SPEND_WARNING_FRACTION } from "./lib/fal-retry-budget.mjs";
 import { chooseNativeValidationRows } from "./lib/fal-validation-selector.mjs";
 import { falAdjudicationPath, validateFalNoJobAdjudication } from "./lib/fal-ambiguous-adjudication.mjs";
 import { falFailureReceiptPath, recordFalFailure } from "./lib/fal-failure-receipt.mjs";
@@ -32,6 +32,11 @@ const bytes = value => `${JSON.stringify(value, null, 2)}\n`;
 function need(value, message) { if (!value) throw new Error(message); }
 // An exact token authorizes one manual dispatch; on a budget-locked identity the
 // single episode_budget token authorizes any dispatch within the locked cap.
+// Per-request ceilings come from the contract locked at preflight (3x the measured rate); a
+// historical contract without the table reads the same built-in table. Never raised from billed data.
+let cap=()=>{throw new Error("Fal context is not ready.");};
+function bindCaps(ctx){cap=(endpoint,imageSize)=>falPerRequestCapUsd({endpoint,imageSize,caps:ctx.contract.per_request_caps_usd??null});}
+async function warnNearCaps(ctx,rows){const billedState=await falBilledRateState(ctx.episodeDir);for(const row of rows){if(!Number.isFinite(row.max_cost_usd)||row.max_cost_usd<=0)continue;const rate=falProjectedRateUsd({endpoint:row.endpoint,imageSize:row.image_size,billedState});if(rate.rate_usd>=FAL_SPEND_WARNING_FRACTION*row.max_cost_usd)console.error(`Fal per-request warning: ${row.image_id} projects $${rate.rate_usd} (${rate.rate_source}) against its locked $${row.max_cost_usd} cap (>=70%); caps are never raised automatically.`);}}
 function spendOk(ctx,f,token){const auth=spendAuthorization({identity:ctx.identity,flags:f,token});if(auth.authorized)ctx.spendBasis=auth.basis;return auth.authorized;}
 function flags(argv) { const out={}; for(let i=0;i<argv.length;i+=2){need(argv[i]?.startsWith("--")&&argv[i+1]!==undefined,"Every Fal production flag requires a value.");out[argv[i].slice(2)]=argv[i+1];} return out; }
 async function read(file){return JSON.parse(await fs.readFile(file,"utf8"));}
@@ -42,7 +47,7 @@ async function mapLimit(rows, limit, fn){const out=[];let cursor=0,failure=null;
 async function context(f){
   const episodeDir=await fs.realpath(path.resolve(f["episode-dir"])); const identity=await read(path.join(episodeDir,"run_identity.json"));
   need(identity.image_provider==="fal_ai","Fal production requires a Fal-locked identity.");
-  const root=path.join(episodeDir,"fal"); return {episodeDir,identity,root,identityHash:await falFileSha256(path.join(episodeDir,"run_identity.json")),contract:identity.image_provider_options.fal};
+  const root=path.join(episodeDir,"fal"); const ctx={episodeDir,identity,root,identityHash:await falFileSha256(path.join(episodeDir,"run_identity.json")),contract:identity.image_provider_options.fal}; bindCaps(ctx); return ctx;
 }
 async function readEffectiveBulk(ctx){
   const bulk=await read(path.join(ctx.root,"bulk-plan.json"));
@@ -109,7 +114,7 @@ async function prepareReferences(ctx){
       `Approved global identity is unavailable or changed: ${target.canonical_subject_id}`);
     const joeyIdentity=target.kind==="character_state"&&(/(^|[_-])(joey|evan)([_-]|$)/i.test(id)||/\bJoey Manhwa\b/i.test(target.subject??""));
     const source=joeyIdentity?{asset_id:joey.asset_id,asset_class:joey.asset_class,path:joey.local_absolute_path,sha256:joey.sha256}:null;
-    const core={image_id:id,ref_id:id,endpoint:reusableAsset?"local-approved-bank-reuse":source?FAL_ENDPOINTS.primary_edit:FAL_ENDPOINTS.primary_text,prompt,prompt_sha256:digest(prompt),run_identity_sha256:ctx.identityHash,reference_mode:reusableAsset?"approved_local_asset":source?"separate_ordered_references":"text_only",reference_asset_ids:reusableAsset?[reusableAsset.asset_id]:source?[source.asset_id]:[],reference_hashes:reusableAsset?[reusableAsset.sha256]:source?[source.sha256]:[],board_path:reusableAsset?.local_absolute_path??source?.path??null,board_sha256:reusableAsset?.sha256??source?.sha256??null,board_manifest_path:null,max_cost_usd:reusableAsset?0:1.0,asset_class:target.kind,subject:target.subject??null};
+    const core={image_id:id,ref_id:id,endpoint:reusableAsset?"local-approved-bank-reuse":source?FAL_ENDPOINTS.primary_edit:FAL_ENDPOINTS.primary_text,prompt,prompt_sha256:digest(prompt),run_identity_sha256:ctx.identityHash,reference_mode:reusableAsset?"approved_local_asset":source?"separate_ordered_references":"text_only",reference_asset_ids:reusableAsset?[reusableAsset.asset_id]:source?[source.asset_id]:[],reference_hashes:reusableAsset?[reusableAsset.sha256]:source?[source.sha256]:[],board_path:reusableAsset?.local_absolute_path??source?.path??null,board_sha256:reusableAsset?.sha256??source?.sha256??null,board_manifest_path:null,max_cost_usd:reusableAsset?0:cap(source?FAL_ENDPOINTS.primary_edit:FAL_ENDPOINTS.primary_text,null),asset_class:target.kind,subject:target.subject??null};
     const assignment={...core,assignment_sha256:falObjectSha256(JSON.stringify(core)),submission_receipt_path:path.join(ctx.root,"reference","submission-receipts",`${id}.json`),result_receipt_path:path.join(ctx.root,"reference","result-receipts",`${id}.json`),output_path:output,upload_receipt_path:path.join(ctx.root,"reference","upload-receipts",`${id}.json`)};
     const assignmentPath=path.join(ctx.root,"reference","assignments",`${id}.json`);await write(assignmentPath,assignment);assignments.push({...assignment,assignment_path:assignmentPath});
     if(reusableAsset){
@@ -211,7 +216,7 @@ async function prepare(ctx,{revision=1}={}){
       const board=refs.length?await buildReferenceBoard({root:validationRoot,imageId:row.image_id,references:refs,outputSize:pageBoardOutputSize(row.panel_page_template)}):null;
       const basePrompt=row.provider_prompt??row.image_prompt;need(basePrompt,`Fal validation prompt missing: ${row.image_id}`);
       const prompt=board?`${basePrompt}\n\n${boardGuidance(row.panel_page_template,board)}`:basePrompt;
-      const core={...pageField(row.panel_page_template,row.panel_page_canvas),image_id:row.image_id,validation_category:category,validation_category_matched:category_matched,endpoint:board?FAL_ENDPOINTS.primary_edit:FAL_ENDPOINTS.primary_text,prompt,prompt_sha256:digest(prompt),run_identity_sha256:ctx.identityHash,reference_mode:board?"one_positional_collage":"text_only",reference_asset_ids:refs.map(r=>r.asset_id),reference_hashes:refs.map(r=>r.sha256),board_path:board?.output_path??null,board_sha256:board?.output_sha256??null,board_manifest_path:board?.manifest_path??null,max_cost_usd:1.0};
+      const core={...pageField(row.panel_page_template,row.panel_page_canvas),image_id:row.image_id,validation_category:category,validation_category_matched:category_matched,endpoint:board?FAL_ENDPOINTS.primary_edit:FAL_ENDPOINTS.primary_text,prompt,prompt_sha256:digest(prompt),run_identity_sha256:ctx.identityHash,reference_mode:board?"one_positional_collage":"text_only",reference_asset_ids:refs.map(r=>r.asset_id),reference_hashes:refs.map(r=>r.sha256),board_path:board?.output_path??null,board_sha256:board?.output_sha256??null,board_manifest_path:board?.manifest_path??null,max_cost_usd:cap(board?FAL_ENDPOINTS.primary_edit:FAL_ENDPOINTS.primary_text,row.panel_page_canvas)};
       const assignment={...core,assignment_sha256:falObjectSha256(JSON.stringify(core)),submission_receipt_path:path.join(validationRoot,"submission-receipts",`${row.image_id}.json`),result_receipt_path:path.join(validationRoot,"result-receipts",`${row.image_id}.json`),output_path:path.join(validationRoot,"validation-results",`${row.image_id}.png`),upload_receipt_path:path.join(validationRoot,"upload-receipts",`${row.image_id}.json`),checks:["identity consistency","hands","prop fidelity","composition","unwanted text"]};
       const assignmentPath=path.join(validationRoot,"validation-assignments",`${row.image_id}.json`);await write(assignmentPath,assignment);assignments.push({...assignment,assignment_path:assignmentPath});
     }
@@ -224,7 +229,7 @@ async function prepare(ctx,{revision=1}={}){
     let ids=[...shot.reference_asset_ids]; if(ids.length>4) ids=ids.filter(id=>!id.includes("location.")).slice(0,4);
     const refs=ids.map(id=>{const row=approved.get(id);need(row?.local_absolute_path&&row?.sha256,`Approved canonical asset missing: ${id}`);return {asset_id:id,asset_class:row.asset_class,path:row.local_absolute_path,sha256:row.sha256};});
     const board=await buildReferenceBoard({root:ctx.root,imageId:shot.image_id,references:refs});
-    const prompt=`${shot.prompt}\n\n${referenceBoardPromptGuidance(board)}`; const core={image_id:shot.image_id,endpoint:FAL_ENDPOINTS.primary_edit,prompt,prompt_sha256:digest(prompt),run_identity_sha256:ctx.identityHash,reference_mode:"one_positional_collage",reference_asset_ids:refs.map(r=>r.asset_id),reference_hashes:refs.map(r=>r.sha256),board_path:board.output_path,board_sha256:board.output_sha256,board_manifest_path:board.manifest_path,max_cost_usd:1.0};
+    const prompt=`${shot.prompt}\n\n${referenceBoardPromptGuidance(board)}`; const core={image_id:shot.image_id,endpoint:FAL_ENDPOINTS.primary_edit,prompt,prompt_sha256:digest(prompt),run_identity_sha256:ctx.identityHash,reference_mode:"one_positional_collage",reference_asset_ids:refs.map(r=>r.asset_id),reference_hashes:refs.map(r=>r.sha256),board_path:board.output_path,board_sha256:board.output_sha256,board_manifest_path:board.manifest_path,max_cost_usd:cap(FAL_ENDPOINTS.primary_edit,null)};
     const assignment={...core,assignment_sha256:falObjectSha256(JSON.stringify(core)),submission_receipt_path:path.join(ctx.root,"submission-receipts",`${shot.image_id}.json`),result_receipt_path:path.join(ctx.root,"result-receipts",`${shot.image_id}.json`),output_path:path.join(ctx.root,"validation-results",`${shot.image_id}.png`),upload_receipt_path:path.join(ctx.root,"upload-receipts",`${shot.image_id}.json`),checks:shot.checks};
     const assignmentPath=path.join(ctx.root,"validation-assignments",`${shot.image_id}.json`);await write(assignmentPath,assignment);assignments.push({...assignment,assignment_path:assignmentPath});
   }
@@ -256,7 +261,7 @@ async function prepareBulk(ctx,f){
     const basePrompt=prebulkCorrection?.effectivePrompts.get(row.image_id)
       ??row.provider_prompt??row.image_prompt??row.canonical_prompt; need(basePrompt,`Prompt missing for ${row.image_id}.`);
     const prompt=board?`${basePrompt}\n\n${boardGuidance(row.panel_page_template,board)}`:basePrompt;
-    const core={...pageField(row.panel_page_template,row.panel_page_canvas),image_id:row.image_id,endpoint:board?FAL_ENDPOINTS.primary_edit:FAL_ENDPOINTS.primary_text,prompt,prompt_sha256:digest(prompt),run_identity_sha256:ctx.identityHash,reference_mode:board?"one_positional_collage":"text_only",reference_asset_ids:refs.map(r=>r.asset_id),reference_hashes:refs.map(r=>r.sha256),board_path:board?.output_path??null,board_sha256:board?.output_sha256??null,board_manifest_path:board?.manifest_path??null,max_cost_usd:0.05,start_sec:row.start_sec,duration_sec:row.duration_sec,
+    const core={...pageField(row.panel_page_template,row.panel_page_canvas),image_id:row.image_id,endpoint:board?FAL_ENDPOINTS.primary_edit:FAL_ENDPOINTS.primary_text,prompt,prompt_sha256:digest(prompt),run_identity_sha256:ctx.identityHash,reference_mode:board?"one_positional_collage":"text_only",reference_asset_ids:refs.map(r=>r.asset_id),reference_hashes:refs.map(r=>r.sha256),board_path:board?.output_path??null,board_sha256:board?.output_sha256??null,board_manifest_path:board?.manifest_path??null,max_cost_usd:cap(board?FAL_ENDPOINTS.primary_edit:FAL_ENDPOINTS.primary_text,row.panel_page_canvas),start_sec:row.start_sec,duration_sec:row.duration_sec,
       ...(prebulkCorrection?.effectivePrompts.has(row.image_id)?{prebulk_prompt_correction_receipt_sha256:await falFileSha256(prebulkCorrection.paths.receipt)}:{})};
     const acceptedValidation=correction?.expected.rejected_ids.includes(row.image_id)
       ?recovery.plan.assignments.find(item=>item.image_id===row.image_id&&recovery.review.approved_ids.includes(item.image_id))
@@ -282,13 +287,14 @@ async function prepareBulk(ctx,f){
   const projectedBase=Number((assignments.filter(row=>!row.reused_validation_shot).length*0.00441).toFixed(4));
   const spend=await falSpendProjectionState({episodeDir:ctx.episodeDir,
     warningBudgetUsd:ctx.contract.warning_budget_usd,hardBudgetUsd:ctx.contract.hard_budget_usd});
-  const projectedPending=assignments.filter(row=>!row.reused_validation_shot).length;
-  const projectedEpisode=falProjectedSpendUsd(spend.paid_submissions+projectedPending);
+  const pendingAssignments=assignments.filter(row=>!row.reused_validation_shot);
+  const bulkBilledState=await falBilledRateState(ctx.episodeDir);
+  const projectedEpisode=Number((spend.projected_spend_usd+pendingAssignments.reduce((sum,row)=>sum+falProjectedRateUsd({endpoint:row.endpoint,imageSize:row.image_size,billedState:bulkBilledState}).rate_usd,0)).toFixed(4));
   need(projectedEpisode<ctx.contract.hard_budget_usd,
     "Projected Fal episode spend reaches the locked hard budget; estimate only, verify actual account spend.");
   if(projectedEpisode>=ctx.contract.warning_budget_usd)
     console.error(`Fal projected episode spend $${projectedEpisode} reaches the locked warning threshold; estimate only, verify actual account spend.`);
-  const plan={schema:"goldflow_fal_bulk_plan_v1",created_at:new Date().toISOString(),run_identity_sha256:ctx.identityHash,model:FAL_ENDPOINTS.primary_edit,quality:"low",width:1920,height:1080,format:"png",reference_mode:"one_positional_collage",concurrency:ctx.contract.production_concurrency,assignment_count:assignments.length,projected_base_cost_usd:projectedBase,projected_observed_rate_episode_cost_usd:projectedEpisode,pricing_note:"$0.00441 is base-output only. The episode spend projection uses $0.022 per paid request from observed Fal billing; actual charges require dashboard verification.",
+  const plan={schema:"goldflow_fal_bulk_plan_v1",created_at:new Date().toISOString(),run_identity_sha256:ctx.identityHash,model:FAL_ENDPOINTS.primary_edit,quality:"low",width:1920,height:1080,format:"png",reference_mode:"one_positional_collage",concurrency:ctx.contract.production_concurrency,assignment_count:assignments.length,projected_base_cost_usd:projectedBase,projected_observed_rate_episode_cost_usd:projectedEpisode,pricing_note:"$0.00441 is base-output only. The episode spend projection uses the measured billed rate per endpoint/canvas (1920 edit $0.0176) or this episode's reconciled billed median; billed USD lands only through billing-reconcile records.",cost_basis:spend.cost_basis==="none"?"projected":spend.cost_basis,
     ...(prebulkCorrection?{prebulk_prompt_correction_receipt_sha256:await falFileSha256(prebulkCorrection.paths.receipt),prebulk_corrected_image_ids:[...prebulkCorrection.effectivePrompts.keys()]}:{}),
     ...(correction?{validation_review_correction_sha256:await falFileSha256(correction.paths.correction),validation_recovery_review_sha256:await falFileSha256(correction.paths.review)}:{}),
     ...(recovery?.second?{validation_second_review_sha256:await falFileSha256(recovery.second.reviewPath)}:{}),assignments};
@@ -317,7 +323,9 @@ async function submitRows(ctx,rows,limit){
     const spend=await assertFalSpendProjectionBudget({episodeDir:ctx.episodeDir,assignments:pending,
       warningBudgetUsd:ctx.contract.warning_budget_usd,hardBudgetUsd:ctx.contract.hard_budget_usd});
     if(spend.warning_after_batch)console.error(`Fal projected spend warning: $${spend.projected_spend_after_batch_usd} against locked $${spend.warning_budget_usd}; estimate only, verify actual Fal balance.`);
-    await assertEpisodeBudget({episodeDir:ctx.episodeDir,identity:ctx.identity,requestedUsd:falProjectedSpendUsd(pending.length),scope:`fal_${ctx.action??"dispatch"}`,basis:ctx.spendBasis??"exact_token"});
+    else if(spend.warning_70_percent_after_batch)console.error(`Fal spend warning: $${spend.projected_spend_after_batch_usd} projected after this batch reaches 70% of the locked $${spend.hard_budget_usd} hard budget.`);
+    await warnNearCaps(ctx,pending);
+    await assertEpisodeBudget({episodeDir:ctx.episodeDir,identity:ctx.identity,requestedUsd:spend.requested_batch_usd,scope:`fal_${ctx.action??"dispatch"}`,basis:ctx.spendBasis??"exact_token"});
     return await mapLimit(pending,limit,async row=>{
       if(!row.board_path)return submitFalImage({assignment:row,referenceUrls:[],receiptPath:row.submission_receipt_path});
       const upload=await uploadFalReference({localPath:row.board_path,expectedSha256:row.board_sha256,receiptPath:row.upload_receipt_path});
@@ -335,9 +343,10 @@ async function preflightPaidRepair(ctx,receiptDir,imageIds,fileStemForId=id=>id)
   }
   if(!pending.length)return;
   await assertFalRetryBudget({episodeDir:ctx.episodeDir,assignments:pending});
-  await assertFalSpendProjectionBudget({episodeDir:ctx.episodeDir,assignments:pending,
+  const spend=await assertFalSpendProjectionBudget({episodeDir:ctx.episodeDir,assignments:pending,
     warningBudgetUsd:ctx.contract.warning_budget_usd,hardBudgetUsd:ctx.contract.hard_budget_usd});
-  await assertEpisodeBudget({episodeDir:ctx.episodeDir,identity:ctx.identity,requestedUsd:falProjectedSpendUsd(pending.length),scope:`fal_${ctx.action??"repair"}`,basis:ctx.spendBasis??"exact_token",record:false});
+  if(spend.warning_70_percent_after_batch)console.error(`Fal spend warning: $${spend.projected_spend_after_batch_usd} projected after this repair reaches 70% of the locked $${spend.hard_budget_usd} hard budget.`);
+  await assertEpisodeBudget({episodeDir:ctx.episodeDir,identity:ctx.identity,requestedUsd:spend.requested_batch_usd,scope:`fal_${ctx.action??"repair"}`,basis:ctx.spendBasis??"exact_token",record:false});
 }
 async function observeRows(ctx,rows,limit){return mapLimit(rows,limit,async row=>{const receipt=await read(row.submission_receipt_path);try{return await observeFalImage({endpoint:receipt.endpoint,requestId:receipt.request_id,outputPath:row.output_path,receiptPath:row.result_receipt_path,expectedSize:row.image_size});}catch(error){const timedOut=error?.name==="TimeoutError"||/aborted due to timeout/i.test(error?.message??"");const stale=Date.now()-Date.parse(receipt.submitted_at)>15*60_000;if(timedOut&&!stale)return {complete:false,transient_observation_timeout:true,request_id:receipt.request_id};if(timedOut||Number(error?.status)>=500||/Gateway Timeout|Internal Server Error/i.test(error?.message??"")){const resultDir=path.basename(path.dirname(row.result_receipt_path));const holdName=resultDir==="review-repair-result-receipts"?path.basename(row.result_receipt_path):resultDir==="review-repair-transport-recovery-result-receipts"||resultDir==="transport-recovery-result-receipts"?`${path.basename(row.result_receipt_path,".json")}-recovery.json`:`${row.image_id}.json`;const holdPath=path.join(path.dirname(path.dirname(row.result_receipt_path)),"transport-holds",holdName);if(!await fs.access(holdPath).then(()=>true,()=>false))await write(holdPath,{schema:"goldflow_fal_transport_hold_v1",created_at:new Date().toISOString(),image_id:row.image_id,endpoint:receipt.endpoint,request_id:receipt.request_id,assignment_sha256:row.assignment_sha256,provider_queue_status:"unknown_or_completed",reason:timedOut?"stale_observation_timeout":"provider_5xx_during_observation",billable_request_resubmitted:false});return {complete:false,transport_pending:true,request_id:receipt.request_id,hold_path:holdPath};}if(error?.status!==422)throw error;const failurePath=await recordFalFailure(row,receipt,error);return {complete:false,failed:true,failure_path:failurePath};}});}
 async function main(){
@@ -413,6 +422,14 @@ async function main(){
    }
    const result=await observeRows(ctx,rows,ctx.contract.production_concurrency);
    return console.log(JSON.stringify({status:"observed",checked:result.length,complete:result.filter(x=>x.complete).length},null,2));
+ }
+ if(action==="billing-reconcile"){
+   // Append-only: queries billing events for exact request IDs and writes one new cost_reconciled
+   // record; --dry-run true plans the queries from receipts without network or writes. Never prints a key.
+   const dryRun=/^(true|1|yes)$/i.test(String(f["dry-run"]??""));
+   const result=await reconcileFalBilling({episodeDir:ctx.episodeDir,dryRun});
+   const {rows,...summary}=result.record;
+   return console.log(JSON.stringify({status:result.record.billing_status,record_path:result.path,...summary,missing_request_ids:summary.missing_request_ids.length,median_usd_by_key:summary.median_usd_by_key??null},null,2));
  }
  if(action==="prepare-references") return console.log(JSON.stringify(await prepareReferences(ctx),null,2));
  if(["dispatch-validation-second","observe-validation-second","review-validation-second"].includes(action)) {
@@ -875,7 +892,7 @@ async function main(){
      const board=refs.length?await buildReferenceBoard({root:path.join(ctx.root,"bulk","review-repair"),imageId:round.stem,references:refs,outputSize:pageBoardOutputSize(original.panel_page_template)}):null;
      const prompt=board?`${directive.replacement_prompt}\n\n${boardGuidance(original.panel_page_template,board)}`:directive.replacement_prompt;
      need(digest(prompt)!==original.prompt_sha256,`Visual repair prompt unchanged: ${directive.image_id}`);
-     const core={...pageField(original.panel_page_template,original.image_size),image_id:directive.image_id,endpoint:board?FAL_ENDPOINTS.primary_edit:FAL_ENDPOINTS.primary_text,prompt,prompt_sha256:digest(prompt),run_identity_sha256:ctx.identityHash,reference_mode:board?"one_positional_collage":"text_only",reference_asset_ids:refs.map(ref=>ref.asset_id),reference_hashes:refs.map(ref=>ref.sha256),board_path:board?.output_path??null,board_sha256:board?.output_sha256??null,board_manifest_path:board?.manifest_path??null,max_cost_usd:0.05,start_sec:original.start_sec,duration_sec:original.duration_sec,previous_assignment_sha256:original.assignment_sha256,rejected_image_sha256:directive.rejected_image_sha256,repair_reason:directive.finding,qa_report_sha256:directives.qa_report_sha256};
+     const core={...pageField(original.panel_page_template,original.image_size),image_id:directive.image_id,endpoint:board?FAL_ENDPOINTS.primary_edit:FAL_ENDPOINTS.primary_text,prompt,prompt_sha256:digest(prompt),run_identity_sha256:ctx.identityHash,reference_mode:board?"one_positional_collage":"text_only",reference_asset_ids:refs.map(ref=>ref.asset_id),reference_hashes:refs.map(ref=>ref.sha256),board_path:board?.output_path??null,board_sha256:board?.output_sha256??null,board_manifest_path:board?.manifest_path??null,max_cost_usd:cap(board?FAL_ENDPOINTS.primary_edit:FAL_ENDPOINTS.primary_text,original.image_size),start_sec:original.start_sec,duration_sec:original.duration_sec,previous_assignment_sha256:original.assignment_sha256,rejected_image_sha256:directive.rejected_image_sha256,repair_reason:directive.finding,qa_report_sha256:directives.qa_report_sha256};
      if(directive.character_reference_additions){
        Object.assign(core,{reviewed_character_reference_additions:directive.character_reference_additions,
          reference_review_directives_sha256:await falFileSha256(f.directives),

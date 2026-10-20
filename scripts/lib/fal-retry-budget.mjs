@@ -4,10 +4,91 @@ import path from "node:path";
 import { falAdjudicationForAttempt } from "./fal-ambiguous-adjudication.mjs";
 
 const RETRY_FRACTION = 0.10;
-// Conservative planning allowance based on the 2026-09-29 Fal dashboard:
-// 3,088 billed Sunburst edit requests cost $55.76 ($0.01806 each), while
-// text-to-image averaged about $0.005. This is not a provider-enforced quote.
-export const FAL_PROJECTED_PAID_REQUEST_USD = 0.022;
+// Measured billed rates per paid request (USD) by endpoint and output canvas,
+// read from Fal billing events, not list prices:
+// - sunburst/edit 1920x1080 with a 1920 board: $0.0176 (coma-healer, 658 requests, $11.58);
+//   the 2026-09-29 dashboard showed $0.01806 over 3,088 edits.
+// - sunburst/edit 3840x2160 with a 1920 board: $0.0263 (reference_board_size_cost_test_v1, 4 pages).
+// - text-to-image 1920x1080: $0.0061 (124 references, about $0.76).
+// Rows marked derived add Fal's list delta for the larger output to the measured 1920 rate.
+// A rolling median of this episode's reconciled billed costs replaces a row once it exists.
+export const FAL_MEASURED_PAID_REQUEST_USD = Object.freeze({
+  "openai/gpt-image-2.5/sunburst/edit": Object.freeze({ "1920x1080": 0.0176, "2560x1440": 0.0193, "3840x2160": 0.0263 }),
+  "openai/gpt-image-2.5/sunburst/text-to-image": Object.freeze({ "1920x1080": 0.0061, "2560x1440": 0.0078, "3840x2160": 0.0128 }),
+});
+export const FAL_DEFAULT_PAID_REQUEST_USD = FAL_MEASURED_PAID_REQUEST_USD["openai/gpt-image-2.5/sunburst/edit"]["1920x1080"];
+// Compatibility alias for callers that still project at one flat rate.
+export const FAL_PROJECTED_PAID_REQUEST_USD = FAL_DEFAULT_PAID_REQUEST_USD;
+// Per-request cost ceilings are 3x the measured rate, locked at preflight in the
+// identity's Fal contract and never raised from billed data.
+export const FAL_PER_REQUEST_CAP_MULTIPLIER = 3;
+export const FAL_SPEND_WARNING_FRACTION = 0.7;
+export const FAL_COST_RECONCILED_SCHEMA = "goldflow_fal_cost_reconciled_v1";
+export const FAL_BILLING_RECONCILIATION_DIR = "fal/billing/reconciliations";
+
+export function falCanvasKey(imageSize) {
+  const width = Number(imageSize?.width ?? 1920), height = Number(imageSize?.height ?? 1080);
+  return `${width}x${height}`;
+}
+function roundUsd(value) { return Number(Number(value).toFixed(4)); }
+
+/** Measured rate for an endpoint/canvas; unknown rows fall back to the 1920 edit rate. */
+export function falMeasuredRateUsd({ endpoint, imageSize } = {}) {
+  const row = FAL_MEASURED_PAID_REQUEST_USD[String(endpoint ?? "")];
+  return row?.[falCanvasKey(imageSize)] ?? row?.["1920x1080"] ?? FAL_DEFAULT_PAID_REQUEST_USD;
+}
+
+/** The locked cap table written into a new Fal contract (3x measured, every endpoint/canvas). */
+export function buildFalPerRequestCaps() {
+  return Object.fromEntries(Object.entries(FAL_MEASURED_PAID_REQUEST_USD).map(([endpoint, rows]) => [endpoint,
+    Object.fromEntries(Object.entries(rows).map(([canvas, usd]) => [canvas, roundUsd(usd * FAL_PER_REQUEST_CAP_MULTIPLIER)]))]));
+}
+
+/** Cap for one assignment: the identity's locked table when present, else the built-in 3x table. */
+export function falPerRequestCapUsd({ endpoint, imageSize, caps = null } = {}) {
+  const locked = caps?.[String(endpoint ?? "")]?.[falCanvasKey(imageSize)];
+  if (Number.isFinite(Number(locked)) && Number(locked) > 0) return Number(locked);
+  return roundUsd(falMeasuredRateUsd({ endpoint, imageSize }) * FAL_PER_REQUEST_CAP_MULTIPLIER);
+}
+
+/**
+ * Rolling billed state from append-only cost_reconciled records: the latest
+ * billed cost per request_id and the median billed cost per endpoint/canvas.
+ */
+export async function falBilledRateState(episodeDir) {
+  const dir = path.join(episodeDir, FAL_BILLING_RECONCILIATION_DIR);
+  const names = (await fs.readdir(dir).catch(error => { if (error.code === "ENOENT") return []; throw error; }))
+    .filter(name => /^\d{4}_.*\.json$/.test(name)).sort();
+  const byRequestId = new Map();
+  for (const name of names) {
+    const record = JSON.parse(await fs.readFile(path.join(dir, name), "utf8"));
+    if (record.schema !== FAL_COST_RECONCILED_SCHEMA) throw new Error(`Invalid Fal cost reconciliation record: ${path.join(dir, name)}`);
+    for (const row of record.rows ?? []) {
+      if (row.cost_basis !== "billed" || !Number.isFinite(Number(row.cost_usd))) continue;
+      byRequestId.set(row.request_id, { cost_usd: Number(row.cost_usd), endpoint: row.endpoint, image_size: row.image_size ?? null, record_path: path.join(dir, name) });
+    }
+  }
+  const samples = new Map();
+  for (const row of byRequestId.values()) {
+    const key = `${row.endpoint}|${falCanvasKey(row.image_size)}`;
+    if (!samples.has(key)) samples.set(key, []);
+    samples.get(key).push(row.cost_usd);
+  }
+  const medianByKey = {};
+  for (const [key, values] of samples) {
+    const sorted = [...values].sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    medianByKey[key] = { median_usd: roundUsd(sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2), count: sorted.length };
+  }
+  return { billed_by_request_id: byRequestId, median_usd_by_key: medianByKey, record_count: names.length };
+}
+
+/** Projected rate for one request: this episode's billed median when it exists, else the measured table. */
+export function falProjectedRateUsd({ endpoint, imageSize, billedState = null } = {}) {
+  const median = billedState?.median_usd_by_key?.[`${endpoint}|${falCanvasKey(imageSize)}`];
+  if (median?.count > 0) return { rate_usd: median.median_usd, rate_source: "episode_billed_median" };
+  return { rate_usd: falMeasuredRateUsd({ endpoint, imageSize }), rate_source: "measured_table" };
+}
 const REPAIR_RECEIPT_DIRS = Object.freeze([
   "validation-recovery/submission-receipts",
   "validation-recovery-second/submission-receipts",
@@ -56,6 +137,7 @@ async function paidSubmissionsIn(root, relativeDir) {
   const records = [...receipts].map(([name, receipt]) => ({
     image_id: receipt.image_id, assignment_sha256: receipt.assignment_sha256,
     submission_receipt_path: path.join(dir, name), ambiguous: false,
+    request_id: receipt.request_id, endpoint: receipt.endpoint ?? null, image_size: receipt.params?.image_size ?? null,
   }));
   for (const attemptPath of attemptPaths) {
     const name = path.basename(attemptPath);
@@ -104,9 +186,40 @@ async function rejectedValidationIds(root) {
   if (!Array.isArray(review.rejected_ids)) throw new Error(`Invalid Fal validation review: ${reviewFile}`);
   return new Set(review.rejected_ids.map(String));
 }
-export function falProjectedSpendUsd(requestCount) {
+export function falProjectedSpendUsd(requestCount, rateUsd = FAL_DEFAULT_PAID_REQUEST_USD) {
   if (!Number.isSafeInteger(requestCount) || requestCount < 0) throw new Error("Fal projection needs a nonnegative request count.");
-  return Number((requestCount * FAL_PROJECTED_PAID_REQUEST_USD).toFixed(4));
+  if (!Number.isFinite(rateUsd) || rateUsd < 0) throw new Error("Fal projection needs a nonnegative rate.");
+  return Number((requestCount * rateUsd).toFixed(4));
+}
+
+/**
+ * Cost of a set of paid submissions: billed where a cost_reconciled record
+ * covers the request_id, projected (billed median, else measured table) otherwise.
+ */
+export function falSubmissionCostState(rows, billedState = null) {
+  let billedUsd = 0, projectedUsd = 0, billedCount = 0;
+  const sources = new Set();
+  for (const row of rows) {
+    const billed = row.request_id ? billedState?.billed_by_request_id?.get(row.request_id) : null;
+    if (billed) { billedUsd += billed.cost_usd; billedCount += 1; continue; }
+    const rate = falProjectedRateUsd({ endpoint: row.endpoint, imageSize: row.image_size, billedState });
+    projectedUsd += rate.rate_usd; sources.add(rate.rate_source);
+  }
+  const total = roundUsd(billedUsd + projectedUsd);
+  return {
+    paid_submissions: rows.length, billed_count: billedCount, billed_usd: roundUsd(billedUsd),
+    projected_count: rows.length - billedCount, projected_usd: roundUsd(projectedUsd), total_usd: total,
+    cost_basis: rows.length === 0 ? "none" : billedCount === rows.length ? "billed" : billedCount ? "mixed" : "projected",
+    rate_sources: [...sources].sort(),
+  };
+}
+
+/** Every paid submission of the episode with its endpoint/canvas and billed cost where reconciled. */
+export async function falEpisodeSpendState(episodeDir) {
+  const root = path.join(episodeDir, "fal");
+  const groups = await Promise.all([...INITIAL_RECEIPT_DIRS, ...REPAIR_RECEIPT_DIRS].map(dir => paidSubmissionsIn(root, dir)));
+  const billedState = await falBilledRateState(episodeDir);
+  return { ...falSubmissionCostState(groups.flat(), billedState), billed_state: billedState };
 }
 
 export async function falRetryBudgetState(episodeDir) {
@@ -174,28 +287,30 @@ export async function falSpendProjectionState({ episodeDir, warningBudgetUsd, ha
     || warningBudgetUsd <= 0 || hardBudgetUsd <= warningBudgetUsd) {
     throw new Error("Fal spend projection requires valid locked warning and hard budgets.");
   }
-  const root = path.join(episodeDir, "fal");
-  const groups = await Promise.all([...INITIAL_RECEIPT_DIRS, ...REPAIR_RECEIPT_DIRS]
-    .map(dir => paidSubmissionsIn(root, dir)));
-  const paidSubmissions = groups.flat().length;
-  const projectedSpendUsd = falProjectedSpendUsd(paidSubmissions);
+  const spend = await falEpisodeSpendState(episodeDir);
+  const paidSubmissions = spend.paid_submissions;
+  const projectedSpendUsd = spend.total_usd;
   return {
     paid_submissions: paidSubmissions, projected_spend_usd: projectedSpendUsd,
+    billed_usd: spend.billed_usd, billed_count: spend.billed_count, cost_basis: spend.cost_basis, rate_sources: spend.rate_sources,
     warning_budget_usd: warningBudgetUsd, hard_budget_usd: hardBudgetUsd,
     warning_reached: projectedSpendUsd >= warningBudgetUsd,
     hard_reached: projectedSpendUsd >= hardBudgetUsd,
-    estimate_only: true, actual_charge_usd: null,
-    pricing_note: "Conservative $0.022 per paid request from observed Fal dashboard billing; actual charges remain unavailable in submission/result receipts.",
+    estimate_only: spend.billed_count < paidSubmissions, actual_charge_usd: spend.billed_count ? spend.billed_usd : null,
+    pricing_note: "Billed USD comes only from append-only cost_reconciled records (imagegen fal --action billing-reconcile); unreconciled requests are projected at this episode's billed median per endpoint/canvas, else the measured table (1920 edit $0.0176). Projections are estimates, not provider quotes.",
   };
 }
 
 export async function assertFalSpendProjectionBudget({ episodeDir, assignments, warningBudgetUsd, hardBudgetUsd }) {
   const state = await falSpendProjectionState({ episodeDir, warningBudgetUsd, hardBudgetUsd });
-  const projectedAfterBatch = falProjectedSpendUsd(state.paid_submissions + assignments.length);
+  const billedState = await falBilledRateState(episodeDir);
+  const batchUsd = assignments.reduce((sum, row) => sum + falProjectedRateUsd({ endpoint: row.endpoint, imageSize: row.image_size, billedState }).rate_usd, 0);
+  const projectedAfterBatch = roundUsd(state.projected_spend_usd + batchUsd);
   if (state.hard_reached || projectedAfterBatch >= hardBudgetUsd) {
     throw new Error(`Fal projected spend reaches the locked $${hardBudgetUsd} hard budget ($${state.projected_spend_usd} already projected + ${assignments.length} new requests). This is an estimate only; verify actual Fal balance before further spend.`);
   }
-  return { ...state, requested_submissions: assignments.length,
+  return { ...state, requested_submissions: assignments.length, requested_batch_usd: roundUsd(batchUsd),
     projected_spend_after_batch_usd: projectedAfterBatch,
-    warning_after_batch: projectedAfterBatch >= warningBudgetUsd };
+    warning_after_batch: projectedAfterBatch >= warningBudgetUsd,
+    warning_70_percent_after_batch: projectedAfterBatch >= FAL_SPEND_WARNING_FRACTION * hardBudgetUsd };
 }

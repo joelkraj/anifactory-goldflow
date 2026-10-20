@@ -57,15 +57,18 @@ test("dispatch within the cap writes an authorization receipt; overspend is a ha
   const identity = { episode_budget: buildEpisodeBudget({ usd: "0.10", lockedAt }) };
   const episodeDir = await episode(identity);
   try {
-    // Two paid Fal submissions project $0.044 at the conservative observed rate.
+    // Two paid Fal submissions project $0.0352 at the measured 1920 edit rate (no billing yet).
     await falReceipt(episodeDir, "bulk/submission-receipts", "a");
     await falReceipt(episodeDir, "bulk/submission-receipts", "b");
     const state = await episodeSpendState({ episodeDir, identity });
-    assert.equal(state.spent_usd, 0.044);
-    assert.equal(state.remaining_usd, 0.056);
-    const ok = await assertEpisodeBudget({ episodeDir, identity, requestedUsd: 0.044, scope: "fal_dispatch-bulk", basis: "episode_budget", now: lockedAt });
+    assert.equal(state.spent_usd, 0.0352);
+    assert.equal(state.remaining_usd, 0.0648);
+    assert.equal(state.fal_cost_basis, "projected");
+    assert.equal(state.estimate_only, true);
+    const ok = await assertEpisodeBudget({ episodeDir, identity, requestedUsd: 0.0352, scope: "fal_dispatch-bulk", basis: "episode_budget", now: lockedAt });
     assert.equal(ok.status, "authorized");
-    assert.equal(ok.projected_after_usd, 0.088);
+    assert.equal(ok.projected_after_usd, 0.0704);
+    assert.equal(ok.warning_after, true, "70% of the $0.10 cap is reached");
     const receipts = await readdir(path.join(episodeDir, "episode_budget", "authorizations"));
     assert.equal(receipts.length, 1);
     const receipt = JSON.parse(await readFile(path.join(episodeDir, "episode_budget", "authorizations", receipts[0]), "utf8"));
@@ -78,8 +81,8 @@ test("dispatch within the cap writes an authorization receipt; overspend is a ha
     // Non-Fal spend counts against the same cap.
     await recordEpisodeSpend({ episodeDir, provider: "thumbnail_route", usd: 0.05, scope: "packaging", now: lockedAt });
     await assert.rejects(
-      assertEpisodeBudget({ episodeDir, identity, requestedUsd: 0.022, scope: "fal_dispatch-zone-repair", basis: "episode_budget" }),
-      (error) => error instanceof EpisodeBudgetExceededError && /^Episode budget hard stop:/.test(error.message) && error.state.spent_usd === 0.094,
+      assertEpisodeBudget({ episodeDir, identity, requestedUsd: 0.0176, scope: "fal_dispatch-zone-repair", basis: "episode_budget" }),
+      (error) => error instanceof EpisodeBudgetExceededError && /^Episode budget hard stop:/.test(error.message) && error.state.spent_usd === 0.0852,
     );
     assert.equal((await readdir(path.join(episodeDir, "episode_budget", "authorizations"))).length, 1);
   } finally {

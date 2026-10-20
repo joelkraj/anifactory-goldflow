@@ -389,7 +389,7 @@ export async function falProductionStageStates({ episodeDir, identity } = {}) {
     const queued = submitted.map((value,index) => value || (adjudicated[index] && retrySubmitted[index]));
     const regularUnsubmittedCount = submitted.filter((value,index) => !value && !adjudicated[index]).length;
     const adjudicatedRetryPendingCount = adjudicated.filter((value,index) => value && !retrySubmitted[index]).length;
-    if (spend) projectedWithPendingBulkUsd = falProjectedSpendUsd(spend.paid_submissions + regularUnsubmittedCount + adjudicatedRetryPendingCount);
+    if (spend) projectedWithPendingBulkUsd = Number((spend.projected_spend_usd + falProjectedSpendUsd(regularUnsubmittedCount + adjudicatedRetryPendingCount)).toFixed(4));
     const results = await Promise.all(bulk.assignments.map(row => exists(row.result_receipt_path)));
     const repairResults = await Promise.all(bulk.assignments.map(row => exists(path.join(root,"bulk","repair-result-receipts",`${row.image_id}.json`))));
     const repairFailures = await Promise.all(bulk.assignments.map(row => exists(path.join(root,"bulk","repair-failure-receipts",`${row.image_id}.json`))));

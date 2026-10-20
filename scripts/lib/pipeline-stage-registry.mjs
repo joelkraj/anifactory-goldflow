@@ -507,6 +507,8 @@ export function commandStageFor(commandName, subcommandName, flags = {}, identit
     return /^(true|1|yes)$/i.test(String(flags["references-only"] ?? "")) ? "reference_generation" : "image_generation";
   }
   if (registry === PIPELINE_STAGE_REGISTRY && key === "imagegen fal") {
+    // Append-only billing reconciliation spends nothing and belongs to no stage.
+    if (String(flags.action ?? "") === "billing-reconcile") return null;
     if (["repair-reviewed-bulk", "recover-reviewed-bulk-hold", "observe-reviewed-bulk", "finalize-reviewed-bulk"].includes(String(flags.action ?? ""))) return "image_output_qa";
     if (identity.visual_restart?.fork_at === "visual_reference_plan") {
       if (["repair-reviewed-references", "observe-reviewed-references", "repair-failed-reviewed-reference", "observe-failed-reviewed-reference", "repair-successful-reviewed-references", "observe-successful-reviewed-references", "finalize-reviewed-references"].includes(String(flags.action ?? ""))) return "reference_image_approval";

@@ -168,3 +168,31 @@ test('reviewed exact manual reconciliation preserves original bytes and dispatch
     assert.equal(resumed.recipe_sha256, repaired.recipe_sha256); assert.equal(calls, 1);
   } finally { await fs.rm(f.root, { recursive: true, force: true }); }
 });
+
+test('authored cuts play several crops of one artwork within a beat, each validated, snapped and readable', async () => {
+  const { compilePanelComposition } = await import('../lib/panel-composition-authoring.mjs');
+  const f = await fixture('cuts');
+  try {
+    const chunk = panelAuthorChunks(f.packet)[0], baseline = structuredClone(f.packet.baseline);
+    // Stretch the fixture's 1s/2s beats so a beat can hold two readable shots.
+    baseline.scenes[0].end_sec = baseline.scenes[1].start_sec = 3; baseline.scenes[1].end_sec = baseline.duration_sec = 6;
+    for (const scene of baseline.scenes) for (const layer of scene.layers) { layer.start_sec = scene.start_sec; layer.end_sec = scene.end_sec; }
+    const scene = baseline.scenes[0];
+    const mid = scene.start_sec + (scene.end_sec - scene.start_sec) / 2;
+    const r = responseFor(chunk.scenes);
+    r.decisions[0].cuts = [{ start_sec: mid, source_rect: { x: .2, y: .4, width: .6, height: .2 }, camera_from: { x: .5, y: .5, zoom: 1 }, camera_to: { x: .5, y: .5, zoom: 1.1 }, region_evidence: 'The lower band holds the fixture detail the narration names next.' }];
+    assert.throws(() => validatePanelAuthorResponse(structuredClone(r), chunk, baseline), /unfilled panel viewport .* cut/);
+    const snaps = snapPanelAuthorRects(r, baseline);
+    assert.deepEqual(snaps.map(row => row.field), ['cuts[0].rect']);
+    assert.equal(validatePanelAuthorResponse(r, chunk, baseline).length, 2);
+    const recipe = { schema: 'goldflow_panel_composition_recipe_v1', author: 'Fixture editor', decisions: r.decisions };
+    const compiled = compilePanelComposition(baseline, recipe, { mode: 'production_panel_composition' });
+    const layers = compiled.scenes[0].layers;
+    assert.deepEqual(layers.map(layer => [layer.start_sec, layer.end_sec]), [[scene.start_sec, mid], [mid, scene.end_sec]]);
+    assert.equal(compiled.panels.find(panel => panel.id === layers[1].panel_id).metadata.derived_from_panel_id, r.decisions[0].panel_id);
+    r.decisions[0].cuts[0].start_sec = scene.end_sec - 0.5;
+    assert.throws(() => compilePanelComposition(baseline, recipe, { mode: 'production_panel_composition' }), /at least 1.2s/);
+    r.decisions[0].cuts[0].start_sec = mid; r.decisions[0].layout = 'reveal';
+    assert.throws(() => compilePanelComposition(baseline, recipe, { mode: 'production_panel_composition' }), /entry and context required|cuts are only supported/);
+  } finally { await fs.rm(f.root, { recursive: true, force: true }); }
+});

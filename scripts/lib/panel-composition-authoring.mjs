@@ -68,6 +68,9 @@ export async function createPanelCompositionTemplate({ timelinePath, outputDir }
   return { status: 'needs_authoring', recipe_path: path.join(output, 'recipe.json'), packet_path: path.join(output, 'authoring_packet.json'), decision_count: recipe.decisions.length };
 }
 
+// Several shots per beat: at most two cuts (three shots), each shot readable.
+export const MAX_BEAT_CUTS = 2, MIN_SHOT_SEC = 1.2;
+
 function key(at_sec, rect, view = camera, easing = 'smooth') { return { at_sec, rect: { ...rect }, camera: { ...view }, opacity: 1, easing }; }
 
 function cameraKeys(start, end, rect, row) {
@@ -147,6 +150,26 @@ export function compilePanelComposition(timeline, recipe, { mode = 'editing_expe
       layers.push({ id: `${scene.id}__context`, panel_id: context.panel_id, start_sec: start, end_sec: context.end_sec, z: 0, fit: context.fit ?? 'contain', border_px: context.border_px ?? 4, keyframes: [key(start, context.rect, context.camera ?? camera, 'hold'), key(context.end_sec, context.rect, context.camera ?? camera, 'hold')] });
     } else if (row.entry || row.context) fail(`unused entry/context on ${row.layout}: ${scene.id}`);
     layers.push(main);
+    if (row.cuts != null) {
+      // Authored hard cuts to other crops of the SAME main artwork within one
+      // long beat: shot 1 is the decision itself, each cut starts a new shot.
+      if (!['inset', 'full_frame', 'page_pan'].includes(row.layout)) fail(`cuts are only supported on inset, full_frame or page_pan: ${scene.id}`);
+      if (!Array.isArray(row.cuts) || row.cuts.length < 1 || row.cuts.length > MAX_BEAT_CUTS) fail(`1..${MAX_BEAT_CUTS} cuts allowed: ${scene.id}`);
+      if (row.rect_to || row.move_start_sec != null || row.move_end_sec != null) fail(`cuts replace rect_to and move times: ${scene.id}`);
+      const original = panel(row.panel_id), bounds = [start, ...row.cuts.map(cut => cut.start_sec), end];
+      for (let i = 1; i < bounds.length; i++) if (!Number.isFinite(bounds[i]) || bounds[i] - bounds[i - 1] < MIN_SHOT_SEC - 1e-9) fail(`every shot must last at least ${MIN_SHOT_SEC}s: ${scene.id}`);
+      main.end_sec = bounds[1]; main.keyframes = cameraKeys(start, bounds[1], rect, row);
+      row.cuts.forEach((cut, i) => {
+        const c = cut.source_rect, base = original.source_rect;
+        if (!c || !['x', 'y', 'width', 'height'].every(k => Number.isFinite(c[k])) || c.x < 0 || c.y < 0 || c.width <= 0 || c.height <= 0 || c.x + c.width > 1 || c.y + c.height > 1) fail(`invalid cut crop ${scene.id}`);
+        const id = `${scene.id}__cut_${i + 1}`;
+        if (panels.has(id)) fail(`derived panel id already exists: ${id}`);
+        const derived = { ...structuredClone(original), id, source_rect: { x: base.x + c.x * base.width, y: base.y + c.y * base.height, width: c.width * base.width, height: c.height * base.height }, metadata: { ...original.metadata, derived_from_panel_id: original.id, crop_author: recipe.author } };
+        panels.set(id, derived); result.panels.push(derived);
+        const cutRect = cut.rect ?? rect;
+        layers.push({ id, panel_id: id, start_sec: bounds[i + 1], end_sec: bounds[i + 2], z: 2 + i, fit: cut.fit ?? main.fit, border_px: main.border_px, keyframes: cameraKeys(bounds[i + 1], bounds[i + 2], cutRect, { scene_id: scene.id, camera_from: cut.camera_from, camera_to: cut.camera_to }) });
+      });
+    }
     return { id: scene.id, start_sec: start, end_sec: end, background: { panel_id: row.background_panel_id, blur_px: row.blur_px ?? 32, brightness: row.background_brightness ?? 0.32 }, layers, editorial: { layout: row.layout, reason: row.editorial_reason, author: recipe.author } };
   });
   return mode === 'production_panel_composition' ? validatePanelTimeline(result, mode) : validatePanelExperimentTimeline(result);

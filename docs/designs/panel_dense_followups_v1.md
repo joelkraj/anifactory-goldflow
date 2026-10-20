@@ -6,7 +6,7 @@ This tracker lists the ten agreed follow-ups. Each item lands as a reviewed, tes
 
 | # | Item | Status | Commit / evidence |
 | --- | --- | --- | --- |
-| 1 | Several shots per beat: 2–3 authored crops of one zone within a long beat | pending | |
+| 1 | Several shots per beat: 2–3 authored crops of one zone within a long beat | **done** | Optional `cuts` on inset, full_frame and page_pan decisions: at most 2 cuts, each shot at least 1.2 s, all from the same main artwork. The author validates each cut and snaps its rect, and the compiler turns cuts into sequential derived-crop layers. Not yet exercised by a real author run. |
 | 2 | More cuts between zones of the same page (reaction pairs and contexts across siblings) in the author prompt | pending | |
 | 3 | Impact beats: an authored screen-shake window and quick cut bursts | pending | |
 | 4 | Snap author rects to the crop aspect deterministically (removes manual fill reconciliation) | **done** | `snapPanelAuthorRects` in the native author, with snaps recorded per chunk. All 3 gala chunks that had failed pass with it. |

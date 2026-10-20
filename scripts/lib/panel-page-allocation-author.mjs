@@ -56,7 +56,7 @@ binding: {"beat_id","asset_id","zone_id"(pages only),"editorial_reason"} — exa
 ${JSON.stringify({ templates, beats })}`;
 }
 
-async function nativeAllocation({ prompt, outputPath, repoRoot }) {
+export async function nativeAllocation({ prompt, outputPath, repoRoot }) {
   const result = await runCodexCli({ prompt, stageName: 'visual_prompt_plan', repoRoot, outputPath, verbosity: 'low', timeoutMs: 900_000, extraArgs: ['--sandbox', 'read-only'] });
   let text = result.content.trim(); const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i); if (fenced) text = fenced[1];
   return JSON.parse(text);
@@ -66,12 +66,17 @@ export async function authorDensePageAllocation({ episodeDir, outputDir, repoRoo
   const loaded = await loadPanelAssetInputs(episodeDir);
   const referencePlan = await read(path.join(loaded.episodeDir, 'visual_reference_plan.json'));
   need(['passed', 'approved'].includes(referencePlan.status), 'a passed reference plan is required');
-  const constraints = beatAllocationConstraints({ beats: loaded.beats, referencePlan });
-  const chunks = denseAllocationChunks(loaded.beats, { maxBeats });
-  const inputsKey = sha(JSON.stringify({ source_hashes: loaded.sourceHashes, chunks: chunks.map(chunk => chunk.beats.map(beat => beat.visual_beat_id)) }));
-  const job = path.resolve(outputDir ?? path.join(loaded.episodeDir, 'reports', 'panel_assets', 'dense-author'), inputsKey.slice(0, 16));
+  return authorDenseAllocationChunks({ ...loaded, referencePlan, jobRoot: outputDir ?? path.join(loaded.episodeDir, 'reports', 'panel_assets', 'dense-author'), validate: plan => validatePanelAssetPlan(plan, loaded), repoRoot, executor, concurrency, limit, maxBeats, onProgress });
+}
+
+/** Chunked authoring core. Inputs must already be verified by the caller (`validate` checks a merged candidate). */
+export async function authorDenseAllocationChunks({ identity, beats, sourceHashes, referencePlan, jobRoot, validate, repoRoot, executor = nativeAllocation, concurrency = 6, limit = 1000, maxBeats = 40, onProgress = () => {} }) {
+  const constraints = beatAllocationConstraints({ beats, referencePlan });
+  const chunks = denseAllocationChunks(beats, { maxBeats });
+  const inputsKey = sha(JSON.stringify({ source_hashes: sourceHashes, chunks: chunks.map(chunk => chunk.beats.map(beat => beat.visual_beat_id)) }));
+  const job = path.resolve(jobRoot, inputsKey.slice(0, 16));
   await fs.mkdir(path.join(job, 'chunks'), { recursive: true });
-  const base = { schema: 'goldflow_panel_asset_plan_v2', episode: loaded.identity.episode, author: 'Native dense page allocation author', source_hashes: loaded.sourceHashes };
+  const base = { schema: 'goldflow_panel_asset_plan_v2', episode: identity.episode, author: 'Native dense page allocation author', source_hashes: sourceHashes };
   const rows = new Map(), pending = [];
   for (const chunk of chunks) {
     const out = path.join(job, 'chunks', `${chunk.id}.json`);
@@ -85,7 +90,7 @@ export async function authorDensePageAllocation({ episodeDir, outputDir, repoRoo
       try {
         const response = await executor({ prompt: request.prompt, outputPath: request.raw, repoRoot });
         const plan = { ...base, asset_orders: response.asset_orders, beat_bindings: response.beat_bindings };
-        validatePanelAssetPlan(plan, { beats: request.chunk.beats, identity: loaded.identity, sourceHashes: loaded.sourceHashes });
+        validatePanelAssetPlan(plan, { beats: request.chunk.beats, identity, sourceHashes });
         const findings = denseAllocationFindings(plan, constraints);
         const blockers = findings.filter(row => row.severity === 'blocker');
         row = blockers.length ? { status: 'failed', error: blockers.map(row => row.message).join(' '), findings } : { status: 'authored', response, findings };
@@ -96,12 +101,12 @@ export async function authorDensePageAllocation({ episodeDir, outputDir, repoRoo
     }
   }));
   const failed = chunks.filter(chunk => rows.get(chunk.id)?.status === 'failed').map(chunk => chunk.id);
-  const report = { schema: 'goldflow_dense_allocation_report_v1', episode: loaded.identity.episode, job_dir: job, chunk_count: chunks.length, authored: [...rows.values()].filter(row => row.status === 'authored').length, failed_chunk_ids: failed, provider_calls: selected.length, image_provider_calls: 0, created_at: new Date().toISOString() };
+  const report = { schema: 'goldflow_dense_allocation_report_v1', episode: identity.episode, job_dir: job, chunk_count: chunks.length, authored: [...rows.values()].filter(row => row.status === 'authored').length, failed_chunk_ids: failed, provider_calls: selected.length, image_provider_calls: 0, created_at: new Date().toISOString() };
   if (rows.size === chunks.length && !failed.length) {
     const candidate = { ...base, status: 'candidate', asset_orders: chunks.flatMap(chunk => rows.get(chunk.id).response.asset_orders), beat_bindings: chunks.flatMap(chunk => rows.get(chunk.id).response.beat_bindings) };
-    validatePanelAssetPlan(candidate, loaded);
+    validate(candidate);
     report.findings = denseAllocationFindings(candidate, constraints);
-    report.density = allocationDensity(candidate, loaded.beats.length);
+    report.density = allocationDensity(candidate, beats.length);
     report.candidate_path = path.join(job, `candidate-${sha(JSON.stringify(candidate)).slice(0, 12)}.json`);
     if (!await exists(report.candidate_path)) await fs.writeFile(report.candidate_path, json(candidate), { flag: 'wx' });
     report.status = 'candidate_ready';

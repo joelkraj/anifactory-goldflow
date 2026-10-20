@@ -127,9 +127,14 @@ export function pageReferenceBoardPromptGuidance(board) {
   return guidance.replace(SINGLE_FRAME_LINE, PAGE_FRAME_BOARD_LINE);
 }
 
-// Proof-only smaller board outputs (follow-up 8): the same 1920x1080 layout,
-// downscaled before upload to test whether input-image tokens drive cost.
+// Smaller board outputs (follow-up 8): the same 1920x1080 layout, downscaled
+// before upload; input-image tokens scale with board pixels.
 export const REFERENCE_BOARD_OUTPUT_SIZES = Object.freeze([{ width: 1920, height: 1080 }, { width: 1280, height: 720 }, { width: 1024, height: 576 }]);
+
+// Page generations upload a 1024x576 board (follow-up 8 proof: -25% billed
+// per page, geometry and identities held). Single images keep 1920x1080.
+export const PAGE_REFERENCE_BOARD_SIZE = Object.freeze({ width: 1024, height: 576 });
+export const pageBoardOutputSize = (pageTemplate) => (pageTemplate ? PAGE_REFERENCE_BOARD_SIZE : null);
 
 export async function buildReferenceBoard({ root, imageId, references, outputSize = null }) {
   const layout = referenceBoardLayout(references);

@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import sharp from 'sharp';
-import { buildReferenceBoard, referenceBoardLayout, referenceBoardPromptGuidance } from '../lib/openart-reference-board.mjs';
+import { buildReferenceBoard, referenceBoardLayout, referenceBoardPromptGuidance, pageBoardOutputSize } from '../lib/openart-reference-board.mjs';
 
 const root = await fs.mkdtemp(path.join(os.tmpdir(), 'goldflow-reference-board-'));
 const digest = (bytes) => createHash('sha256').update(bytes).digest('hex');
@@ -44,6 +44,10 @@ try {
   assert.equal(referenceBoardPromptGuidance(small), guidance);
   assert.equal((await buildReferenceBoard({ root, imageId: 'frame.001', references: refs, outputSize: { width: 1920, height: 1080 } })).cache_key, first.cache_key);
   await assert.rejects(buildReferenceBoard({ root, imageId: 'frame.001', references: refs, outputSize: { width: 640, height: 360 } }), /Unsupported reference board output size/);
+  // Page generations default to the 1024x576 board; single images keep 1920x1080.
+  assert.deepEqual(pageBoardOutputSize('P4H'), { width: 1024, height: 576 }); assert.equal(pageBoardOutputSize(undefined), null);
+  assert.equal((await buildReferenceBoard({ root, imageId: 'frame.001', references: refs, outputSize: pageBoardOutputSize('P4H') })).cache_key, small.cache_key);
+  assert.equal((await buildReferenceBoard({ root, imageId: 'frame.001', references: refs, outputSize: pageBoardOutputSize(null) })).width, 1920);
   const style = await make('probability-style', '#20152e', 'style');
   const locationStyle = await buildReferenceBoard({ root, imageId: 'frame.location-style', references: [refs[1], style] });
   const locationStyleGuidance = referenceBoardPromptGuidance(locationStyle);

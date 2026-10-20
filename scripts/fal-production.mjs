@@ -2,7 +2,7 @@
 import { createHash } from "node:crypto";
 import { promises as fs, constants as fsConstants } from "node:fs";
 import path from "node:path";
-import { buildReferenceBoard, referenceBoardPromptGuidance, pageReferenceBoardPromptGuidance } from "./lib/openart-reference-board.mjs";
+import { buildReferenceBoard, referenceBoardPromptGuidance, pageReferenceBoardPromptGuidance, pageBoardOutputSize } from "./lib/openart-reference-board.mjs";
 // Page owners carry their template on the prompt row (and later on the assignment, for repairs).
 const boardGuidance=(pageTemplate,board)=>pageTemplate?pageReferenceBoardPromptGuidance(board):referenceBoardPromptGuidance(board);
 const pageField=(pageTemplate,canvas)=>pageTemplate?{panel_page_template:pageTemplate,...(canvas?{image_size:{width:canvas.width,height:canvas.height}}:{})}:{};
@@ -194,7 +194,7 @@ async function prepare(ctx,{revision=1}={}){
     const assignments=[];
     for(const {row,category,category_matched} of chooseNativeValidationRows(await falArtworkOrders({episodeDir:ctx.episodeDir,prompts:hardened.prompts}))){
       const refs=await nativePromptReferences(ctx,row,approval);
-      const board=refs.length?await buildReferenceBoard({root:validationRoot,imageId:row.image_id,references:refs}):null;
+      const board=refs.length?await buildReferenceBoard({root:validationRoot,imageId:row.image_id,references:refs,outputSize:pageBoardOutputSize(row.panel_page_template)}):null;
       const basePrompt=row.provider_prompt??row.image_prompt;need(basePrompt,`Fal validation prompt missing: ${row.image_id}`);
       const prompt=board?`${basePrompt}\n\n${boardGuidance(row.panel_page_template,board)}`:basePrompt;
       const core={...pageField(row.panel_page_template,row.panel_page_canvas),image_id:row.image_id,validation_category:category,validation_category_matched:category_matched,endpoint:board?FAL_ENDPOINTS.primary_edit:FAL_ENDPOINTS.primary_text,prompt,prompt_sha256:digest(prompt),run_identity_sha256:ctx.identityHash,reference_mode:board?"one_positional_collage":"text_only",reference_asset_ids:refs.map(r=>r.asset_id),reference_hashes:refs.map(r=>r.sha256),board_path:board?.output_path??null,board_sha256:board?.output_sha256??null,board_manifest_path:board?.manifest_path??null,max_cost_usd:1.0};
@@ -238,7 +238,7 @@ async function prepareBulk(ctx,f){
   for(const row of rows){
     const refs=nativeFal?await nativePromptReferences(ctx,row,approval):(row.reference_bindings??[]).slice(0,4).map(ref=>({asset_id:ref.asset_id,asset_class:ref.asset_class,path:ref.portable_file?.path??ref.path,sha256:ref.portable_file?.sha256??ref.sha256}));
     need(refs.every(ref=>ref.path&&ref.sha256),`Portable reference binding missing for ${row.image_id}.`);
-    const board=refs.length?await buildReferenceBoard({root:path.join(ctx.root,"bulk"),imageId:row.image_id,references:refs}):null;
+    const board=refs.length?await buildReferenceBoard({root:path.join(ctx.root,"bulk"),imageId:row.image_id,references:refs,outputSize:pageBoardOutputSize(row.panel_page_template)}):null;
     const basePrompt=prebulkCorrection?.effectivePrompts.get(row.image_id)
       ??row.provider_prompt??row.image_prompt??row.canonical_prompt; need(basePrompt,`Prompt missing for ${row.image_id}.`);
     const prompt=board?`${basePrompt}\n\n${boardGuidance(row.panel_page_template,board)}`:basePrompt;
@@ -856,7 +856,7 @@ async function main(){
        refs=order.map(id=>refs.find(ref=>ref.asset_id===id));
      }
      const round=rounds.get(directive.image_id);
-     const board=refs.length?await buildReferenceBoard({root:path.join(ctx.root,"bulk","review-repair"),imageId:round.stem,references:refs}):null;
+     const board=refs.length?await buildReferenceBoard({root:path.join(ctx.root,"bulk","review-repair"),imageId:round.stem,references:refs,outputSize:pageBoardOutputSize(original.panel_page_template)}):null;
      const prompt=board?`${directive.replacement_prompt}\n\n${boardGuidance(original.panel_page_template,board)}`:directive.replacement_prompt;
      need(digest(prompt)!==original.prompt_sha256,`Visual repair prompt unchanged: ${directive.image_id}`);
      const core={...pageField(original.panel_page_template,original.image_size),image_id:directive.image_id,endpoint:board?FAL_ENDPOINTS.primary_edit:FAL_ENDPOINTS.primary_text,prompt,prompt_sha256:digest(prompt),run_identity_sha256:ctx.identityHash,reference_mode:board?"one_positional_collage":"text_only",reference_asset_ids:refs.map(ref=>ref.asset_id),reference_hashes:refs.map(ref=>ref.sha256),board_path:board?.output_path??null,board_sha256:board?.output_sha256??null,board_manifest_path:board?.manifest_path??null,max_cost_usd:0.05,start_sec:original.start_sec,duration_sec:original.duration_sec,previous_assignment_sha256:original.assignment_sha256,rejected_image_sha256:directive.rejected_image_sha256,repair_reason:directive.finding,qa_report_sha256:directives.qa_report_sha256};

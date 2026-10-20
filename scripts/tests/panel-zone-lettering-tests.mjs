@@ -14,6 +14,12 @@ test('the three real gala garbles are flagged', () => {
   assert.deepEqual(codes(["I'd queue again."], [w("I'd", 92, 133, 85), w('queue', 96, 198, 96), w('agian.', 56, 323, 87, 39), w('aaain.', 19, 216, 132, 31)]), ['zone_lettering_garbled']);
 });
 
+test('a doubled word OCR splits into fragments is re-joined and flagged', () => {
+  const words = [{ text: '"BORROWED', conf: 71, box: { left: 60, top: 55, width: 270, height: 61 } }, { text: 'RANK', conf: 67, box: { left: 374, top: 46, width: 160, height: 70 } },
+    { text: 'R', conf: 47, box: { left: 210, top: 133, width: 15, height: 30 } }, { text: 'AINK', conf: 83, box: { left: 239, top: 134, width: 105, height: 28 } }];
+  assert.deepEqual(codes(['BORROWED RANK'], words), ['zone_lettering_garbled']);
+});
+
 test('clean bubbles, OCR misreads and distant art noise are not garbles', () => {
   assert.deepEqual(codes(['Why the sudden hush?'], [w('Why', 96, 100, 50), w('the', 96, 170, 50), w('y/', 49, 230, 50), w('Y', 78, 260, 50), w('sudden', 96, 290, 50), w('hush?', 96, 400, 50)]), []);
   assert.deepEqual(codes(['What else did I miss?'], [w('What', 97, 708, 65), w('el:', 95, 759, 65), w('did', 69, 717, 97, 16), w('|', 69, 750, 97, 16), w('miss?', 94, 761, 97, 16)]), [], 'a same-count substitution is an OCR misread');

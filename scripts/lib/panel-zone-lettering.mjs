@@ -29,7 +29,18 @@ export async function tesseractWords(imagePath, { exec = promisify(execFile) } =
 
 /** Compare each requested string with what the crop actually reads. */
 export function letteringFindings({ requested, words }) {
-  const all = words.map(word => ({ ...word, norm: norm(word.text) })).filter(word => word.norm);
+  // Re-join fragments OCR split inside one word ("R" + "AINK"): same line, touching
+  // boxes, or a lone letter within about a word space of its neighbour.
+  const merged = [];
+  for (const word of words) {
+    const last = merged.at(-1), a = last?.box, b = word.box;
+    const h = Math.max(a?.height ?? 0, b?.height ?? 0), gap = a && b ? b.left - (a.left + a.width) : NaN;
+    const lone = /^[A-Za-z]$/.test(last?.text ?? '') || /^[A-Za-z]$/.test(word.text);
+    const sameLine = a && b && [a.left, a.width, b.left, gap].every(Number.isFinite) && Math.abs(a.top - b.top) <= 0.3 * h;
+    if (sameLine && gap >= -2 && gap <= (lone ? 0.6 : 0.2) * h) merged[merged.length - 1] = { text: last.text + word.text, conf: Math.max(last.conf, word.conf), box: { left: a.left, top: Math.min(a.top, b.top), width: b.left + b.width - a.left, height: h } };
+    else merged.push(word);
+  }
+  const all = merged.map(word => ({ ...word, norm: norm(word.text) })).filter(word => word.norm);
   const findings = [];
   // Single letters ("I", "a") are unreliable in OCR, so neither side counts them.
   const real = value => /[a-z]{2,}|\d/.test(value);

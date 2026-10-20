@@ -94,7 +94,7 @@ The driver runs only the status command shapes, so the workflow guard, provenanc
 | Episode budget lock: `run preflight --episode-budget-usd <usd>` → `episode_budget` in the identity | done (`scripts/lib/episode-budget.mjs`) |
 | Episode cap enforced on every Fal paid submission (`submitRows`), on top of the Fal hard budget and retry cap, with append-only authorization receipts | done |
 | `--confirm-spend episode_budget` accepted by `fal-production.mjs` on a budget-locked identity; exact tokens unchanged | done |
-| Workflow guard mapping `episode_budget` onto the exact token that status names (`guardFlagsForEpisodeBudget`) | done after Joel's explicit approval |
+| Workflow guard mapping `episode_budget` onto the exact token that status names (`guardFlagsForEpisodeBudget`) | done; Joel approved (roadmap Q41, 2026-10-20) and R07 un-held it: preflight-locked cap, Fal hard budget and retry cap stay on top, one authorization receipt per dispatch |
 | `--autopilot true` policy lock (`scripts/lib/autopilot-policy.mjs`) | done |
 | Automatic gate deciders (`autopilot-gates.mjs`), model reviewer (`autopilot-reviewer.mjs`), command shapes (`autopilot-command-shape.mjs`) | done |
 | `run auto` driver (`autopilot-driver.mjs`, `scripts/run-auto.mjs`) | done |

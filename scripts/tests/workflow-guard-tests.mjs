@@ -15,6 +15,7 @@ import { PIPELINE_STAGE_REGISTRY, buildStageCommand, commandStageFor } from "../
 import { buildNarrationQualityContract } from "../lib/narration-quality-contract.mjs";
 import { appendIdentityRevision, currentIdentityRevisionSync, eventsSinceIdentityRevision } from "../lib/run-identity-revisions.mjs";
 import { creativeStageRerunDecisionForEpisode } from "../lib/creative-stage-rerun-policy.mjs";
+import { buildEpisodeBudget, guardFlagsForEpisodeBudget } from "../lib/episode-budget.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const FAL_EPISODE = process.env.GOLDFLOW_FAL_EPISODE_DIR
@@ -231,4 +232,19 @@ test("replay: the recorded FAL command shapes classify as run or triage through 
   assert.equal(report.rows.length, 126);
   assert.ok(report.run > 0);
   console.log(`[replay] FAL shapes: run=${report.run} triage=${report.triage} ${JSON.stringify(report.counts)}; stage disagreements with the recorded ledger=${recordedMismatch.length}${recordedMismatch.length ? ` (${recordedMismatch.map((row) => `${row.shape.split(" ").slice(2, 4).join(" ")}→${row.stage}`).slice(0, 6).join("; ")})` : ""}`);
+});
+
+test("Q41: the episode_budget token is admitted on budget-locked identities and passes through the R07 admissions untouched", () => {
+  const identity = { run_intent: "production", episode_budget: buildEpisodeBudget({ usd: "10", lockedAt: "2026-10-20T00:00:00.000Z" }) };
+  const shape = "node bin/goldflow.mjs imagegen fal --episode-dir /e --action dispatch-zone-repair --spec /e/s.json --confirm-spend exact_fal_zone_repair";
+  const budgeted = status({ stage: "image_output_qa", state: "blocked", shape, identity, rows: { image_output_qa: "blocked" } });
+  const flags = { "episode-dir": "/e", action: "dispatch-zone-repair", spec: "/e/s.json", "confirm-spend": "episode_budget" };
+  // The guard maps the single episode token onto the exact token status names; the cap itself is enforced at submission.
+  const mapped = guardFlagsForEpisodeBudget(budgeted, flags);
+  assert.equal(mapped["confirm-spend"], "exact_fal_zone_repair");
+  // No R07 admission claims a Fal dispatch, so the mapped flags reach the existing Fal recovery admission unchanged.
+  assert.equal(decisionShapeAdmission(budgeted, "imagegen", "fal", mapped).applicable, false);
+  // Without a locked budget, or when status names no exact token, the token is not mapped (nothing is admitted on prose).
+  assert.equal(guardFlagsForEpisodeBudget({ ...budgeted, identity: { run_intent: "production" } }, flags)["confirm-spend"], "episode_budget");
+  assert.equal(guardFlagsForEpisodeBudget({ ...budgeted, next_command_shape: "Triage zone repair z1; do not resubmit it." }, flags)["confirm-spend"], "episode_budget");
 });

@@ -3622,7 +3622,8 @@ async function main() {
   let priorUnitQaSha256 = priorUnitQaBuffer
     ? createHash("sha256").update(priorUnitQaBuffer).digest("hex")
     : null;
-  if (priorNarrationReport && priorNarrationReport.voice_id !== policy.primary.voice_id
+  if (priorNarrationReport && (priorNarrationReport.voice_id ?? priorNarrationReport.narrator_voice_id
+    ?? priorNarrationReport.policy?.primary?.voice_id) !== policy.primary.voice_id
     && identity.narration_identity_relock?.recovery_kind === "operator_selected_qwen_voice_migration") {
     const handoff = await verifyVoiceMigrationHandoff({
       identity, identityFileSha256, episodeDir, reportPath, unitQaPath,

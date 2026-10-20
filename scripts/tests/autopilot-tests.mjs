@@ -10,7 +10,9 @@ import { buildEpisodeBudget } from "../lib/episode-budget.mjs";
 import { goldflowArgv, placeholdersIn, repairScope, tokenizeShape, useEpisodeBudgetToken } from "../lib/autopilot-command-shape.mjs";
 import { classifyRiskCut, decideNext } from "../lib/autopilot-gates.mjs";
 import { createModelReviewer } from "../lib/autopilot-reviewer.mjs";
-import { runAutopilot } from "../lib/autopilot-driver.mjs";
+import {
+  AUTOPILOT_STOP_REASONS, STAGE_WALL_BUDGETS, codeDriftByAncestry, falObserveArgvFor, interruptedChildFrom, paidDispatchKey, planAutopilot, runAutopilot, wallBudgetSecFor,
+} from "../lib/autopilot-driver.mjs";
 import {
   autoPrivateUpload, autopilotPublishStatus, automatedUploadReceipt, finalWatchStatus, publishApproval, recordFinalWatch,
 } from "../lib/autopilot-publish.mjs";
@@ -451,3 +453,241 @@ test("packaging is authored automatically, validated, and never invents research
     await assert.rejects(authorAutomatedPackaging({ episodeDir: dir, episode: "ep_01", identity: { ...identity, content_profile: "asset_afterlife_v1", ...mediaWorkflowForPreflight({ contentProfile: "asset_afterlife_v1", mediaWorkflow: "generated_visuals_v1" }) }, config, reviewer, thumbnailGenerator }), /Packaging workflow unsupported/);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+
+/* ---------- R08: lock, code drift, timeouts, SLO, resume ---------- */
+
+const HEAD = "b".repeat(40);
+const IDENTITY_COMMIT = "a".repeat(40);
+const gitAt = ({ commit = HEAD, dirty = false, ancestor = true, intervening = ["c".repeat(40)] } = {}) => ({
+  head: () => ({ commit, dirty, dirty_diff_sha256: dirty ? sha("diff") : null }),
+  isAncestor: (a, b) => ancestor && a === IDENTITY_COMMIT && b === commit,
+  intervening: () => intervening,
+});
+const lockAt = ({ pid = 4242, host = "studio-mac", alive = () => false } = {}) => ({ pid, host, processAlive: alive });
+const driverEvents = async (dir) => (await readFile(path.join(dir, "autopilot", "driver_events.jsonl"), "utf8")).trim().split("\n").map(JSON.parse);
+const withDeps = (run, extra = {}) => ({ ...run.deps, lock: lockAt(), git: gitAt(), ...extra });
+
+test("run auto refuses non-production intent before anything else", async () => {
+  const dir = await episodeDir(autopilotIdentity({ run_intent: "proof" }));
+  try {
+    const run = scriptedRun([{ ...concrete("timing_bind", "timing bind"), identity: autopilotIdentity({ run_intent: "proof" }) }]);
+    const result = await runAutopilot({ episodeDir: dir, deps: withDeps(run) });
+    assert.deepEqual([result.status, result.reason], ["refused", "not_production"]);
+    assert.equal(run.ran.length, 0);
+    assert.equal(await readdir(dir).then((names) => names.includes("autopilot")), false, "a refusal writes nothing");
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test("lock contention: a live pid or a different host stops with lock_held and runs nothing", async () => {
+  const dir = await episodeDir();
+  try {
+    await json(path.join(dir, "autopilot", "driver.lock"), { schema: "goldflow_autopilot_driver_lock_v1", pid: 99, host: "studio-mac", started_at: lockedAt, head: HEAD, heartbeat_at: lockedAt });
+    const live = scriptedRun([concrete("timing_bind", "timing bind")]);
+    const result = await runAutopilot({ episodeDir: dir, deps: withDeps(live, { lock: lockAt({ alive: () => true }) }) });
+    assert.equal(result.reason, "lock_held");
+    assert.equal(live.ran.length, 0);
+    assert.equal(JSON.parse(await readFile(result.triage_path, "utf8")).lock.pid, 99);
+    const other = scriptedRun([concrete("timing_bind", "timing bind")]);
+    assert.equal((await runAutopilot({ episodeDir: dir, deps: withDeps(other, { lock: lockAt({ host: "laptop", alive: () => false }) }) })).reason, "lock_held", "a dead pid on another host is not ours to judge");
+    assert.equal(other.ran.length, 0);
+    assert.equal(JSON.parse(await readFile(path.join(dir, "autopilot", "driver.lock"), "utf8")).pid, 99, "the foreign lock is untouched");
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test("stale lock: same host and a dead pid is taken over with a recorded event, and released at the end", async () => {
+  const dir = await episodeDir();
+  try {
+    await json(path.join(dir, "autopilot", "driver.lock"), { schema: "goldflow_autopilot_driver_lock_v1", pid: 99, host: "studio-mac", started_at: lockedAt, head: HEAD, heartbeat_at: lockedAt });
+    const run = scriptedRun([concrete("timing_bind", "timing bind"), status("final_watch", "Watch …", { final_watch_video_path: "/v.mp4" })]);
+    const result = await runAutopilot({ episodeDir: dir, deps: withDeps(run) });
+    assert.equal(result.reason, "final_watch");
+    assert.equal(run.ran.length, 1);
+    const events = await driverEvents(dir);
+    assert.equal(events[0].event, "lock_takeover");
+    assert.deepEqual([events[0].previous_lock.pid, events[0].lock.pid, events[0].driver_host], [99, 4242, "studio-mac"]);
+    assert.ok(events.every((row) => row.head_commit === HEAD && row.worktree_dirty === false), "every driver event records the executing HEAD and dirty state");
+    await assert.rejects(readFile(path.join(dir, "autopilot", "driver.lock")), /ENOENT/, "the lock is released when the driver stops");
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test("code drift by ancestry: a clean descendant HEAD continues with one code_drift event listing the intervening commits", async () => {
+  const identity = autopilotIdentity({ code_commit: IDENTITY_COMMIT });
+  const dir = await episodeDir(identity);
+  try {
+    const statuses = [{ ...concrete("timing_bind", "timing bind"), identity }, { ...status("final_watch", "Watch …", { final_watch_video_path: "/v.mp4" }), identity }];
+    const run = scriptedRun(statuses);
+    const result = await runAutopilot({ episodeDir: dir, deps: withDeps(run) });
+    assert.equal(result.reason, "final_watch");
+    assert.equal(run.ran.length, 1);
+    assert.ok(!run.ran[0].includes("--allow-code-drift"), "the driver never adds the drift flag itself");
+    const drift = (await driverEvents(dir)).filter((row) => row.event === "code_drift");
+    assert.equal(drift.length, 1);
+    assert.deepEqual([drift[0].kind, drift[0].identity_commit, drift[0].head_commit, drift[0].intervening_commits], ["head_descends_from_identity_commit", IDENTITY_COMMIT, HEAD, ["c".repeat(40)]]);
+    // A second run on the same HEAD does not repeat the event.
+    const again = scriptedRun(statuses);
+    await runAutopilot({ episodeDir: dir, deps: withDeps(again) });
+    assert.equal((await driverEvents(dir)).filter((row) => row.event === "code_drift").length, 1);
+    assert.deepEqual(JSON.parse(await readFile(path.join(dir, "run_identity.json"), "utf8")), identity, "the identity is never rewritten");
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test("code drift: a non-descendant HEAD or a dirty worktree is a triage, unless an operator reason code is given", async () => {
+  const identity = autopilotIdentity({ code_commit: IDENTITY_COMMIT });
+  const dir = await episodeDir(identity);
+  try {
+    const statuses = [{ ...concrete("timing_bind", "timing bind"), identity }, { ...status("final_watch", "Watch …"), identity }];
+    const foreign = scriptedRun(statuses);
+    const result = await runAutopilot({ episodeDir: dir, deps: withDeps(foreign, { git: gitAt({ ancestor: false }) }) });
+    assert.deepEqual([result.reason, foreign.ran.length], ["code_drift", 0]);
+    assert.equal(JSON.parse(await readFile(result.triage_path, "utf8")).code_drift.kind, "head_does_not_contain_identity_commit");
+    const dirty = scriptedRun(statuses);
+    const dirtyResult = await runAutopilot({ episodeDir: dir, deps: withDeps(dirty, { git: gitAt({ dirty: true }) }) });
+    assert.deepEqual([dirtyResult.reason, dirty.ran.length], ["code_drift", 0]);
+    assert.equal(JSON.parse(await readFile(dirtyResult.triage_path, "utf8")).code_drift.kind, "worktree_dirty");
+    // The operator's reason code records the drift and is forwarded only for a non-descendant HEAD.
+    const allowed = scriptedRun(statuses);
+    const allowedResult = await runAutopilot({ episodeDir: dir, deps: withDeps(allowed, { git: gitAt({ ancestor: false }) }), allowCodeDrift: "reviewed_hotfix_branch" });
+    assert.equal(allowedResult.reason, "final_watch");
+    assert.deepEqual(allowed.ran[0].slice(-2), ["--allow-code-drift", "reviewed_hotfix_branch"]);
+    const drift = (await driverEvents(dir)).filter((row) => row.event === "code_drift");
+    assert.deepEqual([drift.at(-1).kind, drift.at(-1).reason_code], ["head_does_not_contain_identity_commit", "reviewed_hotfix_branch"]);
+    const dirtyAllowed = scriptedRun(statuses);
+    await runAutopilot({ episodeDir: dir, deps: withDeps(dirtyAllowed, { git: gitAt({ dirty: true }) }), allowCodeDrift: "local_diagnostic" });
+    assert.ok(!dirtyAllowed.ran[0].includes("--allow-code-drift"), "a dirty descendant needs no guard flag");
+    assert.equal(codeDriftByAncestry({ identity: {}, head: { commit: HEAD }, git: gitAt() }).applicable, false, "legacy identities are not checked");
+    assert.equal(codeDriftByAncestry({ identity, head: { commit: HEAD, dirty: false }, git: gitAt({ ancestor: false }), allowReasonCode: "Bad Code" }).continue, false, "a malformed reason code admits nothing");
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test("child timeout is terminal, process-group wide, and the stage is never re-dispatched", async () => {
+  const dir = await episodeDir();
+  try {
+    const render = status("premium_render", "node bin/goldflow.mjs render start --episode-dir /e --motion panel_composition_v1");
+    const kills = [];
+    let reads = 0;
+    const result = await runAutopilot({ episodeDir: dir, deps: {
+      readStatus: async () => { reads += 1; return render; },
+      runCommand: async (argv, { timeoutMs, stage }) => { kills.push({ argv, timeoutMs, stage }); return { code: null, output: "ffmpeg…", timed_out: true, signal: "SIGKILL" }; },
+      reviewer: neverReviewer, sleep: async () => {}, now: () => lockedAt, lock: lockAt(), git: gitAt(),
+    } });
+    assert.equal(result.reason, "child_timeout");
+    assert.equal(kills.length, 1);
+    assert.equal(kills[0].timeoutMs, STAGE_WALL_BUDGETS.stages.premium_render * 1000, "the render budget is 2 × the recorded maximum successful wall time");
+    const triage = JSON.parse(await readFile(result.triage_path, "utf8"));
+    assert.deepEqual([triage.kind, triage.wall_budget_sec, triage.repair_key], ["child_timeout", 4458, "dispatch:premium_render:render start:all"]);
+    assert.equal(triage.fal_observe_argv, null);
+    const events = await driverEvents(dir);
+    assert.deepEqual(events.map((row) => row.event), ["run", "child_timeout"]);
+    assert.equal(events[1].signal, "SIGKILL");
+    // A restart does not dispatch the same stage again: the timeout counts against its key.
+    const second = scriptedRun([render]);
+    const again = await runAutopilot({ episodeDir: dir, deps: withDeps(second) });
+    assert.equal(second.ran.length, 0);
+    assert.equal(again.reason, "blocker");
+    assert.equal(again.detail, "dispatch bound reached");
+    assert.equal(wallBudgetSecFor("image_generation", ["imagegen", "fal", "--action", "observe-bulk"]), STAGE_WALL_BUDGETS.poll_sec, "poll verbs keep their own short cap");
+    assert.equal(wallBudgetSecFor("unknown_stage", ["x", "y"]), STAGE_WALL_BUDGETS.default_sec);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test("a timed-out Fal dispatch is observed, never resubmitted; spend authorizations stay as recorded", async () => {
+  const dir = await episodeDir();
+  try {
+    const dispatch = status("image_generation", "node bin/goldflow.mjs imagegen fal --episode-dir /e --action dispatch-bulk --limit 20 --confirm-spend exact_fal_bulk_batch");
+    const first = scriptedRun([dispatch], [{ code: null, output: "", timed_out: true, signal: "SIGTERM", advance: false }]);
+    const result = await runAutopilot({ episodeDir: dir, deps: withDeps(first) });
+    assert.equal(result.reason, "child_timeout");
+    const triage = JSON.parse(await readFile(result.triage_path, "utf8"));
+    assert.deepEqual(triage.fal_observe_argv, ["imagegen", "fal", "--episode-dir", "/e", "--action", "observe-bulk"]);
+    assert.match(triage.reason, /never resubmit/);
+    assert.equal(triage.repair_key, "dispatch:image_generation:imagegen dispatch-bulk:all");
+    // Resume while status still asks for the same dispatch: refused with the observe shape, no spend.
+    const second = scriptedRun([dispatch]);
+    const again = await runAutopilot({ episodeDir: dir, deps: withDeps(second) });
+    assert.equal(second.ran.length, 0);
+    assert.equal(again.detail, "dispatch bound reached");
+    assert.match(JSON.parse(await readFile(again.triage_path, "utf8")).reason, /observe-bulk/);
+    assert.deepEqual(falObserveArgvFor(["imagegen", "fal", "--episode-dir", "/e", "--action", "billing-submit-reference", "--image-id", "char_x", "--confirm-spend", "exact_fal_reference_probe"]),
+      ["imagegen", "fal", "--episode-dir", "/e", "--action", "billing-observe-reference", "--image-id", "char_x"]);
+    assert.equal(falObserveArgvFor(["imagegen", "fal", "--episode-dir", "/e", "--action", "observe-bulk"]), null);
+    assert.equal(paidDispatchKey(["timing", "bind"]), null);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test("resume after a triage with an interrupted child: recorded, and a cut-off paid dispatch is only observed", async () => {
+  const dir = await episodeDir();
+  try {
+    const dispatchArgv = ["imagegen", "fal", "--episode-dir", "/e", "--action", "dispatch-references", "--confirm-spend", "episode_budget"];
+    await mkdir(path.join(dir, "autopilot"), { recursive: true });
+    await writeFile(path.join(dir, "autopilot", "driver_events.jsonl"), [
+      JSON.stringify({ at: lockedAt, event: "run", stage: "reference_generation", argv: ["timing", "bind"] }),
+      JSON.stringify({ at: lockedAt, event: "exit", stage: "reference_generation", code: 0 }),
+      JSON.stringify({ at: lockedAt, event: "run", stage: "reference_generation", argv: dispatchArgv }),
+    ].join("\n") + "\n");
+    assert.deepEqual(interruptedChildFrom(await driverEvents(dir)).argv, dispatchArgv);
+    // Status now asks to observe (the submissions landed): the driver continues normally.
+    const observe = concrete("reference_generation", "imagegen fal --action observe-references");
+    const run = scriptedRun([observe, status("final_watch", "Watch …", { final_watch_video_path: "/v.mp4" })]);
+    const result = await runAutopilot({ episodeDir: dir, deps: withDeps(run) });
+    assert.equal(result.reason, "final_watch");
+    const events = await driverEvents(dir);
+    const interrupted = events.find((row) => row.event === "interrupted_child");
+    assert.deepEqual([interrupted.stage, interrupted.paid_dispatch_key, interrupted.fal_observe_argv.at(-1)], ["reference_generation", "dispatch:reference_generation:imagegen dispatch-references:all", "observe-references"]);
+    assert.deepEqual(run.ran[0].slice(0, 2), ["imagegen", "fal"]);
+    // Had status asked for the same paid dispatch again, it would have been refused.
+    const redo = scriptedRun([status("reference_generation", "node bin/goldflow.mjs imagegen fal --episode-dir /e --action dispatch-references --confirm-spend exact_fal_reference_batch")]);
+    const refused = await runAutopilot({ episodeDir: dir, deps: withDeps(redo) });
+    assert.deepEqual([refused.detail, redo.ran.length], ["dispatch bound reached", 0]);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test("an SLO breach is one driver event and never a stop; relock-tts is never dispatched", async () => {
+  const dir = await episodeDir();
+  try {
+    await json(path.join(dir, "production_slo_state.json"), { state: "breached", elapsed_minutes: 567.8, hard_ceiling_minutes: 420, target_minutes: 360 });
+    const run = scriptedRun([concrete("timing_bind", "timing bind"), concrete("visual_reference_plan", "visual refs"), status("final_watch", "Watch …", { final_watch_video_path: "/v.mp4" })]);
+    const result = await runAutopilot({ episodeDir: dir, deps: withDeps(run) });
+    assert.equal(result.reason, "final_watch");
+    assert.equal(run.ran.length, 2);
+    const breaches = (await driverEvents(dir)).filter((row) => row.event === "slo_breach");
+    assert.equal(breaches.length, 1);
+    assert.deepEqual([breaches[0].elapsed_minutes, breaches[0].hard_ceiling_minutes], [567.8, 420]);
+    assert.ok(!("slo_breach" in AUTOPILOT_STOP_REASONS));
+    const relock = scriptedRun([status("run_identity", "node bin/goldflow.mjs run relock-tts --episode-dir /e --approved-by joel --tts-profile x")]);
+    const refused = await runAutopilot({ episodeDir: dir, deps: withDeps(relock) });
+    assert.deepEqual([refused.reason, relock.ran.length], ["blocker", 0]);
+    assert.match(refused.detail, /operator-only/);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test("status failures and timeouts stop with status_timeout, not a hang", async () => {
+  const dir = await episodeDir();
+  try {
+    const result = await runAutopilot({ episodeDir: dir, deps: { readStatus: async () => { throw new Error("run status exceeded 600 s"); }, runCommand: neverReviewer, reviewer: neverReviewer, sleep: async () => {}, now: () => lockedAt, lock: lockAt(), git: gitAt() } });
+    assert.equal(result.reason, "status_timeout");
+    assert.equal(JSON.parse(await readFile(result.triage_path, "utf8")).kind, "status_timeout");
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test("run auto --dry-run plans from the recorded ledger without executing or writing anything", async () => {
+  const dir = await episodeDir();
+  try {
+    await writeSequenced(dir);
+    const dispatch = status("image_generation", "node bin/goldflow.mjs imagegen fal --episode-dir /e --action dispatch-bulk --confirm-spend exact_fal_bulk_batch");
+    const run = scriptedRun([dispatch]);
+    const before = (await readdir(dir, { recursive: true })).sort();
+    const plan = await planAutopilot({ episodeDir: dir, deps: withDeps(run) });
+    assert.deepEqual((await readdir(dir, { recursive: true })).sort(), before, "a dry run writes nothing");
+    assert.equal(run.ran.length, 0);
+    assert.deepEqual([plan.refusal, plan.current_stage, plan.next_shape.disposition, plan.wall_budget_sec], [null, "image_generation", "run", STAGE_WALL_BUDGETS.stages.image_generation]);
+    assert.deepEqual(plan.repair_ledger_keys, ["zone:z1"]);
+    assert.equal(plan.driver_events.count, 0);
+    assert.equal(plan.code_drift.applicable, false);
+    assert.ok(Object.keys(plan.stop_reasons).includes("lock_held"));
+    const proof = scriptedRun([{ ...dispatch, identity: autopilotIdentity({ run_intent: "proof" }) }]);
+    assert.equal((await planAutopilot({ episodeDir: dir, deps: withDeps(proof) })).refusal, "not_production");
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+async function writeSequenced(dir) {
+  await json(path.join(dir, "autopilot", "repair_ledger", "0001_image_output_qa.json"), { schema: "goldflow_autopilot_repair_v1", keys: ["zone:z1"], sequence: 1 });
+}

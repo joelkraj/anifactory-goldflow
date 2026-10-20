@@ -67,11 +67,24 @@ The avatar pilot (`pilot …`), the CrimeDungeon proofs (`crime-proof …`, `cri
 - `final_watch`, printing the MP4 path;
 - the publish approval (`youtube_pinned_comment` on an autopilot identity);
 - a **budget stop**: the episode cap or a Fal hard cap refuses a dispatch;
-- a **blocker**: no automatic decision exists, the decision rejected with no repair route, a command failed without changing status, or a repair item was already repaired once.
+- a **blocker**: no automatic decision exists, the decision rejected with no repair route, a command failed without changing status, a repair item was already repaired once, a dispatch already timed out or was interrupted once, the step limit was reached, or status asked for the operator-only `run relock-tts`;
+- **code_drift**: the executing HEAD does not contain the identity commit, or the worktree is dirty (see below);
+- **lock_held**: another live driver, or a driver on another host, holds `autopilot/driver.lock`;
+- **child_timeout**: a stage command exceeded its wall budget (see below);
+- **status_timeout**: `run status` itself failed or exceeded its budget.
 
-Each stop writes `autopilot/triage/<timestamp>_<stage>.json`, so nothing is skipped silently.
+This list is exhaustive (`AUTOPILOT_STOP_REASONS` in `scripts/lib/autopilot-driver.mjs`). Each stop other than the two human steps writes `autopilot/triage/<seq>_<kind>_<stage>.json`, so nothing is skipped silently. `run auto` refuses to start on any identity whose `run_intent` is not `production`, and on identities without the autopilot lock.
 
-The driver runs only the status command shapes, so the workflow guard, provenance and rerun policies all still apply. It never adds `--workflow-bypass`. Repairs are bounded to one exact-scope repair per failed item, recorded in `autopilot/repair_ledger/`. A step that leaves status exactly where it was counts as a failure, and the driver does not retry it in a creative loop.
+The driver runs only the status command shapes, so the workflow guard, provenance and rerun policies all still apply. It never adds `--workflow-bypass` and never dispatches `run relock-tts`. Repairs are bounded to one exact-scope repair per failed item, recorded in `autopilot/repair_ledger/`. A step that leaves status exactly where it was counts as a failure, and the driver does not retry it in a creative loop.
+
+### Driver hardening (R08)
+
+- **One driver per episode.** `autopilot/driver.lock` holds `{pid, host, started_at, head, heartbeat_at}` and is the only mutable driver state; the heartbeat is rewritten before every step and the lock is removed when the driver stops. Same host and a dead pid: the new driver takes over and appends a `lock_takeover` driver event. A live pid, or a lock from another host: `lock_held` triage, nothing runs.
+- **Code drift by ancestry, never equality.** Every `driver_events.jsonl` row records the executing HEAD, whether the worktree is dirty and a hash of the dirty diff. When the identity commit is an ancestor of HEAD and the worktree is clean, the driver continues and appends one `code_drift` event per distinct HEAD listing the intervening commits. When HEAD is not a descendant, or the worktree is dirty, it writes a `code_drift` triage. `run auto --allow-code-drift <reason-code>` lets an operator continue anyway: the drift is recorded with that code, and the flag is forwarded to the stage commands only for a non-descendant HEAD (the operator passed it, the driver never invents it). The identity is never rewritten.
+- **Child wall budgets.** `STAGE_WALL_BUDGETS`: max(2 × the largest successful `wall_time_sec` recorded for the stage, 900 s) from the two recorded 2026-W43 coma-healer runs (one episode each, so no p95); unmeasured stages use 1800 s, poll verbs 300 s, `run status` 600 s. Provisional until a second production episode is recorded. A timeout signals the child's whole process group (SIGTERM, then SIGKILL after 15 s), is a terminal `child_timeout` stop recorded in the driver events and the triage file, and counts against the dispatch's key in `autopilot/repair_ledger/` so it is never re-dispatched automatically. For a Fal dispatch the triage names the matching observe verb (`dispatch-bulk` → `observe-bulk`, `billing-submit-reference` → `billing-observe-reference`, …): already-submitted request IDs are observed, never resubmitted; spend authorizations stay as recorded.
+- **SLO breach is an event.** `production_slo_state.json` (or, without it, the elapsed time since the autopilot lock against the 420-minute ceiling) at `breached` appends one `slo_breach` event; the driver continues the single critical path.
+- **Resume.** Repair keys are written before execution and reloaded at start, so an interrupted repair is never retried. On restart the driver finds a `run` event with no `exit`, appends an `interrupted_child` event, and when that child was a paid dispatch records its dispatch key so status can only route to the observe verb.
+- **Dry run.** `run auto --dry-run true` reads status once and prints the schedule from the recorded ledger: the next shape's disposition (run, prose, placeholder, repair-bound, dispatch-bound), its wall budget, the lock, the code-drift decision, the SLO state, the repair keys, the driver events and the triage files. It executes nothing, writes nothing and takes no lock.
 
 ## Implementation status (2026-10-20)
 
@@ -85,6 +98,8 @@ The driver runs only the status command shapes, so the workflow guard, provenanc
 | `--autopilot true` policy lock (`scripts/lib/autopilot-policy.mjs`) | done |
 | Automatic gate deciders (`autopilot-gates.mjs`), model reviewer (`autopilot-reviewer.mjs`), command shapes (`autopilot-command-shape.mjs`) | done |
 | `run auto` driver (`autopilot-driver.mjs`, `scripts/run-auto.mjs`) | done |
+| Driver lock, ancestry code-drift events, process-group child timeouts, SLO event, interrupted-child resume, `--dry-run` (R08) | done; wall budgets provisional (n=1 episode) |
+| Guard admits decision-bearing shapes without a bypass; `--bypass-reason-code` enum; no environment bypass; shared command builder (R07) | done (`scripts/lib/workflow-guard.mjs`, `workflow-bypass.mjs`, `workflow-command-builder.mjs`) |
 | `final_watch` stage, `run final-watch`, `youtube auto-upload`, `youtube publish`, `youtube author-packaging` (`autopilot-publish.mjs`, `autopilot-packaging.mjs`) | done |
 | Policy: AGENTS.md, generated-visuals and manhwa guides | done |
 | Tests: `npm run test:autopilot` (no network; injected executors) | done |

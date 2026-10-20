@@ -1,5 +1,12 @@
 #!/usr/bin/env node
 import { isSameValueNumberContraction } from "./lib/narration-number-contraction.mjs";
+import {
+  NARRATION_GROUPED_NUMBER_RULES,
+  NARRATION_SPOKEN_FORM_EQUIVALENCES_SHA256,
+  NARRATION_SPOKEN_FORM_EQUIVALENCES_VERSION,
+  applyNarrationSpokenFormSpellings,
+  narrationSpokenFormCompound,
+} from "./lib/narration-spoken-form-equivalences.mjs";
 import { localWhisperPython } from "./lib/local-whisper-policy.mjs";
 import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -1759,12 +1766,17 @@ function transcriptInputText(value) {
 }
 
 export const TRANSCRIPT_QA_COMPARISON_VERSION = "unicode_words_exact_stable_source_numeric_alignment_v13";
+// The spoken-form equivalences the comparator applies are the frozen table in
+// config/narration_spoken_form_equivalences_v1.json (R05); its sha is bound into
+// new automated identities' narration quality contracts.
+export const TRANSCRIPT_QA_SPOKEN_FORM_EQUIVALENCES_VERSION = NARRATION_SPOKEN_FORM_EQUIVALENCES_VERSION;
+export const TRANSCRIPT_QA_SPOKEN_FORM_EQUIVALENCES_SHA256 = NARRATION_SPOKEN_FORM_EQUIVALENCES_SHA256;
 
 const TRANSCRIPT_PUNCTUATION = new Set([".", ",", ";", ":", "!", "?", "…"]);
 
 function rawTranscriptTokens(value) {
-  return (transcriptInputText(value)
-    .normalize("NFC")
+  return (applyNarrationSpokenFormSpellings(transcriptInputText(value)
+    .normalize("NFC"))
     .replace(/−/g, "-")
     .replace(/\b(\d{1,3})\s+,(\d{3})\b/g, "$1,$2")
     .replace(/([+-])\s*\$\s*(?=\d)/g, (_match, sign) => `$${sign}`)
@@ -1773,9 +1785,6 @@ function rawTranscriptTokens(value) {
     // Do not expand ambiguous 's/'d forms or an unpunctuated name such as Im.
     .replace(/(?<![\p{L}\p{M}])I['’]m(?![\p{L}\p{M}])/giu, "I am")
     .replace(/\b(thousand|million|billion)fold\b/gi, "$1 fold")
-    .replace(/\bDr\.(?=\s|$)/g, "doctor")
-    .replace(/\bMr\.(?=\s|$)/g, "mister")
-    .replace(/\bcancelled\b/gi, "canceled")
     .replace(/([\p{L}\p{M}])[-‐‑‒–—]([\p{L}\p{M}])/gu, "$1 $2")
     .match(/[+-]?\d+(?:,\d{3})*(?:\.\d+)?(?:st|nd|rd|th|%|[xXsS])?|\bSt\.|[\p{L}\p{M}]+(?:['’][\p{L}\p{M}]+)?|[/$%.,;:!?…]/giu) ?? [])
     .map((raw) => {
@@ -1958,8 +1967,8 @@ function canonicalTranscriptTokensWithoutAliases(value, preserveBoundaries = fal
     } else if (base[index] === "wi" && base[index + 1] === "fi") {
       compounds.push("wifi");
       index += 1;
-    } else if (base[index] === "every" && base[index + 1] === "one") {
-      compounds.push("everyone");
+    } else if (narrationSpokenFormCompound(base[index], base[index + 1])) {
+      compounds.push(narrationSpokenFormCompound(base[index], base[index + 1]));
       index += 1;
     } else if (base[index] === "every" && base[index + 1] === "body") {
       compounds.push("everybody");
@@ -2099,17 +2108,18 @@ function alignGroupedNumberNotation(leftTokens, rightTokens, leftText, rightText
     }
     if (cursor !== tokens.length) return;
     const groups = [];
+    const rules = NARRATION_GROUPED_NUMBER_RULES;
     for (let i = 0; i < tokens.length; i += 1) {
-      if (!/^num:[1-9]\d?$/.test(tokens[i])) continue;
+      if (!rules.lead.test(tokens[i])) continue;
       let digits = tokens[i].slice(4);
-      for (let end = i + 1; end <= Math.min(i + 2, tokens.length - 1); end += 1) {
+      for (let end = i + 1; end <= Math.min(i + rules.maxGroupTokens - 1, tokens.length - 1); end += 1) {
         if (boundaries.has(end)) break;
-        const part = tokens[end] === "oh" ? "0" : /^num:\d{1,2}$/.test(tokens[end]) ? tokens[end].slice(4) : null;
+        const part = tokens[end] === rules.zeroWord ? "0" : rules.part.test(tokens[end]) ? tokens[end].slice(4) : null;
         if (part === null) break;
         digits += part;
-        if (tokens[end] === "oh") continue;
-        const matches = [...new Set(other.filter((t) => /^num:\d{3,4}$/.test(t) && t.slice(4) === digits
-          || /^num:\d{1,2}\.\d{2}$/.test(t) && t.slice(4).replace(".", "") === digits))];
+        if (tokens[end] === rules.zeroWord) continue;
+        const matches = [...new Set(other.filter((t) => rules.targets.some((target) => target.test(t))
+          && t.slice(4).replace(".", "") === digits))];
         if (matches.length === 1) { groups.push({ start: i, count: end - i + 1, token: matches[0] }); i = end; break; }
       }
     }

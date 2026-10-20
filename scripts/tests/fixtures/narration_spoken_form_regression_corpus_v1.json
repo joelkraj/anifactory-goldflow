@@ -1,0 +1,976 @@
+{
+  "schema": "goldflow_narration_spoken_form_regression_corpus_v1",
+  "built_from": {
+    "episode": "53rebirth 2026-W43-coma-healer-panel-baseline-v1 ep_01",
+    "review": "operator_narration_review/blocked_units_review.md (44 hash-bound blocked-unit clips, Oct 19 Joel-clone pass) with operator_narration_review/archive/manual_review_round1_b8060895c495.json (Joel: 38 accepted, 6 rejected by ear: clips 3, 4, 6, 17, 23, 37)",
+    "triage": [
+      {
+        "file": "manual_blocker_triage_qwen_tts_stitch_ep_01.json",
+        "recorded_at": "2026-10-19T12:20:41.176240+00:00",
+        "blocked_report_sha256": "f6364a395ae8e9a29ebfcc7b4e1234afc94674f546dde2aeb2b8e0b09e16b99b",
+        "repair_spec": "narration_exact_boundary_repair_spec_ep_01_v2.json",
+        "human_listening_performed": null,
+        "reviewed_unit_ids": [],
+        "summary": "After the six-unit boundary repair, five units pass; seg_57 still loses 'two' at the first split edge. The other 38 blocked units are Joel-accepted, byte-identical first takes awaiting re-bound review."
+      },
+      {
+        "file": "manual_blocker_triage_qwen_tts_stitch_ep_01_v2.json",
+        "recorded_at": "2026-10-19T12:24:40.341161+00:00",
+        "blocked_report_sha256": "f6364a395ae8e9a29ebfcc7b4e1234afc94674f546dde2aeb2b8e0b09e16b99b",
+        "repair_spec": "narration_exact_boundary_repair_spec_ep_01_v3.json",
+        "human_listening_performed": null,
+        "reviewed_unit_ids": [],
+        "summary": "After the six-unit boundary repair, five units pass; seg_57 still loses 'two' at the first split edge. The other 38 blocked units are Joel-accepted, byte-identical first takes awaiting re-bound review."
+      },
+      {
+        "file": "manual_blocker_triage_qwen_tts_stitch_ep_01_v3.json",
+        "recorded_at": "2026-10-19T12:26:06.017897+00:00",
+        "blocked_report_sha256": "f6364a395ae8e9a29ebfcc7b4e1234afc94674f546dde2aeb2b8e0b09e16b99b",
+        "repair_spec": "narration_exact_boundary_repair_spec_ep_01_v4.json",
+        "human_listening_performed": null,
+        "reviewed_unit_ids": [],
+        "summary": "After the six-unit boundary repair, five units pass; seg_57 still loses 'two' at the first split edge. The other 38 blocked units are Joel-accepted, byte-identical first takes awaiting re-bound review."
+      },
+      {
+        "file": "manual_blocker_triage_qwen_tts_stitch_ep_01_v4.json",
+        "recorded_at": "2026-10-19T13:12:12.258Z",
+        "blocked_report_sha256": "463729157be00474128ff3a97bfcadd04d756400ad1532215b1297bb782603fa",
+        "repair_spec": "narration_exact_boundary_repair_spec_ep_01_v5.json",
+        "human_listening_performed": null,
+        "reviewed_unit_ids": [],
+        "summary": "Unit QA passes after Joel re-bound review. Full-stream: Joel accepted window 071 (eleven thirty-four) and rejected window 043 (saline heard as sailing). Only seg_173_u007 is resynthesized."
+      },
+      {
+        "file": "manual_blocker_triage_qwen_tts_stitch_ep_01_v5.json",
+        "recorded_at": "2026-10-20T03:37:31.328429+00:00",
+        "blocked_report_sha256": "ad71cc138ed90770202c4883cdd6343d236f0cedaf292ab941679658a24c138f",
+        "repair_spec": "narration_exact_boundary_repair_spec_ep_01.json",
+        "human_listening_performed": false,
+        "reviewed_unit_ids": [
+          "narr_voice_seg_28_u001-007_337773fd7dfa",
+          "narr_voice_seg_32_u001-005_e0607537b909",
+          "narr_voice_seg_93_u005-001_22093c158daf",
+          "narr_voice_seg_106_u002-008_b30f3d25dbc2",
+          "narr_voice_seg_136_u001-003_be89d75bffe9",
+          "narr_voice_seg_144_u001-003_b8652886d0f6",
+          "narr_voice_seg_301_u001-007_5153e3a4a99c"
+        ],
+        "summary": "Apply one exact sentence-boundary repair to the seven persistent second-take defects; preserve all other selected audio. Explicit user authorization covers the Coma revoice and autonomous QA. No human listening claimed, no text rewriting or blanket retry."
+      }
+    ],
+    "comparator": {
+      "transcript_comparison_version": "unicode_words_exact_stable_source_numeric_alignment_v13",
+      "delivery_consensus_version": "protected_operations_lexical_number_contraction_v3"
+    },
+    "note": "Expectations are the frozen comparator's text-only outcome on the Script/Heard pairs recorded in the review reel. Human decisions are recorded separately and are not asserted as comparator outcomes. Rows classified acoustic_only_gap are defects the comparator cannot see in text (rushed or clipped delivery with a complete transcript)."
+  },
+  "units": [
+    {
+      "clip": 1,
+      "unit_id": "narr_voice_seg_01_u001-003_87cba6109676",
+      "source": "operator_narration_review/blocked_units_review.md (Oct 19 Joel-clone pass)",
+      "intended_text": "Joey's eyes opened in room four twelve, Crestwood General Hospital. His wife Vanessa wore a new diamond wedding ring matching his doctor Marcus Hale's. She pushed divorce papers and a cheap hospital pen at him.",
+      "recognized_text": "Joey's eyes opened in room 412. Crestwood General Hospital, his wife Vanessa, wore a new diamond wedding ring matching his doctor Marcus Hales. She pushed divorce papers and a cheap hospital pen at him.",
+      "human_decision": "accepted_by_ear",
+      "human_note": null,
+      "md_note": null,
+      "frozen_comparator": {
+        "word_error_rate": 0,
+        "deletions": 0,
+        "insertions": 0,
+        "substitutions": 0,
+        "blocker_codes": [],
+        "warning_codes": []
+      },
+      "classification": "notation_false_positive_resolved"
+    },
+    {
+      "clip": 2,
+      "unit_id": "narr_voice_seg_08_u001-004_f6dc1277d20c",
+      "source": "operator_narration_review/blocked_units_review.md (Oct 19 Joel-clone pass)",
+      "intended_text": "At two in the morning, Joey sat on the bed's edge in yellow grip socks, waiting for discharge papers. Then Henry's monitor started screaming. Lily burst through the door and slapped the call button. \"Code blue, four twelve!\"",
+      "recognized_text": "At two in the morning, Joey sat on the bed's edge in yellow grip socks, waiting for discharge papers. Then Henry's monitor started screaming. Lily burst through the door and slapped the call button. Code Blue, 412.",
+      "human_decision": "accepted_by_ear",
+      "human_note": null,
+      "md_note": null,
+      "frozen_comparator": {
+        "word_error_rate": 0,
+        "deletions": 0,
+        "insertions": 0,
+        "substitutions": 0,
+        "blocker_codes": [],
+        "warning_codes": []
+      },
+      "classification": "notation_false_positive_resolved"
+    },
+    {
+      "clip": 3,
+      "unit_id": "narr_voice_seg_21_u003_79272ca75ed0",
+      "source": "operator_narration_review/blocked_units_review.md (Oct 19 Joel-clone pass)",
+      "intended_text": "And beneath that, a second line acknowledging the certification of incapacity signed by Doctor Marcus Hale fourteen months ago. Fourteen months. Not three years. Fourteen.",
+      "recognized_text": "and beneath that a second line acknowledging the certification of incapacity signed by Dr. Marcus Hale 14 months ago 14 months not three years 14",
+      "human_decision": "rejected_by_ear",
+      "human_note": "14 is there but seems rushed",
+      "md_note": null,
+      "frozen_comparator": {
+        "word_error_rate": 0,
+        "deletions": 0,
+        "insertions": 0,
+        "substitutions": 0,
+        "blocker_codes": [],
+        "warning_codes": []
+      },
+      "classification": "human_rejected_acoustic_only_gap"
+    },
+    {
+      "clip": 4,
+      "unit_id": "narr_voice_seg_27_u001-004_5f999b6000d8",
+      "source": "operator_narration_review/blocked_units_review.md (Oct 19 Joel-clone pass)",
+      "intended_text": "At nine that night the discharge papers came. The bill was stapled to the back like an afterthought. Four hundred thousand, two hundred and eighteen dollars. Patient responsible.",
+      "recognized_text": "At nine that night, the discharge papers came. The bill was stapled to the back like an afterthought. Four hundred thousand two hundred eighteen dollars.",
+      "human_decision": "rejected_by_ear",
+      "human_note": "ending 'patient responsible' is clipped",
+      "md_note": "STILL CLIPPED after retake: ASR ends before 'Patient responsible.'",
+      "frozen_comparator": {
+        "word_error_rate": 0.090909,
+        "deletions": 2,
+        "insertions": 0,
+        "substitutions": 0,
+        "blocker_codes": [
+          "narration_confirmed_contiguous_words_missing",
+          "narration_confirmed_final_token_mismatch",
+          "narration_confirmed_final_word_missing",
+          "narration_confirmed_word_omission"
+        ],
+        "warning_codes": []
+      },
+      "classification": "human_rejected_text_blocks"
+    },
+    {
+      "clip": 5,
+      "unit_id": "narr_voice_seg_57_u001-004_78bd5ad03434",
+      "source": "operator_narration_review/blocked_units_review.md (Oct 19 Joel-clone pass)",
+      "intended_text": "Henry opened it to a marked page and read aloud. \"One fifty-eight in the morning. Bed one, Walsh. Cardiac arrest.\"",
+      "recognized_text": "Henry opened it to a marked page and read aloud, 1.58 in the morning, bed 1, Walsh. Cardiac Arrest",
+      "human_decision": "accepted_by_ear",
+      "human_note": null,
+      "md_note": null,
+      "frozen_comparator": {
+        "word_error_rate": 0,
+        "deletions": 0,
+        "insertions": 0,
+        "substitutions": 0,
+        "blocker_codes": [],
+        "warning_codes": []
+      },
+      "classification": "notation_false_positive_resolved"
+    },
+    {
+      "clip": 6,
+      "unit_id": "narr_voice_seg_57_u005-009_f06479053bb2",
+      "source": "operator_narration_review/blocked_units_review.md (Oct 19 Joel-clone pass)",
+      "intended_text": "Code called at two. Team delayed, trauma on third floor. No physician present. Two oh one, pulse restored after contact by patient in bed two. Team arrived two oh seven.",
+      "recognized_text": "Code called at two, team delayed, trauma on third floor, no physician present, 201, pulse restored after contact by patient in bed. Two team arrived 207.",
+      "human_decision": "rejected_by_ear",
+      "human_note": "the ending sentence starts with 'two'; that 'two' should end the previous sentence",
+      "md_note": null,
+      "frozen_comparator": {
+        "word_error_rate": 0,
+        "deletions": 0,
+        "insertions": 0,
+        "substitutions": 0,
+        "blocker_codes": [],
+        "warning_codes": []
+      },
+      "classification": "human_rejected_acoustic_only_gap"
+    },
+    {
+      "clip": 7,
+      "unit_id": "narr_voice_seg_62_u001-007_86a3575b9744",
+      "source": "operator_narration_review/blocked_units_review.md (Oct 19 Joel-clone pass)",
+      "intended_text": "He turned on Lily. \"You're terminated. Effective now. Security will escort you out.\" Lily went white. Her nursing license was the only thing she had ever owned outright. Joey saw her hands shake.",
+      "recognized_text": "He turned on Lily, you're terminated, effective now, security will escort you out. Lily went white, her nursing license was the only thing she had ever owned outright. Joey saw her hand shake.",
+      "human_decision": "accepted_by_ear",
+      "human_note": null,
+      "md_note": null,
+      "frozen_comparator": {
+        "word_error_rate": 0.030303,
+        "deletions": 0,
+        "insertions": 0,
+        "substitutions": 1,
+        "blocker_codes": [],
+        "warning_codes": [
+          "narration_confirmed_lexical_or_pronunciation_difference"
+        ]
+      },
+      "classification": "notation_false_positive_resolved"
+    },
+    {
+      "clip": 8,
+      "unit_id": "narr_voice_seg_69_u006-002_4386902f6a0f",
+      "source": "operator_narration_review/blocked_units_review.md (Oct 19 Joel-clone pass)",
+      "intended_text": "He used the cheap plastic hospital pen from room four twelve. He had kept it. He signed the acknowledgment of divorce. Then he turned to page six, drew one straight line through the waiver and another through the certification line, and initialed both.",
+      "recognized_text": "He used a cheap plastic hospital pen from room 412, he had kept it. He signed the acknowledgement of divorce, then he turned to page 6, drew one straight line through the waiver and another through the certification line, an initialed both",
+      "human_decision": "accepted_by_ear",
+      "human_note": null,
+      "md_note": null,
+      "frozen_comparator": {
+        "word_error_rate": 0.069767,
+        "deletions": 0,
+        "insertions": 0,
+        "substitutions": 3,
+        "blocker_codes": [],
+        "warning_codes": [
+          "narration_asr_lexical_uncertainty_above_wer_threshold",
+          "narration_confirmed_lexical_or_pronunciation_difference"
+        ]
+      },
+      "classification": "notation_false_positive_resolved"
+    },
+    {
+      "clip": 9,
+      "unit_id": "narr_voice_seg_76_u002-003_d91ea895bb54",
+      "source": "operator_narration_review/blocked_units_review.md (Oct 19 Joel-clone pass)",
+      "intended_text": "\"Across the street,\" Lily said, standing on the sidewalk with her arms crossed. \"You want Marcus Hale to see you every morning on his way in.\" \"I want his patients to see me,\" Joey said. \"Every one he sent home without fixing.\"",
+      "recognized_text": "Across the street, Lilly said, standing on the sidewalk with her arms crossed. You want Marcus Hale to see you every morning on his way in? I want his patients to see me, Joey said, everyone he sent home without fixing.",
+      "human_decision": "accepted_by_ear",
+      "human_note": null,
+      "md_note": null,
+      "frozen_comparator": {
+        "word_error_rate": 0.02439,
+        "deletions": 0,
+        "insertions": 0,
+        "substitutions": 1,
+        "blocker_codes": [],
+        "warning_codes": [
+          "narration_confirmed_lexical_or_pronunciation_difference"
+        ]
+      },
+      "classification": "notation_false_positive_resolved"
+    },
+    {
+      "clip": 10,
+      "unit_id": "narr_voice_seg_96_u002-007_6334038f2236",
+      "source": "operator_narration_review/blocked_units_review.md (Oct 19 Joel-clone pass)",
+      "intended_text": "There was nothing. Not cold. Not pain. Not a wound waiting to close. Only stillness, like reaching into an empty room. Whatever the gift was, it needed something alive to hold on to.",
+      "recognized_text": "There was nothing, not cold, not pain, not a wound waiting to close, only stillness like reaching into an empty room. Whatever the gift was, it needed something alive to hold onto.",
+      "human_decision": "accepted_by_ear",
+      "human_note": null,
+      "md_note": null,
+      "frozen_comparator": {
+        "word_error_rate": 0.060606,
+        "deletions": 1,
+        "insertions": 0,
+        "substitutions": 1,
+        "blocker_codes": [
+          "narration_confirmed_final_token_mismatch",
+          "narration_confirmed_word_omission"
+        ],
+        "warning_codes": [
+          "narration_confirmed_lexical_or_pronunciation_difference"
+        ]
+      },
+      "classification": "human_accepted_text_still_blocks"
+    },
+    {
+      "clip": 11,
+      "unit_id": "narr_voice_seg_106_u002-008_b30f3d25dbc2",
+      "source": "operator_narration_review/blocked_units_review.md (Oct 19 Joel-clone pass)",
+      "intended_text": "The second was a man in his fifties. Gallstones. Three. One's stuck. Elena checked the folder. Said nothing. Turned the page.",
+      "recognized_text": "The second was a man in his fifties, gallstones, three, one stuck, Elena checked the folder, said nothing. Turned the page.",
+      "human_decision": "accepted_by_ear",
+      "human_note": null,
+      "md_note": null,
+      "frozen_comparator": {
+        "word_error_rate": 0.047619,
+        "deletions": 0,
+        "insertions": 0,
+        "substitutions": 1,
+        "blocker_codes": [],
+        "warning_codes": [
+          "narration_confirmed_lexical_or_pronunciation_difference"
+        ]
+      },
+      "classification": "notation_false_positive_resolved"
+    },
+    {
+      "clip": 12,
+      "unit_id": "narr_voice_seg_142_u001-007_2dfafcb51d09",
+      "source": "operator_narration_review/blocked_units_review.md (Oct 19 Joel-clone pass)",
+      "intended_text": "\"Doctor Elena Ward,\" she told the inspector. \"Board certified surgeon. Licensed in this state for eleven years. Doctor of record for this clinic. Every patient examined by me. Every outcome documented.\"",
+      "recognized_text": "Dr. Elena Ward, she told the inspector, board certified surgeon, licensed in this state for eleven years, doctor of record for this clinic, every patient examined by me, every outcome documented.",
+      "human_decision": "accepted_by_ear",
+      "human_note": null,
+      "md_note": null,
+      "frozen_comparator": {
+        "word_error_rate": 0,
+        "deletions": 0,
+        "insertions": 0,
+        "substitutions": 0,
+        "blocker_codes": [],
+        "warning_codes": []
+      },
+      "classification": "notation_false_positive_resolved"
+    },
+    {
+      "clip": 13,
+      "unit_id": "narr_voice_seg_143_u001-007_efbe11a26573",
+      "source": "operator_narration_review/blocked_units_review.md (Oct 19 Joel-clone pass)",
+      "intended_text": "Pruitt blinked. \"This is an unlicensed...\" \"Licensed private practice.\" Sam stepped up beside her, his hands shaking so hard the papers rattled. He dropped one. Picked it up. Took a breath.",
+      "recognized_text": "Pruitt blinked. This is an unlicensed private practice. Sam stepped up beside her, his hands shaking so hard the papers rattled. He dropped one. Picked it up. Took a breath.",
+      "human_decision": "accepted_by_ear",
+      "human_note": null,
+      "md_note": null,
+      "frozen_comparator": {
+        "word_error_rate": 0.032258,
+        "deletions": 1,
+        "insertions": 0,
+        "substitutions": 0,
+        "blocker_codes": [
+          "narration_confirmed_word_omission"
+        ],
+        "warning_codes": []
+      },
+      "classification": "human_accepted_text_still_blocks"
+    },
+    {
+      "clip": 14,
+      "unit_id": "narr_voice_seg_149_u001-005_3b9819d7d7a4",
+      "source": "operator_narration_review/blocked_units_review.md (Oct 19 Joel-clone pass)",
+      "intended_text": "\"Doctor Hale told me to make peace with the chair,\" he said, his voice rough. \"Joey Carter told me to come back Friday.\" He looked straight into the lens. \"Thank you, Joey.\"",
+      "recognized_text": "Dr. Hale told me to make peace with the chair, he said, his voice rough. Joey Carter told me to come back Friday. He looked straight into the lens. Thank you, Joey.",
+      "human_decision": "accepted_by_ear",
+      "human_note": null,
+      "md_note": null,
+      "frozen_comparator": {
+        "word_error_rate": 0,
+        "deletions": 0,
+        "insertions": 0,
+        "substitutions": 0,
+        "blocker_codes": [],
+        "warning_codes": []
+      },
+      "classification": "notation_false_positive_resolved"
+    },
+    {
+      "clip": 15,
+      "unit_id": "narr_voice_seg_162_u004-008_1937c797eed9",
+      "source": "operator_narration_review/blocked_units_review.md (Oct 19 Joel-clone pass)",
+      "intended_text": "The long-term ward was dim and humming. Monitors glowing green. Rows of beds, curtains half drawn. At the far end of the hall, a door stood open on an empty, freshly made room. Room four twelve.",
+      "recognized_text": "The long-term ward was dim and humming, monitors glowing green, rows of beds, curtains half drawn. At the far end of the hall, a door stood open on an empty, freshly made room, room 412.",
+      "human_decision": "accepted_by_ear",
+      "human_note": null,
+      "md_note": null,
+      "frozen_comparator": {
+        "word_error_rate": 0,
+        "deletions": 0,
+        "insertions": 0,
+        "substitutions": 0,
+        "blocker_codes": [],
+        "warning_codes": []
+      },
+      "classification": "notation_false_positive_resolved"
+    },
+    {
+      "clip": 16,
+      "unit_id": "narr_voice_seg_165_u007-001_546fdcb6847d",
+      "source": "operator_narration_review/blocked_units_review.md (Oct 19 Joel-clone pass)",
+      "intended_text": "Not the opioid from the sidewalk. Something deeper. Something he knew in his bones. It was the feeling from his own last year asleep.",
+      "recognized_text": "Not the opioid from the sidewalk, something deeper, something he knew in his bones. It was the feeling from his own last year of sleep.",
+      "human_decision": "accepted_by_ear",
+      "human_note": null,
+      "md_note": null,
+      "frozen_comparator": {
+        "word_error_rate": 0.083333,
+        "deletions": 0,
+        "insertions": 1,
+        "substitutions": 1,
+        "blocker_codes": [
+          "narration_confirmed_final_token_mismatch"
+        ],
+        "warning_codes": [
+          "narration_asr_lexical_uncertainty_above_wer_threshold",
+          "narration_confirmed_lexical_or_pronunciation_difference",
+          "narration_possible_asr_token_resegmentation"
+        ]
+      },
+      "classification": "human_accepted_text_still_blocks"
+    },
+    {
+      "clip": 17,
+      "unit_id": "narr_voice_seg_169_u001-004_0efa3036c245",
+      "source": "operator_narration_review/blocked_units_review.md (Oct 19 Joel-clone pass)",
+      "intended_text": "She stopped. Her hand went to her mouth. In her own small, neat handwriting: “Patient squeezed my hand twice on verbal command. Reported to day team.”",
+      "recognized_text": "She stopped. Her hand went to her mouth. In her own small, neat handwriting, patient squeezed my hand twice on verbal command, reported to date to",
+      "human_decision": "rejected_by_ear",
+      "human_note": "'team' is clipped at end",
+      "md_note": null,
+      "frozen_comparator": {
+        "word_error_rate": 0.076923,
+        "deletions": 0,
+        "insertions": 0,
+        "substitutions": 2,
+        "blocker_codes": [
+          "narration_confirmed_final_token_mismatch"
+        ],
+        "warning_codes": [
+          "narration_asr_lexical_uncertainty_above_wer_threshold",
+          "narration_confirmed_lexical_or_pronunciation_difference"
+        ]
+      },
+      "classification": "human_rejected_text_blocks"
+    },
+    {
+      "clip": 18,
+      "unit_id": "narr_voice_seg_183_u001-005_64e2f4bd2468",
+      "source": "operator_narration_review/blocked_units_review.md (Oct 19 Joel-clone pass)",
+      "intended_text": "\"Mister Carter, your guardian was fully authorized,\" he had said, the way one explains something to a child. \"There's nothing here for you. You're the husband who lost everything, I'm afraid. I'd focus on recovery.\"",
+      "recognized_text": "Mr. Carter, your guardian was fully authorized, he had said. The way one explains something to a child, there's nothing here for you. You're the husband who lost everything, I'm afraid. I'd focus on recovery.",
+      "human_decision": "accepted_by_ear",
+      "human_note": null,
+      "md_note": null,
+      "frozen_comparator": {
+        "word_error_rate": 0,
+        "deletions": 0,
+        "insertions": 0,
+        "substitutions": 0,
+        "blocker_codes": [],
+        "warning_codes": []
+      },
+      "classification": "notation_false_positive_resolved"
+    },
+    {
+      "clip": 19,
+      "unit_id": "narr_voice_seg_186_u001-003_d6df44fed369",
+      "source": "operator_narration_review/blocked_units_review.md (Oct 19 Joel-clone pass)",
+      "intended_text": "\"Mister Walsh has asked us to begin moving all foundation accounts out of First Harbor today,\" she said pleasantly. \"Mister Carter is a foundation partner, and his experience with this branch has been, let's say, discouraging.\"",
+      "recognized_text": "Mr. Walsh has asked us to begin moving all foundation accounts out of First Harbor today, she said pleasantly. Mr. Carter is a foundation partner and his experience with this branch has been, let's say, discouraging.",
+      "human_decision": "accepted_by_ear",
+      "human_note": null,
+      "md_note": null,
+      "frozen_comparator": {
+        "word_error_rate": 0,
+        "deletions": 0,
+        "insertions": 0,
+        "substitutions": 0,
+        "blocker_codes": [],
+        "warning_codes": []
+      },
+      "classification": "notation_false_positive_resolved"
+    },
+    {
+      "clip": 20,
+      "unit_id": "narr_voice_seg_203_u001-006_94120ebb4d25",
+      "source": "operator_narration_review/blocked_units_review.md (Oct 19 Joel-clone pass)",
+      "intended_text": "Marcus watched from beside the stage. \"Henry brought his pet faith healer,\" he said to the donor next to him. \"We'll seat him at the kids' table.\" Vanessa didn't laugh. She was watching her friends wave at Joey.",
+      "recognized_text": "Marcus watched from beside the stage. Henry brought his pet faith healer, he said to the donor next to him. We'll seat him at the kid's table. Vanessa didn't laugh. She was watching her friends wave at Joey.",
+      "human_decision": "accepted_by_ear",
+      "human_note": null,
+      "md_note": null,
+      "frozen_comparator": {
+        "word_error_rate": 0,
+        "deletions": 0,
+        "insertions": 0,
+        "substitutions": 0,
+        "blocker_codes": [],
+        "warning_codes": []
+      },
+      "classification": "notation_false_positive_resolved"
+    },
+    {
+      "clip": 21,
+      "unit_id": "narr_voice_seg_210_u005-008_a2ed69f21ff5",
+      "source": "operator_narration_review/blocked_units_review.md (Oct 19 Joel-clone pass)",
+      "intended_text": "It cost him. More than Henry's heart had cost back in room four twelve. But back then, a heart had put him on the floor for fourteen hours. Tonight, he stayed on his knees, breathing hard, while the stone dissolved like sugar in warm water.",
+      "recognized_text": "It cost him. More than Henry's heart had cost back in room 412, but back then, a heart had put him on the floor for 14 hours. Tonight, he stayed on his knees, breathing hard, while the stone dissolved like sugar in warm water.",
+      "human_decision": "accepted_by_ear",
+      "human_note": null,
+      "md_note": null,
+      "frozen_comparator": {
+        "word_error_rate": 0,
+        "deletions": 0,
+        "insertions": 0,
+        "substitutions": 0,
+        "blocker_codes": [],
+        "warning_codes": []
+      },
+      "classification": "notation_false_positive_resolved"
+    },
+    {
+      "clip": 22,
+      "unit_id": "narr_voice_seg_225_u001-004_c42c530584de",
+      "source": "operator_narration_review/blocked_units_review.md (Oct 19 Joel-clone pass)",
+      "intended_text": "He turned to Lily. \"If you want to stop, stop. I'll fight for your license either way. That's not a trade.\"",
+      "recognized_text": "He turned to Lily. If you wanna stop, stop. I'll fight for your license either way. That's not a trade.",
+      "human_decision": "accepted_by_ear",
+      "human_note": null,
+      "md_note": null,
+      "frozen_comparator": {
+        "word_error_rate": 0.095238,
+        "deletions": 1,
+        "insertions": 0,
+        "substitutions": 1,
+        "blocker_codes": [
+          "narration_confirmed_word_omission"
+        ],
+        "warning_codes": [
+          "narration_confirmed_lexical_or_pronunciation_difference"
+        ]
+      },
+      "classification": "human_accepted_text_still_blocks"
+    },
+    {
+      "clip": 23,
+      "unit_id": "narr_voice_seg_225_u005-003_d18520fcef83",
+      "source": "operator_narration_review/blocked_units_review.md (Oct 19 Joel-clone pass)",
+      "intended_text": "Lily looked at him a long time. Then she stood and slid the notebook back into her pocket. \"Nobody else knows the night schedule,\" she said. \"You need me.\"",
+      "recognized_text": "Lilly looked at him a long time. Then she stood and slid the notebook back into her pocket. Nobody else knows the night schedule, she said, you need me",
+      "human_decision": "rejected_by_ear",
+      "human_note": "ending 'me' seems rushed",
+      "md_note": null,
+      "frozen_comparator": {
+        "word_error_rate": 0.034483,
+        "deletions": 0,
+        "insertions": 0,
+        "substitutions": 1,
+        "blocker_codes": [
+          "narration_confirmed_opening_token_mismatch"
+        ],
+        "warning_codes": [
+          "narration_confirmed_lexical_or_pronunciation_difference"
+        ]
+      },
+      "classification": "human_rejected_text_blocks"
+    },
+    {
+      "clip": 24,
+      "unit_id": "narr_voice_seg_239_u001_7749830f8929",
+      "source": "operator_narration_review/blocked_units_review.md (Oct 19 Joel-clone pass)",
+      "intended_text": "The board meeting to confirm Marcus as permanent director was set for the following Friday at eleven thirty at night, the latest hour Crestwood's bylaws allowed, rushed onto the calendar so Richard could push it through before anyone organized against him.",
+      "recognized_text": "The board meeting to confirm Marcus as permanent director was set for the following Friday at 11.30 at night. The latest hour Crestwood's bylaws allowed rushed onto the calendar so Richard could push it through before anyone organized against him.",
+      "human_decision": "accepted_by_ear",
+      "human_note": null,
+      "md_note": null,
+      "frozen_comparator": {
+        "word_error_rate": 0.04878,
+        "deletions": 1,
+        "insertions": 0,
+        "substitutions": 1,
+        "blocker_codes": [
+          "narration_confirmed_tts_transcript_protected_value_mismatch",
+          "narration_confirmed_tts_transcript_protected_value_missing",
+          "narration_confirmed_word_omission"
+        ],
+        "warning_codes": [
+          "narration_confirmed_lexical_or_pronunciation_difference"
+        ]
+      },
+      "classification": "human_accepted_text_still_blocks"
+    },
+    {
+      "clip": 25,
+      "unit_id": "narr_voice_seg_240_u001-005_f74b7acd8f85",
+      "source": "operator_narration_review/blocked_units_review.md (Oct 19 Joel-clone pass)",
+      "intended_text": "\"Friday at eleven thirty,\" Sam said, gray in the face. \"Then Friday morning,\" Joey said, \"we visit Vanessa.\"",
+      "recognized_text": "Friday at 1130, Sam said, gray in the face. Then Friday morning, Joey said, we visit Vanessa.",
+      "human_decision": "accepted_by_ear",
+      "human_note": null,
+      "md_note": null,
+      "frozen_comparator": {
+        "word_error_rate": 0,
+        "deletions": 0,
+        "insertions": 0,
+        "substitutions": 0,
+        "blocker_codes": [],
+        "warning_codes": []
+      },
+      "classification": "notation_false_positive_resolved"
+    },
+    {
+      "clip": 26,
+      "unit_id": "narr_voice_seg_260_u008-010_4e67bf9a5179",
+      "source": "operator_narration_review/blocked_units_review.md (Oct 19 Joel-clone pass)",
+      "intended_text": "They came for him at the clinic at eight fifteen. Two sheriff's deputies, apologetic, and three Crestwood security officers who were not. The line outside watched in silence.",
+      "recognized_text": "They came for him at the clinic at 8.15. Two sheriff's deputies, apologetic, and three Crestwood security officers who were not. The line outside watched in silence.",
+      "human_decision": "accepted_by_ear",
+      "human_note": null,
+      "md_note": null,
+      "frozen_comparator": {
+        "word_error_rate": 0,
+        "deletions": 0,
+        "insertions": 0,
+        "substitutions": 0,
+        "blocker_codes": [],
+        "warning_codes": []
+      },
+      "classification": "notation_false_positive_resolved"
+    },
+    {
+      "clip": 27,
+      "unit_id": "narr_voice_seg_262_u003-001_2ce6613d5e2b",
+      "source": "operator_narration_review/blocked_units_review.md (Oct 19 Joel-clone pass)",
+      "intended_text": "Then they wheeled him up to the fourth floor, down the long-term ward, past eleven sleeping patients. Into room four twelve.",
+      "recognized_text": "Then they wheeled him up to the fourth floor, down the long-term ward, past 11 sleep-in patients, into room 412.",
+      "human_decision": "accepted_by_ear",
+      "human_note": null,
+      "md_note": null,
+      "frozen_comparator": {
+        "word_error_rate": 0.090909,
+        "deletions": 0,
+        "insertions": 1,
+        "substitutions": 1,
+        "blocker_codes": [],
+        "warning_codes": [
+          "narration_asr_lexical_uncertainty_above_wer_threshold",
+          "narration_confirmed_lexical_or_pronunciation_difference",
+          "narration_possible_asr_token_resegmentation"
+        ]
+      },
+      "classification": "notation_false_positive_resolved"
+    },
+    {
+      "clip": 28,
+      "unit_id": "narr_voice_seg_268_u001-003_04de66468c3f",
+      "source": "operator_narration_review/blocked_units_review.md (Oct 19 Joel-clone pass)",
+      "intended_text": "At ten twenty-two, in room four twelve, Joey Carter's eyes opened. The world was thick and slow, like moving underwater. But it was moving.",
+      "recognized_text": "At 10.22 in room 412, Joey Carter's eyes opened. The world was thick and slow like moving underwater, but it was moving.",
+      "human_decision": "accepted_by_ear",
+      "human_note": null,
+      "md_note": null,
+      "frozen_comparator": {
+        "word_error_rate": 0,
+        "deletions": 0,
+        "insertions": 0,
+        "substitutions": 0,
+        "blocker_codes": [],
+        "warning_codes": []
+      },
+      "classification": "notation_false_positive_resolved"
+    },
+    {
+      "clip": 29,
+      "unit_id": "narr_voice_seg_271_u001_80c82c48e0f4",
+      "source": "operator_narration_review/blocked_units_review.md (Oct 19 Joel-clone pass)",
+      "intended_text": "At ten forty-five, the night security officer began his round on the third floor, exactly as Lily's notebook said he would.",
+      "recognized_text": "At 10.45, the night security officer began his round on the third floor, exactly as Lilly's notebook said he would.",
+      "human_decision": "accepted_by_ear",
+      "human_note": null,
+      "md_note": null,
+      "frozen_comparator": {
+        "word_error_rate": 0.047619,
+        "deletions": 0,
+        "insertions": 0,
+        "substitutions": 1,
+        "blocker_codes": [],
+        "warning_codes": [
+          "narration_confirmed_lexical_or_pronunciation_difference"
+        ]
+      },
+      "classification": "notation_false_positive_resolved"
+    },
+    {
+      "clip": 30,
+      "unit_id": "narr_voice_seg_271_u002_86fcf0b431dd",
+      "source": "operator_narration_review/blocked_units_review.md (Oct 19 Joel-clone pass)",
+      "intended_text": "At ten forty-six, the fourth floor charge nurse went on break in the staff room at the far end of the hall, exactly as she had every night for six years.",
+      "recognized_text": "At 1046, the 4th floor charge nurse went on break in the staff room at the far end of the hall, exactly as she had every night for 6 years.",
+      "human_decision": "accepted_by_ear",
+      "human_note": null,
+      "md_note": null,
+      "frozen_comparator": {
+        "word_error_rate": 0,
+        "deletions": 0,
+        "insertions": 0,
+        "substitutions": 0,
+        "blocker_codes": [],
+        "warning_codes": []
+      },
+      "classification": "notation_false_positive_resolved"
+    },
+    {
+      "clip": 31,
+      "unit_id": "narr_voice_seg_272_u001-002_bba642ed390b",
+      "source": "operator_narration_review/blocked_units_review.md (Oct 19 Joel-clone pass)",
+      "intended_text": "At ten forty-seven, a door behind the linen room opened without a sound. Lily came first, walking the dark corridor she had walked hundreds of times to sit beside a man no one else would talk to.",
+      "recognized_text": "At 10.47, a door behind the linen room opened without a sound. Lily came first, walking the dark corridor she had walked hundreds of times to sit beside a man no one else would talk to.",
+      "human_decision": "accepted_by_ear",
+      "human_note": null,
+      "md_note": null,
+      "frozen_comparator": {
+        "word_error_rate": 0,
+        "deletions": 0,
+        "insertions": 0,
+        "substitutions": 0,
+        "blocker_codes": [],
+        "warning_codes": []
+      },
+      "classification": "notation_false_positive_resolved"
+    },
+    {
+      "clip": 32,
+      "unit_id": "narr_voice_seg_272_u003-002_d68f44bb1bad",
+      "source": "operator_narration_review/blocked_units_review.md (Oct 19 Joel-clone pass)",
+      "intended_text": "Elena followed with a medical bag. Lily went straight to room four twelve and cut the cuffs with trauma shears. \"You're early,\" she whispered, and her voice cracked.",
+      "recognized_text": "Alaina followed with a medical bag. Lily went straight to room 412 and cut the cuffs with trauma shears. You're early, she whispered, and her voice cracked.",
+      "human_decision": "accepted_by_ear",
+      "human_note": null,
+      "md_note": null,
+      "frozen_comparator": {
+        "word_error_rate": 0.035714,
+        "deletions": 0,
+        "insertions": 0,
+        "substitutions": 1,
+        "blocker_codes": [
+          "narration_confirmed_opening_token_mismatch"
+        ],
+        "warning_codes": [
+          "narration_confirmed_lexical_or_pronunciation_difference"
+        ]
+      },
+      "classification": "human_accepted_text_still_blocks"
+    },
+    {
+      "clip": 33,
+      "unit_id": "narr_voice_seg_273_u007-002_5a1e5c8f94aa",
+      "source": "operator_narration_review/blocked_units_review.md (Oct 19 Joel-clone pass)",
+      "intended_text": "Then she pulled a form from her bag and signed it on the spot. Independent physician evaluation. Patient alert, oriented, and competent. Ten fifty-one. \"Now you're legally awake,\" she said.",
+      "recognized_text": "Then she pulled a form from her bag and signed it on the spot. Independent physician evaluation, patient alert, oriented and competent. 1051, now you're legally awake, she said.",
+      "human_decision": "accepted_by_ear",
+      "human_note": null,
+      "md_note": null,
+      "frozen_comparator": {
+        "word_error_rate": 0,
+        "deletions": 0,
+        "insertions": 0,
+        "substitutions": 0,
+        "blocker_codes": [],
+        "warning_codes": []
+      },
+      "classification": "notation_false_positive_resolved"
+    },
+    {
+      "clip": 34,
+      "unit_id": "narr_voice_seg_278_u001-003_108e8a77fa63",
+      "source": "operator_narration_review/blocked_units_review.md (Oct 19 Joel-clone pass)",
+      "intended_text": "He thought of room four twelve, ten steps behind him, where he had lost three years. He was not afraid of that room anymore. He chose.",
+      "recognized_text": "He thought of room 412, ten steps behind him, where he had lost three years. He was not afraid of that room anymore. He chose…",
+      "human_decision": "accepted_by_ear",
+      "human_note": null,
+      "md_note": null,
+      "frozen_comparator": {
+        "word_error_rate": 0,
+        "deletions": 0,
+        "insertions": 0,
+        "substitutions": 0,
+        "blocker_codes": [],
+        "warning_codes": []
+      },
+      "classification": "notation_false_positive_resolved"
+    },
+    {
+      "clip": 35,
+      "unit_id": "narr_voice_seg_282_u001-006_b7e59209b3bf",
+      "source": "operator_narration_review/blocked_units_review.md (Oct 19 Joel-clone pass)",
+      "intended_text": "Joey stayed on his feet. Barely. But on his feet. At eleven thirty-four, he looked at the clock on the wall. \"Time for a meeting,\" he said.",
+      "recognized_text": "Joey stayed on his feet, barely, but on his feet, at 11.34, he looked at the clock on the wall. Time for a meeting, he said.",
+      "human_decision": "accepted_by_ear",
+      "human_note": null,
+      "md_note": null,
+      "frozen_comparator": {
+        "word_error_rate": 0,
+        "deletions": 0,
+        "insertions": 0,
+        "substitutions": 0,
+        "blocker_codes": [],
+        "warning_codes": []
+      },
+      "classification": "notation_false_positive_resolved"
+    },
+    {
+      "clip": 36,
+      "unit_id": "narr_voice_seg_289_u001-003_1460ec186ed9",
+      "source": "operator_narration_review/blocked_units_review.md (Oct 19 Joel-clone pass)",
+      "intended_text": "Sam breathed. He stood. And at eleven forty-one exactly, he set a document in front of the board secretary.",
+      "recognized_text": "Sam breathed, he stood, and at 1141 exactly, he set a document in front of the board secretary.",
+      "human_decision": "accepted_by_ear",
+      "human_note": null,
+      "md_note": null,
+      "frozen_comparator": {
+        "word_error_rate": 0,
+        "deletions": 0,
+        "insertions": 0,
+        "substitutions": 0,
+        "blocker_codes": [],
+        "warning_codes": []
+      },
+      "classification": "notation_false_positive_resolved"
+    },
+    {
+      "clip": 37,
+      "unit_id": "narr_voice_seg_290_u006-002_87d00b9de373",
+      "source": "operator_narration_review/blocked_units_review.md (Oct 19 Joel-clone pass)",
+      "intended_text": "And under section two of paragraph fourteen, no permanent director may be confirmed without the holders' consent. He swallowed. \"Consent is not given.\"",
+      "recognized_text": "And under section 2 of paragraph 14, no permanent director may be confirmed without the holder's consent. He swallowed. Consent is not g-",
+      "human_decision": "rejected_by_ear",
+      "human_note": "'given' is clipped",
+      "md_note": "STILL CLIPPED after retake: ASR ends 'Consent is not g-'",
+      "frozen_comparator": {
+        "word_error_rate": 0.043478,
+        "deletions": 0,
+        "insertions": 0,
+        "substitutions": 1,
+        "blocker_codes": [
+          "narration_confirmed_final_token_mismatch"
+        ],
+        "warning_codes": [
+          "narration_confirmed_lexical_or_pronunciation_difference"
+        ]
+      },
+      "classification": "human_rejected_text_blocks"
+    },
+    {
+      "clip": 38,
+      "unit_id": "narr_voice_seg_296_u004-010_45585087b53f",
+      "source": "operator_narration_review/blocked_units_review.md (Oct 19 Joel-clone pass)",
+      "intended_text": "It was eleven forty-three. It was not possible for Joey Carter to be standing in this room. He had done everything right. Cuffs. Sedation. Distance. Three rules, three answers.",
+      "recognized_text": "It was 1143. It was not possible for Joey Carter to be standing in this room. He had done everything right. Cuffs, sedation, distance, three rules, three answers.",
+      "human_decision": "accepted_by_ear",
+      "human_note": null,
+      "md_note": null,
+      "frozen_comparator": {
+        "word_error_rate": 0,
+        "deletions": 0,
+        "insertions": 0,
+        "substitutions": 0,
+        "blocker_codes": [],
+        "warning_codes": []
+      },
+      "classification": "notation_false_positive_resolved"
+    },
+    {
+      "clip": 39,
+      "unit_id": "narr_voice_seg_299_u002-004_b79aa0c90acf",
+      "source": "operator_narration_review/blocked_units_review.md (Oct 19 Joel-clone pass)",
+      "intended_text": "\"Elena Ward, licensed physician,\" Elena said, laying her form on the table. \"Independent evaluation of Joey Carter, alert, oriented, and competent at ten fifty-one tonight.\"",
+      "recognized_text": "Elena Ward, licensed physician, Elena said, laying her form on the table. Independent evaluation of Joey Carter, alert oriented and competent at 1051 Tonight.",
+      "human_decision": "accepted_by_ear",
+      "human_note": null,
+      "md_note": null,
+      "frozen_comparator": {
+        "word_error_rate": 0,
+        "deletions": 0,
+        "insertions": 0,
+        "substitutions": 0,
+        "blocker_codes": [],
+        "warning_codes": []
+      },
+      "classification": "notation_false_positive_resolved"
+    },
+    {
+      "clip": 40,
+      "unit_id": "narr_voice_seg_308_u005-007_ee3968d3fafb",
+      "source": "operator_narration_review/blocked_units_review.md (Oct 19 Joel-clone pass)",
+      "intended_text": "The board voted at eleven fifty-two. Henry Walsh, now seated as one of the three new members, called the question. Marcus Hale's appointment failed without a single vote in favor.",
+      "recognized_text": "The board voted at 1152. Henry Walsh, now seated as one of the three new members, called the question. Marcus Hale's appointment failed without a single vote in favor.",
+      "human_decision": "accepted_by_ear",
+      "human_note": null,
+      "md_note": null,
+      "frozen_comparator": {
+        "word_error_rate": 0,
+        "deletions": 0,
+        "insertions": 0,
+        "substitutions": 0,
+        "blocker_codes": [],
+        "warning_codes": []
+      },
+      "classification": "notation_false_positive_resolved"
+    },
+    {
+      "clip": 41,
+      "unit_id": "narr_voice_seg_310_u001_548994381338",
+      "source": "operator_narration_review/blocked_units_review.md (Oct 19 Joel-clone pass)",
+      "intended_text": "At twelve oh four, the officers walked Marcus Hale out of the boardroom in handcuffs, past the portraits of his grandfather and great-grandfather, past the press crowded in the lobby, cameras flashing on a man who had once smiled from every billboard in the city.",
+      "recognized_text": "At 1204, the officers walked Marcus Hale out of the boardroom in handcuffs, past the portraits of his grandfather and great-grandfather, past the press crowded in the lobby, cameras flashing on a man who had once smiled from every billboard in the city.",
+      "human_decision": "accepted_by_ear",
+      "human_note": null,
+      "md_note": null,
+      "frozen_comparator": {
+        "word_error_rate": 0,
+        "deletions": 0,
+        "insertions": 0,
+        "substitutions": 0,
+        "blocker_codes": [],
+        "warning_codes": []
+      },
+      "classification": "notation_false_positive_resolved"
+    },
+    {
+      "clip": 42,
+      "unit_id": "narr_voice_seg_320_u003_d20c3e57b2ff",
+      "source": "operator_narration_review/blocked_units_review.md (Oct 19 Joel-clone pass)",
+      "intended_text": "And Lily Moon, whose license was restored with a formal apology from the state nursing board, became director of the long-term ward on the fourth floor.",
+      "recognized_text": "Ann Lilly Moon, whose license was restored with a formal apology from the State Nursing Board, became director of the Long-Term Ward on the 4th floor.",
+      "human_decision": "accepted_by_ear",
+      "human_note": null,
+      "md_note": null,
+      "frozen_comparator": {
+        "word_error_rate": 0.074074,
+        "deletions": 0,
+        "insertions": 0,
+        "substitutions": 2,
+        "blocker_codes": [
+          "narration_confirmed_opening_token_mismatch"
+        ],
+        "warning_codes": [
+          "narration_asr_lexical_uncertainty_above_wer_threshold",
+          "narration_confirmed_lexical_or_pronunciation_difference"
+        ]
+      },
+      "classification": "human_accepted_text_still_blocks"
+    },
+    {
+      "clip": 43,
+      "unit_id": "narr_voice_seg_322_u001_9c40e03405b3",
+      "source": "operator_narration_review/blocked_units_review.md (Oct 19 Joel-clone pass)",
+      "intended_text": "On the first morning of spring, Joey Carter, owner of Crestwood General Hospital, rode the elevator to the fourth floor and walked into room four twelve.",
+      "recognized_text": "On the first morning of spring, Joey Carter, owner of Crestwood General Hospital, rode the elevator to the fourth floor and walked into room 412.",
+      "human_decision": "accepted_by_ear",
+      "human_note": null,
+      "md_note": null,
+      "frozen_comparator": {
+        "word_error_rate": 0,
+        "deletions": 0,
+        "insertions": 0,
+        "substitutions": 0,
+        "blocker_codes": [],
+        "warning_codes": []
+      },
+      "classification": "notation_false_positive_resolved"
+    },
+    {
+      "clip": 44,
+      "unit_id": "narr_voice_seg_328_u001-003_ae0f533eb153",
+      "source": "operator_narration_review/blocked_units_review.md (Oct 19 Joel-clone pass)",
+      "intended_text": "Her eyelashes fluttered. Her eyes opened. She looked up at a stranger in a plain shirt, standing beside her bed in room four twelve.",
+      "recognized_text": "Her eyelashes fluttered, her eyes opened. She looked up at a stranger in a plain shirt, standing beside her bed in room 412.",
+      "human_decision": "accepted_by_ear",
+      "human_note": null,
+      "md_note": null,
+      "frozen_comparator": {
+        "word_error_rate": 0,
+        "deletions": 0,
+        "insertions": 0,
+        "substitutions": 0,
+        "blocker_codes": [],
+        "warning_codes": []
+      },
+      "classification": "notation_false_positive_resolved"
+    }
+  ],
+  "summary": {
+    "notation_false_positive_resolved": 31,
+    "human_rejected_acoustic_only_gap": 2,
+    "human_rejected_text_blocks": 4,
+    "human_accepted_text_still_blocks": 7
+  }
+}

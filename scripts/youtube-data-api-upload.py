@@ -248,6 +248,7 @@ def upload(args: argparse.Namespace) -> None:
         "watch_url": f"https://www.youtube.com/watch?v={video_id}",
         "studio_url": f"https://studio.youtube.com/video/{video_id}/edit",
         "title": item.get("snippet", {}).get("title"),
+        "description": item.get("snippet", {}).get("description"),
         "privacy_status": item.get("status", {}).get("privacyStatus"),
         "self_declared_made_for_kids": item.get("status", {}).get("selfDeclaredMadeForKids"),
         "contains_synthetic_media": item.get("status", {}).get("containsSyntheticMedia"),

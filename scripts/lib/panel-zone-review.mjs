@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { panelPageGeometryDir } from './panel-page-geometry.mjs';
+import { zoneRequestedLettering } from './panel-page-prompts.mjs';
+import { tesseractWords, letteringFindings, LETTERING_OCR } from './panel-zone-lettering.mjs';
 
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 const readJson = file => fs.readFile(file, 'utf8').then(JSON.parse).catch(error => { if (error.code === 'ENOENT') return null; throw error; });
@@ -12,8 +14,18 @@ const readJson = file => fs.readFile(file, 'utf8').then(JSON.parse).catch(error 
  * Missing, failed, mismatched or tampered geometry blocks exactly the beats
  * of that zone. Nothing is regenerated or re-measured here.
  */
-export async function resolveZoneReviewImages({ episodeDir, prompts, results }) {
-  const views = new Map(), findings = [];
+export async function resolveZoneReviewImages({ episodeDir, prompts, results, ocrWords = tesseractWords }) {
+  const views = new Map(), findings = [], ocrByCrop = new Map();
+  // OCR runs once per crop and only when its zone requests lettering; an
+  // unavailable OCR engine leaves the ordinary review path unchanged.
+  const lettering = async (prompt, crop) => {
+    const requested = zoneRequestedLettering(prompt.provider_prompt ?? prompt.image_prompt, prompt.panel_zone_slot);
+    if (!requested?.length) return { status: 'none_requested' };
+    if (!ocrByCrop.has(crop.sha256)) ocrByCrop.set(crop.sha256, ocrWords(crop.path).then(words => ({ words }), error => ({ error: error.message })));
+    const ocr = await ocrByCrop.get(crop.sha256);
+    if (ocr.error) return { status: 'unavailable', requested, error: ocr.error };
+    return { status: 'checked', engine: LETTERING_OCR, requested, findings: letteringFindings({ requested, words: ocr.words }) };
+  };
   const resultById = new Map((results ?? []).map(row => [String(row.image_id ?? ''), row]));
   const realEpisodeDir = await fs.realpath(episodeDir);
   for (const prompt of prompts ?? []) {
@@ -32,7 +44,7 @@ export async function resolveZoneReviewImages({ episodeDir, prompts, results }) 
     const crop = (geometry.review_crops ?? []).find(row => row.slot === prompt.panel_zone_slot);
     const cropBytes = crop ? await fs.readFile(crop.path).catch(() => null) : null;
     if (!cropBytes || sha(cropBytes) !== crop.sha256) { block('zone_review_crop_invalid', `Review crop for ${prompt.panel_zone_id} (${prompt.panel_zone_slot}) is missing or changed.`); continue; }
-    views.set(imageId, { review_image_path: crop.path, review_image_sha256: crop.sha256, page_asset_id: prompt.panel_asset_id, zone_id: prompt.panel_zone_id, zone_slot: prompt.panel_zone_slot, page_geometry_path: receiptPath, page_geometry_sha256: sha(await fs.readFile(receiptPath)) });
+    views.set(imageId, { lettering: await lettering(prompt, crop), review_image_path: crop.path, review_image_sha256: crop.sha256, page_asset_id: prompt.panel_asset_id, zone_id: prompt.panel_zone_id, zone_slot: prompt.panel_zone_slot, page_geometry_path: receiptPath, page_geometry_sha256: sha(await fs.readFile(receiptPath)) });
   }
   return { views, findings };
 }

@@ -40,6 +40,24 @@ try {
     assert.deepEqual(reviewViewReport({ results: inputs.results }, review.views).results.map(row => path.basename(row.image_path)), ['left.png', 'right.png']);
   });
 
+  await test('a garbled zone bubble forces manual review of that beat; OCR runs once per crop and only where text is requested', async () => {
+    const f = await panelProductionFixture(path.join(root, 'lettering'), { pages: true });
+    const inputs = await zoneInputs(f), calls = [];
+    for (const prompt of inputs.prompts) prompt.provider_prompt = "Frame.\n\nPanel 1 (left): No lettering.\nPanel 2 (right): A thought bubble reads exactly 'No more looking down.'\n";
+    const word = (text, conf, left, top) => ({ text, conf, box: { left, top, width: 60, height: 30 } });
+    const ocrWords = async file => { calls.push(path.basename(file)); return ['No', 'more', 'looking', 'dowrg', 'down.'].map((text, i) => word(text, 95, 100 + i * 70, 60)); };
+    const review = await resolveZoneReviewImages({ ...inputs, ocrWords });
+    assert.deepEqual(calls, ['right.png']);
+    assert.equal(review.views.get('image_a').lettering.status, 'none_requested');
+    assert.deepEqual(review.views.get('image_b').lettering.findings.map(row => row.code), ['zone_lettering_garbled']);
+    const audit = await structuralAuditForTests({ prompts: inputs.prompts }, { results: inputs.results }, null, null, review);
+    const row = id => audit.rows.find(value => value.image_id === id);
+    assert.equal(row('image_b').requires_manual_risk_review, true); assert.ok(row('image_b').risk_reasons.includes('zone_lettering_garbled'));
+    assert.ok(!row('image_a').risk_reasons.includes('zone_lettering_garbled'));
+    const offline = await resolveZoneReviewImages({ ...inputs, ocrWords: async () => { throw new Error('tesseract not installed'); } });
+    assert.equal(offline.views.get('image_b').lettering.status, 'unavailable'); assert.deepEqual(offline.findings, [], 'missing OCR never blocks');
+  });
+
   await test('missing, failed, mismatched or tampered geometry blocks exactly the zone beats', async () => {
     const codes = async (name, change) => {
       const f = await panelProductionFixture(path.join(root, name), { pages: true });

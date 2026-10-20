@@ -343,10 +343,13 @@ async function structuralAudit(promptPlan, imagegenReport, focalAnalysis = null,
     const semanticUnavailable = semantic?.status === "unavailable";
     const heroOrPriority = (semantic?.selection_reasons ?? []).some((reason) => ["hero_beat", "priority_beat"].includes(reason));
     const requiresSemanticReview = semanticNeedsReview && (!semanticUnavailable || heroOrPriority);
+    // A garbled zone bubble must be looked at: crop it out in composition or reject the zone for repair.
+    const letteringGarbled = (zoneReview?.views.get(imageId)?.lettering?.findings ?? []).some((row) => row.code === "zone_lettering_garbled");
     const riskReasons = [...new Set([
       ...reviewPolicy.reasons,
       ...(semantic ? semantic.selection_reasons.map((reason) => `semantic:${reason}`) : []),
       ...(requiresSemanticReview ? ["semantic_audit_needs_review"] : []),
+      ...(letteringGarbled ? ["zone_lettering_garbled"] : []),
     ])];
     rows.push({
       image_id: imageId,
@@ -363,7 +366,7 @@ async function structuralAudit(promptPlan, imagegenReport, focalAnalysis = null,
       risk_reasons: riskReasons,
       qa_tier: requiresSemanticReview ? "semantic_exception_review" : reviewPolicy.tier,
       deterministic_sample: reviewPolicy.sampled,
-      requires_manual_risk_review: reviewPolicy.requires_manual_review || requiresSemanticReview,
+      requires_manual_risk_review: reviewPolicy.requires_manual_review || requiresSemanticReview || letteringGarbled,
       focal_anchor: focal?.focal_anchor ?? null,
       focal_confidence: focal?.confidence ?? null,
       composition_findings: focal?.findings ?? [],

@@ -50,6 +50,20 @@ function visiblePeople(prompt) {
 }
 
 /** Structural page checks run during hardening; every finding blocks dispatch. */
+/** Exact text a prompt section requests ("reads exactly '...'", including listed extras). */
+export function letteringElements(section) {
+  return [...String(section).matchAll(/(?:reads|reading|read) exactly\s+(["'\u201c])(.*?)\1(?=[\s.,;:]|$)((?:,?\s*(?:and\s+)?(["'\u201c])[^"'\u201d]*?\4(?=[\s.,;:]|$))*)/g)].flatMap(match => [match[2], ...(match[3] ? [...match[3].matchAll(/(["'\u201c])(.*?)\1(?=[\s.,;:]|$)/g)].map(row => row[2]) : [])]);
+}
+
+/** The requested lettering of one zone, read from its "Panel N (slot)" section of the page prompt. */
+export function zoneRequestedLettering(promptText, slot) {
+  const text = String(promptText ?? ''), heading = new RegExp(`Panel \\d+ \\(${pageSlotLabel(slot).replace(/[-]/g, '\\-')}\\):`);
+  const match = heading.exec(text);
+  if (!match) return null;
+  const rest = text.slice(match.index + match[0].length), next = rest.search(/Panel \d+ \(|\n\s*\n/);
+  return letteringElements(next >= 0 ? rest.slice(0, next) : rest);
+}
+
 export function pagePromptFindings(prompt, order) {
   if (order?.kind !== 'page') return [];
   const finding = (code, message) => ({ image_id: prompt.image_id, scene_id: prompt.scene_id, severity: 'blocker', production_blocking: true, code, message, resolved: false });
@@ -67,7 +81,7 @@ export function pagePromptFindings(prompt, order) {
     const slots = PAGE_TEMPLATES[order.page_template].map(zone => zone.slot);
     positions.forEach((start, i) => {
       const section = text.slice(start, i + 1 < positions.length ? positions[i + 1] : text.length);
-      const elements = [...section.matchAll(/(?:reads|reading|read) exactly\s+(["'\u201c])(.*?)\1(?=[\s.,;:]|$)((?:,?\s*(?:and\s+)?(["'\u201c])[^"'\u201d]*?\4(?=[\s.,;:]|$))*)/g)].flatMap(match => [match[2], ...(match[3] ? [...match[3].matchAll(/(["'\u201c])(.*?)\1(?=[\s.,;:]|$)/g)].map(row => row[2]) : [])]);
+      const elements = letteringElements(section);
       const large = PAGE_LETTERING_POLICY.large_slots.includes(slots[i]);
       const long = elements.filter(value => value.split(/\s+/).filter(Boolean).length > PAGE_LETTERING_POLICY.max_words || value.length > PAGE_LETTERING_POLICY.max_chars);
       if ((!large && elements.length > 1) || (!large && long.length)) findings.push(finding('page_lettering_policy', `${headings[i]} in dense page ${order.asset_id} carries ${elements.length} text element(s)${long.length ? ` including over-long ${JSON.stringify(long)}` : ''}; small zones allow one element of at most ${PAGE_LETTERING_POLICY.max_words} words and ${PAGE_LETTERING_POLICY.max_chars} characters. Put cards in a large zone.`));

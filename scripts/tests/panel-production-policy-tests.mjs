@@ -69,7 +69,7 @@ try {
   await test('rejected CLI routing writes no episode state or execution events', async () => {
     const before = await tree(scratch);
     for (const args of [
-      ['visual', 'motion-plan', '--episode-dir', episodeDir, '--workflow-bypass', 'true'],
+      ['visual', 'motion-plan', '--episode-dir', episodeDir, '--workflow-bypass', 'true', '--bypass-reason-code', 'test_fixture'],
       ['run', 'preflight', '--channel', 'fixture', '--series', 'fixture', '--week', 'fixture', '--episode', 'ep_02', '--content-profile', 'manhwa_recap_v1', '--media-workflow', 'generated_visuals_v1', '--render-profile', 'panel_composition_v1', '--fps', '60'],
     ]) {
       await assert.rejects(exec(process.execPath, ['bin/goldflow.mjs', ...args], { cwd: root, env: { PATH: process.env.PATH, ANIFACTORY_DATA_ROOT: scratch }, timeout: 20000 }), error => error.code === 1 && /[Pp]anel|panel_composition_v1/.test(error.stderr));

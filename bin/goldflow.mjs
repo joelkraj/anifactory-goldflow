@@ -47,6 +47,8 @@ import { pronunciationGuardAdmission } from "../scripts/lib/narration-pronunciat
 import { contractionGuardAdmission } from "../scripts/lib/narration-contraction-repair.mjs";
 import { appendOnlyTailGuardAdmission } from "../scripts/lib/narration-append-only-tail.mjs";
 import { guardFlagsForEpisodeBudget } from "../scripts/lib/episode-budget.mjs";
+import { BYPASS_REASON_FLAG, workflowBypassDecision, workflowBypassRecord } from "../scripts/lib/workflow-bypass.mjs";
+import { decisionShapeAdmission } from "../scripts/lib/workflow-guard.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
@@ -97,7 +99,16 @@ function statusArgsFor(parsedFlags) {
 
 function enforceWorkflowGuard(commandName, subcommandName, scriptArgs, episodeDir) {
   let parsedFlags = parseFlags(scriptArgs);
-  if (isTrue(parsedFlags["workflow-bypass"]) || isTrue(process.env.GOLDFLOW_WORKFLOW_BYPASS)) return;
+  // A bypass is an operator exception with a structured reason code (R07).
+  // There is no environment bypass path.
+  const bypass = workflowBypassDecision(parsedFlags);
+  if (bypass.requested || Object.hasOwn(parsedFlags, BYPASS_REASON_FLAG)) {
+    if (!bypass.allowed) {
+      console.error(`Workflow bypass refused: ${bypass.reason}`);
+      process.exit(1);
+    }
+    return;
+  }
   const expectedStage = commandStage(commandName, subcommandName, parsedFlags, episodeDir);
   if (!expectedStage) return;
   const statusArgs = statusArgsFor(parsedFlags);
@@ -125,6 +136,18 @@ function enforceWorkflowGuard(commandName, subcommandName, scriptArgs, episodeDi
   // A budget-locked identity admits the single episode_budget token wherever
   // status names an exact per-dispatch token; the episode cap is enforced at submission.
   parsedFlags = guardFlagsForEpisodeBudget(result, parsedFlags);
+  // Decision-bearing shapes the ledger asks for (image QA cut decisions, final
+  // QA approval with reviewed codes, automated_asr_v1 narration repairs, the
+  // operator-only relock) are admitted on their recorded state, never bypassed.
+  const decisionShape = decisionShapeAdmission(result, commandName, subcommandName, parsedFlags);
+  if (decisionShape.applicable) {
+    if (!decisionShape.allowed) {
+      console.error(`Workflow guard blocked ${decisionShape.admission}: ${decisionShape.reason}`);
+      if (result.next_command_shape) console.error(`Next valid command shape: ${result.next_command_shape}`);
+      process.exit(1);
+    }
+    return;
+  }
   const currentStage = result.current_stage;
   const allowedStages = Array.isArray(result.allowed_command_stages)
     ? result.allowed_command_stages
@@ -362,7 +385,7 @@ function enforceWorkflowGuard(commandName, subcommandName, scriptArgs, episodeDi
   console.error(`Workflow guard blocked: ${commandName} ${subcommandName}`);
   console.error(`Current stage is ${currentStage}; this command belongs to ${expectedStage}.`);
   if (result.next_command_shape) console.error(`Next valid command shape: ${result.next_command_shape}`);
-  console.error("Use --workflow-bypass true only for an explicit operator-approved diagnostic or recovery action.");
+  console.error(`Use --workflow-bypass true --${BYPASS_REASON_FLAG} <code> only for an explicit operator-approved diagnostic or recovery action.`);
   process.exit(1);
 }
 
@@ -419,6 +442,10 @@ function run(script, scriptArgs = []) {
     // The flag belongs to this guard; child scripts never see it.
     scriptArgs = scriptArgs.filter((arg, index, all) => arg !== "--allow-code-drift" && all[index - 1] !== "--allow-code-drift");
   }
+  if (Object.hasOwn(parsedFlags, BYPASS_REASON_FLAG)) {
+    // The reason code is recorded on the execution event; children never see it.
+    scriptArgs = scriptArgs.filter((arg, index, all) => arg !== `--${BYPASS_REASON_FLAG}` && all[index - 1] !== `--${BYPASS_REASON_FLAG}`);
+  }
   const plannerRerunDecision = command === "visual" && ["repair-beats", "repair-beat-density", "repair-prompt", "repair-prompt-multiplier", "review-prop-repair", "repair-screen-identity", "repair-identity-binding", "repair-reviewed-ref-scope"].includes(subcommand)
     ? { allowed: true }
     : plannerRerunDecisionForEpisode({ command, subcommand, stage, flags: parsedFlags, episodeDir });
@@ -458,6 +485,7 @@ function run(script, scriptArgs = []) {
       env: process.env,
       repoRoot,
       codeDrift,
+      workflowBypass: workflowBypassRecord(parsedFlags),
     }) : null;
     if (execution && codeDrift?.applicable && codeDrift.ancestor === false) {
       await appendCodeDriftEvent({ episodeDir, identity: readEpisodeRoutingIdentity(episodeDir), decision: codeDrift, execution, repoRoot });
@@ -510,7 +538,7 @@ function help() {
   console.log(`AniFactory Goldflow
 
 Profile-routed production with identity-locked media workflows.
-Production commands are guarded by the run-status ledger. Use --workflow-bypass true only for explicit diagnostic/recovery work.
+Production commands are guarded by the run-status ledger. Use --workflow-bypass true --bypass-reason-code <code> only for explicit diagnostic/recovery work.
 Episode commands require an explicit target: --episode-dir where supported, otherwise complete --channel, --week, and --episode flags.
 New preflights require --content-profile <manhwa_recap_v1|asset_afterlife_v1|profile.json> --media-workflow generated_visuals_v1.
 Content profile selects editorial rules; media workflow selects the stage chain. Existing identities retain their legacy route.

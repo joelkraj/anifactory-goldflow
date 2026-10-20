@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import path from "node:path";
+import { currentIdentityRevisionSync, eventsSinceIdentityRevision } from "./run-identity-revisions.mjs";
+import { PIPELINE_STAGE_REGISTRY } from "./pipeline-stage-registry.mjs";
 
 const ONE_SHOT_CREATIVE_COMMANDS = Object.freeze(new Map([
   ["voice plan", Object.freeze({
@@ -325,7 +327,11 @@ export function creativeStageRerunDecisionForEpisode({
       required_recovery: "Pass --episode-dir <absolute-episode-dir> or the complete --channel/--week/--episode identity so Goldflow can inspect durable attempt history before creative work.",
     };
   }
-  const priorEvents = readEvents(episodeDir);
+  // After an operator relock (append-only identity revision), stages at or after
+  // its invalidation boundary start fresh: a post-relock voice plan or narration
+  // is a first attempt, not a full-stage rerun that would need a bypass.
+  const priorEvents = eventsSinceIdentityRevision(readEvents(episodeDir), currentIdentityRevisionSync(episodeDir),
+    { stage, stageOrder: PIPELINE_STAGE_REGISTRY.map((row) => row.id) });
   return creativeStageRerunDecision({
     command,
     subcommand,

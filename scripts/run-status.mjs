@@ -119,6 +119,7 @@ import {
   youtubeUploadReceiptComplete,
 } from "./lib/youtube-publish-contract.mjs";
 import { autopilotEnabled } from "./lib/autopilot-policy.mjs";
+import { recoveryStageFor } from "./lib/workflow-command-builder.mjs";
 import { autopilotPublishStatus, finalWatchStatus } from "./lib/autopilot-publish.mjs";
 import {
   GENERATED_MOTION_PROVIDER_LTX,
@@ -6916,10 +6917,17 @@ async function main() {
     identity, stage_ledger: rows, visual_prompt_recovery_scope: visualPromptRepairScope };
   const promptRecoveryAllowed = visualPromptRecoveryAdmission(promptRecoveryStatus,
     { "cut-ids": visualPromptRepairScope?.failed_cut_ids?.join(",") ?? "" }).allowed;
+  // The next row's shape is parsed by the shared command builder, never by
+  // regex: a concrete recovery command for the row's own stage admits that stage.
+  const nextRecovery = recoveryStageFor(next, identity, { allowStages: ["reference_generation", "image_generation", "image_output_qa", next?.stage].filter(Boolean) });
+  const nextRecoveryIs = (command, subcommand, ...kinds) => Boolean(nextRecovery)
+    && nextRecovery.parsed.command === command && nextRecovery.parsed.subcommand === subcommand
+    && kinds.every((kind) => nextRecovery.recovery.kinds.includes(kind));
+  const nextRecoveryIds = (prefix) => Boolean(nextRecovery) && nextRecovery.recovery.ids.some((id) => id.startsWith(`${prefix}=`));
   const repairCommandStages = semanticRepairUnitIds.length
     ? ["semantic_scene_plan"]
     : next?.stage === "voice_plan" && next?.state === "blocked"
-      && /voice plan\b.*--performance-packet-ids\s+\S+/.test(String(next.next_command_shape ?? ""))
+      && nextRecoveryIs("voice", "plan", "performance-packet")
     ? ["voice_plan"]
     : next?.stage === "visual_beat_plan" && next?.state === "blocked" && visualBeatRepairScope
     ? ["visual_beat_plan"]
@@ -6931,16 +6939,19 @@ async function main() {
     ? ["transition_edit_plan"]
     : next?.stage === "qwen_tts_stitch"
       && next?.state === "blocked"
-      && /tts (?:approve-listen|narrate|finalize-provider|repair-boundary|review-contraction|repair-contraction)\b/.test(String(next.next_command_shape ?? ""))
+      && nextRecovery && nextRecovery.parsed.command === "tts"
+      && ["approve-listen", "narrate", "finalize-provider", "repair-boundary", "review-contraction", "repair-contraction"].includes(nextRecovery.parsed.subcommand)
       ? ["qwen_tts_stitch"]
     : ["reference_generation", "image_generation"].includes(next?.stage)
       && next?.state === "blocked"
       && !(next?.stage === "reference_generation" && referenceGeneration.reference_image_qa_recovery_scope)
-      && /imagegen browser-pool\b.*--(?:reference|image)-ids\s+\S+.*--repair-reason\b/.test(String(next.next_command_shape ?? ""))
+      && nextRecoveryIs("imagegen", "browser-pool", "repair-reason")
+      && (nextRecoveryIds("reference-ids") || nextRecoveryIds("image-ids"))
       ? [next.stage]
     : next?.stage === "image_output_qa"
       && next?.state === "blocked"
-      && /imagegen browser-pool\b.*--image-ids\s+\S+.*--qa-recovery\s+true\b.*--repair-reason\b/.test(String(next.next_command_shape ?? ""))
+      && nextRecoveryIs("imagegen", "browser-pool", "qa-recovery", "repair-reason")
+      && nextRecoveryIds("image-ids")
       ? ["image_output_qa"]
       : [];
   const result = {

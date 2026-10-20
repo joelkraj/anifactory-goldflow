@@ -162,14 +162,14 @@ try {
     ["conflicting-content-profile", { ...base, content_profile: "asset_afterlife_v1" }],
   ];
   for (const [label, identity] of invalidIdentities) {
-    await test(`${label}: status and global CLI fail closed before ledger writes, including both bypass mechanisms`, async () => {
+    await test(`${label}: status and global CLI fail closed before ledger writes, including an explicit reason-coded bypass`, async () => {
       const episodeDir = await writeIdentity(label, identity);
       await unchangedFailure(["scripts/run-status.mjs", "--episode-dir", episodeDir]);
       await unchangedFailure(["bin/goldflow.mjs", "run", "status", "--episode-dir", episodeDir]);
       // Ingest is local-only even if a future regression defeats the route gate.
       const command = ["bin/goldflow.mjs", "ingest", "source", "--episode-dir", episodeDir, "--source", sourcePath];
-      await unchangedFailure([...command, "--workflow-bypass", "true"]);
-      await unchangedFailure(command, { commandEnv: { ...env, GOLDFLOW_WORKFLOW_BYPASS: "true" } });
+      await unchangedFailure([...command, "--workflow-bypass", "true", "--bypass-reason-code", "test_fixture"]);
+      await unchangedFailure([...command, "--workflow-bypass", "true", "--bypass-reason-code", "test_fixture"]);
     });
   }
   for (const [label, raw] of [["corrupt-json", "{ broken JSON"], ["null-json", "null"], ["array-json", "[]"]]) {
@@ -177,7 +177,7 @@ try {
       const episodeDir = await writeIdentity(label, raw, true);
       await unchangedFailure(["scripts/run-status.mjs", "--episode-dir", episodeDir]);
       await unchangedFailure(["bin/goldflow.mjs", "ingest", "source", "--episode-dir", episodeDir,
-        "--source", sourcePath, "--workflow-bypass", "true"], { commandEnv: { ...env, GOLDFLOW_WORKFLOW_BYPASS: "true" } });
+        "--source", sourcePath, "--workflow-bypass", "true", "--bypass-reason-code", "test_fixture"]);
     });
   }
 
@@ -191,8 +191,8 @@ try {
     for (const partial of [[], ["--channel", "53rebirth"], ["--week", "current"], ["--episode", "ep_01"],
       ["--channel", "53rebirth", "--week", "current"]]) {
       const command = ["bin/goldflow.mjs", "script", "approve", ...partial];
-      await unchangedFailure([...command, "--workflow-bypass", "true"], {}, /requires explicit --episode-dir|implicit default episode/i);
-      await unchangedFailure(command, { commandEnv: { ...env, GOLDFLOW_WORKFLOW_BYPASS: "true" } },
+      await unchangedFailure([...command, "--workflow-bypass", "true", "--bypass-reason-code", "test_fixture"], {}, /requires explicit --episode-dir|implicit default episode/i);
+      await unchangedFailure([...command, "--workflow-bypass", "true", "--bypass-reason-code", "test_fixture"], {},
         /requires explicit --episode-dir|implicit default episode/i);
     }
   });
@@ -223,15 +223,15 @@ try {
     const tuple = ["--channel", "routing_fixture", "--week", "tuple-forbidden", "--episode", "ep_01"];
     for (const flags of [["--episode-dir", safeDir], ["--episode-dir", safeDir, ...tuple]]) {
       await unchangedFailure(["bin/goldflow.mjs", "ingest", "source", ...flags, "--source", sourcePath,
-        "--workflow-bypass", "true"], { commandEnv: { ...env, GOLDFLOW_WORKFLOW_BYPASS: "true" } }, /does not support --episode-dir/);
+        "--workflow-bypass", "true", "--bypass-reason-code", "test_fixture"], {}, /does not support --episode-dir/);
     }
     await unchangedFailure(["bin/goldflow.mjs", "run", "preflight", "--episode-dir", path.join(scratch, "preflight-unrelated"),
       "--channel", "routing_fixture", "--series", "routing-fixture", "--week", "must-not-preflight", "--episode", "ep_01",
       "--content-profile", "manhwa_recap_v1", "--media-workflow", "generated_visuals_v1", "--source", sourcePath,
       "--title", "Must not create episode", "--run-intent", "proof", "--proof-scope", "0-4",
-      "--allow-dirty-worktree", "true", "--dirty-reason", "routing regression", "--workflow-bypass", "true"], {}, /does not support --episode-dir/);
+      "--allow-dirty-worktree", "true", "--dirty-reason", "routing regression", "--workflow-bypass", "true", "--bypass-reason-code", "test_fixture"], {}, /does not support --episode-dir/);
     await unchangedFailure(["bin/goldflow.mjs", "run", "cleanup", "--episode-dir", safeDir,
-      "--episodeDir", forbiddenDir, "--workflow-bypass", "true"], {}, /ambiguous --episodeDir alias/);
+      "--episodeDir", forbiddenDir, "--workflow-bypass", "true", "--bypass-reason-code", "test_fixture"], {}, /ambiguous --episodeDir alias/);
   });
 
   await test("mixed repeated equals-form arguments use identical last-value precedence in guard and child", async () => {
@@ -243,7 +243,7 @@ try {
     assert.equal(JSON.parse(status.stdout).episode_dir, safeDir);
     assert.deepEqual(await treeSnapshot(scratch), before);
     await unchangedFailure(["bin/goldflow.mjs", "script", "approve", `--episode-dir=${safeDir}`,
-      "--episode-dir", forbiddenDir, "--workflow-bypass", "true"], {}, /reserved|unavailable/);
+      "--episode-dir", forbiddenDir, "--workflow-bypass", "true", "--bypass-reason-code", "test_fixture"], {}, /reserved|unavailable/);
   });
 
   await test("explicit flags cannot switch a historical or locked existing run's workflow/content profile", async () => {
@@ -251,7 +251,7 @@ try {
       const episodeDir = await writeIdentity("flag-switch", identity);
       for (const overrides of [["--content-profile", "asset_afterlife_v1"], ["--media-workflow", "source_footage_v1"]]) {
         await unchangedFailure(["bin/goldflow.mjs", "ingest", "source", "--episode-dir", episodeDir,
-          "--source", sourcePath, "--workflow-bypass", "true", ...overrides], {}, /identity.locked|cannot switch|unavailable/i);
+          "--source", sourcePath, "--workflow-bypass", "true", "--bypass-reason-code", "test_fixture", ...overrides], {}, /identity.locked|cannot switch|unavailable/i);
         await unchangedFailure(["scripts/run-status.mjs", "--episode-dir", episodeDir, ...overrides], {}, /identity.locked|cannot switch|unavailable/i);
       }
       const result = await run(["bin/goldflow.mjs", "run", "status", "--episode-dir", episodeDir,
@@ -342,8 +342,8 @@ try {
     for (const profileFlags of [[], ["--content-profile", "asset_afterlife_v1"]]) {
       await unchangedFailure(["bin/goldflow.mjs", "source", "manufacture", "prepare", "--episode-dir", episodeDir,
         ...profileFlags, "--development-dir", path.join(scratch, "must-not-author-legacy"),
-        "--brief", path.join(scratch, "deliberately-missing-brief.json"), "--workflow-bypass", "true"],
-      { commandEnv: { ...env, GOLDFLOW_WORKFLOW_BYPASS: "true" } }, /manhwa_recap_v1 only|own source.development guidance/i);
+        "--brief", path.join(scratch, "deliberately-missing-brief.json"), "--workflow-bypass", "true", "--bypass-reason-code", "test_fixture"],
+      {}, /manhwa_recap_v1 only|own source.development guidance/i);
     }
   });
 
@@ -372,7 +372,7 @@ try {
       ["--content-profile", "nonexistent_fixture_profile_v1", "--media-workflow", "generated_visuals_v1"],
       ["--content-profile", "manhwa_recap_v1", "--media-workflow", "unknown_fixture_v1"]]) {
       await unchangedFailure(["scripts/run-preflight.mjs", ...common, ...selection]);
-      await unchangedFailure(["bin/goldflow.mjs", "run", "preflight", ...common, ...selection, "--workflow-bypass", "true"]);
+      await unchangedFailure(["bin/goldflow.mjs", "run", "preflight", ...common, ...selection, "--workflow-bypass", "true", "--bypass-reason-code", "test_fixture"]);
     }
   });
 
@@ -385,8 +385,8 @@ try {
       "--title", "Must not replace the existing fixture", "--image-provider", "modelslab", "--run-intent", "proof", "--proof-scope", "0-4",
       "--allow-dirty-worktree", "true", "--dirty-reason", "routing fixture"];
     await unchangedFailure(["scripts/run-preflight.mjs", ...common], {}, /already exists|cannot overwrite|immutable/i);
-    await unchangedFailure(["bin/goldflow.mjs", "run", "preflight", ...common, "--workflow-bypass", "true"],
-      { commandEnv: { ...env, GOLDFLOW_WORKFLOW_BYPASS: "true" } }, /already exists|cannot overwrite|immutable/i);
+    await unchangedFailure(["bin/goldflow.mjs", "run", "preflight", ...common, "--workflow-bypass", "true", "--bypass-reason-code", "test_fixture"],
+      {}, /already exists|cannot overwrite|immutable/i);
   });
 
   await test("Asset Afterlife cannot enter manhwa source manufacture, including workflow bypass", async () => {
@@ -396,8 +396,8 @@ try {
     // The missing brief is a second safety barrier: no provider call is possible
     // even if the intended routing refusal regresses.
     await unchangedFailure(command, {}, /manhwa_recap_v1 only|own source.development guidance/i);
-    await unchangedFailure([...command, "--workflow-bypass", "true"],
-      { commandEnv: { ...env, GOLDFLOW_WORKFLOW_BYPASS: "true" } }, /manhwa_recap_v1 only|own source.development guidance/i);
+    await unchangedFailure([...command, "--workflow-bypass", "true", "--bypass-reason-code", "test_fixture"],
+      {}, /manhwa_recap_v1 only|own source.development guidance/i);
   });
 
   await test("standalone footage help/config remain outside production routing without reading real keys", async () => {

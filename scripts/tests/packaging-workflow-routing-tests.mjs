@@ -89,9 +89,9 @@ async function runPublishing(scratch, action, { rootCli = false } = {}) {
   try {
     const entry = rootCli ? ["bin/goldflow.mjs", "youtube", action] : ["scripts/youtube-publish.mjs", action];
     const result = await execFileAsync(process.execPath, [...entry,
-      "--episode-dir", scratch, "--approve", "true", "--approved-by", "fixture-reviewer", "--workflow-bypass", "true"], {
+      "--episode-dir", scratch, "--approve", "true", "--approved-by", "fixture-reviewer", "--workflow-bypass", "true", "--bypass-reason-code", "test_fixture"], {
       cwd: repoRoot, timeout: 15000, maxBuffer: 1024 * 1024,
-      env: { PATH: process.env.PATH, TMPDIR: scratch, ANIFACTORY_DATA_ROOT: scratch, GOLDFLOW_WORKFLOW_BYPASS: "true" },
+      env: { PATH: process.env.PATH, TMPDIR: scratch, ANIFACTORY_DATA_ROOT: scratch },
     });
     return { code: 0, ...result };
   } catch (error) {

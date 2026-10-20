@@ -8,6 +8,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import * as narrationPolicy from "./lib/narration-tts-policy.mjs";
 import { PIPELINE_STAGE_REGISTRY_VERSION } from "./lib/pipeline-stage-registry.mjs";
+import { appendIdentityRevision, identityRevisionReasonCodeFor } from "./lib/run-identity-revisions.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const QWEN_LIAM_PROFILE_ID = "qwen3_1_7b_base_joel_sentence_v1";
@@ -777,8 +778,14 @@ async function main() {
   if (!isTrue(flags["operator-approved"])) {
     throw new Error("--operator-approved true is required for a production narrator identity relock.");
   }
-  if (!isTrue(flags["workflow-bypass"])) {
-    throw new Error("--workflow-bypass true is required because this recovery intentionally returns an established run to voice_plan.");
+  // Operator-only: the workflow guard admits this shape on --approved-by alone
+  // (R07); no bypass is needed or honoured here. Automated reviewers never relock.
+  const approvedBy = cleanValue(flags["approved-by"]);
+  if (!approvedBy) {
+    throw new Error("--approved-by <operator> is required: run relock-tts intentionally returns an established run to voice_plan and is never dispatched automatically.");
+  }
+  if (/^automated:/.test(approvedBy)) {
+    throw new Error("run relock-tts cannot be approved by an automated reviewer.");
   }
   if (!reason) throw new Error("--reason is required for the append-only recovery record.");
   if (![QWEN_LIAM_PROFILE_ID, DEEPMALE_PROFILE_ID].includes(requestedProfile)) {
@@ -955,7 +962,8 @@ async function main() {
     episode: identity.episode,
     recorded_at: timestamp,
     operator_request: reason,
-    workflow_bypass_authorized: true,
+    workflow_bypass_authorized: false,
+    approved_by: approvedBy,
     recovery_kind: recoveryKind,
     operator_approved_batch4_promotion:
       migrated.narration_identity_relock.synthesis_contract_changed,
@@ -1043,7 +1051,21 @@ async function main() {
   };
 
   await atomicWrite(identityPath, migratedBytes);
-  await atomicWriteJson(triagePath, triage);
+  // Append-only identity revision record beside run_identity.json (R07): the
+  // durable account of {previous sha, new sha, reason code}, independent of the
+  // hashes inside the rewritten identity.
+  const revision = await appendIdentityRevision(episodeDir, {
+    previousSha256: beforeHash,
+    newSha256: afterHash,
+    reasonCode: identityRevisionReasonCodeFor(migrated.narration_identity_relock.recovery_scope),
+    approvedBy,
+    command: "run relock-tts",
+    invalidationBoundary: "voice_plan",
+    archiveDir,
+    gitCommit: git.commit,
+    recordedAt: timestamp,
+  });
+  await atomicWriteJson(triagePath, { ...triage, identity_revision: revision });
   const recoveryReportPath = path.join(archiveDir, "tts_identity_relock_report.json");
   await atomicWriteJson(recoveryReportPath, recoveryReport);
 

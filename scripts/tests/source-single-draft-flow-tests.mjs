@@ -367,6 +367,16 @@ function fullRunResponder(rounds) {
   assert.ok(calls[0].prompt.includes("No brief was supplied"));
   assert.equal(await readFile(broughtPath, "utf8"), DRAFT, "the brought file is never modified");
   assert.equal(await readFile(report.final_script_path, "utf8"), DRAFT, "verify keeps the original when the revision is not better");
+  // A brought script gets a hand-off too: no brief, so no title; preflight needs --title.
+  const broughtHandoff = JSON.parse(await readFile(path.join(directory, "revision_loop", "source_handoff.json"), "utf8"));
+  assert.equal(broughtHandoff.schema, "goldflow_source_handoff_v1");
+  assert.equal(broughtHandoff.status, "ready_for_preflight");
+  assert.equal(broughtHandoff.title, null);
+  assert.equal(broughtHandoff.brief_sha256, null);
+  assert.equal(broughtHandoff.sha256, sha(DRAFT));
+  assert.equal(broughtHandoff.final_script_path, report.final_script_path);
+  assert.match(broughtHandoff.model_lock_sha256, /^[a-f0-9]{64}$/);
+  assert.equal(broughtHandoff.incumbent_source, "operator_script");
   await writeFile(path.join(broughtDirectory, "other.txt"), REVISION_2);
   await assert.rejects(manufacturer.reviseScript(directory, { script: path.join(broughtDirectory, "other.txt") }), /differs from the requested script/);
 }
@@ -392,6 +402,34 @@ function fullRunResponder(rounds) {
   assert.equal(result.title, topTitle);
   assert.equal(result.final_script_sha256, sha(await readFile(result.final_script_path, "utf8")));
   assert.match(result.next_action, /run preflight/);
+  assert.match(result.next_action, /--source-handoff /);
+  assert.match(result.next_action, /--channel-preset /);
+  assert.match(result.next_action, /--content-profile manhwa_recap_v1 --media-workflow generated_visuals_v1 --run-intent production/);
+  // The hand-off binds script, brief, model lock and evidence by hash and names no profile/workflow/intent.
+  const handoff = JSON.parse(await readFile(result.source_handoff_path, "utf8"));
+  assert.equal(handoff.schema, "goldflow_source_handoff_v1");
+  assert.equal(handoff.status, "ready_for_preflight");
+  assert.equal(handoff.title, topTitle);
+  assert.equal(handoff.final_script_path, result.final_script_path);
+  assert.equal(handoff.sha256, result.final_script_sha256);
+  const brief = JSON.parse(await readFile(path.join(directory, "manufacturing_brief.json"), "utf8"));
+  assert.equal(handoff.brief_sha256, sha(await readFile(path.join(directory, "manufacturing_brief.json"))));
+  assert.equal(handoff.evidence_sha256, brief.selection_basis.evidence_sha256);
+  assert.equal(handoff.evidence_sha256, sha(evidenceText));
+  assert.equal(handoff.model_lock_sha256, sha(await readFile(path.join(directory, "manufacturing_model_lock.json"))));
+  assert.deepEqual(handoff.never_supplies, ["content-profile", "media-workflow", "run-intent"]);
+  assert.equal(result.source_handoff_sha256, sha(await readFile(result.source_handoff_path)));
+  // The rank-one brief notice is a non-gate file written before the one draft call.
+  const notice = JSON.parse(await readFile(path.join(directory, "rank_one_brief_notice.json"), "utf8"));
+  assert.equal(notice.schema, "goldflow_manhwa_rank_one_brief_notice_v1");
+  assert.equal(notice.gate, false);
+  assert.equal(notice.title, topTitle);
+  assert.equal(notice.brief_sha256, handoff.brief_sha256);
+  // Re-running the loop (all rounds cached) keeps the hand-off byte-for-byte.
+  const handoffBytes = await readFile(result.source_handoff_path);
+  const again = await manufacturer.reviseScript(directory, {});
+  assert.equal(again.handoff.created, false);
+  assert.deepEqual(await readFile(result.source_handoff_path), handoffBytes);
   const timing = JSON.parse(await readFile(result.timing_report_path, "utf8"));
   assert.equal(timing.writer_policy, "single_6_sol_pro_v1");
   assert.equal(timing.stages.revision.call_count, 3);

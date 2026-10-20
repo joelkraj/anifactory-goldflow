@@ -242,3 +242,64 @@ export function validateManufacturingSelection(document, { portfolio = null } = 
   if (!text(document?.decision_rationale)) blockers.push("manufacturing_selection_rationale_missing");
   return { done: blockers.length === 0, blockers };
 }
+
+// The source → preflight hand-off. Written by `source manufacture run` and `revise` beside the
+// retained script; consumed by `run preflight --source-handoff`. Code never edits the title.
+export const SOURCE_HANDOFF_SCHEMA = "goldflow_source_handoff_v1";
+export const SOURCE_HANDOFF_STATUS = "ready_for_preflight";
+
+function isSha256Text(value) {
+  return /^[a-f0-9]{64}$/.test(String(value ?? ""));
+}
+
+export function buildSourceHandoff({
+  title = null,
+  finalScriptPath,
+  sha256,
+  briefSha256 = null,
+  modelLockSha256 = null,
+  evidenceSha256 = null,
+  channel = null,
+  developmentDir = null,
+  revisionReportPath = null,
+  revisionReportSha256 = null,
+  incumbentSource = null,
+  wordCount = null,
+  writtenAt = new Date().toISOString(),
+} = {}) {
+  return {
+    schema: SOURCE_HANDOFF_SCHEMA,
+    status: SOURCE_HANDOFF_STATUS,
+    title: title == null ? null : String(title),
+    final_script_path: finalScriptPath,
+    sha256,
+    brief_sha256: briefSha256,
+    model_lock_sha256: modelLockSha256,
+    evidence_sha256: evidenceSha256,
+    channel,
+    development_dir: developmentDir,
+    incumbent_source: incumbentSource,
+    word_count: wordCount,
+    revision_report_path: revisionReportPath,
+    revision_report_sha256: revisionReportSha256,
+    supplies_preflight_flags: ["title", "source"],
+    never_supplies: ["content-profile", "media-workflow", "run-intent"],
+    written_at: writtenAt,
+  };
+}
+
+export function validateSourceHandoff(document) {
+  const blockers = [];
+  if (document?.schema !== SOURCE_HANDOFF_SCHEMA) blockers.push("source_handoff_schema_invalid");
+  if (document?.status !== SOURCE_HANDOFF_STATUS) blockers.push("source_handoff_status_invalid");
+  if (typeof document?.final_script_path !== "string" || !document.final_script_path.trim()) blockers.push("source_handoff_final_script_path_missing");
+  if (!isSha256Text(document?.sha256)) blockers.push("source_handoff_sha256_invalid");
+  if (document?.title != null && (typeof document.title !== "string" || !document.title.trim())) blockers.push("source_handoff_title_invalid");
+  for (const field of ["brief_sha256", "model_lock_sha256", "evidence_sha256"]) {
+    if (document?.[field] != null && !isSha256Text(document[field])) blockers.push(`source_handoff_${field}_invalid`);
+  }
+  for (const field of ["content_profile", "media_workflow", "run_intent", "content-profile", "media-workflow", "run-intent"]) {
+    if (document && Object.hasOwn(document, field)) blockers.push(`source_handoff_carries_${field.replace(/-/g, "_")}`);
+  }
+  return { done: blockers.length === 0, status: blockers.length ? "blocked" : "passed", blockers };
+}

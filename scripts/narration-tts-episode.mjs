@@ -49,7 +49,15 @@ import {
 } from "./lib/narration-performance-contract.mjs";
 import {
   narrationQualityContractForIdentity,
+  narrationSpokenFormEquivalencesForContract,
+  narrationUsesAutomatedAsrAcceptance,
 } from "./lib/narration-quality-contract.mjs";
+import {
+  AutomatedRetakeEvidenceError,
+  authoredBoundaryFragments,
+  buildAutomatedRetakeEvidence,
+  writeAutomatedRetakeEvidence,
+} from "./lib/narration-automated-retake-evidence.mjs";
 import {
   adjudicateNarrationDeliveryConsensus,
   exactNarrationListenReviewPacket,
@@ -1095,7 +1103,22 @@ function sha256Text(value) {
   return createHash("sha256").update(String(value ?? "")).digest("hex");
 }
 
+// In-process memo keyed by inode, size and mtime: the automated retake loop
+// re-enters main() in the same process and must not re-hash ~215 MB of
+// preserved unit WAVs per pass (R05(2)). Any byte change alters size or mtime.
+const SHA256_FILE_MEMO = new Map();
+
 async function sha256File(filePath) {
+  const stat = await fs.stat(filePath);
+  const memoKey = `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}`;
+  const memo = SHA256_FILE_MEMO.get(filePath);
+  if (memo && memo.key === memoKey) return memo.digest;
+  const digest = await sha256FileUncached(filePath);
+  SHA256_FILE_MEMO.set(filePath, { key: memoKey, digest });
+  return digest;
+}
+
+async function sha256FileUncached(filePath) {
   const digest = createHash("sha256");
   const handle = await fs.open(filePath, "r");
   try {
@@ -3199,8 +3222,242 @@ export async function adoptInterruptedQwenFirstTakes(flags = {}) {
     never_submitted_unit_count: original.never_submitted_unit_ids.length };
 }
 
-async function main() {
-  const flags = parseFlags(process.argv.slice(2));
+const AUTOMATED_RETAKE_LOOP_SCHEMA = "goldflow_narration_automated_retake_loop_receipt_v1";
+const AUTOMATED_RETAKE_LOOP_POLICY =
+  "one_exact_unit_retake_then_one_sentence_boundary_repair_then_finalize_then_stop";
+const UNIT_DELIVERY_BLOCK = /^Provider-neutral delivery QA blocked \d+ unit\(s\)\.$/u;
+const FULL_STREAM_BLOCK = /^Canonical full-stream delivery QA blocked: /u;
+
+function isAutomatedRetakeLoopBlock(error) {
+  const message = String(error?.message ?? "");
+  return UNIT_DELIVERY_BLOCK.test(message) || FULL_STREAM_BLOCK.test(message);
+}
+
+async function writeAutomatedRetakeLoopReceipt(episodeDir, invocationId, phase, body) {
+  const dir = path.join(episodeDir, "reports", "narration_automated_retake_loop");
+  await fs.mkdir(dir, { recursive: true });
+  const receiptPath = path.join(
+    dir,
+    `${new Date().toISOString().replace(/[:.]/g, "-")}-${invocationId}-${phase}.json`,
+  );
+  const receipt = {
+    schema: AUTOMATED_RETAKE_LOOP_SCHEMA,
+    policy: AUTOMATED_RETAKE_LOOP_POLICY,
+    phase,
+    invocation_id: invocationId,
+    recorded_at: new Date().toISOString(),
+    human_listening_performed: false,
+    authorized_by: "automated:delivery_qa_v1",
+    ...body,
+  };
+  await fs.writeFile(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`, { flag: "wx" });
+  return { path: receiptPath, sha256: await sha256File(receiptPath), receipt };
+}
+
+function automatedRetakeStop(code, message, detail = {}) {
+  const error = new Error(`Automated narration retake loop stopped (${code}): ${message}`);
+  error.code = code;
+  error.structured_blocker = { code, ...detail };
+  return error;
+}
+
+// Authors the exact-boundary repair spec from the current blocked QA rows:
+// every still-blocked unit (after its one retake) and every unresolved
+// full-stream blocker gets its exact text split at an authored sentence
+// boundary. No text is rewritten; fragments rejoin to the spoken text.
+async function authorAutomatedBoundarySpec({
+  episodeDir, episode, plan, report, reportPath, scriptHash, planSha256, planFileSha256,
+}) {
+  const deliveryPath = path.join(episodeDir, `narration_unit_delivery_qa_${episode}.json`);
+  const fullStreamPath = path.join(episodeDir, `narration_full_stream_qa_${episode}.json`);
+  const manifestPath = path.resolve(report.provider_output_manifest_path
+    ?? path.join(episodeDir, `narration_provider_output_manifest_${episode}.json`));
+  const [delivery, fullStreamCandidate] = await Promise.all([
+    readJson(deliveryPath, null),
+    readJson(fullStreamPath, null),
+  ]);
+  const unitById = new Map((plan.units ?? []).map((unit) => [String(unit.unit_id), unit]));
+  const blockedDelivery = (delivery?.units ?? []).filter((row) => row.decision?.status === "blocked");
+  const fullStream = fullStreamCandidate?.status === "blocked"
+    && report.full_stream_qa_status === "blocked" ? fullStreamCandidate : null;
+  const { fullStreamReviewScope } = await import("./lib/narration-full-stream-manual-review.mjs");
+  const { fullStreamFindingTargetsLockedUnitForTests } = await import("./tts-exact-boundary-repair.mjs");
+  const fullStreamTargets = [];
+  if (fullStream) {
+    for (const item of fullStreamReviewScope(fullStream)) {
+      const unitId = (item.finding.unit_ids ?? []).find((candidate) => {
+        const unit = unitById.get(String(candidate));
+        return unit && fullStreamFindingTargetsLockedUnitForTests(item.finding, unit.spoken_text);
+      });
+      if (!unitId) {
+        throw automatedRetakeStop("boundary_target_unresolved",
+          `full-stream blocker ${item.finding.code} names no text-bearing unit`, { finding: item.finding });
+      }
+      fullStreamTargets.push({ finding_sha256: item.finding_sha256, unit_id: String(unitId), code: item.finding.code });
+    }
+  }
+  const unitIds = [...new Set([
+    ...blockedDelivery.map((row) => String(row.unit_id)),
+    ...fullStreamTargets.map((row) => row.unit_id),
+  ])];
+  if (!unitIds.length) {
+    throw automatedRetakeStop("boundary_scope_empty", "no blocked unit or full-stream target remains to repair");
+  }
+  const units = [];
+  for (const unitId of unitIds) {
+    const unit = unitById.get(unitId);
+    const codes = [
+      ...(blockedDelivery.find((row) => String(row.unit_id) === unitId)?.decision?.blockers ?? []).map((row) => row.code),
+      ...fullStreamTargets.filter((row) => row.unit_id === unitId).map((row) => row.code),
+    ];
+    const authored = unit ? authoredBoundaryFragments(unit.spoken_text, codes) : null;
+    if (!authored) {
+      throw automatedRetakeStop("boundary_fragments_unavailable",
+        `${unitId} has no authored sentence boundary to split at`, { unit_id: unitId, blocker_codes: codes });
+    }
+    units.push({
+      unit_id: unitId,
+      spoken_text_sha256: unit.spoken_text_sha256,
+      fragments: authored.fragments,
+      fragment_policy: authored.policy,
+      reviewed_blocker_codes: [...new Set(codes)].sort(),
+      review_reason: "Automated delivery QA: this unit still fails after its one exact retake "
+        + `(${[...new Set(codes)].sort().join(", ")}). Re-synthesize only this unit as sentence-bounded fragments `
+        + "of its exact spoken text; every other selected unit is preserved. No human listening claimed.",
+    });
+  }
+  const spec = {
+    schema: "goldflow_tts_exact_boundary_repair_spec_v1",
+    reviewer: "automated:delivery_qa_v1",
+    human_listening_performed: false,
+    reviewed_at: new Date().toISOString(),
+    authored_by: "narration_automated_retake_loop",
+    source_script_sha256: scriptHash,
+    narration_generation_plan_sha256: planSha256,
+    narration_generation_plan_file_sha256: planFileSha256,
+    prior_report_file_sha256: await sha256File(reportPath),
+    prior_delivery_file_sha256: await sha256File(deliveryPath),
+    prior_manifest_file_sha256: await sha256File(manifestPath),
+    ...(fullStream ? {
+      prior_full_stream_file_sha256: await sha256File(fullStreamPath),
+      full_stream_targets: fullStreamTargets.map(({ finding_sha256, unit_id }) => ({ finding_sha256, unit_id })),
+    } : {}),
+    units,
+  };
+  let specPath = null;
+  for (let revision = 1; revision < 1000 && !specPath; revision += 1) {
+    const candidate = path.join(episodeDir,
+      `narration_exact_boundary_repair_spec_${episode}_auto${revision === 1 ? "" : `_r${revision}`}.json`);
+    if (!(await fs.stat(candidate).catch(() => null))) specPath = candidate;
+  }
+  await fs.writeFile(specPath, `${JSON.stringify(spec, null, 2)}\n`, { flag: "wx" });
+  return { spec, specPath, specSha256: await sha256File(specPath) };
+}
+
+export const isAutomatedRetakeLoopBlockForTests = isAutomatedRetakeLoopBlock;
+export const runAutomatedNarrationRetakeLoopForTests = (options) => runAutomatedNarrationRetakeLoop(options);
+
+async function runAutomatedNarrationRetakeLoop({
+  error, flags, retakeDepth, episodeDir, episode, reportPath, planPath, identityPath,
+  scriptPath, scriptHash, planSha256, planFileSha256, identityFileSha256, identity, plan,
+  scriptBuffer, narrationQualityContract, invocationId, requestedRecoveryScope,
+  // Injection points for tests only: the in-process re-entry and the repair.
+  reenter = main,
+  repairBoundaryModule = () => import("./tts-exact-boundary-repair.mjs"),
+}) {
+  const reportBuffer = await fs.readFile(reportPath);
+  const report = JSON.parse(reportBuffer.toString("utf8"));
+  const reportSha256 = createHash("sha256").update(reportBuffer).digest("hex");
+  const blockMessage = String(error.message);
+  const unitBlock = UNIT_DELIVERY_BLOCK.test(blockMessage);
+  const blockedUnitIds = [...new Set((report.blockers ?? []).map((row) => String(row.unit_id ?? "")).filter(Boolean))];
+
+  // Phase 1: the one exact-unit retake, only from the initial pass.
+  if (unitBlock && retakeDepth === 0 && !requestedRecoveryScope) {
+    let evidence;
+    try {
+      evidence = buildAutomatedRetakeEvidence({
+        priorReport: report, priorReportSha256: reportSha256, priorReportPath: reportPath,
+        sourceScriptSha256: scriptHash, planSha256, planFileSha256,
+        qualityContractSha256: narrationQualityContract.contract_sha256,
+      });
+    } catch (evidenceError) {
+      if (!(evidenceError instanceof AutomatedRetakeEvidenceError)) throw evidenceError;
+      const receipt = await writeAutomatedRetakeLoopReceipt(episodeDir, invocationId, "retake-refused", {
+        blocked_report_sha256: reportSha256, blocked_unit_ids: blockedUnitIds,
+        stop: { code: evidenceError.code, message: evidenceError.message, detail: evidenceError.detail },
+      });
+      throw automatedRetakeStop(evidenceError.code, evidenceError.message,
+        { ...evidenceError.detail, receipt_path: receipt.path });
+    }
+    const written = await writeAutomatedRetakeEvidence(episodeDir, episode, evidence);
+    const receipt = await writeAutomatedRetakeLoopReceipt(episodeDir, invocationId, "retake", {
+      blocked_report_path: reportPath, blocked_report_sha256: reportSha256,
+      blocked_unit_ids: blockedUnitIds,
+      evidence_path: written.path, evidence_file_sha256: written.file_sha256,
+      evidence_sha256: evidence.evidence_sha256, evidence_revision: written.revision,
+      narration_quality_contract_sha256: narrationQualityContract.contract_sha256,
+      maximum_attempts_per_unit: 1,
+    });
+    console.error(`Automated retake loop: ${blockedUnitIds.length} blocked unit(s); evidence ${written.path}; receipt ${receipt.path}`);
+    await reenter({
+      ...flags,
+      "confirmed-retry-unit-ids": evidence.confirmed_units.map((row) => row.unit_id).join(","),
+      "confirmed-retry-evidence": written.path,
+    }, {
+      retakeDepth: 1,
+      preloaded: { identity, plan, scriptBuffer, identityPath, planPath, scriptPath, identityFileSha256, planFileSha256 },
+    });
+    return;
+  }
+
+  // Phase 2: one sentence-boundary repair authored from the same QA rows, then
+  // finalize (the repair runs finalize itself). Reached after the retake pass
+  // blocked again, or when the initial/retake pass blocked on the full stream.
+  if (retakeDepth <= 1) {
+    const { spec, specPath, specSha256 } = await authorAutomatedBoundarySpec({
+      episodeDir, episode, plan, report, reportPath, scriptHash, planSha256, planFileSha256,
+    });
+    const receipt = await writeAutomatedRetakeLoopReceipt(episodeDir, invocationId, "boundary-repair", {
+      blocked_report_path: reportPath, blocked_report_sha256: reportSha256,
+      block_message: blockMessage, blocked_unit_ids: blockedUnitIds,
+      spec_path: specPath, spec_file_sha256: specSha256,
+      repaired_unit_ids: spec.units.map((row) => row.unit_id),
+      full_stream_targets: spec.full_stream_targets ?? [],
+    });
+    console.error(`Automated retake loop: boundary repair of ${spec.units.length} unit(s); spec ${specPath}; receipt ${receipt.path}`);
+    const { main: repairBoundary } = await repairBoundaryModule();
+    try {
+      await repairBoundary(["--episode-dir", episodeDir, "--spec", specPath], {
+        inProcessAuthorization: {
+          schema: AUTOMATED_RETAKE_LOOP_SCHEMA,
+          receipt_path: receipt.path,
+          receipt_sha256: receipt.sha256,
+          blocked_report_sha256: reportSha256,
+        },
+      });
+    } catch (repairError) {
+      const stopReceipt = await writeAutomatedRetakeLoopReceipt(episodeDir, invocationId, "stop", {
+        blocked_report_sha256: reportSha256, spec_path: specPath, spec_file_sha256: specSha256,
+        stop: { code: "boundary_repair_still_blocked", message: String(repairError?.message ?? repairError) },
+        no_third_attempt: true, text_rewrite: false, skipped_units: [],
+      });
+      throw automatedRetakeStop("boundary_repair_still_blocked",
+        `${repairError?.message ?? repairError}; no third attempt, no text rewrite, no skip`,
+        { receipt_path: stopReceipt.path, spec_path: specPath });
+    }
+    return;
+  }
+  throw automatedRetakeStop("retake_bound_exceeded", blockMessage, { blocked_report_sha256: reportSha256 });
+}
+
+// `loopContext` is set only by the in-process automated retake loop: it
+// re-enters main() with the retake flags, the already-parsed plan/identity and
+// `retakeDepth` 1 so the hard one-retake stop holds (R05(2)).
+async function main(flagsOverride = null, loopContext = {}) {
+  const flags = flagsOverride ?? parseFlags(process.argv.slice(2));
+  const retakeDepth = Number(loopContext.retakeDepth ?? 0);
+  const preloaded = loopContext.preloaded ?? null;
   const finalizeInterrupted = boolFlag(flags["finalize-interrupted"]);
   const channel = flags.channel ?? "53rebirth";
   const week = flags.week ?? "current";
@@ -3280,16 +3537,24 @@ async function main() {
   const stitchReportPath = path.join(episodeDir, `audio_stitch_report_${episode}-narration.json`);
   const eventsPath = path.join(episodeDir, "narration_tts_attempt_events.jsonl");
 
-  const [identity, plan, scriptBuffer] = await Promise.all([
-    readJson(identityPath, null),
-    readJson(planPath, null),
-    fs.readFile(scriptPath),
-  ]);
+  const [identity, plan, scriptBuffer] = preloaded
+    && preloaded.identityPath === identityPath && preloaded.planPath === planPath
+    && preloaded.scriptPath === scriptPath
+    ? [preloaded.identity, preloaded.plan, preloaded.scriptBuffer]
+    : await Promise.all([
+      readJson(identityPath, null),
+      readJson(planPath, null),
+      fs.readFile(scriptPath),
+    ]);
   if (!identity || !plan) throw new Error("Missing locked run_identity.json or narration_generation_plan.json");
   const [identityFileSha256, planFileSha256] = await Promise.all([
     sha256File(identityPath),
     sha256File(planPath),
   ]);
+  if (preloaded && (preloaded.identityFileSha256 !== identityFileSha256
+    || preloaded.planFileSha256 !== planFileSha256)) {
+    throw new Error("Automated retake loop: run_identity.json or the narration plan changed between passes.");
+  }
   if (!flags["output-dir"] && identity.narration_identity_relock?.recovery_kind === "operator_selected_qwen_voice_migration") {
     const voiceId = identity.narration_identity_relock.narrator_voice_id;
     if (!/^[a-zA-Z0-9_-]+$/.test(voiceId ?? "")) throw new Error("Unsafe migrated narrator voice ID");
@@ -4804,6 +5069,11 @@ async function main() {
       generationPlanSha256: plan.plan_sha256 ?? planSha256,
       generationPlanFileSha256: planFileSha256,
       qualityContractSha256: narrationQualityContract.contract_sha256,
+      // R05(5): finalize reuses this unit ASR only on an exact three-way match
+      // (unit WAV sha, ASR model + engine version, equivalence-table sha).
+      spokenFormEquivalencesSha256:
+        narrationSpokenFormEquivalencesForContract(narrationQualityContract)?.config_sha256 ?? null,
+      asrEngineVersion: runtimePreflight.tools?.asr_python?.modules?.faster_whisper ?? null,
       providerExecution: {
         synthesis_contract: policy.synthesis_contract,
         batch_plan_sha256: batchPlan?.batch_plan_sha256 ?? null,
@@ -4827,7 +5097,7 @@ async function main() {
     const { finalizeNarrationProviderOutput } = await import(
       "./narration-provider-output-finalize.mjs"
     );
-    await finalizeNarrationProviderOutput([
+    const finalizeArgs = [
       "--episode-dir", episodeDir,
       "--plan", planPath,
       "--manifest", providerOutputManifestPath,
@@ -4847,7 +5117,26 @@ async function main() {
             String(flags["delivery-waiver-reason"]).trim(),
           ]
         : []),
-    ]);
+    ];
+    // R05(2): under automated_asr_v1 a delivery block is not a process exit.
+    // narrate authors the hash-bound retake evidence itself, performs the one
+    // exact-unit retake in-process, then the sentence-boundary repair and
+    // finalize, and stops with a structured blocker after that.
+    const automatedLoop = narrationUsesAutomatedAsrAcceptance(narrationQualityContract)
+      && !dryRun && !planOnly && !finalizeInterrupted
+      && !boolFlag(flags["accept-asr-delivery-blockers"])
+      && !boolFlag(flags["disable-automated-retake-loop"]);
+    try {
+      await finalizeNarrationProviderOutput(finalizeArgs);
+    } catch (error) {
+      if (!automatedLoop || !isAutomatedRetakeLoopBlock(error)) throw error;
+      await runAutomatedNarrationRetakeLoop({
+        error, flags, retakeDepth, episodeDir, episode, reportPath, planPath, identityPath,
+        scriptPath, scriptHash, planSha256, planFileSha256, identityFileSha256, identity, plan,
+        scriptBuffer, narrationQualityContract, invocationId, finalizeArgs,
+        finalizeNarrationProviderOutput, requestedRecoveryScope,
+      });
+    }
     return;
   }
   if (narrationQualityV2 && selectedRows.length) {
@@ -5009,21 +5298,28 @@ async function main() {
       blockers: strictUnitDeliveryBlockers,
       units: rows,
     };
+    if (narrationUsesAutomatedAsrAcceptance(narrationQualityContract)) {
+      // R05(4): listen packets are legacy-contract artifacts nobody acts on
+      // under automated_asr_v1; record the disposition instead of the packet.
+      unitDeliveryQaV2.listen_review_status = "automated_asr_qa";
+    }
     await atomicWriteJson(
       path.join(episodeDir, `narration_unit_delivery_qa_${episode}.json`),
       unitDeliveryQaV2,
     );
-    await atomicWriteJson(
-      path.join(episodeDir, `narration_exact_listen_review_packet_${episode}.json`),
-      listenReviewPacket,
-    );
-    await atomicWriteJson(
-      path.join(episodeDir, `narration_exact_repair_packet_${episode}.json`),
-      exactNarrationRepairPacket({
-        decision: { status: unitDeliveryQaV2.status, blockers: strictUnitDeliveryBlockers },
-        units: selectedRows,
-      }),
-    );
+    if (!narrationUsesAutomatedAsrAcceptance(narrationQualityContract)) {
+      await atomicWriteJson(
+        path.join(episodeDir, `narration_exact_listen_review_packet_${episode}.json`),
+        listenReviewPacket,
+      );
+      await atomicWriteJson(
+        path.join(episodeDir, `narration_exact_repair_packet_${episode}.json`),
+        exactNarrationRepairPacket({
+          decision: { status: unitDeliveryQaV2.status, blockers: strictUnitDeliveryBlockers },
+          units: selectedRows,
+        }),
+      );
+    }
   }
   const orderQa = validateSelectedUnitOrder(units, selectedRows);
   const unitQaReport = rebuildQaAggregate(

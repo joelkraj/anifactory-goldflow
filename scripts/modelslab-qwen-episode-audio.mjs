@@ -2571,9 +2571,11 @@ async function runFasterWhisperUnitBatch(rows, {
   await fs.writeFile(inputPath, JSON.stringify(rows.map((row) => ({ unit_id: row.unit_id, wav: row.wav }))), "utf8");
   const python = String.raw`
 import json, sys
+import faster_whisper
 from faster_whisper import WhisperModel
 
 input_path, output_path, model_name, device, compute_type = sys.argv[1:6]
+engine_version = str(getattr(faster_whisper, "__version__", "") or "unknown")
 with open(input_path, "r", encoding="utf-8") as handle:
     rows = json.load(handle)
 model = WhisperModel(model_name, device=device, compute_type=compute_type)
@@ -2603,6 +2605,7 @@ for row in rows:
         "words": words,
         "language": info.language,
         "language_probability": float(info.language_probability),
+        "asr_engine_version": engine_version,
     })
 with open(output_path, "w", encoding="utf-8") as handle:
     json.dump(output, handle, ensure_ascii=False)
@@ -2748,6 +2751,7 @@ async function runUnitOutputQa(results, options = {}) {
         asr_contract: previousQa.transcript.asr_contract ?? null,
         asr_contract_sha256:
           previousQa.transcript.asr_contract_sha256 ?? null,
+        asr_engine_version: previousQa.transcript.asr_engine_version ?? null,
         reused: true,
       });
     } else if (transcriptQaRequired) {
@@ -2881,6 +2885,7 @@ async function runUnitOutputQa(results, options = {}) {
         language_probability: recognized.language_probability ?? null,
         asr_contract: recognized.asr_contract ?? null,
         asr_contract_sha256: recognized.asr_contract_sha256 ?? null,
+        asr_engine_version: recognized.asr_engine_version ?? null,
         recognized_text: recognized.text,
         recognized_words: recognized.words ?? [],
         reused_exact_hash_qa: Boolean(recognized.reused),

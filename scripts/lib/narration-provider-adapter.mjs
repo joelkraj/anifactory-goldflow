@@ -258,6 +258,8 @@ export function buildNarrationProviderOutputManifest({
   generationPlanSha256 = null,
   generationPlanFileSha256 = null,
   qualityContractSha256 = null,
+  spokenFormEquivalencesSha256 = null,
+  asrEngineVersion = null,
   providerExecution = null,
   units = [],
   results = [],
@@ -278,6 +280,8 @@ export function buildNarrationProviderOutputManifest({
             ?? result?.unit_qa?.audio_sha256
             ?? null,
           narrationQualityContractSha256: qualityContractSha256,
+          spokenFormEquivalencesSha256,
+          asrEngineVersion,
         })
       : null;
     return {
